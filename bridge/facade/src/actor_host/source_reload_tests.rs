@@ -111,9 +111,11 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     .join("helpers");
                 let draft = helper_root.join("drafts/run/SessionHelpers.hs");
                 let root = campaign.root_installation.policy.clone();
-                assert!(std::fs::read_to_string(&draft)
-                    .unwrap()
-                    .contains("helperAnswer = 41"));
+                assert!(
+                    std::fs::read_to_string(&draft)
+                        .unwrap()
+                        .contains("helperAnswer = 41")
+                );
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
@@ -123,10 +125,14 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 let first = published["items"][0]["value"]["revision"]["identity"]
                     .as_str()
                     .unwrap();
-                assert!(issued_source_identity_matches(root.as_ref(), first).await);
+                assert!(issued_source_identity_matches(campaign, root.as_ref(), first).await);
                 committed(root.as_ref(), "import SessionHelpers").await;
-                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+                let answer = displayed(campaign, root.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&answer),
+                    "41",
+                    "{answer}"
+                );
 
                 let invalid = "module SessionHelpers where\nhelperAnswer = (\n";
                 std::fs::write(&draft, invalid).unwrap();
@@ -140,10 +146,14 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     rejected["items"][0]["value"]["issuedRevision"]["identity"],
                     first
                 );
-                assert!(issued_source_identity_matches(root.as_ref(), first).await);
+                assert!(issued_source_identity_matches(campaign, root.as_ref(), first).await);
                 assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
-                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+                let answer = displayed(campaign, root.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&answer),
+                    "41",
+                    "{answer}"
+                );
 
                 std::fs::write(
                     &draft,
@@ -160,10 +170,14 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     .as_str()
                     .unwrap();
                 assert_ne!(second, first);
-                assert!(issued_source_identity_matches(root.as_ref(), second).await);
+                assert!(issued_source_identity_matches(campaign, root.as_ref(), second).await);
                 committed(root.as_ref(), "import SessionHelpers").await;
-                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(answer["items"][0]["output"], "42", "{answer}");
+                let answer = displayed(campaign, root.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&answer),
+                    "42",
+                    "{answer}"
+                );
 
                 let launch = {
                     let root = root.clone();
@@ -175,8 +189,12 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 assert_eq!(launch.await.unwrap()["status"], "committed");
                 committed(child.policy.as_ref(), "import SessionHelpers").await;
                 let child_answer =
-                    committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+                    displayed(campaign, child.policy.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&child_answer),
+                    "42",
+                    "{child_answer}"
+                );
 
                 std::fs::write(
                     &draft,
@@ -190,11 +208,20 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     "{published}"
                 );
                 committed(root.as_ref(), "import SessionHelpers").await;
-                let parent_answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(parent_answer["items"][0]["output"], "43", "{parent_answer}");
+                let parent_answer =
+                    displayed(campaign, root.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&parent_answer),
+                    "43",
+                    "{parent_answer}"
+                );
                 let child_answer =
-                    committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
-                assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+                    displayed(campaign, child.policy.as_ref(), "display helperAnswer").await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&child_answer),
+                    "42",
+                    "{child_answer}"
+                );
             })
         })
         .await;
@@ -213,6 +240,7 @@ fn ignore_workspace(workspace: &Path) {
 /// source revision with the exact reload receipt. A previously issued endpoint
 /// remains pinned to its earlier generation.
 async fn issued_source_identity_matches(
+    campaign: &mut TestCampaign,
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     expected: &str,
 ) -> bool {
@@ -220,21 +248,25 @@ async fn issued_source_identity_matches(
         .snapshot_for_request()
         .expect("issued source generation");
     let source = format!(
-        "import qualified Data.Text as ReceiptText\nRight selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == ReceiptText.pack {expected:?})"
+        "import qualified Data.Text as ReceiptText\nRight selectedSource <- sourceStatus\ndisplay (revisionIdentity (statusActive selectedSource) == ReceiptText.pack {expected:?})"
     );
-    let result = committed(issued.as_ref(), &source).await;
-    result["items"][1]["output"] == "True"
+    let result = displayed(campaign, issued.as_ref(), &source).await;
+    super::test_campaign::committed_display_text(&result) == "True"
 }
 
 /// Retain the active revision as a typed value in the root's current notebook.
-async fn bind_current_source_identity(policy: &dyn exomonad_actor::ResidentToolEndpoint) {
-    let result = committed(
+async fn bind_current_source_identity(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+) {
+    let result = displayed(
+        campaign,
         policy,
-        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ninspectFull True",
+        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ndisplay True",
     )
     .await;
     assert_eq!(
-        result["items"].as_array().unwrap().last().unwrap()["output"],
+        super::test_campaign::committed_display_text(&result),
         "True",
         "{result}"
     );
@@ -242,14 +274,16 @@ async fn bind_current_source_identity(policy: &dyn exomonad_actor::ResidentToolE
 
 /// Compare against the retained typed value without rendering the identity.
 async fn current_source_matches_bound_identity(
+    campaign: &mut TestCampaign,
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
 ) -> bool {
-    let result = committed(
+    let result = displayed(
+        campaign,
         policy,
-        "Right selectedSource <- sourceStatus\ninspectFull (publishedSourceBefore == revisionIdentity (statusActive selectedSource))",
+        "Right selectedSource <- sourceStatus\ndisplay (publishedSourceBefore == revisionIdentity (statusActive selectedSource))",
     )
     .await;
-    result["items"].as_array().unwrap().last().unwrap()["output"] == "True"
+    super::test_campaign::committed_display_text(&result) == "True"
 }
 
 /// Admit the next child, grant it its worktree, and let it run.
@@ -310,7 +344,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    bind_current_source_identity(root.as_ref()).await;
+    bind_current_source_identity(campaign, root.as_ref()).await;
 
     let launch = {
         let root = root.clone();
@@ -331,35 +365,38 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     assert!(module.exists(), "the checkout carries the authored package");
 
     std::fs::write(&module, work_module(41)).unwrap();
-    let stale = committed(child.policy.as_ref(), "inspectFull answer").await;
-    assert_eq!(stale["items"][0]["output"], "1", "{stale}");
+    let stale = displayed(campaign, child.policy.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&stale), "1", "{stale}");
     std::fs::remove_file(&module).unwrap();
-    let missing = committed(child.policy.as_ref(), "inspectFull answer").await;
-    assert_eq!(missing["items"][0]["output"], "1", "{missing}");
+    let missing = displayed(campaign, child.policy.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&missing), "1", "{missing}");
 
-    let refused = committed(
+    let refused = displayed(
+        campaign,
         child.policy.as_ref(),
-        "outcome <- reloadSource []\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ndisplay (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
-    assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert!(current_source_matches_bound_identity(root.as_ref()).await);
-    let root_answer = committed(root.as_ref(), "inspectFull answer").await;
-    assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
+    assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
+    let root_answer = displayed(campaign, root.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&root_answer), "1", "{root_answer}");
 
     // Both source status views name the run's current revision.
-    let child_status = committed(
+    let child_status = displayed(
+        campaign,
         child.policy.as_ref(),
-        "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))",
+        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
     )
     .await;
-    assert_eq!(child_status["items"][1]["output"], "1", "{child_status}");
-    let root_status = committed(
+    assert_eq!(super::test_campaign::committed_display_text(&child_status), "1", "{child_status}");
+    let root_status = displayed(
+        campaign,
         root.as_ref(),
-        "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))",
+        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
     )
     .await;
-    assert_eq!(root_status["items"][1]["output"], "1", "{root_status}");
+    assert_eq!(super::test_campaign::committed_display_text(&root_status), "1", "{root_status}");
 })).await;
 }
 
@@ -388,7 +425,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    bind_current_source_identity(root.as_ref()).await;
+    bind_current_source_identity(campaign, root.as_ref()).await;
 
     let launch = {
         let root = root.clone();
@@ -410,12 +447,13 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     );
 
     // It reads the layer it actually compiles against…
-    let status = committed(
+    let status = displayed(
+        campaign,
         child.policy.as_ref(),
-        "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))",
+        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
     )
     .await;
-    assert_eq!(status["items"][1]["output"], "1", "{status}");
+    assert_eq!(super::test_campaign::committed_display_text(&status), "1", "{status}");
 
     // …and cannot publish into it. The edit the root made is still waiting for
     // the root, not for this child.
@@ -427,15 +465,16 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
         work_module(41),
     )
     .unwrap();
-    let refused = committed(
+    let refused = displayed(
+        campaign,
         child.policy.as_ref(),
-        "outcome <- reloadSource []\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ndisplay (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
-    assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert!(current_source_matches_bound_identity(root.as_ref()).await);
-    let root_answer = committed(root.as_ref(), "inspectFull answer").await;
-    assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
+    assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
+    let root_answer = displayed(campaign, root.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&root_answer), "1", "{root_answer}");
 })).await;
 }
 
@@ -551,20 +590,19 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     )
     .unwrap();
 
-    let result = committed(
+    let result = displayed(
+        campaign,
         policy.as_ref(),
-        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False })\ninspectFull (revisionIdentity (statusActive before) == revisionIdentity (statusActive after))\ninspectFull (case outcome of { ReloadPublished first second _ -> (revisionIdentity first == revisionIdentity (statusActive before) && revisionIdentity second /= revisionIdentity (statusActive before)) || (revisionIdentity second == revisionIdentity (statusActive before) && revisionIdentity first /= revisionIdentity (statusActive before)); _ -> False })",
+        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ndisplay ((case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False }) && (revisionIdentity (statusActive before) == revisionIdentity (statusActive after)) && (case outcome of { ReloadPublished first second _ -> (revisionIdentity first == revisionIdentity (statusActive before) && revisionIdentity second /= revisionIdentity (statusActive before)) || (revisionIdentity second == revisionIdentity (statusActive before) && revisionIdentity first /= revisionIdentity (statusActive before)); _ -> False }))",
     )
     .await;
-    assert_eq!(result["items"][3]["output"], "True", "{result}");
-    assert_eq!(result["items"][4]["output"], "True", "{result}");
-    assert_eq!(result["items"][5]["output"], "True", "{result}");
+    assert_eq!(super::test_campaign::committed_display_text(&result), "True", "{result}");
     assert!(
         new_module.is_file(),
         "publication leaves the authored edit in place"
     );
-    let fresh = committed(policy.as_ref(), "import Project.Vibe\ninspectFull vibeAnswer").await;
-    assert_eq!(fresh["items"][1]["output"], "42", "{fresh}");
+    let fresh = displayed(campaign, policy.as_ref(), "import Project.Vibe\ndisplay vibeAnswer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&fresh), "42", "{fresh}");
 })).await;
 }
 
