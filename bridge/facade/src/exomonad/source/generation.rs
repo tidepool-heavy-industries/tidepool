@@ -321,10 +321,12 @@ impl ExomonadSourceReload {
             .get(run_index)
             .and_then(|identity| identity.strip_prefix("run:"))
             .ok_or("source reference lacks run revision ownership")?;
-        let prepared = self.prepared_run_revision()?;
-        if let Some(prepared) = prepared.filter(|prepared| prepared.identity == identity) {
-            expected_paths.extend(prepared.paths);
-        } else {
+        let run_start = expected_paths.len();
+        if graph
+            .roots
+            .get(run_start)
+            .is_some_and(|root| root.path.starts_with(self.layer.revisions()))
+        {
             expected_paths.extend(
                 inspect_retained_revision(
                     self.frozen.identity(),
@@ -334,6 +336,12 @@ impl ExomonadSourceReload {
                 )?
                 .paths,
             );
+        } else {
+            let prepared = self
+                .prepared_run_revision()?
+                .filter(|prepared| prepared.identity == identity)
+                .ok_or("source reference does not select this deployment's original source")?;
+            expected_paths.extend(prepared.paths);
         }
         expected_identities.push(format!("run:{identity}"));
         expected_identities.push(format!("workspace:{}", self.frozen.identity()));
@@ -416,10 +424,14 @@ impl ExomonadSourceReload {
             ]
         });
         roots.push(self.frozen.runtime_orchestration());
-        roots
-            .into_iter()
-            .map(|path| path.canonicalize().map_err(Into::into))
-            .collect()
+        let mut selected = Vec::new();
+        for root in roots {
+            let root = root.canonicalize()?;
+            if !selected.contains(&root) {
+                selected.push(root);
+            }
+        }
+        Ok(selected)
     }
 
     pub(super) fn append_shared_roots(

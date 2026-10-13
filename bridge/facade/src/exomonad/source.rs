@@ -1454,27 +1454,6 @@ fn revision_module(identity: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    fn with_compiler_owner<T>(action: impl FnOnce() -> T) -> T {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
-        let cleanup = owner.cleanup();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.block_on(owner.scope(async { action() })).action
-        }));
-        let observation =
-            runtime.block_on(cleanup.wait_for_settlement(std::time::Duration::from_secs(5)));
-        assert!(
-            observation.is_confirmed(),
-            "compiler cleanup: {observation:?}"
-        );
-        match result {
-            Ok(value) => value,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }
 
     use super::*;
 
@@ -2779,9 +2758,6 @@ mod tests {
 
     /// Source-revision identity; artifact reuse additionally validates the
     /// compiler's consumed dependency and import-resolution evidence.
-    fn cache_key(include: &[PathBuf]) -> String {
-        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include).unwrap()
-    }
 
     /// `frozen_drift` compares the run's immutable floor to what the same
     /// roots hold on disk right now, independent of the layer `drift`
@@ -2899,6 +2875,21 @@ mod tests {
             .stage_reload(PrincipalId::SYSTEM, c.source(), &[])
             .unwrap();
         assert_eq!(same.configuration_digest(), c.configuration_digest());
+        let memory = project.path().join(".exomonad/state");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(
+            memory.join("Memory.hs"),
+            "durable memory is not Haskell source",
+        )
+        .unwrap();
+        let after_memory = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, c.source(), &[])
+            .unwrap();
+        assert_eq!(
+            after_memory.configuration_digest(),
+            c.configuration_digest()
+        );
         std::fs::write(project.path().join(".exomonad/agent.md"), "Instructions C").unwrap();
         let prompts = reload
             .clone()
@@ -2908,6 +2899,57 @@ mod tests {
         assert_eq!(prompts.candidate_revision(), c.candidate_revision());
         assert_eq!(c.prompt_snapshot().instructions(), "Instructions B");
         assert_eq!(prompts.prompt_snapshot().instructions(), "Instructions C");
+    }
+
+    #[test]
+    fn source_reference_refuses_incomplete_graph_aliases_and_raw_file_drift() {
+        use exomonad_actor::ActorSourceLayers;
+        use tidepool_runtime::session::GenerationArtifactReference;
+        let (project, reload) = generation_owner();
+        let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let reference = &a.generation_evidence().unwrap().reference;
+        let original: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+        for mode in 0..3 {
+            let mut modified = original.clone();
+            let roots = modified["roots"].as_array_mut().unwrap();
+            match mode {
+                0 => {
+                    roots.pop();
+                }
+                1 => {
+                    roots.swap(0, 1);
+                }
+                _ => {
+                    roots[0]["path"] = serde_json::json!(project.path());
+                }
+            }
+            let foreign =
+                GenerationArtifactReference::capture(serde_json::to_vec(&modified).unwrap());
+            assert!(
+                reload.restore_source(&foreign).is_err(),
+                "refuse unowned source graph variant {mode}"
+            );
+        }
+        let a_text = reload.read_from(&a, "Project.Work").unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 41\n",
+        )
+        .unwrap();
+        let b = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, &a, &[])
+            .unwrap();
+        let root = b
+            .source()
+            .include_paths()
+            .iter()
+            .find(|root| root.join("Project/Work.hs").is_file())
+            .unwrap();
+        std::fs::write(root.join("Project/Work.hs"), "raw mutation").unwrap();
+        assert!(reload.restore_source(&b.evidence().reference).is_err());
+        assert!(reload.read_from(b.source(), "Project.Work").is_err());
+        assert_eq!(reload.read_from(&a, "Project.Work").unwrap(), a_text);
     }
 
     proptest::proptest! {
