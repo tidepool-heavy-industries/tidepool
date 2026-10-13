@@ -494,7 +494,7 @@ The coherent reload history checks new source and type behavior, fresh notebook
 bindings, immutable issued requests, prompt selection, no-op and refusal outcomes.
 Independent coherent cold histories restore published B despite edited draft C and refuse
 missing or corrupt selected installers while retaining the configuration through
-legitimate incarnation transfers. All five exact cases must execute and pass.
+legitimate incarnation transfers. All six exact cases must execute and pass.
 The crash case has no graceful
 hosted cleanup report; its retained `not_observed` status remains distinct from
 the test's actual process wait, physical lock and successor assertions.

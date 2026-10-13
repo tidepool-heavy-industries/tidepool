@@ -984,8 +984,9 @@ class NativeQualificationTests(unittest.TestCase):
             'actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control',
             'actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization',
             'actor_host::coherent_reload_acceptance_tests::coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work',
-            'actor_host::embedded_recovery_tests::production_coherent_reload_recovers_published_configuration_without_recapturing_draft'])
-        self.assertEqual(cohort['expected_count'], 5)
+            'actor_host::embedded_recovery_tests::production_coherent_reload_recovers_published_configuration_without_recapturing_draft',
+            'actor_host::embedded_recovery_tests::production_coherent_reload_recovery_refuses_corrupt_selected_installer'])
+        self.assertEqual(cohort['expected_count'], 6)
         self.assertFalse(cohort['ignored'])
         self.assertEqual(cohort['max_jobs'], 1)
         self.assertEqual(cohort['compiler_mode'], 'owned-resident')
@@ -1009,7 +1010,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                    '/frozen/runner', '/frozen/libtest'])
                     self.assertEqual([command[i + 1] for i, word in enumerate(command)
                                       if word == '--exact'], cohort['tests'])
-                    self.assertEqual(command[command.index('--expected-count') + 1], '5')
+                    self.assertEqual(command[command.index('--expected-count') + 1], '6')
                     self.assertIn('--retain-artifacts', command)
                     self.assertNotIn('--ignored', command)
                     for name, path in resources.items():
@@ -1041,7 +1042,7 @@ class NativeQualificationTests(unittest.TestCase):
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
                 self.assertEqual(report['completed'], mutation == 'control')
-                self.assertEqual(report['expected_count'], 5)
+                self.assertEqual(report['expected_count'], 6)
                 if mutation == 'control':
                     crash = next(record for record in report['tests']
                                  if record['test'] == cohort['tests'][2])

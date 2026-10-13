@@ -1361,7 +1361,7 @@ async fn coherent_recovery_history(fault: InstallerFault) {
             .unwrap();
             (
                 "coherent-corrupt-installer",
-                "recovered installer source closure differs from its owner",
+                "original purpose, target or configured source selection differs",
             )
         }
     };
