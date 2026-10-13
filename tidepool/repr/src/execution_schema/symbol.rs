@@ -1,6 +1,6 @@
 //! The shared wire grammar for a complete nominal symbol.
 
-use super::{ParseError, SymbolIdentity};
+use super::{ConstructorIdentity, ParseError, SymbolIdentity, TypeIdentity, TypeVersion};
 use ciborium::value::Value;
 
 pub(crate) fn encode(value: &SymbolIdentity) -> Value {
@@ -54,4 +54,33 @@ pub(crate) fn decode(
         occurrence: text(&fields[3], "symbol occurrence")?,
         record_parent,
     })
+}
+
+
+pub(crate) fn encode_type(value: &TypeIdentity) -> Value {
+    Value::Array(vec![encode(&value.symbol), match &value.version {
+        TypeVersion::WiredIn => Value::Array(vec![Value::Integer(0.into())]),
+        TypeVersion::GhcAbi(bytes) => Value::Array(vec![Value::Integer(1.into()), Value::Bytes(bytes.to_vec())]),
+    }])
+}
+
+pub(crate) fn encode_constructor(value: &ConstructorIdentity) -> Value {
+    Value::Array(vec![encode(&value.symbol), encode_type(&value.family)])
+}
+
+pub(crate) fn decode_type(value: &Value, mut text: impl FnMut(&Value, &str) -> Result<String, ParseError>) -> Result<TypeIdentity, ParseError> {
+    let Value::Array(fields) = value else { return Err(ParseError::Malformed("type identity must be an array".into())); };
+    let [symbol, Value::Array(version)] = fields.as_slice() else { return Err(ParseError::Malformed("type identity must have symbol and version".into())); };
+    let version = match version.as_slice() {
+        [Value::Integer(tag)] if *tag == 0.into() => TypeVersion::WiredIn,
+        [Value::Integer(tag), Value::Bytes(bytes)] if *tag == 1.into() => TypeVersion::GhcAbi(bytes.as_slice().try_into().map_err(|_| ParseError::Malformed("GHC ABI must be exactly 16 bytes".into()))?),
+        _ => return Err(ParseError::Malformed("invalid type version".into())),
+    };
+    Ok(TypeIdentity { symbol: decode(symbol, &mut text)?, version })
+}
+
+pub(crate) fn decode_constructor(value: &Value, mut text: impl FnMut(&Value, &str) -> Result<String, ParseError>) -> Result<ConstructorIdentity, ParseError> {
+    let Value::Array(fields) = value else { return Err(ParseError::Malformed("constructor identity must be an array".into())); };
+    let [symbol, family] = fields.as_slice() else { return Err(ParseError::Malformed("constructor identity must have symbol and family".into())); };
+    Ok(ConstructorIdentity { symbol: decode(symbol, &mut text)?, family: decode_type(family, &mut text)? })
 }

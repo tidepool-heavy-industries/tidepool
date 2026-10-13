@@ -74,6 +74,35 @@ pub struct SymbolIdentity {
     pub record_parent: Option<String>,
 }
 
+/// Compiler-issued declaration revision. Wired-in declarations belong to the
+/// matched compiler ABI; all other declarations carry their defining GHC ABI.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TypeVersion {
+    WiredIn,
+    GhcAbi([u8; 16]),
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TypeIdentity {
+    pub symbol: SymbolIdentity,
+    pub version: TypeVersion,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ConstructorIdentity {
+    pub symbol: SymbolIdentity,
+    pub family: TypeIdentity,
+}
+
+/// Canonical definite-length CBOR used by the compiler's constructor-ID issuer.
+/// This encodes complete authority; Rust does not issue numeric constructor IDs.
+pub fn canonical_constructor_identity_bytes(identity: &ConstructorIdentity) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&symbol::encode_constructor(identity), &mut bytes)
+        .expect("encoding a finite constructor identity into Vec cannot fail");
+    bytes
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RuntimeRep {
     Void,

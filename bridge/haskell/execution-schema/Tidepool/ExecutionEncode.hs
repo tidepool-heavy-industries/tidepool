@@ -4,7 +4,7 @@
 -- The reader owns validation; this module preserves the already-normalized
 -- table order and uses only definite-length arrays and primitive leaves.
 module Tidepool.ExecutionEncode
-  ( encodeSymbol, encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
+  ( encodeSymbol, encodeTypeIdentity, encodeConstructorIdentity, encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
   , ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
   , ProjectedGroupEncoding, prepareProjectedGroupEncoding, prepareModuleProductEncodingFromGroups
@@ -14,6 +14,8 @@ module Tidepool.ExecutionEncode
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
+import Data.ByteString.Builder (word64BE, toLazyByteString)
+import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (fold)
 import Data.List (mapAccumL)
 import Data.IntMap.Strict qualified as IntMap
@@ -166,6 +168,21 @@ encodeSymbol symbol = array
       Nothing -> tag 0
       Just parent -> tagged 1 [encodeString parent]
   ]
+
+-- | Canonical identity grammar shared with Rust: arrays and shortest CBOR
+-- primitives only. GHC fingerprints are raw bytes, never rendered text.
+encodeTypeIdentity :: TypeIdentity -> Encoding
+encodeTypeIdentity identity = array
+  [ encodeSymbol (typeSymbol identity)
+  , case typeVersion identity of
+      WiredIn -> tag 0
+      GhcAbi high low -> tagged 1
+        [encodeBytes (BL.toStrict (toLazyByteString (word64BE high <> word64BE low)))]
+  ]
+
+encodeConstructorIdentity :: ConstructorIdentity -> Encoding
+encodeConstructorIdentity identity = array
+  [encodeSymbol (constructorSymbol identity), encodeTypeIdentity (constructorType identity)]
 
 encodeRep :: RuntimeRep -> Encoding
 encodeRep rep = case rep of

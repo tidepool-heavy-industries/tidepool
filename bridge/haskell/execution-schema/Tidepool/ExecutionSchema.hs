@@ -6,7 +6,7 @@
 -- introspection API. Diagnostic rendering is separate from graph semantics.
 module Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), TargetDescriptor(..)
-  , ProgramEnvelope(..), SymbolIdentity(..), RuntimeRep(..), ResultContract(..), Signature(..)
+  , ProgramEnvelope(..), SymbolIdentity(..), TypeVersion(..), TypeIdentity(..), ConstructorIdentity(..), RuntimeRep(..), ResultContract(..), Signature(..)
   , ValueId(..), JoinId(..), GlobalId(..), ConstructorId(..), OperationId(..)
   , SignatureId(..), ValueRef(..), ScalarLiteral(..), Atom(..), Group(..)
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
@@ -56,6 +56,17 @@ data SymbolIdentity = SymbolIdentity
   , symbolOccurrence :: Text
   , symbolRecordParent :: Maybe Text
   } deriving stock (Eq, Ord, Show, Generic)
+
+-- | Wired-in declarations use the matched compiler ABI. Other declarations
+-- retain their defining interface's fingerprint, in big-endian Word64 order.
+data TypeVersion = WiredIn | GhcAbi Word64 Word64
+  deriving stock (Eq, Ord, Show, Generic)
+data TypeIdentity = TypeIdentity
+  { typeSymbol :: SymbolIdentity, typeVersion :: TypeVersion }
+  deriving stock (Eq, Ord, Show, Generic)
+data ConstructorIdentity = ConstructorIdentity
+  { constructorSymbol :: SymbolIdentity, constructorType :: TypeIdentity }
+  deriving stock (Eq, Ord, Show, Generic)
 
 data RuntimeRep = VoidRep | LiftedRefRep | UnliftedRefRep | AddressRep
   | IntRep Word8 | WordRep Word8 | FloatRep Word8
