@@ -498,6 +498,16 @@ pub trait ActorSourceLayers: Send + Sync {
         Err("source recovery is unavailable".into())
     }
 
+    fn restore_source_with_acquisition(
+        &self,
+        _reference: &tidepool_runtime::session::GenerationArtifactReference,
+        _acquisition: &crate::ToolsetAcquisition,
+    ) -> Result<CheckpointSourceLayer, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "completed source recovery is unavailable".into(),
+        ))
+    }
+
     /// Inspect exactly the issued immutable graph, without selecting a live head.
     fn read_from(
         &self,

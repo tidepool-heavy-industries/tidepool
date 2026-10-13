@@ -2190,6 +2190,15 @@ enum ResidentBoot {
 /// `Receiving` — the receive loop's own next-message wait does not by
 /// itself mean the earlier request was answered.
 #[derive(Clone)]
+enum InitialActorConfiguration {
+    Unselected,
+    Fresh,
+    Restored {
+        head: tidepool_runtime::session::ActiveNotebookGeneration,
+        source: crate::CheckpointSourceLayer,
+    },
+}
+
 struct OutstandingInteractive {
     response: crate::ResponseExpectation,
     request: crate::RequestId,
@@ -2763,6 +2772,7 @@ pub struct ResidentKernelBehavior<H, O> {
     worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     policy_installed: bool,
     actor_program_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    initial_configuration: InitialActorConfiguration,
     actor_callback_execution: Option<crate::request::sources::CallbackExecution>,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
@@ -3692,6 +3702,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             worktree_custody: None,
             policy_installed: false,
             actor_program_snapshot: None,
+            initial_configuration: InitialActorConfiguration::Unselected,
             actor_callback_execution: None,
             installed_tools: Arc::default(),
             spec_installs: 0,
@@ -7860,10 +7871,74 @@ where
         result
     }
 
+    async fn select_initial_configuration(
+        &mut self,
+        context: &ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if !matches!(
+            self.initial_configuration,
+            InitialActorConfiguration::Unselected
+        ) {
+            return Ok(());
+        }
+        if self.descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable {
+            self.initial_configuration = InitialActorConfiguration::Fresh;
+            return Ok(());
+        }
+        let predecessor = self
+            .root_startup
+            .as_ref()
+            .and_then(|startup| startup.manifest_predecessor);
+        let head = self
+            .environment
+            .runner
+            .application_workbench()
+            .startup_generation(context.clone(), self.descriptor.clone(), predecessor)
+            .await?;
+        let Some(head) = head else {
+            self.initial_configuration = InitialActorConfiguration::Fresh;
+            return Ok(());
+        };
+        head.references
+            .validate()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let installation = crate::PersistedActorInstallation::decode(
+            &head.references.installation,
+            &head.references.source,
+        )
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let layers = self.environment.source_layers.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "restored generation has no source recovery owner".into(),
+            )
+        })?;
+        let reference = head.references.source.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            layers.restore_source_with_acquisition(&reference, installation.acquisition())
+        })
+        .await
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        if source
+            .generation_evidence()
+            .is_none_or(|evidence| evidence.reference != head.references.source)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "source recovery did not retain the selected artifact reference".into(),
+            ));
+        }
+        self.initial_configuration = InitialActorConfiguration::Restored { head, source };
+        Ok(())
+    }
+
     fn freeze_installed_source(
         &self,
         actor: ActorRef,
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
+        if matches!(self.initial_configuration, InitialActorConfiguration::Unselected) { return Err(ResidentActorWorkbenchError::ActorProtocol("initial configuration has not been selected".into())); }
+        if let InitialActorConfiguration::Restored { source, .. } = &self.initial_configuration {
+            return Ok(source.clone());
+        }
         self.environment.source_layers.as_ref().map_or_else(
             || Ok(crate::CheckpointSourceLayer::default()),
             |layers| {
@@ -8092,6 +8167,7 @@ where
         context: &ActorSessionContext,
         initial_user_message: Option<String>,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
+        self.select_initial_configuration(context).await?;
         let source = self.freeze_installed_source(context.actor)?;
         self.prepare_interactive_policy_from_source(kernel, context, initial_user_message, source)
             .await
@@ -8191,10 +8267,21 @@ where
                 self.installed_tools.clone(),
             ));
 
-        let prompts = self
-            .descriptor
-            .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let prompts = match &self.initial_configuration {
+            InitialActorConfiguration::Restored { head, .. } => {
+                prepared_tools
+                    .verify_recovered_generation(&head.references)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                Some(head.references.prompts.clone())
+            }
+            InitialActorConfiguration::Unselected => return Err(ResidentActorWorkbenchError::ActorProtocol("prompt composition preceded initial configuration selection".into())),
+            InitialActorConfiguration::Fresh => self
+                .descriptor
+                .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+        };
         let (checkpoint, checkpoint_attachment) = self
             .admitted_checkpoint
             .take()
@@ -8234,6 +8321,7 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        self.select_initial_configuration(context).await?;
         if self.actor_program_snapshot.is_none() {
             let source = self.freeze_installed_source(context.actor)?;
             let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);

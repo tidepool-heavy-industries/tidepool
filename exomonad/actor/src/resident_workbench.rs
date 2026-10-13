@@ -1240,6 +1240,231 @@ pub enum SpecReplacementError {
     Failed(String),
 }
 
+/// Persisted installation facts; decoding does not issue compiler custody.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistedActorInstallation {
+    version: u32,
+    source_sha256: [u8; 32],
+    acquisition: crate::ToolsetAcquisition,
+    entry: Option<String>,
+    effects: String,
+    declarations: Vec<exomonad_tool::HostedTool>,
+    slots: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ActorInstallationRecoveryError {
+    #[error("corrupt installation reference: {0}")]
+    Corrupt(String),
+    #[error("unsupported installation reference version {0}")]
+    UnsupportedVersion(u32),
+    #[error("installation reference has no completed original")]
+    MissingOriginal,
+    #[error("installation reference selects a different source artifact")]
+    SourceMismatch,
+    #[error("recovered installation differs from persisted {0}")]
+    InstallationMismatch(&'static str),
+}
+
+impl PersistedActorInstallation {
+    pub fn decode(
+        reference: &tidepool_runtime::session::GenerationArtifactReference,
+        source: &tidepool_runtime::session::GenerationArtifactReference,
+    ) -> Result<Self, ActorInstallationRecoveryError> {
+        reference
+            .validate()
+            .map_err(|error| ActorInstallationRecoveryError::Corrupt(error.to_string()))?;
+        source
+            .validate()
+            .map_err(|error| ActorInstallationRecoveryError::Corrupt(error.to_string()))?;
+        let installation: Self = serde_json::from_slice(reference.bytes())
+            .map_err(|error| ActorInstallationRecoveryError::Corrupt(error.to_string()))?;
+        if installation.version != 1 {
+            return Err(ActorInstallationRecoveryError::UnsupportedVersion(
+                installation.version,
+            ));
+        }
+        if installation.source_sha256 != *source.sha256() {
+            return Err(ActorInstallationRecoveryError::SourceMismatch);
+        }
+        if installation.acquisition.selection().is_none() {
+            return Err(ActorInstallationRecoveryError::MissingOriginal);
+        }
+        Ok(installation)
+    }
+    pub fn acquisition(&self) -> &crate::ToolsetAcquisition {
+        &self.acquisition
+    }
+    pub fn entry(&self) -> Option<&str> {
+        self.entry.as_deref()
+    }
+    pub fn effects(&self) -> &str {
+        &self.effects
+    }
+    pub fn declarations(&self) -> &[exomonad_tool::HostedTool] {
+        &self.declarations
+    }
+    pub fn slots(&self) -> &[String] {
+        &self.slots
+    }
+
+    fn capture(
+        lease: &InstalledToolLease,
+        source: &tidepool_runtime::session::GenerationArtifactReference,
+    ) -> Result<Self, String> {
+        let evidence = lease
+            .source()
+            .generation_evidence()
+            .ok_or("source-backed generation has no complete retained artifact evidence")?;
+        if &evidence.reference != source {
+            return Err("installation and generation select different source artifacts".into());
+        }
+        let tools = lease
+            .tools()
+            .ok_or("generation has no native installation")?;
+        let acquisition = lease
+            .toolset_acquisition()
+            .ok_or("generation has no compiler-issued installation acquisition")?;
+        if acquisition.selection().is_none() {
+            return Err("generation installer has no retained original for recovery".into());
+        }
+        Ok(Self {
+            version: 1,
+            source_sha256: *source.sha256(),
+            acquisition: acquisition.clone(),
+            entry: tools
+                .origin
+                .resolved()
+                .and_then(|resolved| resolved.entry.clone()),
+            effects: tools.dispatcher_effects.expression().to_owned(),
+            declarations: tools.declarations.clone(),
+            slots: tools.slots.clone(),
+        })
+    }
+    fn verify(
+        &self,
+        lease: &InstalledToolLease,
+        source: &tidepool_runtime::session::GenerationArtifactReference,
+    ) -> Result<(), ActorInstallationRecoveryError> {
+        let recovered =
+            Self::capture(lease, source).map_err(ActorInstallationRecoveryError::Corrupt)?;
+        self.verify_facts(&recovered)
+    }
+    fn verify_facts(&self, actual: &Self) -> Result<(), ActorInstallationRecoveryError> {
+        if self.acquisition.selection() != actual.acquisition.selection() {
+            return Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "completed original",
+            ));
+        }
+        if self.entry != actual.entry {
+            return Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "entry",
+            ));
+        }
+        if self.effects != actual.effects {
+            return Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "effect row",
+            ));
+        }
+        if self.declarations != actual.declarations {
+            return Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "registered declarations",
+            ));
+        }
+        if self.slots != actual.slots {
+            return Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "slots",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod installation_reference_tests {
+    use super::*;
+    use tidepool_runtime::session::GenerationArtifactReference;
+
+    #[test]
+    fn decoded_installation_checks_version_source_and_completed_selection() {
+        let source = GenerationArtifactReference::capture(b"source graph".to_vec());
+        let installation = PersistedActorInstallation {
+            version: 1,
+            source_sha256: *source.sha256(),
+            acquisition: crate::ToolsetAcquisition::FreshRunOriginal {
+                recipe: "recipe".into(),
+                original: uuid::Uuid::new_v4(),
+            },
+            entry: Some("Spec.agentSpec".into()),
+            effects: "ActorEffects".into(),
+            declarations: vec![],
+            slots: vec!["haskell".into()],
+        };
+        let reference =
+            GenerationArtifactReference::capture(serde_json::to_vec(&installation).unwrap());
+        assert_eq!(
+            PersistedActorInstallation::decode(&reference, &source).unwrap(),
+            installation
+        );
+        let corrupt = GenerationArtifactReference::capture(b"broken json".to_vec());
+        assert!(matches!(
+            PersistedActorInstallation::decode(&corrupt, &source),
+            Err(ActorInstallationRecoveryError::Corrupt(_))
+        ));
+        let another = GenerationArtifactReference::capture(b"another graph".to_vec());
+        assert!(matches!(
+            PersistedActorInstallation::decode(&reference, &another),
+            Err(ActorInstallationRecoveryError::SourceMismatch)
+        ));
+        let mut unsupported = installation.clone();
+        unsupported.version = 2;
+        let reference =
+            GenerationArtifactReference::capture(serde_json::to_vec(&unsupported).unwrap());
+        assert!(matches!(
+            PersistedActorInstallation::decode(&reference, &source),
+            Err(ActorInstallationRecoveryError::UnsupportedVersion(2))
+        ));
+        let mut missing = installation.clone();
+        missing.acquisition = crate::ToolsetAcquisition::UnretainedCompilation {
+            recipe: "recipe".into(),
+        };
+        let reference = GenerationArtifactReference::capture(serde_json::to_vec(&missing).unwrap());
+        assert!(matches!(
+            PersistedActorInstallation::decode(&reference, &source),
+            Err(ActorInstallationRecoveryError::MissingOriginal)
+        ));
+        let mut restored = installation.clone();
+        let (recipe, original) = installation
+            .acquisition
+            .completed_entry_selection()
+            .unwrap();
+        restored.acquisition = crate::ToolsetAcquisition::ExistingRunOriginal {
+            recipe: recipe.into(),
+            original,
+        };
+        assert!(installation.verify_facts(&restored).is_ok());
+        restored.slots.push("different".into());
+        assert!(matches!(
+            installation.verify_facts(&restored),
+            Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "slots"
+            ))
+        ));
+        restored = installation.clone();
+        restored.acquisition = crate::ToolsetAcquisition::ExistingRunOriginal {
+            recipe: recipe.into(),
+            original: uuid::Uuid::new_v4(),
+        };
+        assert!(matches!(
+            installation.verify_facts(&restored),
+            Err(ActorInstallationRecoveryError::InstallationMismatch(
+                "completed original"
+            ))
+        ));
+    }
+}
+
 /// Authority over one actor's installed handler and immutable source revision.
 /// The handler root remains live while an issued request retains this value.
 #[derive(Clone)]
@@ -1328,50 +1553,22 @@ impl InstalledToolLease {
         source: tidepool_runtime::session::GenerationArtifactReference,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
-        #[derive(serde::Serialize)]
-        struct Installation<'a> {
-            version: u32,
-            source_sha256: &'a [u8; 32],
-            acquisition: &'a crate::ToolsetAcquisition,
-            entry: Option<&'a str>,
-            effects: &'a str,
-            declarations: &'a [exomonad_tool::HostedTool],
-            slots: &'a [String],
-        }
-        let evidence = self
-            .source()
-            .generation_evidence()
-            .ok_or("source-backed generation has no complete retained artifact evidence")?;
-        if evidence.reference != source {
-            return Err("installation and generation select different source artifacts".into());
-        }
-        let tools = self
-            .tools()
-            .ok_or("generation has no native installation")?;
-        let acquisition = self
-            .toolset_acquisition()
-            .ok_or("generation has no compiler-issued installation acquisition")?;
-        if acquisition.selection().is_none() {
-            return Err("generation installer has no retained original for recovery".into());
-        }
-        let installation = Installation {
-            version: 1,
-            source_sha256: source.sha256(),
-            acquisition,
-            entry: tools
-                .origin
-                .resolved()
-                .and_then(|resolved| resolved.entry.as_deref()),
-            effects: tools.dispatcher_effects.expression(),
-            declarations: &tools.declarations,
-            slots: &tools.slots,
-        };
+        let installation = PersistedActorInstallation::capture(self, &source)?;
         let bytes = serde_json::to_vec(&installation).map_err(|error| error.to_string())?;
         Ok(tidepool_runtime::session::DurableGenerationReferences {
             source,
             installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
             prompts,
         })
+    }
+
+    pub(crate) fn verify_recovered_generation(
+        &self,
+        references: &tidepool_runtime::session::DurableGenerationReferences,
+    ) -> Result<(), ActorInstallationRecoveryError> {
+        let installation =
+            PersistedActorInstallation::decode(&references.installation, &references.source)?;
+        installation.verify(self, &references.source)
     }
 
     pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {
@@ -1395,6 +1592,10 @@ pub(crate) struct ActorGeneration {
 }
 
 pub(crate) enum PreparedGenerationCommit {
+    Restored {
+        selected: tidepool_runtime::session::ActiveNotebookGeneration,
+        readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+    },
     Ephemeral(tidepool_runtime::session::NotebookGenerationId),
     Durable {
         prepared: tidepool_runtime::session::PreparedNotebookGeneration,
@@ -1601,6 +1802,56 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn startup_generation(
+        &self,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        predecessor: Option<crate::ActorRef>,
+    ) -> Result<
+        Option<tidepool_runtime::session::ActiveNotebookGeneration>,
+        ResidentActorWorkbenchError,
+    > {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let Some(path) = descriptor.actor_path() else {
+                    return Ok(None);
+                };
+                let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                    path,
+                    context.actor.incarnation.0,
+                )
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "startup generation has no canonical actor owner".into(),
+                    )
+                })?;
+                if let Some(head) = session
+                    .active_notebook_generation(&owner)
+                    .map_err(ResidentError::Session)?
+                {
+                    return Ok(Some(head));
+                }
+                let Some(predecessor) = predecessor else {
+                    return Ok(None);
+                };
+                let previous = tidepool_runtime::session::RecoveryPublicOwner::new(
+                    path,
+                    predecessor.incarnation.0,
+                )
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "startup predecessor has no canonical actor owner".into(),
+                    )
+                })?;
+                session
+                    .active_notebook_generation(&previous)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
     pub(crate) async fn prepare_actor_generation(
         &self,
         context: crate::ActorSessionContext,
@@ -1653,6 +1904,20 @@ where
                                     "durable generation has no canonical actor owner".into(),
                                 )
                             })?;
+                        let restored = if expected.is_none() {
+                            session.active_notebook_generation(&owner).map_err(ResidentError::Session)?
+                        } else { None };
+                        if let Some(selected) = restored {
+                            selected.references.validate().map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                            if references.source != selected.references.source || references.prompts != selected.references.prompts {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol("restored generation must retain its source and prompt references".into()));
+                            }
+                            let persisted = PersistedActorInstallation::decode(&selected.references.installation, &selected.references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                            let actual = PersistedActorInstallation::decode(&references.installation, &references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                            persisted.verify_facts(&actual).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                            let readiness = session.durable_public_readiness(&selected.owner, scope.scope()).map_err(ResidentError::Session)?;
+                            PreparedGenerationCommit::Restored { selected, readiness }
+                        } else {
                         let prepared = session
                             .prepare_notebook_generation(
                                 scope.scope(),
@@ -1665,10 +1930,12 @@ where
                             .map_err(ResidentError::Session)?;
                         let selected = prepared.selection();
                         PreparedGenerationCommit::Durable { prepared, selected }
+                        }
                     }
                 };
                 let native_owner = match &commit {
                     PreparedGenerationCommit::Ephemeral(_) => None,
+                    PreparedGenerationCommit::Restored { selected, .. } => Some(&selected.owner),
                     PreparedGenerationCommit::Durable { prepared, .. } => Some(prepared.owner()),
                 };
                 let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
@@ -1714,6 +1981,21 @@ where
             let PreparedActorGeneration { context, scope, commit,public_owner } = prepared;
             let mut visible = None;
             match commit {
+                PreparedGenerationCommit::Restored { selected, readiness } => {
+                    let canonical = selected.owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL);
+                    let observed = session.active_notebook_generation(&canonical).map_err(ResidentError::Session)?;
+                    if observed.as_ref() != Some(&selected) || !readiness.is_current() {
+                        return Ok(ActorGenerationCommit::Refused("restored generation changed before adoption".into()));
+                    }
+                    installation.verify_recovered_generation(&selected.references).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                    if prompts != selected.references.prompts {
+                        return Ok(ActorGenerationCommit::Refused("restored prompt snapshot changed before adoption".into()));
+                    }
+                    let owner = public_owner.bind(Some(readiness));
+                    let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
+                    *current = InstalledToolsAvailability::Generation(generation.clone());
+                    visible=Some(generation);
+                },
                 PreparedGenerationCommit::Ephemeral(id) => {
                     let owner = public_owner.bind(None);
                     let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };

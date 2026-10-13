@@ -43,6 +43,7 @@ where
         {
             return Ok(SrReloadOutcome::ReloadCancelled(active));
         }
+        let requested_checks = !self.checked.is_empty();
         let layers = self.layers.clone();
         let actor = self.expected.context.actor;
         let source = self.expected.installation.source().clone();
@@ -57,7 +58,9 @@ where
         })?;
         let previous = staged.previous_revision().clone();
         let candidate_revision = staged.candidate_revision().clone();
-        if staged.configuration_digest() == self.expected.configuration_digest {
+        let configuration_unchanged =
+            staged.configuration_digest() == self.expected.configuration_digest;
+        if configuration_unchanged && !requested_checks {
             return Ok(SrReloadOutcome::ReloadUnchanged(previous));
         }
         let (context, authority) = WorkbenchCompilationAuthority::admit(
@@ -126,6 +129,9 @@ where
                     exomonad_tool::surface::describe_changes(&changes)
                 ),
             ));
+        }
+        if configuration_unchanged {
+            return Ok(SrReloadOutcome::ReloadUnchanged(previous));
         }
         let installation = crate::InstalledToolLease::new(
             actor,
