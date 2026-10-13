@@ -86,6 +86,15 @@ pub trait RetainedSourceLayer: Send + Sync {
     fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
         None
     }
+
+    fn source_reference(&self) -> Option<&tidepool_runtime::session::GenerationArtifactReference> {
+        None
+    }
+
+    fn configuration_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
+
 }
 
 /// Retained storage selected by the source owner. A recipe key is only a
@@ -198,6 +207,16 @@ impl CheckpointSourceLayer {
     #[must_use]
     pub fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
         self.retained.as_ref()?._owner.prepared_entries()
+    }
+
+    #[must_use]
+    pub fn source_reference(&self) -> Option<&tidepool_runtime::session::GenerationArtifactReference> {
+        self.retained.as_ref()?._owner.source_reference()
+    }
+
+    #[must_use]
+    pub fn configuration_digest(&self) -> Option<[u8; 32]> {
+        self.retained.as_ref()?._owner.configuration_digest()
     }
 
     #[must_use]
@@ -467,43 +486,23 @@ pub trait ActorSourceLayers: Send + Sync {
 
     fn bind_for(&self, _actor: PrincipalId, _helper_source: &str) {}
 
-    /// Re-read and publish the source layer this principal may own, with
-    /// `also_check` naming modules to pull into the checked closure. Hosts
-    /// that install no layers answer
-    /// [`SourceLayerReload::Unavailable`], which is also the default.
-    fn reload(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
-        let _ = (actor, also_check);
-        SourceLayerReload::Unavailable("this host installs no source layers".into())
+    /// Inspect exactly the issued immutable graph, without selecting a live head.
+    fn read_from(&self, _source: &CheckpointSourceLayer, _module: &str) -> Result<(String, String), String> {
+        Err("issued source inspection is unavailable".into())
     }
 
-    /// Re-read this actor's session helper draft and publish its last
-    /// typechecked revision. Helpers are branch-local source, not AgentSpec
-    /// tool declarations. Hosts without the helper surface report it as
-    /// unavailable.
-    fn reload_helpers(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
-        let _ = (actor, also_check);
-        SourceLayerReload::Unavailable("this host installs no session helpers".into())
+    fn observe(&self, _source: &CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrStatus, String> {
+        Err("issued source status is unavailable".into())
     }
 
-    /// Retain a checked AgentSpec source candidate without publishing it.
-    /// The actor executes its installer and compares the registered surface
-    /// before consuming the returned source-owner token.
-    fn stage_spec_reload(
+    /// Capture an immutable candidate relative to the actor-issued generation.
+    fn stage_reload(
         self: std::sync::Arc<Self>,
         actor: PrincipalId,
+        expected: &CheckpointSourceLayer,
         also_check: &[String],
     ) -> Result<Box<dyn StagedActorSourceReload>, SourceLayerReload>;
 
-    fn reload_helpers_with_publication(
-        &self,
-        _actor: PrincipalId,
-        _also_check: &[String],
-        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> SourceLayerReload {
-        SourceLayerReload::Unavailable(
-            "source owner does not support cancellable helper reload".into(),
-        )
-    }
 }
 
 /// A source-owner candidate retaining its original expected active revision.
@@ -511,19 +510,12 @@ pub trait ActorSourceLayers: Send + Sync {
 /// ownership used by ordinary installer admission.
 pub trait StagedActorSourceReload: Send + Sync {
     fn source(&self) -> &CheckpointSourceLayer;
-
-    /// Called synchronously while the actor's installed-pointer fence is held.
-    /// The source owner takes its publication gate, rejects a changed active
-    /// revision, then arbitrates cancellation with the existing decision.
-    /// After the visibility rename it invokes `on_visible` exactly once before
-    /// confirming durability. The callback replaces the paired source/tools
-    /// lease infallibly and must not await or reenter either owner.
-    /// A before-visibility refusal drops the callback without invoking it.
-    fn commit(
-        self: Box<Self>,
-        publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-        on_visible: Box<dyn FnOnce() + '_>,
-    ) -> SourceLayerReload;
+    fn source_reference(&self) -> &tidepool_runtime::session::GenerationArtifactReference;
+    fn validation_imports(&self) -> &tidepool_runtime::session::SourceImports;
+    fn prompt_snapshot(&self) -> &tidepool_runtime::session::ComposedPromptSnapshot;
+    fn configuration_digest(&self) -> [u8; 32];
+    /// Repair derived filesystem projections after authoritative publication.
+    fn finalize_projection(&self) -> Result<(), String>;
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to
