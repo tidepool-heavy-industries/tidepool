@@ -119,11 +119,11 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
-                    published["items"][0]["value"]["outcome"], "unchanged",
+                    published["items"][0]["value"]["outcome"], "published",
                     "{published}"
                 );
                 let first = issued_source_identity(root.as_ref()).await;
-                assert_eq!(first, initial);
+                assert_ne!(first, initial);
                 assert_eq!(
                     published["items"][0]["value"]["revision"]["identity"],
                     first

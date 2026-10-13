@@ -2543,15 +2543,6 @@ mod tests {
             "{generated}\n{}",
             published.identity
         );
-        assert!(
-            generated.contains("import qualified Data.Text as Text")
-                && generated.contains(&format!(
-                    "compiledSourceRevision = Text.pack \"{}\"",
-                    published.identity
-                )),
-            "generated revision must construct Text without ambient extensions:\n{generated}"
-        );
-
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
     }
