@@ -1197,22 +1197,109 @@ pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
     explicit_display_text(response)
 }
 
-pub(super) fn explicit_display_text(response: &serde_json::Value) -> &str {
+fn explicit_display_operation(response: &serde_json::Value) -> &serde_json::Value {
     let items = response["items"].as_array().expect("cell item receipts");
-    let displays = items
+    let operations = items
         .iter()
         .flat_map(|item| item["operations"].as_array().into_iter().flatten())
-        .filter_map(|operation| operation.get("display"))
+        .filter(|operation| operation.get("display").is_some())
         .collect::<Vec<_>>();
-    let [display] = displays.as_slice() else {
+    let [operation] = operations.as_slice() else {
         panic!("expected one explicit display receipt: {response}");
     };
+    operation
+}
+
+/// Model presentation can point to an aggregate item output containing other
+/// receipt metadata. This reads that complete model-facing string.
+pub(super) fn explicit_display_text(response: &serde_json::Value) -> &str {
+    let display = &explicit_display_operation(response)["display"];
     assert!(
         display["output"]["sequence"].as_i64().is_some(),
         "{response}"
     );
     assert!(display["output"]["run"].as_str().is_some(), "{response}");
-    display["text"].as_str().unwrap()
+    let text = match display.get("textSource") {
+        Some(pointer) => response
+            .pointer(
+                pointer
+                    .as_str()
+                    .expect("display textSource is a JSON pointer"),
+            )
+            .expect("display textSource resolves within the same response"),
+        None => display
+            .get("text")
+            .expect("inline display text is retained"),
+    };
+    text.as_str().expect("display text is a complete string")
+}
+
+/// Read the exact authored page from its committed Store owner, independently
+/// of the model-facing aggregate presentation.
+pub(super) fn retained_committed_display_text(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &serde_json::Value,
+) -> String {
+    assert_eq!(response["status"], "committed", "{response}");
+    for item in response["items"].as_array().expect("cell item receipts") {
+        assert_eq!(item["status"], "committed", "{response}");
+    }
+    let operation = explicit_display_operation(response);
+    let display = &operation["display"];
+    let sequence = display["output"]["sequence"]
+        .as_i64()
+        .expect("issued output sequence");
+    assert!(sequence > 0, "issued output sequence must be positive");
+    assert_eq!(display["output"]["run"], origin.run);
+    let history = store
+        .actor_output_page(origin, sequence - 1, 1)
+        .expect("retained actor output remains readable");
+    assert_eq!(&history.origin, origin);
+    let [row] = history.outputs.as_slice() else {
+        panic!("issued output {sequence} is absent from retained actor history");
+    };
+    assert_eq!(&row.reference().origin, origin);
+    assert_eq!(row.reference().sequence, sequence);
+    let emission = row.emission();
+    assert_eq!(&emission.origin, origin);
+    let identity = serde_json::json!([
+        origin.native_actor,
+        origin.incarnation,
+        emission.id.display_slot
+    ]);
+    assert_eq!(display["identity"], identity);
+    let publication = &operation["displayPublication"];
+    assert_eq!(publication["status"], "published");
+    assert_eq!(publication["publication"]["display"], identity);
+    assert_eq!(
+        publication["publication"]["pageOrdinal"],
+        emission.id.page_ordinal
+    );
+    assert_eq!(publication["output"], display["output"]);
+    let harness::store::actor_output::ActorOutputExecution::Notebook {
+        execution,
+        input_unit_index,
+        effect_ordinal,
+    } = &emission.execution
+    else {
+        panic!("notebook receipt must refer to notebook output");
+    };
+    assert_eq!(operation["id"]["execution"], *execution);
+    assert_eq!(operation["id"]["inputUnitIndex"], *input_unit_index);
+    assert_eq!(operation["id"]["effectOrdinal"], *effect_ordinal);
+    assert_eq!(
+        display["expansions"],
+        serde_json::to_value(&emission.page.expansions).unwrap()
+    );
+    assert_eq!(display["unavailable"], emission.page.unavailable);
+    if let Some(inline) = display.get("text") {
+        assert_eq!(
+            inline.as_str().expect("inline display text"),
+            emission.page.text
+        );
+    }
+    emission.page.text.clone()
 }
 
 fn native_activation_event(
@@ -1925,6 +2012,40 @@ pub(super) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[test]
+    fn display_text_resolves_issued_pointer_and_preserves_exact_content() {
+        let page = "Exact page ∑\n[bound is literal page content]\n";
+        let projected = serde_json::json!({
+            "status": "committed",
+            "items": [
+                {"status": "committed", "output": "unrelated item", "operations": []},
+                {"status": "committed", "output": page, "operations": [{
+                    "display": {"textSource": "/items/1/output",
+                        "output": {"run": "run", "sequence": 7}}
+                }]}
+            ]
+        });
+        assert_eq!(committed_display_text(&projected), page);
+
+        let mut inline = projected.clone();
+        let display = inline["items"][1]["operations"][0]["display"]
+            .as_object_mut()
+            .unwrap();
+        display.remove("textSource");
+        display.insert("text".into(), serde_json::json!("Exact inline ■\r\n"));
+        assert_eq!(committed_display_text(&inline), "Exact inline ■\r\n");
+
+        for pointer in ["/items/1/missing", "/items/1/operations"] {
+            let mut invalid = inline.clone();
+            invalid["items"][1]["operations"][0]["display"]["textSource"] =
+                serde_json::json!(pointer);
+            assert!(
+                std::panic::catch_unwind(|| committed_display_text(&invalid)).is_err(),
+                "an invalid issued pointer must not fall back to inline text"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn deployment_pending_selection_preserves_fifo() {

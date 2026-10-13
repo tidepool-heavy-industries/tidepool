@@ -3,8 +3,8 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    commit_workspace, committed_display_text, hosted_script_provider, hosted_test_settings,
-    next_hosted_script_round, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    retained_committed_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use exomonad_actor::{InitialContextState, JevCallFailure};
 use serde_json::{json, Value};
@@ -297,7 +297,15 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
             .await
             .unwrap();
         assert_eq!(
-            committed_display_text(&refreshed.settled_output("persona-refresh")),
+            retained_committed_display_text(
+                &host.runtime.store(),
+                &harness::store::actor_output::ActorOutputOrigin {
+                    run: host.runtime.run_identity().to_owned(),
+                    native_actor: host.context.actor.identity().id.0,
+                    incarnation: host.context.actor.identity().incarnation.0,
+                },
+                &refreshed.settled_output("persona-refresh"),
+            ),
             "True"
         );
         let updated = ["persona", "human", "curiosities"]
@@ -341,7 +349,15 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
             .await
             .unwrap();
         assert_eq!(
-            committed_display_text(&refused.settled_output("persona-native-refusal")),
+            retained_committed_display_text(
+                &host.runtime.store(),
+                &harness::store::actor_output::ActorOutputOrigin {
+                    run: host.runtime.run_identity().to_owned(),
+                    native_actor: host.context.actor.identity().id.0,
+                    incarnation: host.context.actor.identity().incarnation.0,
+                },
+                &refused.settled_output("persona-native-refusal"),
+            ),
             "True"
         );
         super::startup_context_acceptance_tests::assert_request_user_texts(
@@ -452,7 +468,15 @@ async fn persona_web_selection_retains_native_judgment_and_empty_control() {
                     extra = judgments.recv() => panic!("empty page issued another semantic observation: {:?}", extra.map(|judgment| judgment.packet)),
                 }
             }).await.unwrap();
-            assert_eq!(committed_display_text(&selected.settled_output("persona-web-selection")), "True");
+            assert_eq!(retained_committed_display_text(
+                &host.runtime.store(),
+                &harness::store::actor_output::ActorOutputOrigin {
+                    run: host.runtime.run_identity().to_owned(),
+                    native_actor: host.context.actor.identity().id.0,
+                    incarnation: host.context.actor.identity().incarnation.0,
+                },
+                &selected.settled_output("persona-web-selection"),
+            ), "True");
             let saved = preparation(&host.context.config.workspace, "web-evaluation");
             assert_eq!(saved["outcome"], "completed");
             assert_eq!(saved["observations"].as_array().unwrap().len(), 1);
