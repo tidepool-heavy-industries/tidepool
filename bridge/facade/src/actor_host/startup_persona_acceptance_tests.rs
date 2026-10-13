@@ -1,5 +1,5 @@
-//! The delivered persona consumer uses the issued startup block, native Jev
-//! decoding, native JSON state receipts, and explicit synchronous activation.
+//! The delivered persona carries full authored memory to the first provider
+//! request and refreshes that exact issued block only on explicit activation.
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
@@ -40,38 +40,6 @@ impl exomonad_actor::JevBackend for PersonaJevGate {
     }
 }
 
-pub(super) fn original_choices(packet: &Value) -> Value {
-    let questions = packet["questions"].as_object().expect("native Jev packet");
-    assert_eq!(
-        questions.len(),
-        4,
-        "the parsed manifest adds a fourth memory"
-    );
-    let answers = questions
-        .iter()
-        .map(|(key, question)| {
-            assert_eq!(question["type"], "choice");
-            let criteria = question["criteria"].as_object().unwrap();
-            assert!(criteria.contains_key("original"));
-            let probabilities = criteria
-                .keys()
-                .map(|choice| {
-                    (
-                        choice.clone(),
-                        json!(if choice == "original" { 1.0 } else { 0.0 }),
-                    )
-                })
-                .collect::<serde_json::Map<_, _>>();
-            (
-                key.clone(),
-                json!({"type":"choice", "choice":"original",
-            "confidence":1.0, "probabilities": probabilities}),
-            )
-        })
-        .collect::<serde_json::Map<_, _>>();
-    json!({"model":"controlled-persona", "answers":answers, "usage":{}})
-}
-
 fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run: &Path) {
     config.workspace = workspace.to_owned();
     config.run_directory =
@@ -105,24 +73,6 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             "Persona/Orientation.hs",
             tidepool_testing::fixture_source(
                 "exomonad/examples/persona/.exomonad/Persona/Orientation.hs",
-            ),
-        ),
-        (
-            "Persona/Attention.hs",
-            tidepool_testing::fixture_source(
-                "exomonad/examples/persona/.exomonad/Persona/Attention.hs",
-            ),
-        ),
-        (
-            "Persona/AttentionNotebook.hs",
-            tidepool_testing::fixture_source(
-                "exomonad/examples/persona/.exomonad/Persona/AttentionNotebook.hs",
-            ),
-        ),
-        (
-            "Persona/Collection.hs",
-            tidepool_testing::fixture_source(
-                "exomonad/examples/persona/.exomonad/Persona/Collection.hs",
             ),
         ),
         (
@@ -167,9 +117,6 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             "Persona.Web".into(),
             "Persona.Spec".into(),
             "Persona.Orientation".into(),
-            "Persona.Attention".into(),
-            "Persona.AttentionNotebook".into(),
-            "Persona.Collection".into(),
             "Persona.Context".into(),
             "Jev.Operators".into(),
         ];
@@ -194,27 +141,14 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     std::fs::create_dir_all(&memory).unwrap();
     for (name, body) in [
         ("persona", "persona-memory-original"),
-        ("human", "human-memory-original"),
+        (
+            "human",
+            "A saved correction: answer from supplied memory when asked what you already remember.",
+        ),
         ("curiosities", "curiosity-memory-original"),
-        ("extra", "extra-memory-original"),
     ] {
         std::fs::write(memory.join(format!("{name}.md")), body).unwrap();
     }
-    std::fs::write(
-        memory.join("collection.json"),
-        json!({"version":1,"memories":[{
-            "id":"extra", "path":"memory/extra.md", "tags":["extra"],
-            "related":["persona"], "availableAt":10
-        }]})
-        .to_string(),
-    )
-    .unwrap();
-}
-
-fn preparation(workspace: &Path, name: &str) -> Value {
-    let text = std::fs::read_to_string(workspace.join(format!(".exomonad/state/notes/{name}.md")))
-        .unwrap();
-    serde_json::from_str(&text).expect("the actual persona save uses native JSON")
 }
 
 async fn settled_head(host: &HostedTestRuntime) -> harness::model::RequestId {
@@ -244,7 +178,7 @@ async fn settled_head(host: &HostedTestRuntime) -> harness::model::RequestId {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn actual_persona_prepares_saves_activates_and_retires_without_resurrection() {
+async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     let mut files = tempfile::tempdir().unwrap();
     let mut repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
@@ -256,31 +190,13 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let (entered, mut judgments) = mpsc::unbounded_channel();
-    let backend = Arc::new(PersonaJevGate(entered));
-    let configured_backend = backend.clone();
-    let mut starting = Box::pin(HostedTestRuntime::start_configured(
-        &settings,
-        &provider,
-        |config| {
-            retained_location(config, &workspace, &run);
-            configure_persona(config, "AgentSpec.agentSpec");
-            config.jev = Some(configured_backend);
-        },
-    ));
-    let judgment = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-        tokio::select! {
-            judgment = judgments.recv() => judgment.expect("persona startup asks native Jev"),
-            started = &mut starting => match started {
-                Ok(_) => panic!("persona startup bypassed the actual preparation"),
-                Err(failure) => panic!("persona preparation failed before judgment: {failure}"),
-            },
-        }
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        retained_location(config, &workspace, &run);
+        configure_persona(config, "AgentSpec.agentSpec");
+        config.jev = Some(Arc::new(PersonaJevGate(entered)));
     })
     .await
-    .expect("persona startup reaches controlled judgment");
-    let response = original_choices(&judgment.packet);
-    judgment.answer.send(response).unwrap();
-    let host = starting.await.unwrap();
+    .unwrap();
     {
         let retained = host
             .context
@@ -289,23 +205,29 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             .await
             .unwrap();
         assert_eq!(retained.state, InitialContextState::Published);
-        let saved = preparation(&workspace, "startup-preparation");
-        assert_eq!(saved["passesUsed"], 1);
-        assert_eq!(saved["retainedMemories"].as_array().unwrap().len(), 4);
-        assert_eq!(
-            saved["retainedMemories"][0]["original"],
-            "persona-memory-original"
-        );
-        assert_eq!(
-            saved["retainedMemories"][3]["original"],
-            "extra-memory-original"
-        );
         let result = retained.result.as_ref().unwrap();
-        assert_eq!(
-            result.sections[0].body,
-            saved["contextText"].as_str().unwrap()
-        );
-        host.input("persona-activation").await.unwrap();
+        assert_eq!(result.sections.len(), 1);
+        let original = ["persona", "human", "curiosities"]
+            .map(|name| {
+                format!(
+                    "[Memory file: .exomonad/state/memory/{name}.md]\n{}",
+                    std::fs::read_to_string(
+                        workspace.join(format!(".exomonad/state/memory/{name}.md"))
+                    )
+                    .unwrap()
+                )
+            })
+            .join("\n\n");
+        assert_eq!(result.sections[0].body, original);
+        assert_eq!(result.sections[0].source.as_deref(), Some("Persona.Orientation.startup; .exomonad/state/memory/{persona,human,curiosities}.md"));
+        assert!(!workspace.join(".exomonad/state/notes").exists());
+        assert!(matches!(
+            judgments.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        host.input("What do you already remember about me?")
+            .await
+            .unwrap();
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
         let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -313,7 +235,10 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             &host,
             host.context.actor.identity(),
             &first.request,
-            &[result.rendered.as_str(), "persona-activation"],
+            &[
+                result.rendered.as_str(),
+                "What do you already remember about me?",
+            ],
         )
         .await;
         let instructions = first.request.instructions.clone();
@@ -323,43 +248,33 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             "haskell",
             include_str!("fixtures/startup_persona_refresh.hs"),
         );
-        let judgment = host
+        let refreshed = host
             .while_operation_succeeds(
                 &operation,
-                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                next_hosted_script_round(&mut requests, &mut pending, &root),
             )
             .await
-            .unwrap()
-            .unwrap()
             .unwrap();
-        let response = original_choices(&judgment.packet);
-        judgment.answer.send(response).unwrap();
-        let refreshed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         assert_eq!(
             committed_display_text(&refreshed.settled_output("persona-refresh")),
             "True"
         );
-        let updated = preparation(&workspace, "refresh-preparation");
-        let empty = preparation(&workspace, "empty-preparation");
-        assert_eq!(empty["outcomes"], json!([]));
-        assert_eq!(empty["batches"], json!([]));
-        assert_eq!(empty["passesUsed"], 0);
-        assert_eq!(
-            preparation(&workspace, "empty-judgment"),
-            json!({"outcome":"completed", "observations":[]})
-        );
-        assert_eq!(
-            updated["retainedMemories"][0]["original"],
-            "persona-memory-updated"
-        );
+        let updated = ["persona", "human", "curiosities"]
+            .map(|name| {
+                format!(
+                    "[Memory file: .exomonad/state/memory/{name}.md]\n{}",
+                    std::fs::read_to_string(
+                        workspace.join(format!(".exomonad/state/memory/{name}.md"))
+                    )
+                    .unwrap()
+                )
+            })
+            .join("\n\n");
         super::startup_context_acceptance_tests::assert_request_user_texts(
             &host,
             host.context.actor.identity(),
             &refreshed.request,
-            &[
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation",
-            ],
+            &[updated.as_str(), "What do you already remember about me?"],
         )
         .await;
         assert_eq!(refreshed.request.instructions, instructions);
@@ -377,7 +292,13 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             "haskell",
             include_str!("fixtures/startup_persona_refuse_native.hs"),
         );
-        let refused = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let refused = host
+            .while_operation_succeeds(
+                &refusal_operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             committed_display_text(&refused.settled_output("persona-native-refusal")),
             "True"
@@ -386,10 +307,7 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             &host,
             host.context.actor.identity(),
             &refused.request,
-            &[
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation",
-            ],
+            &[updated.as_str(), "What do you already remember about me?"],
         )
         .await;
         assert_eq!(refused.request.instructions, instructions);
@@ -400,13 +318,10 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
         refused.finish();
         settled_head(&host).await;
         for completed in [&operation, &refusal_operation] {
-            assert!(
-                matches!(
-                    host.runtime.scheduler().output(completed).await.unwrap(),
-                    Some(harness::turn::JobOutput::Completed(Ok(_)))
-                ),
-                "completed scheduler jobs remain inspectable before physical shutdown"
-            );
+            assert!(matches!(
+                host.runtime.scheduler().output(completed).await.unwrap(),
+                Some(harness::turn::JobOutput::Completed(Ok(_)))
+            ));
         }
     }
     let forest = Arc::downgrade(&host.context.forest);
@@ -416,12 +331,7 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
         repository.disable_cleanup(true);
     }
     stopped.unwrap();
-    assert_eq!(
-        forest.strong_count(),
-        0,
-        "retained completed cancellation records do not keep the forest alive"
-    );
-
+    assert_eq!(forest.strong_count(), 0);
     let records =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
@@ -448,108 +358,22 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shipped_persona_initializer_uses_actual_preparation_before_first_request() {
+async fn persona_web_selection_retains_native_judgment_and_empty_control() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let (entered, mut judgments) = mpsc::unbounded_channel();
-    let mut starting = Box::pin(HostedTestRuntime::start_configured(
-        &settings,
-        &provider,
-        move |config| {
-            configure_persona(config, "Persona.Spec.agentSpec");
-            config.jev = Some(Arc::new(PersonaJevGate(entered)));
-        },
-    ));
-    let judgment = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-        tokio::select! {
-            judgment = judgments.recv() => judgment.expect("shipped persona prepares through native Jev"),
-            started = &mut starting => match started {
-                Ok(_) => panic!("shipped persona became ready before its judgment"),
-                Err(failure) => panic!("shipped persona failed before judgment: {failure}"),
-            },
-        }
-    }).await.unwrap();
-    assert!(judgment.packet["state"]["occasion"]
-        .as_str()
-        .is_some_and(|occasion| !occasion.is_empty()));
-    assert!(matches!(
-        requests.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
-    judgment
-        .answer
-        .send(original_choices(&judgment.packet))
-        .unwrap();
-    let host = starting.await.unwrap();
-    host.run_scenario(|host| {
-        Box::pin(async move {
-            let retained = host
-                .context
-                .forest
-                .initial_context_observation(host.context.actor.identity())
-                .await
-                .unwrap();
-            assert_eq!(retained.state, InitialContextState::Published);
-            let result = retained.result.as_ref().unwrap();
-            assert_eq!(result.sections.len(), 1);
-            assert_eq!(
-                result.sections[0].source.as_deref(),
-                Some("Persona.Orientation.startup; inspection: notes/initial-attention.md")
-            );
-            let saved = preparation(&host.context.config.workspace, "initial-attention");
-            assert_eq!(
-                saved["operation"].as_str(),
-                Some(retained.identity.as_ref().unwrap().operation.as_str())
-            );
-            assert_eq!(
-                saved["attention"]["contextText"].as_str(),
-                Some(result.sections[0].body.as_str())
-            );
-            assert_eq!(
-                saved["attention"]["retainedMemories"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                4
-            );
-            for (name, expected) in [
-                ("persona", "persona-memory-original"),
-                ("human", "human-memory-original"),
-                ("curiosities", "curiosity-memory-original"),
-                ("extra", "extra-memory-original"),
-            ] {
-                assert_eq!(
-                    std::fs::read_to_string(
-                        host.context
-                            .config
-                            .workspace
-                            .join(format!(".exomonad/state/memory/{name}.md"))
-                    )
-                    .unwrap(),
-                    expected
-                );
-                assert!(result.sections[0].body.contains(expected));
-            }
-            host.input("canonical-persona-activation").await.unwrap();
-            let mut pending = VecDeque::new();
-            let first = next_hosted_script_round(
-                &mut requests,
-                &mut pending,
-                &harness::model::AgentPath("/root".into()),
-            )
-            .await;
-            super::startup_context_acceptance_tests::assert_request_user_texts(
-                host,
-                host.context.actor.identity(),
-                &first.request,
-                &[result.rendered.as_str(), "canonical-persona-activation"],
-            )
-            .await;
-            assert!(matches!(
-                judgments.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "Persona.Spec.agentSpec");
+        config.jev = Some(Arc::new(PersonaJevGate(entered)));
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        host.input("Explore these passages").await.unwrap();
+        let mut pending = VecDeque::new();
+        let root = harness::model::AgentPath("/root".into());
+        let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let operation = first.operation("persona-web-selection");
             first.sync_call_named(
                 "persona-web-selection",
@@ -596,7 +420,11 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
             assert_eq!(preparation(&host.context.config.workspace, "empty-web-evaluation"),
                 json!({"outcome":"completed", "observations":[]}));
             selected.finish();
-        })
-    })
-    .await;
+    })).await;
+}
+
+fn preparation(workspace: &Path, name: &str) -> Value {
+    let text = std::fs::read_to_string(workspace.join(format!(".exomonad/state/notes/{name}.md")))
+        .unwrap();
+    serde_json::from_str(&text).expect("persona web evaluation uses native JSON")
 }

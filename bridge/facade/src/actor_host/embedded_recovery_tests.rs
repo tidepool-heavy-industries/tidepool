@@ -13,7 +13,7 @@ struct RecoveryPersonaJev {
 impl exomonad_actor::JevBackend for RecoveryPersonaJev {
     fn ask(
         &self,
-        packet: String,
+        _packet: String,
     ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
         Box::pin(async move {
             let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -22,12 +22,9 @@ impl exomonad_actor::JevBackend for RecoveryPersonaJev {
                 count.to_string(),
             )
             .unwrap();
-            assert_eq!(
-                self.phase, "persona-original",
-                "cold successor replayed persona preparation"
-            );
-            let packet = serde_json::from_str(&packet).unwrap();
-            Ok(super::startup_persona_acceptance_tests::original_choices(&packet).to_string())
+            Err(exomonad_actor::JevCallFailure::JevTransport(
+                "arrival and refresh must not ask Jev".into(),
+            ))
         })
     }
 }
@@ -710,10 +707,7 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
     let original_actor: ActorRef = serde_json::from_value(initial["actor"].clone()).unwrap();
     let original_identity = embedded_recovery::host_identity(&run, "/root", original_actor);
     assert!(!root.join("persona-original.calls").exists());
-    assert_eq!(
-        std::fs::read_to_string(root.join("persona-original.jev-calls")).unwrap(),
-        "1"
-    );
+    assert!(!root.join("persona-original.jev-calls").exists());
     input(
         initial["address"].as_str().unwrap(),
         &original_identity,
@@ -727,10 +721,7 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
         std::fs::read_to_string(root.join("persona-original.calls")).unwrap(),
         "3"
     );
-    assert_eq!(
-        std::fs::read_to_string(root.join("persona-original.jev-calls")).unwrap(),
-        "2"
-    );
+    assert!(!root.join("persona-original.jev-calls").exists());
     let before =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
@@ -752,17 +743,19 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
             .as_deref(),
         Some(source.as_str())
     );
-    let initial_note =
-        std::fs::read(root.join("project/.exomonad/state/notes/initial-attention.md")).unwrap();
-    let inspection: serde_json::Value = serde_json::from_slice(&initial_note).unwrap();
-    assert_eq!(
-        inspection["operation"],
-        startup.identity.as_ref().unwrap().operation.as_str()
-    );
-    let refresh_note =
-        std::fs::read(root.join("project/.exomonad/state/notes/refresh-preparation.md")).unwrap();
-    let refresh: serde_json::Value = serde_json::from_slice(&refresh_note).unwrap();
-    let edited = refresh["contextText"].as_str().unwrap();
+    assert!(!root.join("project/.exomonad/state/notes").exists());
+    let edited = ["persona", "human", "curiosities"]
+        .map(|name| {
+            format!(
+                "[Memory file: .exomonad/state/memory/{name}.md]\n{}",
+                std::fs::read_to_string(
+                    root.join(format!("project/.exomonad/state/memory/{name}.md"))
+                )
+                .unwrap()
+            )
+        })
+        .join("\n\n");
+    let edited = edited.as_str();
     assert_ne!(edited, startup.result.as_ref().unwrap().sections[0].body);
     assert!(edited.contains("persona-memory-updated"));
     let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
@@ -849,14 +842,7 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
             .as_ref(),
         Some(&head)
     );
-    assert_eq!(
-        std::fs::read(root.join("project/.exomonad/state/notes/initial-attention.md")).unwrap(),
-        initial_note
-    );
-    assert_eq!(
-        std::fs::read(root.join("project/.exomonad/state/notes/refresh-preparation.md")).unwrap(),
-        refresh_note
-    );
+    assert!(!root.join("project/.exomonad/state/notes").exists());
     assert_eq!(
         std::fs::read_to_string(root.join("project/.exomonad/state/memory/persona.md")).unwrap(),
         "changed-after-crash"
