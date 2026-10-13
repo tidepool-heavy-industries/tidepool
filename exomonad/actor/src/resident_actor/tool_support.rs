@@ -8,6 +8,7 @@ impl<H, O> ResidentEnvironment<H, O> {
         crate::resident_workbench::intrinsic_effect_families()
             .into_iter()
             .filter(|effect| match effect {
+                ToolEffectKey::Actor(ActorEffectKey::Source) => self.source_layers.is_some(),
                 ToolEffectKey::Actor(ActorEffectKey::Jev) => self.jev.is_installed(),
                 ToolEffectKey::Actor(ActorEffectKey::ModelCall) => {
                     self.cell_model_factory.is_some()

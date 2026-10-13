@@ -164,6 +164,7 @@ impl<H, O> ResidentActorRoot<H, O> {
 pub struct LocalResidentInstallation {
     /// Newly prepared handler custody transfers only with application publication.
     pub(crate) prepared_tools: Option<crate::InstalledToolLease>,
+    pub(crate) prepared_prompts: Option<tidepool_runtime::session::ComposedPromptSnapshot>,
     /// Exact installation observation survives handler transfer without retaining its custody.
     toolset_acquisition: Option<crate::ToolsetAcquisition>,
     pub actor: LocalActorRef,
@@ -7408,6 +7409,7 @@ where
                         let checkpoint_attachment = checkpoint_attachment;
                         let installation = LocalResidentInstallation {
                             prepared_tools: None,
+                            prepared_prompts: None,
                             toolset_acquisition: None,
                             actor,
                             label: self.descriptor.display_label().into_owned(),
@@ -7669,6 +7671,7 @@ where
                     ));
                 }
             };
+            if let Some(installation) = &installation { self.bind_initial_generation(context,installation).await?; }
             self.check_application_readiness(kernel, context).await?;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
@@ -7762,6 +7765,13 @@ where
         &self,
         context: &ActorSessionContext,
     ) -> Result<Arc<WorkbenchPublicOwner>, ResidentActorWorkbenchError> {
+        let retained = self.actor_program_snapshot.as_ref().and_then(|snapshot|snapshot.generation()).cloned()
+            .filter(|generation|generation.public_owner.matches_context(context))
+            .or_else(||self.installed_tools.current_generation().filter(|generation|generation.public_owner.matches_context(context)));
+        if let Some(generation) = retained {
+            if !generation.public_owner.is_current() { return Err(ResidentActorWorkbenchError::ActorProtocol("retained generation native ownership is unavailable".into())); }
+            return Ok(generation.public_owner.clone());
+        }
         let lifecycle = self
             .lifecycle
             .as_ref()
@@ -7775,12 +7785,35 @@ where
             .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 
+    async fn bind_initial_generation(
+        &self,
+        context: &ActorSessionContext,
+        installation: &LocalResidentInstallation,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if self.installed_tools.current_generation().is_some() { return Ok(()); }
+        let (Some(tools),Some(prompts)) = (&installation.prepared_tools,&installation.prepared_prompts) else { return Ok(()); };
+        let Some(evidence) = tools.source().generation_evidence() else { return Ok(()); };
+        let expected = self.installed_tools.snapshot().ok_or_else(||ResidentActorWorkbenchError::ActorProtocol("initial generation lost bootstrap source custody".into()))?;
+        let references = tools.generation_references(evidence.reference.clone(),prompts.clone()).map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let context = self.descriptor.session_context(context.actor);
+        let workbench = self.environment.runner.application_workbench();
+        let prepared = workbench.prepare_actor_generation(context.clone(),self.descriptor.clone(),None,references).await?;
+        match workbench.commit_actor_generation(context,self.descriptor.clone(),self.installed_tools.clone(),expected,prepared,tools.clone(),prompts.clone(),evidence.configuration_digest,tidepool_runtime::session::PublicationDecision::new()).await? {
+            crate::resident_workbench::ActorGenerationCommit::Published(generation) => {
+                if let Some(lifecycle) = &self.lifecycle { lifecycle.generation_published(generation.context.clone(),generation.public_owner.clone(),generation.installation.clone()); }
+                Ok(())
+            },
+            crate::resident_workbench::ActorGenerationCommit::Refused(detail) | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => Err(ResidentActorWorkbenchError::ActorProtocol(detail)),
+        }
+    }
+
     async fn commit_interactive_installation(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        self.bind_initial_generation(context,&installation).await?;
         self.check_application_readiness(kernel, context).await?;
         kernel
             .retained_exit()
@@ -7794,7 +7827,7 @@ where
 
     fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
         if let Some(tools) = installation.prepared_tools.take() {
-            self.installed_tools.publish(tools);
+            if self.installed_tools.current_generation().is_none() { self.installed_tools.publish(tools); }
         }
         self.publish_installation(installation);
         self.policy_installed = true;
@@ -7979,6 +8012,8 @@ where
                 ),
             )?;
         }
+        let prompts = self.descriptor.compose_prompts(context.actor,&compiled_tools.declarations,&self.runtime_observation)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let declarations = compiled_tools.declarations.clone();
         let prepared_tools =
             crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));
@@ -7999,6 +8034,7 @@ where
         Ok(LocalResidentInstallation {
             toolset_acquisition: prepared_tools.toolset_acquisition().cloned(),
             prepared_tools: Some(prepared_tools),
+            prepared_prompts: prompts,
             actor,
             label: self.descriptor.display_label().into_owned(),
             policy,
