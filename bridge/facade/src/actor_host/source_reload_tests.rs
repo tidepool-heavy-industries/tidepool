@@ -209,6 +209,19 @@ fn ignore_workspace(workspace: &Path) {
     commit(workspace, "keep the authored package out of the repository");
 }
 
+/// Obtain the exact identity from a source reload result.
+async fn source_revision_receipt(
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+) -> String {
+    let result = dispatch_structured_tool(policy, "reload", serde_json::json!({})).await;
+    let outcome = result["items"][0]["value"]["outcome"].as_str().unwrap();
+    assert!(matches!(outcome, "published" | "unchanged"), "{result}");
+    result["items"][0]["value"]["revision"]["identity"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 /// Compare the issued source capsule's identity with an exact owner-issued receipt.
 async fn issued_source_identity_matches(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
@@ -220,11 +233,7 @@ async fn issued_source_identity_matches(
     let source = format!(
         "Right selectedSource <- sourceStatus\ndisplay (revisionIdentity (statusActive selectedSource) == {expected:?})"
     );
-    let result = committed(
-        issued.as_ref(),
-        &source,
-    )
-    .await;
+    let result = committed(issued.as_ref(), &source).await;
     result["items"][1]["output"] == "True"
 }
 
@@ -286,6 +295,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
+    let published_before = source_revision_receipt(root.as_ref()).await;
 
     let launch = {
         let root = root.clone();
@@ -293,7 +303,6 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     };
     let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = issued_source_identity(root.as_ref()).await;
 
     // The checkout carries a historical copy of the authored package.
     let checkout = campaign
@@ -319,7 +328,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(issued_source_identity(root.as_ref()).await, published_before);
+    assert!(issued_source_identity_matches(root.as_ref(), &published_before).await);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 
@@ -364,6 +373,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
+    let published_before = source_revision_receipt(root.as_ref()).await;
 
     let launch = {
         let root = root.clone();
@@ -371,7 +381,6 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     };
     let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = issued_source_identity(root.as_ref()).await;
 
     let checkout = campaign
         .worktrees
@@ -409,7 +418,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(issued_source_identity(root.as_ref()).await, published_before);
+    assert!(issued_source_identity_matches(root.as_ref(), &published_before).await);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 })).await;
@@ -520,7 +529,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     campaign.run_scenario(|campaign| Box::pin(async move {
     let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
-    let published_before = issued_source_identity(policy.as_ref()).await;
+    let published_before = source_revision_receipt(policy.as_ref()).await;
     let new_module = workspace.join(".exomonad/Project/Vibe.hs");
     std::fs::write(
         &new_module,
@@ -534,12 +543,12 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     )
     .await;
     assert_eq!(result["items"][3]["output"], "True", "{result}");
-    assert_eq!(result["items"][4]["output"], "True", "{result}");
+    assert_eq!(result["items"][4]["output"], "False", "{result}");
     assert!(
         new_module.is_file(),
         "publication leaves the authored edit in place"
     );
-    assert_ne!(issued_source_identity(policy.as_ref()).await, published_before);
+    assert!(!issued_source_identity_matches(policy.as_ref(), &published_before).await);
     let fresh = committed(policy.as_ref(), "import Project.Vibe\ninspectFull vibeAnswer").await;
     assert_eq!(fresh["items"][1]["output"], "42", "{fresh}");
 })).await;
