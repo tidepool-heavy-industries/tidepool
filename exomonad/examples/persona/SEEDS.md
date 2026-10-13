@@ -13,7 +13,7 @@ suggests one. It has no mandatory semantic planner or memory graph.
 `Persona.Context.refresh` explicitly reloads memory and activates it through the
 context owner’s original publication reference. Writes do not refresh context.
 `activateInitial` can activate authored text; unavailable or unpublished targets
-refuse. Frozen system/developer prompts remain fixed for the run.
+refuse. Workspace prompts activate through explicit reload.
 
 `Persona.Web` retains search hits and complete extracted pages for addressed
 inspection, with optional Jev selection. `Persona.Spec.helperSpec` is an
@@ -26,13 +26,19 @@ Files resolve from the ordinary workspace root. `.exomonad/Persona/*.hs` and
 under `.exomonad/state`, excluded from source capture and drift.
 
 Read a draft with ordinary file access; compare active code through
-`readSourceModule` and `sourceStatus`. Write a revision, then explicitly validate
-and publish through `reloadSource`, `reload_helpers` or `reload_agent_spec`.
-Failed validation retains active source. Already-issued calls retain captured
-source and compiled values retain their definitions. A changed tool surface
-requires a new actor incarnation. Ordinary helper functions remain Haskell
-definitions; adding one does not register a native tool. Minor source edits need no separate edit API or coordinator
-handoff.
+`readSourceModule` and `sourceStatus`. Write a revision, then call native `reload`
+or Haskell `reloadSource`. Source, compatible tools and workspace prompts publish
+as one generation. Changed configuration starts a fresh notebook; unchanged
+configuration preserves bindings. Keep durable definitions in `.hs` files.
+Reload preserves conversation, resources and memory context, and does not refresh
+memory or rerun startup. Failed preparation retains active configuration.
+
+Already-issued work and existing children retain their generation. Fresh-context
+children select published source; captured-only children remain pinned. Incompatible
+registered tools or typed actor protocols refuse publication; a changed tool surface
+requires a new actor incarnation. Modules can be added, edited or removed inside
+declared roots, with no older source fallback. Package pins, external services,
+capabilities and root launch configuration remain launch inputs.
 
 See the [quickstart lifecycle map](.exomonad/prompts/api-guide.md#lifecycle-map)
 and the exact lookup locators there for deeper notebook, actor and Jev contracts.

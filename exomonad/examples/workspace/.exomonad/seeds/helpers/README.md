@@ -1,7 +1,9 @@
 # Focused test helper seed
 
-The root's `.exomonad/helpers/` draft can be published with `reload_helpers`.
-Forked actors receive its selected snapshot; later edits require explicit delivery.
+Edit reusable helpers in `.exomonad/helpers/` and call `reload` to publish source,
+compatible tools and workspace prompts together. Changed reload resets notebook
+bindings; keep durable definitions in `.hs` files. Existing children and issued
+work retain their captured generation.
 Set the package, target, filter, expected count, exact source and memory limit for
 an actual focused check. Use the repository's current runner and isolated outputs.
 

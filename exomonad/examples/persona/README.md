@@ -22,8 +22,7 @@ prompt settings with the operator's existing launch/provider settings. Keep the
 live workspace's configuration separate while preparing this alternative.
 The seed supplies both `prompts/base.md` and `prompts/agent.md`. The workspace
 base override carries composition and lifecycle guidance for an open-ended
-companion; the host appends the profile guide through its frozen prompt-selection
-mechanism.
+companion; the host appends the profile guide through its generation-owned prompt composition.
 The seed selects a compact profile API guide. The full shared guide remains
 available with lookup query `doc api-guide`. Existing TypeSafe excerpts and
 ancestor suggestions remain optional ordinary files under
@@ -59,12 +58,17 @@ block refuses; writing memory does not automatically refresh the current view.
 The renderer is a small Haskell function the companion can edit and reload.
 There is no memory graph, selection planner or attention actor to maintain.
 
-Self-editing uses ordinary file writes followed by explicit source validation
-and publication. `readSourceModule` returns active captured bytes and revision;
-`sourceStatus` distinguishes drafts. Use `reloadSource` for workspace modules,
-`reload_helpers` for actor-local SessionHelpers and `reload_agent_spec` for the
-typed tool record. Failed validation retains active code, and captured values
-keep their definitions. Startup prompts are frozen for the run. See the compact
+Self-editing uses ordinary file writes followed by native `reload`; Haskell
+`reloadSource` invokes the same operation. `readSourceModule` returns active
+captured bytes and revision; `sourceStatus` distinguishes drafts. Source,
+compatible tool handlers and workspace prompts activate together. Changed
+configuration starts a fresh notebook; unchanged configuration preserves it.
+Keep durable definitions in `.hs` files. Conversation, owned resources and memory
+context persist; reload does not rerun startup or refresh memory. Failed preparation
+retains the previous generation. Incompatible registered tools or typed actor
+protocols refuse publication. Existing work and children remain pinned; fresh-context
+children select published source. Package pins, external services, capability grants
+and root launch configuration remain launch inputs. See the compact
 [lifecycle map](.exomonad/prompts/api-guide.md#lifecycle-map).
 
 `Persona.Web.search` returns source hits, `open` retains a complete extracted

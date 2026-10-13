@@ -12,7 +12,7 @@ fallback copy.
 | `agent.md` | `tidepool::actor_host` | One task-neutral developer instruction for every actor |
 | `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
 
-Hosted tool descriptions are owned by their declarations: `status` and reloads
+Hosted tool descriptions are owned by their declarations: `status` and `reload`
 in `exomonad/actor/src/*_tool.rs`; notebooks, commands and lookup in
 `bridge/haskell/lib/Tidepool/{Agent/Contract,Command/Tools,Lookup/Tools}.hs`.
 The host preserves the AgentSpec's typed declarations, including descriptions;
@@ -52,23 +52,27 @@ actor-host checks.
 
 ## Prompt selection
 
-The host compiles `base.md` followed by `api-guide.md` into one frozen base
-artifact. Every actor receives this same content-addressed file. The host also
-uses one task-neutral `agent.md` developer instruction; the active typed request
-and runtime status supply the task and authority. Workspace core overrides are
-selected once at run startup, never by actor role or live bindings.
-`[prompts].api_guide` selects an optional workspace-relative API guide (relative
-to `.exomonad`, like `base` and `agent`). Without it, the shared API guide remains
-the fallback. The shared guide is also available through lookup `doc api-guide`. Native
-multi-agent tooling remains disabled.
+The host composes `base.md` followed by `api-guide.md` as the base selection,
+plus `agent.md` and host-owned invariant/tool guidance. Workspace `base`, `agent`
+and `[prompts].api_guide` overrides are relative to `.exomonad`. Without a profile
+guide the shared API guide is selected; it remains available through lookup
+`doc api-guide`. Native multi-agent tooling remains disabled.
 
-The composed prompt fingerprint covers the frozen base, the agent instruction,
-and shared hosted-tool usage instructions. It does not fingerprint individual
-per-tool declarations; inspect actual provider requests to compare the complete
-surface. Source edits take effect after rebuilding and starting a new host; they
-do not change the content used by an existing host. Reattaching a conversation
-under a new host selects its new base explicitly. Fingerprints record what
-Exomonad selected; they do not certify provider application or cache reuse.
+An actor generation captures prompt bytes together with source and compatible
+tool implementations. Explicit `reload` publishes edited workspace prompts with
+those components. Prompt-only changes count as changed configuration and reset
+the notebook. Already-issued requests, retries and existing children retain their
+captured generation. Compaction uses the same generation selection rule.
+Fresh-context children select the published source.
+Conversation history is not rewritten to activate instructions. Host-owned
+invariants, external service configuration and package pins remain fixed inputs.
+
+The composed fingerprint records selected prompt bodies and hosted-tool guidance;
+individual per-tool declarations are outside it. It does not certify provider
+application or cache reuse. Inspect actual normalized
+provider requests to compare complete instructions and tool surfaces. Shared prompt
+source changes still need a matching host build; workspace overrides activate
+through coherent reload in that host.
 
 The shared base centers expressive Haskell composition: functions, optics, local
 types, typed agent RPC, and small languages interpreted by actors with Jev in

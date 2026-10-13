@@ -167,7 +167,7 @@ shared workspace's `Project.Tools`.
 Use the argument object `{"queries": ["name", "Module.name"]}`.
 The tool preserves original lookup results and may add up to four related
 declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
-remain raw. Run `exomonad check` before reloading the agent spec.
+remain raw. Run `exomonad check` before calling `reload`.
 
 ## `exomonad check`: typecheck the workspace without starting anything
 
@@ -343,15 +343,25 @@ cell to the running session as a resident operator with its own persistent
 bindings; `-` reads the cell from standard input and `--actors` prints the actor
 graph. See [the operator interface](operator-http.md).
 
-**Change code without restarting.** Workspace modules are captured at launch.
-The run owner can edit the run workspace and call `reloadSource` to typecheck
-and publish its authored modules for later cells. Child actors use that same
-run tooling; editing a historical module in a child checkout does not reload
-it. The run owner can call `reload_agent_spec` to rebuild its own typed tool
-record from published source. A reload that would
-change a tool's name, description or argument types is refused with the
-difference, and takes effect at the agent's next incarnation. Prompts, and the
-Haskell library Tidepool ships, change only with a new run.
+**Change code without restarting.** Edit ordinary `.hs` definitions and workspace
+prompt files, then call the native `reload` tool. Haskell `reloadSource` invokes
+the same operation. It prepares source, compatible AgentSpec handlers and
+workspace prompts together. Changed configuration replaces notebook bindings
+with a fresh notebook; unchanged configuration preserves them. Keep definitions
+you want to retain in `.hs` files. Conversation, owned resources and the published
+memory block persist. Reload does not rerun startup or refresh memory; memory
+writes need their own explicit context refresh.
+
+Preparation failures, incompatible registered tools or typed actor protocols,
+and cancellation before commit retain the active generation. Read the publication
+receipt: a confirmed commit with a projection repair warning is still committed;
+an uncertain commit requires reconciliation rather than blind replay. Already-issued
+work and existing children remain pinned; fresh-context children select the
+published source. Captured-only children remain frozen. Source-backed actors may
+add, edit or remove modules inside declared roots; required missing imports fail
+without resurrecting old modules. The pinned Tidepool library, root launch
+configuration, package pins, external services and capability grants remain fixed
+launch inputs.
 
 **See what is live.** The agent's `status` tool, with `view: "detailed"`, shows
 which spec is installed and from which file and revision, retained command jobs,

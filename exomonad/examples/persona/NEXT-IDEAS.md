@@ -80,20 +80,20 @@ The desired direction is for the companion to edit its own authored prompts,
 memory organization, helpers and interfaces, with Git supplying inspectable
 history and restoration. The root model and effort remain human-selected.
 
-The seed can edit ordinary workspace files, including authored Haskell and
-memory, curate admitted context, and inspect active source separately from
-drafts. System/developer prompts remain frozen for the run. Publishing source,
-selecting its implementation for an operation, and activating prompts are
-separate boundaries; inspect their owning receipts before relying on a revision.
-A changed registered tool surface requires a new actor incarnation.
+The seed can edit ordinary workspace files, including authored Haskell, prompts
+and memory, and inspect active source separately from drafts. Explicit `reload`
+publishes source, compatible handlers and workspace prompts together; Haskell
+`reloadSource` uses the same owner. Changed configuration resets the notebook;
+unchanged configuration preserves bindings. Durable definitions belong in `.hs`
+files. Memory remains outside the reload key and needs explicit context refresh.
+Already-issued work and existing children retain their captured generation.
 
-Future prompt activation and richer self-editing experiments should extend the
-existing source, context, Git and prompt-assembly owners. Establish when a saved
-revision affects inference and what restoration means for already completed
-effects. Broader runtime changes need matching native/browser pins where relevant.
-Durable memory under `.exomonad/state` remains outside source capture and drift.
-These are optional directions to explore through actual use, not a standing
-implementation plan.
+Richer self-editing experiments should extend the existing source, context, Git
+and prompt-assembly owners. Registered tool and typed actor protocol compatibility
+still apply. Root launch configuration, external services, capabilities and
+package pins stay fixed. Broader runtime changes need matching native/browser
+pins where relevant. These are optional directions to explore through actual use,
+not a standing implementation plan.
 
 ## Harness adaptation worth harvesting
 

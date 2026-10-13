@@ -41,20 +41,24 @@ reference material describes a vocabulary, not a grant.
 | --- | --- |
 | Write memory or a note | Durable content changes; current arrival context remains as it was |
 | `Persona.Context.refresh` | Reads the current memory files and replaces the published authored context block synchronously; missing or unpublished targets refuse |
-| Edit `.exomonad/Persona/*.hs` | Ordinary source draft changes; active code remains unchanged |
-| `reloadSource [] Nothing` | Typechecks and publishes workspace source for future model requests and new admissions; failed validation retains active source |
-| `reload_helpers` | Checks and publishes actor-local SessionHelpers for future model requests and new admissions |
-| `reload_agent_spec` | Rebuilds the typed tool record; a changed tool surface requires a new actor incarnation |
-| Edit prompt files | Drafts change; frozen system/developer instructions stay fixed for this run |
+| Edit ordinary `.hs` files or workspace prompts | Drafts change; active configuration stays unchanged until reload |
+| Native `reload`; Haskell `reloadSource` | Publishes one coherent source, compatible tool and workspace-prompt generation; changed configuration resets the notebook, unchanged configuration preserves it |
 
-Already-issued calls retain their captured source; existing compiled values retain
-their original definitions. Adding an ordinary Haskell helper function does not
-register a new native tool. The installed native tool surface remains fixed for
-an actor incarnation; `reload_agent_spec` applies a rebuilt tool record within
-that boundary. Inspect source status and reload receipts before relying on a change. Minor source changes can
-use ordinary file writes followed by explicit validation/reload; no separate edit
-API or coordinator handoff is required. The source owner and runtime still enforce
-publication and authority.
+Keep reusable definitions in `.hs` files: notebook names are discarded by changed
+reload. Conversation, resources and the published memory block persist. Reload
+does not rerun startup or refresh memory; use `Persona.Context.refresh` explicitly.
+Already-issued work and existing children retain their captured generation;
+fresh-context children select the published source. Captured-only children stay
+pinned.
+
+Adding an ordinary helper does not register a native tool. Incompatible registered
+tool surfaces or typed actor protocols refuse publication. Preparation failure or
+cancellation before commit retains the active generation. Read reload receipts:
+a confirmed commit with a projection repair warning is committed; uncertain state
+requires reconciliation rather than replay. Source-backed actors can add, edit or
+remove modules inside declared roots; required missing imports fail without old
+source fallback. Package pins, source roots, external services, capability grants
+and root launch configuration remain fixed launch inputs.
 
 `Persona.Orientation.renderMemory` reads the three memory bodies in full, preserving their wording and identifying
 their file paths. It does not seed missing files. `Persona.Orientation.startup` supplies that text through

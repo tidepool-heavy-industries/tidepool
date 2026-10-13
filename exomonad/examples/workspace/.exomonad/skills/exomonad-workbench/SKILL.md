@@ -12,7 +12,11 @@ owned captures retain their receipts. Inspect the outcome before retry. Declarat
 mutually recursive and visible to every statement, but a declaration cannot
 depend on a binding a statement in the same cell introduces. Expressions and
 bindings retain typed values without automatic rendering; declarations and
-bindings persist into later cells. Use `display value` for bounded structured
+bindings persist into later cells in the same notebook generation. Explicit
+`reload` publishes source, compatible tools and workspace prompts together;
+changed configuration resets notebook names, while unchanged configuration
+preserves them. Keep reusable definitions in ordinary `.hs` files. Reload does
+not refresh memory or rerun startup. Use `display value` for bounded structured
 output, and `display (show value)` for Haskell's textual `Show` form.
 
 The APIs in this skill are **shipped** and need no project module. Most names

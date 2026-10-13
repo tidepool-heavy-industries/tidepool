@@ -194,10 +194,22 @@ specific uncertainty. Define the observable outcome and stopping condition,
 exercise a failure path, and bring the result back to the design discussion.
 Distinguish proposed behavior, successful compilation and actual execution.
 
-The run owner can use `reloadSource` to typecheck and publish edited run
-workspace modules, then `reload_agent_spec` to rebuild its own typed tool
-record (a changed tool surface requires a new actor incarnation). Workers use
-the run's tooling; editing a child checkout does not reload it. `Project.Shell`,
+Edit reusable definitions in ordinary `.hs` files and workspace instructions in
+prompt files, then call the native `reload` tool. Haskell `reloadSource` uses
+that same owner. Reload publishes one coherent selection of source, compatible
+tool implementations and workspace prompts. A changed selection starts a fresh
+notebook; an unchanged selection preserves its bindings. Keep durable definitions
+in `.hs` files. Conversation, resources and published memory context persist;
+reload does not run startup or refresh memory.
+
+Failed preparation or cancellation before commit preserves the active selection.
+Incompatible registered tools or typed actor protocols refuse publication.
+Already-issued work and existing children retain their captured generation;
+fresh-context children select the published source. Captured-only children remain
+pinned. Source-backed actors edit inside declared roots; missing required imports
+fail rather than falling back to an old source tree. Package pins, source roots,
+external service configuration and capability grants remain launch inputs.
+`Project.Shell`,
 `Project.Lookup` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
 selectors and event routing. Each installed function tool explicitly selects
 its model-facing text with `presentWith`; see the API guide for `Text`, JSON and

@@ -3,9 +3,11 @@
 This file guides contributors; it is not part of the shipped model prompt.
 
 - `../../bridge/facade/src/actor_host/prompt_catalog.rs` owns prompt composition and
-  catalog identity. `base.md` plus `api-guide.md` form one frozen shared selection
-  for every actor; workspace `[prompts].api_guide` may select a profile guide; `agent.md` is one task-neutral developer instruction. Workspace
-  core overrides are selected once at run startup, never by actor role or live bindings.
+  catalog identity. `base.md` plus `api-guide.md` form the shared base selection; workspace
+  `[prompts].api_guide` may select a profile guide, and `agent.md` supplies the
+  developer instruction. Each actor generation captures the composed workspace
+  prompts with source and tool authority. Explicit reload publishes their successor;
+  already-issued requests retain their captured instruction bytes.
 - Optimize instructions for model decisions: use established technical vocabulary
   with its actual semantics; explain Exomonad-specific departures. Give each contract
   one canonical home, and move rare recovery detail behind targeted discovery.
