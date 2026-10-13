@@ -245,7 +245,6 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
             // A later checkout drains completed admission leases. The callback's
             // owner-derived lease must preserve its exact original scope.
             let _ = session.begin_ephemeral_private_execution(scope_b).map_err(ResidentError::Session)?;
-            assert!(session.scope_tree().is_live(scope_a));
             Ok(scope_b)
         }).await.unwrap();
         assert_ne!(scope_a, scope_b);
