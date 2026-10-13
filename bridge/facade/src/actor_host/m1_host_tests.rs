@@ -14,9 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use super::hosted_test_context::{
-    committed_explicit_display_operation, explicit_cell_display_matches, HostedTestRuntime,
-};
+use super::hosted_test_context::{explicit_cell_display_matches, HostedTestRuntime};
 use super::test_campaign::haskell_call;
 
 #[path = "m1_browser_process.rs"]

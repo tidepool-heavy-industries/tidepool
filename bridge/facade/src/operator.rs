@@ -842,6 +842,16 @@ pub struct InputStatusRequest {
     pub operation: Uuid,
 }
 
+impl InputStatusRequest {
+    fn url(&self) -> Result<reqwest::Url, Box<dyn std::error::Error>> {
+        let mut url = reqwest::Url::parse("http://localhost/host/input/status")?;
+        url.query_pairs_mut()
+            .append_pair("run", &self.run)
+            .append_pair("operation", &self.operation.to_string());
+        Ok(url)
+    }
+}
+
 fn input_refusal((code, reason): (harness::server::CommandRefusal, String)) -> Response {
     use harness::server::CommandRefusal;
     let status = match code {
@@ -931,7 +941,7 @@ pub async fn command(
     let (client, _address) = client_for(socket)?;
     let url = match &action {
         OperatorAction::Input(_) => "http://localhost/host/input".to_owned(),
-        OperatorAction::InputStatus(_) => "http://localhost/host/input/status".to_owned(),
+        OperatorAction::InputStatus(request) => request.url()?.to_string(),
         OperatorAction::New | OperatorAction::List => "http://localhost/host/operators".to_owned(),
         OperatorAction::Artifact { .. } => "http://localhost/host/artifacts".to_owned(),
         OperatorAction::Stop { session } => {
@@ -956,7 +966,7 @@ pub async fn command(
     };
     let response = match action {
         OperatorAction::Input(request) => client.post(url).json(&request),
-        OperatorAction::InputStatus(request) => client.get(url).query(&request),
+        OperatorAction::InputStatus(_) => client.get(url),
         OperatorAction::List => client.get(url),
         OperatorAction::Artifact {
             actor,
@@ -995,7 +1005,7 @@ mod input_tests {
         InputRequest {
             operation: Uuid::new_v4(),
             target: harness::server::HostActorIdentity {
-                run: "exact-run".into(),
+                run: "exact-run + & ü".into(),
                 actor: harness::model::AgentPath("/root".into()),
                 incarnation: "exact-incarnation".into(),
             },
@@ -1010,7 +1020,7 @@ mod input_tests {
             harness::server::ServerConfig::new(PathBuf::from(".")).with_history_store(store),
         );
         control.set_snapshot(harness::server::Snapshot {
-            host_run: Some("exact-run".into()),
+            host_run: Some("exact-run + & ü".into()),
             ..harness::server::Snapshot::default()
         });
         let directory = tempfile::tempdir().unwrap();
@@ -1044,12 +1054,7 @@ mod input_tests {
             run: request.target.run.clone(),
             operation: request.operation,
         };
-        let response = client
-            .get("http://localhost/host/input/status")
-            .query(&query)
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(query.url().unwrap()).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let record: harness::store::EmbeddedCommandRecord = response.json().await.unwrap();
         assert_eq!(record.operation_id.0, request.operation);
@@ -1113,12 +1118,7 @@ mod input_tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
-        let response = client
-            .get("http://localhost/host/input/status")
-            .query(&query)
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(query.url().unwrap()).send().await.unwrap();
         assert_eq!(
             response
                 .json::<harness::store::EmbeddedCommandRecord>()
@@ -1156,11 +1156,14 @@ mod input_tests {
         );
         assert_eq!(
             client
-                .get("http://localhost/host/input/status")
-                .query(&InputStatusRequest {
-                    run: request.target.run,
-                    operation: request.operation
-                })
+                .get(
+                    InputStatusRequest {
+                        run: request.target.run,
+                        operation: request.operation,
+                    }
+                    .url()
+                    .unwrap()
+                )
                 .send()
                 .await
                 .unwrap()
