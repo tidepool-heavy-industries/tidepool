@@ -476,9 +476,10 @@ def resolve_resource_environment(names):
     os.environ.update(selected)
 
 
-def parse_args(argv):
+def parse_args(argv, *, require_binary=True):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('binary', type=lambda value: str(Path(value).resolve(strict=True)))
+    if require_binary:
+        parser.add_argument('binary', type=lambda value: str(Path(value).resolve(strict=True)))
     parser.add_argument('--resource-env', action='append', default=[], metavar='NAME',
                         help='resolve this declared single-path environment input before any test process')
     parser.add_argument(

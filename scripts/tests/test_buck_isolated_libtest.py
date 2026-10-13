@@ -40,6 +40,23 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_argument_preflight_uses_the_runner_contract_without_binary_resolution(self):
+        with patch.object(runner.Path, 'resolve') as resolve:
+            options = runner.parse_args([
+                '--exact', 'suite::first', '--exact', 'suite::second',
+                '--expected-count', '2'], require_binary=False)
+        resolve.assert_not_called()
+        self.assertEqual(options.exact_names, ['suite::first', 'suite::second'])
+        self.assertEqual(options.expected_count, 2)
+
+    def test_execution_parser_still_requires_and_resolves_the_binary(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+            runner.parse_args(['--exact', 'suite::works', '--expected-count', '1'])
+        self.assertEqual(refused.exception.code, 2)
+        options = runner.parse_args([str(self.binary), '--exact', 'suite::works',
+                                     '--expected-count', '1'])
+        self.assertEqual(options.binary, str(self.binary.resolve(strict=True)))
+
     def test_concurrent_cases_keep_candidate_sources_and_cache_reuse_in_their_own_scope(self):
         for diagnostic in (False, True):
             with self.subTest(diagnostic=diagnostic):

@@ -2,6 +2,7 @@
 """Select declared Buck targets; test discovery and execution belong to their runners."""
 import argparse
 from functools import partial
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -107,6 +108,15 @@ def buck(command, labels, extra=(), *, profile="fast-dev", print_passing_details
     return subprocess.call(args, cwd=ROOT)
 
 
+def validate_libtest_arguments(arguments):
+    """Use the execution owner's option contract before admitting a build."""
+    spec = importlib.util.spec_from_file_location(
+        "isolated_libtest", ROOT / "build/rust/isolated-libtest.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    runner.parse_args(arguments, require_binary=False)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=PROFILES, default="fast-dev",
@@ -158,6 +168,7 @@ def main(argv=None):
             extra = extra[1:]
         if any(value.startswith("test(") for value in extra):
             raise ValueError("nextest expressions are retired; use --exact FULL_NAME --expected-count N")
+        validate_libtest_arguments(extra)
         return execute("run" if extra else "test", [target["test"]], extra)
     if options.command in ("suite", "suite-plan"):
         if options.package not in packages:

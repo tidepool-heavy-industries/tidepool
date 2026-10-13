@@ -98,6 +98,44 @@ class NativeWorkflowTests(unittest.TestCase):
         status, calls = self.invoke(["test-lib", "example"])
         self.assertEqual(calls[0].args, ("test", ["//pkg:unit_all"], []))
 
+    def test_malformed_libtest_arguments_refuse_before_any_buck_invocation(self):
+        packages = copy.deepcopy(ROSTER)
+        packages["example"]["binaries"]["tool"] = {
+            "build": "//pkg:tool", "test_build": "//pkg:tool_tests_binary",
+            "test": "//pkg:tool_tests"}
+        commands = (["test-lib", "example"], ["test-target", "example", "scenario"],
+                    ["test-bin", "example", "tool"])
+        malformed = (["--filter", "case"], ["--exact"], ["--exact", "case"],
+                     ["--exact", "case", "--exact", "case", "--expected-count", "2"],
+                     ["--expected-count", "0"], ["--jobs", "0"], ["--timeout", "nan"])
+        for command in commands:
+            for arguments in malformed:
+                with self.subTest(command=command, arguments=arguments):
+                    with patch.object(workflow, "roster", return_value=packages), \
+                         patch.object(workflow, "buck") as buck, \
+                         contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as refused:
+                            workflow.main([*command, *arguments])
+                        self.assertEqual(refused.exception.code, 2)
+                        buck.assert_not_called()
+
+    def test_repeated_exact_names_reach_the_selected_runner_unchanged(self):
+        packages = copy.deepcopy(ROSTER)
+        packages["example"]["binaries"]["tool"] = {
+            "build": "//pkg:tool", "test_build": "//pkg:tool_tests_binary",
+            "test": "//pkg:tool_tests"}
+        commands = ((["test-lib", "example"], "//pkg:unit_all"),
+                    (["test-target", "example", "scenario"], "//pkg:scenario"),
+                    (["test-bin", "example", "tool"], "//pkg:tool_tests"))
+        arguments = ["--exact", "suite::first", "--exact", "suite::second",
+                     "--expected-count", "2"]
+        for command, label in commands:
+            with self.subTest(command=command), \
+                 patch.object(workflow, "roster", return_value=packages), \
+                 patch.object(workflow, "buck", return_value=0) as buck:
+                self.assertEqual(workflow.main([*command, "--", *arguments]), 0)
+                buck.assert_called_once_with("run", [label], arguments, profile="fast-dev")
+
     def test_unknown_target_and_retired_expression_refuse_before_buck(self):
         for arguments in (["test-target", "example", "unknown"], ["test-lib", "example", "test(valid)"]):
             with self.subTest(arguments=arguments), patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck:
