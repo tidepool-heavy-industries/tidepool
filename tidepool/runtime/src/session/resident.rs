@@ -6320,6 +6320,19 @@ where
     pub fn mint_isolated_scope(&mut self) -> ScopeId {
         self.state.mint_isolated_scope()
     }
+    pub fn mint_isolated_scope_with_lease(
+        &mut self,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.mint_isolated_scope_with_lease()
+    }
+    pub fn adopt_initial_notebook_scope(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.adopt_initial_notebook_scope(scope)
+    }
 
     /// The persistent binding names visible at `scope`: its own mutable frame over
     /// the immutable inherited tip captured when the scope was minted.

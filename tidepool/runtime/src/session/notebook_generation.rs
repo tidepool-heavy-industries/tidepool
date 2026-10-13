@@ -30,10 +30,27 @@ pub enum NotebookGenerationError {
 /// Issuers serialize their complete typed identity; recovery revalidates that
 /// identity through its source/installer owner before constructing live leases.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "EncodedGenerationArtifactReference")]
 pub struct GenerationArtifactReference {
     bytes: Vec<u8>,
     sha256: [u8; 32],
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedGenerationArtifactReference {
+    bytes: Vec<u8>,
+    sha256: [u8; 32],
+}
+impl TryFrom<EncodedGenerationArtifactReference> for GenerationArtifactReference {
+    type Error = NotebookGenerationError;
+    fn try_from(encoded: EncodedGenerationArtifactReference) -> Result<Self, Self::Error> {
+        let value = Self {
+            bytes: encoded.bytes,
+            sha256: encoded.sha256,
+        };
+        value.validate()?;
+        Ok(value)
+    }
 }
 impl GenerationArtifactReference {
     pub fn capture(bytes: Vec<u8>) -> Self {
@@ -57,10 +74,27 @@ impl GenerationArtifactReference {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "EncodedComposedPromptSnapshot")]
 pub struct ComposedPromptSnapshot {
     instructions: String,
     sha256: [u8; 32],
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedComposedPromptSnapshot {
+    instructions: String,
+    sha256: [u8; 32],
+}
+impl TryFrom<EncodedComposedPromptSnapshot> for ComposedPromptSnapshot {
+    type Error = NotebookGenerationError;
+    fn try_from(encoded: EncodedComposedPromptSnapshot) -> Result<Self, Self::Error> {
+        let value = Self {
+            instructions: encoded.instructions,
+            sha256: encoded.sha256,
+        };
+        value.validate()?;
+        Ok(value)
+    }
 }
 impl ComposedPromptSnapshot {
     pub fn capture(instructions: String) -> Self {
@@ -110,6 +144,9 @@ impl ActiveNotebookGeneration {
 }
 /// Prepared under one session view; only commit can publish its issued owner.
 pub struct PreparedNotebookGeneration {
+    pub(crate) owner_stamp: super::OwnerStamp,
+    pub(crate) domain: super::RecoveryDomainId,
+    pub(crate) database_id: [u8; 16],
     pub(crate) staged: super::recovery::StagedRecoveryManifest,
     pub(crate) scope: ScopeId,
     pub(crate) epoch: u64,
@@ -145,11 +182,7 @@ mod tests {
         decoded.validate().unwrap();
         let mut forged = serde_json::to_value(&prompt).unwrap();
         forged["instructions"] = serde_json::json!("changed");
-        let forged: ComposedPromptSnapshot = serde_json::from_value(forged).unwrap();
-        assert_eq!(
-            forged.validate(),
-            Err(NotebookGenerationError::DigestMismatch)
-        );
+        assert!(serde_json::from_value::<ComposedPromptSnapshot>(forged).is_err());
         let mut source = GenerationArtifactReference::capture(vec![0, 255, 7]);
         source.bytes.push(8);
         assert_eq!(

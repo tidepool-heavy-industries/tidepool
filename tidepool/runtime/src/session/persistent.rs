@@ -2231,6 +2231,26 @@ impl PersistentSession {
     pub fn mint_isolated_scope(&mut self) -> ScopeId {
         self.scopes.mint_isolated()
     }
+    /// Issue the scope's one retiring owner; all retained uses clone this Arc.
+    pub fn mint_isolated_scope_with_lease(
+        &mut self,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        let scope = self.mint_isolated_scope();
+        self.prepared_lexical_scope_lease(scope)
+    }
+    /// Preserve the exact initialized notebook, including captured ancestry.
+    /// Canonical lease issuance prevents independent retirement owners.
+    pub fn adopt_initial_notebook_scope(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        if scope == ScopeId::ROOT {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.prepared_lexical_scope_lease(scope)
+    }
 
     /// The session's one scope forest — read by both stores for their lookup
     /// walks. There is no `_mut` sibling on purpose: minting and retiring are
@@ -6128,9 +6148,25 @@ mod checkpoint_scope_tests {
                     && target == self.target)
             }
         }
+        fn generation_session(
+            recovery: &crate::session::recovery_test_fixture::RecoveryFixture,
+            root: &Path,
+        ) -> PersistentSession {
+            let mut lib = SessionLib::open(
+                tidepool_repr::SessionId(964),
+                root.join("generation-session"),
+                super::super::ModuleEnv::standalone_default(),
+            )
+            .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                recovery.attach_root(&mut lib, settlement)
+            })
+            .unwrap();
+            PersistentSession::new(Some(lib), 1024)
+        }
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let mut session = publication_session(&recovery, root.path(), 964);
+        let mut session = generation_session(&recovery, root.path());
         let actor = public_owner("root/generation-restart");
         let a = session.mint_isolated_scope();
         session
@@ -6155,14 +6191,21 @@ mod checkpoint_scope_tests {
         drop(session);
         let reopened =
             crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
-        let mut recovered = publication_session(&reopened, root.path(), 964);
+        let mut recovered = generation_session(&reopened, root.path());
         assert_eq!(
             recovered.active_notebook_generation(&actor).unwrap(),
             Some(head_b.clone())
         );
         let b = recovered.recover_public_scope(&head_b.owner).unwrap();
-        let old_lease = recovered.prepared_lexical_scope_lease(b).unwrap();
+        assert!(recovered
+            .begin_durable_private_execution(&head_b.owner, b)
+            .is_ok());
+        drop(recovered);
+        // Startup transfer happens before attaching any public owner in the
+        // new incarnation. Inspecting B above must not change that contract.
+        let mut recovered = generation_session(&reopened, root.path());
         let target = recovered.mint_isolated_scope();
+        let old_lease = recovered.prepared_lexical_scope_lease(target).unwrap();
         let successor = RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/generation-restart").unwrap(),
             2,
@@ -6186,7 +6229,7 @@ mod checkpoint_scope_tests {
             PublicManifestCommit::Durable
         ));
         assert!(recovered
-            .validate_lexical_scope_lease(b, &old_lease)
+            .validate_lexical_scope_lease(target, &old_lease)
             .is_err());
         assert!(recovered
             .active_notebook_generation(&actor)
@@ -6220,6 +6263,99 @@ mod checkpoint_scope_tests {
         assert!(recovered
             .begin_durable_private_execution(&owner_c, c)
             .is_ok());
+    }
+    #[test]
+    fn prepared_generation_refuses_foreign_machine_with_matching_scope_and_snapshot() {
+        let left_root = tempfile::tempdir().unwrap();
+        let right_root = tempfile::tempdir().unwrap();
+        fn empty_session(root: &Path) -> (PersistentSession, ScopeId, RecoveryPublicOwner) {
+            let fixture = crate::session::recovery_test_fixture::RecoveryFixture::create(root);
+            let mut lib = SessionLib::open(
+                tidepool_repr::SessionId(971),
+                root.join("session"),
+                super::super::ModuleEnv::standalone_default(),
+            )
+            .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                fixture.attach_root(&mut lib, settlement)
+            })
+            .unwrap();
+            let mut session = PersistentSession::new(Some(lib), 1024);
+            let scope = session.mint_isolated_scope();
+            let owner = public_owner("root/matching-generations");
+            session
+                .initialize_durable_public_scope(owner.clone(), scope)
+                .unwrap();
+            (session, scope, owner)
+        }
+        let (mut left, a_left, actor) = empty_session(left_root.path());
+        let (mut right, a_right, right_actor) = empty_session(right_root.path());
+        for (session, scope, actor) in [
+            (&mut left, a_left, &actor),
+            (&mut right, a_right, &right_actor),
+        ] {
+            let initial = session
+                .prepare_notebook_generation(scope, actor, None, generation_refs(1))
+                .unwrap();
+            session
+                .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
+                .unwrap();
+        }
+        let left_head = left.active_notebook_generation(&actor).unwrap().unwrap();
+        let right_head = right
+            .active_notebook_generation(&right_actor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(left_head, right_head);
+        let b_left = left.mint_isolated_scope();
+        let b_right = right.mint_isolated_scope();
+        assert_eq!(b_left, b_right);
+        assert_eq!(
+            left.public_visibility_snapshot_in(b_left),
+            right.public_visibility_snapshot_in(b_right)
+        );
+        let prepared = left
+            .prepare_notebook_generation(
+                b_left,
+                &actor,
+                Some(left_head.clone()),
+                generation_refs(2),
+            )
+            .unwrap();
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            right.commit_notebook_generation(prepared, &decision, |_| panic!(
+                "foreign generation installed"
+            )),
+            Err(SessionError::WrongPublicManifestTicket)
+        ));
+        assert_eq!(decision.phase(), crate::session::PublicationPhase::Running);
+        assert_eq!(
+            left.active_notebook_generation(&actor).unwrap(),
+            Some(left_head)
+        );
+        assert_eq!(
+            right.active_notebook_generation(&right_actor).unwrap(),
+            Some(right_head)
+        );
+    }
+
+    #[test]
+    fn notebook_scope_adoption_shares_one_retiring_owner_until_last_arc() {
+        let mut session = PersistentSession::new(None, 1024);
+        let first = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = first.scope();
+        let second = session.adopt_initial_notebook_scope(scope).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        drop(first);
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(scope));
+        drop(second);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(scope));
+        assert!(
+            matches!(session.adopt_initial_notebook_scope(scope), Err(SessionError::DeadScope(id)) if id == scope)
+        );
     }
 }
 
@@ -7199,6 +7335,9 @@ impl PersistentSession {
             next: next.clone(),
         });
         Ok(super::PreparedNotebookGeneration {
+            owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
+            domain: state.domain_id,
+            database_id: state.store.database_id(),
             staged,
             scope,
             epoch,
@@ -7217,6 +7356,9 @@ impl PersistentSession {
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
         let super::PreparedNotebookGeneration {
+            owner_stamp,
+            domain: issued_domain,
+            database_id,
             mut staged,
             scope,
             epoch,
@@ -7224,7 +7366,9 @@ impl PersistentSession {
             next,
             expected,
         } = prepared;
-        if self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot) {
+        if !owner_stamp.matches(self.admission_owner())
+            || self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot)
+        {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         let lib = self.lib();
@@ -7232,6 +7376,9 @@ impl PersistentSession {
             .durable_graph
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if state.domain_id != issued_domain || state.store.database_id() != database_id {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         if state
             .store
             .active_notebook_generation(state.domain_id, &next.owner)
@@ -7308,31 +7455,40 @@ impl PersistentSession {
         let committed = loop {
             match staged.commit() {
                 super::StoreDisposition::Refused(super::StoreRefusal::StaleRevision) => {
-                    if store
-                        .active_notebook_generation(domain, &next.owner)
-                        .map_err(|e| SessionError::RecoveryStore(Box::new(e)))?
-                        != expected
-                    {
-                        break super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch);
-                    }
-                    let graph = super::recovery::load_domain_graph(store.clone(), domain)
-                        .map_err(|e| super::recovery::graph_error(&path, e))?;
-                    let revision = graph.store_revision();
-                    let ceiling = graph.high_water();
-                    let mut candidate = graph.candidate();
-                    if expected.is_some() {
-                        candidate
-                            .replace_surface((*surface).clone())
+                    // StaleRevision proves this write rolled back. Errors
+                    // while rebuilding are previsibility failures, so settle
+                    // that claim rather than leave it falsely unconfirmed.
+                    let retry = (|| -> Result<Option<super::recovery::StagedRecoveryManifest>, SessionError> {
+                        if store.active_notebook_generation(domain, &next.owner)
+                            .map_err(|e| SessionError::RecoveryStore(Box::new(e)))? != expected {
+                            return Ok(None);
+                        }
+                        let graph = super::recovery::load_domain_graph(store.clone(), domain)
                             .map_err(|e| super::recovery::graph_error(&path, e))?;
-                    }
-                    staged = candidate
-                        .prepare(revision, ceiling)
-                        .map_err(|e| super::recovery::graph_error(&path, e))?;
-                    staged.prepared.generation_change =
-                        Some(super::recovery_store::PreparedGenerationChange {
-                            expected: expected.clone(),
-                            next: next.clone(),
+                        let revision = graph.store_revision();
+                        let ceiling = graph.high_water();
+                        let mut candidate = graph.candidate();
+                        if expected.is_some() {
+                            candidate.replace_surface((*surface).clone())
+                                .map_err(|e| super::recovery::graph_error(&path, e))?;
+                        }
+                        let mut retry = candidate.prepare(revision, ceiling)
+                            .map_err(|e| super::recovery::graph_error(&path, e))?;
+                        retry.prepared.generation_change = Some(super::recovery_store::PreparedGenerationChange {
+                            expected: expected.clone(), next: next.clone(),
                         });
+                        Ok(Some(retry))
+                    })();
+                    match retry {
+                        Ok(Some(retry)) => staged = retry,
+                        Ok(None) => {
+                            break super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch)
+                        }
+                        Err(error) => {
+                            claim.before_rename_failure();
+                            return Err(error);
+                        }
+                    }
                 }
                 outcome => break outcome,
             }
