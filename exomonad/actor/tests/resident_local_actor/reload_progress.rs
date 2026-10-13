@@ -31,9 +31,10 @@ impl Drop for ReleaseReloads {
 }
 
 impl exomonad_actor::ActorSourceLayers for ReloadGate {
-    fn stage_spec_reload(
+    fn stage_reload(
         self: Arc<Self>,
         _: tidepool_repr::PrincipalId,
+        _: &exomonad_actor::CheckpointSourceLayer,
         _: &[String],
     ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
     {
@@ -47,40 +48,7 @@ impl exomonad_actor::ActorSourceLayers for ReloadGate {
     }
     fn bind_for(&self, _: tidepool_repr::PrincipalId, _: &str) {}
 
-    fn reload_helpers_with_publication(
-        &self,
-        _: tidepool_repr::PrincipalId,
-        _: &[String],
-        publication: &Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> exomonad_actor::SourceLayerReload {
-        let ordinal = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.decisions.lock().unwrap().push(publication.clone());
-        self.entered
-            .send(ordinal)
-            .expect("reload progress observer");
-        let mut permits = self.permits.lock().unwrap();
-        while *permits == 0 {
-            permits = self.released.wait(permits).unwrap();
-        }
-        *permits -= 1;
-        drop(permits);
-        if self.reject_ordinal == Some(ordinal) {
-            return exomonad_actor::SourceLayerReload::Rejected {
-                active: "last-valid".into(),
-                rejected: "invalid-draft".into(),
-                diagnostics: "draft refused".into(),
-            };
-        }
-        let Some(claim) = publication.claim_commit() else {
-            return exomonad_actor::SourceLayerReload::Cancelled;
-        };
-        claim.published();
-        exomonad_actor::SourceLayerReload::Published {
-            previous: format!("reload-{ordinal}"),
-            revision: format!("reload-{}", ordinal + 1),
-            changed: Vec::new(),
-        }
-    }
+
 }
 
 async fn hosted_tool(

@@ -115,14 +115,41 @@ where H: DispatchEffect<O> + Send + 'static,O: OutputSink + Sync + 'static {
                 behavior.spec_installs = behavior.installed_tools.current_tools().map_or(behavior.spec_installs,|tools|tools.install);
                 behavior.after_tool.forget_failures();
             }
-            Ok(WorkbenchAdvance::Park(Self::finish_owned_task(owned,reload_result(format!("{result:?}")))))
+            Ok(WorkbenchAdvance::Park({
+                let execution = owned.state.request.execution_id().cloned().expect("native reload execution identity");
+                Self::finish_owned_task(owned,reload_result(result,execution))
+            }))
         })
     }
 }
 
-fn reload_result(output:String)->Result<KernelStep<WorkbenchResponse>,WorkbenchExecutionFailure> {
-    Ok(KernelStep::Continue(workbench_response(WorkbenchRunStatus::Committed,vec![WorkbenchItemReceipt {
-        diagnostics:Vec::new(),index:0,kind:None,span:None,source_items:Vec::new(),status:WorkbenchItemStatus::Committed,
-        output,value:None,warnings:Vec::new(),installed_bindings:Vec::new(),operations:Vec::new(),terminal_transfer:None,failure_layer:None,
-    }],1,1,None)))
+fn revision_value(revision:&tidepool_bridge_effects::SrRevision)->serde_json::Value {
+    serde_json::json!({ "identity":revision.identity,"generation":revision.generation,
+        "modules":revision.modules.iter().map(|module|serde_json::json!({"name":module.name,"digest":module.digest})).collect::<Vec<_>>() })
+}
+
+fn reload_result(result:Result<SrReloadOutcome,SourceError>,execution:tidepool_runtime::session::WorkbenchExecutionId)->Result<KernelStep<WorkbenchResponse>,WorkbenchExecutionFailure> {
+    let disposition = source_effect::reload_disposition(&result);
+    let (output,value,warnings) = match result {
+        Ok(SrReloadOutcome::ReloadUnchanged(revision)) => (format!("unchanged: source {}; notebook names retained",revision.identity),serde_json::json!({"outcome":"unchanged","revision":revision_value(&revision)}),Vec::new()),
+        Ok(SrReloadOutcome::ReloadPublished(previous,next,changed)) => (format!("published: source {}; compatible handlers and prompts active; notebook reset",next.identity),serde_json::json!({"outcome":"published","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),Vec::new()),
+        Ok(SrReloadOutcome::ReloadPublishedWithWarnings(previous,next,changed,warnings)) => (format!("published: source {}; notebook reset; derived projections need repair",next.identity),serde_json::json!({"outcome":"publishedWithWarnings","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),warnings),
+        Ok(SrReloadOutcome::ReloadRejected(issued,candidate,diagnostics)) => (format!("rejected: candidate {}; reload changed no active configuration\n{}",candidate.identity,diagnostics),serde_json::json!({"outcome":"rejected","issuedRevision":revision_value(&issued),"candidate":revision_value(&candidate),"diagnostics":diagnostics}),Vec::new()),
+        Ok(SrReloadOutcome::ReloadCancelled(issued)) => ("cancelled before publication; reload changed no active configuration".into(),serde_json::json!({"outcome":"cancelled","issuedRevision":revision_value(&issued)}),Vec::new()),
+        Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(candidate,diagnostics)) => (format!("publication unconfirmed: candidate {}; admission blocked; reconcile before continuing\n{}",candidate.identity,diagnostics),serde_json::json!({"outcome":"publicationUnconfirmed","candidate":revision_value(&candidate),"diagnostics":diagnostics}),Vec::new()),
+        Err(SourceError::SourceUnavailable(detail)) => (format!("unavailable: {detail}"),serde_json::json!({"outcome":"unavailable","detail":detail}),Vec::new()),
+        Err(SourceError::SourceUnreadable(detail)) => (format!("source unreadable: {detail}"),serde_json::json!({"outcome":"unreadable","detail":detail}),Vec::new()),
+    };
+    let (run_status,item_status,completed,layer) = match disposition {
+        WorkbenchOperationDisposition::Read|WorkbenchOperationDisposition::Committed => (WorkbenchRunStatus::Committed,WorkbenchItemStatus::Committed,1,None),
+        WorkbenchOperationDisposition::Rejected => (WorkbenchRunStatus::Rejected,WorkbenchItemStatus::Rejected,0,Some(WorkbenchFailureLayer::Effect)),
+        WorkbenchOperationDisposition::Unknown => (WorkbenchRunStatus::Rejected,WorkbenchItemStatus::Stopped,0,Some(WorkbenchFailureLayer::Effect)),
+        _ => unreachable!("reload result owns a terminal publication disposition"),
+    };
+    Ok(KernelStep::Continue(workbench_response(run_status,vec![WorkbenchItemReceipt {
+        diagnostics:Vec::new(),index:0,kind:None,span:None,source_items:Vec::new(),status:item_status,
+        output,value:Some(value),warnings,installed_bindings:Vec::new(),operations:vec![WorkbenchOperationReceipt {
+            id:WorkbenchOperationId { execution,input_unit_index:0,effect_ordinal:0 },effect:"configuration reload".into(),disposition,display:None,display_publication:None,
+        }],terminal_transfer:None,failure_layer:layer,
+    }],completed,1,None)))
 }

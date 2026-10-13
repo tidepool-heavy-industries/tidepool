@@ -151,6 +151,19 @@ pub(crate) struct WorkbenchPublicOwner {
     readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
 }
 
+/// Prevalidated actor identity and placement for a prepared generation.
+/// The runtime callback supplies the readiness of that same prepared scope.
+pub(crate) struct PreparedWorkbenchGenerationOwner {
+    actor:ActorRef,
+    placement:crate::ActorPlacement,
+}
+
+impl PreparedWorkbenchGenerationOwner {
+    pub(crate) fn bind(self,readiness:Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>) -> Arc<WorkbenchPublicOwner> {
+        Arc::new(WorkbenchPublicOwner { actor:self.actor,placement:self.placement,readiness })
+    }
+}
+
 /// Plain resource owners retained by the existing native continuation entry.
 /// No abort callback, session registry, or input-retirement callback belongs here.
 pub(crate) struct ExecutionResourceOwners {
@@ -277,14 +290,13 @@ impl WorkbenchPublicOwner {
         }))
     }
 
-    /// A retained generation may use a different notebook scope while keeping
-    /// its admitted actor, machine and resource domain unchanged.
-    pub(crate) fn issue_generation(
+    /// Validate actor/session/resource and the native owner before publication.
+    pub(crate) fn prepare_generation(
         context: &ActorSessionContext,
         descriptor: &ActorDescriptor,
         scope: &tidepool_runtime::session::RuntimeLexicalScopeLease,
-        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
-    ) -> Result<Arc<Self>, ResidentActorWorkbenchError> {
+        native_owner: Option<&tidepool_runtime::session::RecoveryPublicOwner>,
+    ) -> Result<PreparedWorkbenchGenerationOwner, ResidentActorWorkbenchError> {
         let placement = descriptor.placement();
         if context.placement.session != placement.session
             || context.placement.resource_scope != placement.resource_scope
@@ -292,21 +304,17 @@ impl WorkbenchPublicOwner {
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation differs from actor/session/resource authority".into()));
         }
-        match (descriptor.persistence_policy(), readiness.as_ref()) {
-            (crate::ActorPersistencePolicy::Ephemeral, None) => {},
-            (crate::ActorPersistencePolicy::Durable, Some(native)) => {
-                let expected = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path, context.actor.incarnation.0));
-                if expected.as_ref().map(|owner| owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL)) != Some(native.durable_owner().for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL))
-                    || native.session() != context.placement.session
-                    || native.scope() != scope.scope()
-                    || !native.is_current()
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation has no exact native publication capability".into()));
+        match (descriptor.persistence_policy(),native_owner) {
+            (crate::ActorPersistencePolicy::Ephemeral,None) => {},
+            (crate::ActorPersistencePolicy::Durable,Some(owner)) => {
+                let expected = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path,context.actor.incarnation.0));
+                if expected != Some(owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL)) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol("prepared generation has a foreign native actor owner".into()));
                 }
             },
             _ => return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation persistence differs from actor".into())),
         }
-        Ok(Arc::new(Self { actor:context.actor, placement:context.placement, readiness }))
+        Ok(PreparedWorkbenchGenerationOwner { actor:context.actor,placement:context.placement })
     }
 
     pub(crate) fn native_readiness(
@@ -3112,9 +3120,10 @@ mod authority_tests {
     struct SourceService(crate::SourceLayerIssuer);
 
     impl crate::ActorSourceLayers for SourceService {
-        fn stage_spec_reload(
+        fn stage_reload(
             self: Arc<Self>,
             _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
             _: &[String],
         ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
             Err(crate::SourceLayerReload::Unavailable(

@@ -107,6 +107,7 @@ fn execution_with_id(
         state: Box::new(WorkbenchExecutionState {
             cell_span: cell_execution_span(&context, &request),
             effects: WorkbenchEffectState {
+                issued_snapshot:None,
                 lifecycle: None,
                 initial_context: false,
                 display_receipt_owner: None,
@@ -712,6 +713,7 @@ async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
     let owners = [
         CurrentEffectOwner::Workbench(&execution.state.effects),
         CurrentEffectOwner::Actor {
+            issued_snapshot:None,
             ephemeral_work: execution.state.effects.invocation_work.clone(),
             publication: CheckpointPublication::Resident,
             reservation_owner: None,

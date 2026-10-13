@@ -67,7 +67,7 @@ mod workbench_ledger;
 #[cfg(test)]
 pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
-    ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
+    ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner, PreparedWorkbenchGenerationOwner,
 };
 
 use display_settlement::{

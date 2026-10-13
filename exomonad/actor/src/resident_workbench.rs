@@ -1373,6 +1373,7 @@ pub(crate) struct PreparedActorGeneration {
     context: crate::ActorSessionContext,
     scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     commit: PreparedGenerationCommit,
+    public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
 }
 
 pub(crate) enum ActorGenerationCommit {
@@ -1566,6 +1567,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
             } else {
                 session.adopt_initial_notebook_scope(context.placement.lexical_scope).map_err(ResidentError::Session)?
             };
+            session.validate_lexical_scope_lease(scope.scope(),&scope)?;
             let commit = match descriptor.persistence_policy() {
                 crate::ActorPersistencePolicy::Ephemeral => PreparedGenerationCommit::Ephemeral(
                     expected.as_ref().map_or(Ok(tidepool_runtime::session::NotebookGenerationId::INITIAL), |generation| generation.id.next())
@@ -1580,7 +1582,9 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                     PreparedGenerationCommit::Durable { prepared, selected }
                 },
             };
-            Ok(PreparedActorGeneration { context:next_context, scope, commit })
+            let native_owner = match &commit { PreparedGenerationCommit::Ephemeral(_) => None, PreparedGenerationCommit::Durable { prepared,.. } => Some(prepared.owner()) };
+            let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(&next_context,&descriptor,&scope,native_owner)?;
+            Ok(PreparedActorGeneration { context:next_context, scope, commit,public_owner })
         }).await
     }
 
@@ -1589,7 +1593,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
     pub(crate) async fn commit_actor_generation(
         &self,
         context: crate::ActorSessionContext,
-        descriptor: crate::ActorDescriptor,
+        _descriptor: crate::ActorDescriptor,
         state: Arc<InstalledToolsState>,
         expected: ActorRequestSnapshot,
         prepared: PreparedActorGeneration,
@@ -1608,12 +1612,12 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                 _ => false,
             };
             if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
-            let PreparedActorGeneration { mut context, scope, commit } = prepared;
+            let PreparedActorGeneration { mut context, scope, commit,public_owner } = prepared;
             context.source_layer = installation.source().include_paths().to_vec().into();
             let mut visible = None;
             match commit {
                 PreparedGenerationCommit::Ephemeral(id) => {
-                    let owner = crate::resident_actor::WorkbenchPublicOwner::issue_generation(&context,&descriptor,&scope,None)?;
+                    let owner = public_owner.bind(None);
                     let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
                     let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
                     *current = InstalledToolsAvailability::Generation(generation.clone());
@@ -1622,8 +1626,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                 },
                 PreparedGenerationCommit::Durable { prepared, selected } => {
                     let result = session.commit_notebook_generation(prepared,&publication,|readiness| {
-                        let owner = crate::resident_actor::WorkbenchPublicOwner::issue_generation(&context,&descriptor,&scope,Some(readiness))
-                            .expect("native generation publication preserves the prepared actor/session/resource identity");
+                        let owner = public_owner.bind(Some(readiness));
                         let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                         *current = InstalledToolsAvailability::Generation(generation.clone());
                         visible = Some(generation);
@@ -17857,28 +17860,6 @@ pub(crate) mod request_tests {
             completed_executions
         );
         assert_eq!(first.declarations, second.declarations);
-        struct CandidateCommit(crate::CheckpointSourceLayer);
-        impl crate::StagedActorSourceReload for CandidateCommit {
-            fn source(&self) -> &crate::CheckpointSourceLayer {
-                &self.0
-            }
-            fn commit(
-                self: Box<Self>,
-                publication: &Arc<tidepool_runtime::session::PublicationDecision>,
-                on_visible: Box<dyn FnOnce() + '_>,
-            ) -> crate::SourceLayerReload {
-                let Some(claim) = publication.claim_commit() else {
-                    return crate::SourceLayerReload::Cancelled;
-                };
-                on_visible();
-                claim.published();
-                crate::SourceLayerReload::Published {
-                    previous: "original".into(),
-                    revision: "candidate".into(),
-                    changed: Vec::new(),
-                }
-            }
-        }
         #[derive(Clone, Copy)]
         enum CandidateOutcome {
             Refused,
@@ -17964,26 +17945,10 @@ pub(crate) mod request_tests {
             if matches!(outcome, CandidateOutcome::Cancelled) {
                 decision.request_cancellation();
             }
-            let result = state.commit_spec_reload(
-                if matches!(outcome, CandidateOutcome::Refused) {
-                    &old
-                } else {
-                    &current
-                },
-                Arc::clone(&candidate),
-                Box::new(CandidateCommit(source)),
-                &decision,
-            );
             match outcome {
-                CandidateOutcome::Refused => {
-                    assert!(matches!(result, crate::SourceLayerReload::Unavailable(_)))
-                }
-                CandidateOutcome::Cancelled => {
-                    assert!(matches!(result, crate::SourceLayerReload::Cancelled))
-                }
-                CandidateOutcome::Published => {
-                    assert!(matches!(result, crate::SourceLayerReload::Published { .. }))
-                }
+                CandidateOutcome::Refused => assert!(matches!(state.replace_explicit(&old,Arc::clone(&candidate)),Err(SpecReplacementError::Unavailable))),
+                CandidateOutcome::Cancelled => assert!(decision.claim_commit().is_none()),
+                CandidateOutcome::Published => state.replace_explicit(&current,Arc::clone(&candidate)).unwrap(),
             }
             let expected = if matches!(outcome, CandidateOutcome::Published) {
                 &candidate
@@ -18663,115 +18628,28 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
-    async fn spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor() {
-        with_test_compiler_owner(
-            spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor_with_compiler_owner(),
-        ).await;
-    }
-
-    async fn spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor_with_compiler_owner(
-    ) {
-        struct NeverCommitted(crate::CheckpointSourceLayer);
-        impl crate::StagedActorSourceReload for NeverCommitted {
-            fn source(&self) -> &crate::CheckpointSourceLayer {
-                &self.0
-            }
-            fn commit(
-                self: Box<Self>,
-                _: &Arc<tidepool_runtime::session::PublicationDecision>,
-                _: Box<dyn FnOnce() + '_>,
-            ) -> crate::SourceLayerReload {
-                panic!("a stale installation must not enter the source publication owner")
-            }
-        }
-        let (session, context, source, _root) = host_mount_fixture();
-        let machines = Arc::new(ActorMachineRegistry::new());
-        machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
-        let first = Arc::new(
-            workbench
-                .prepare_tools(context.clone(), 1, vec![])
-                .await
-                .unwrap(),
-        );
-        let second = Arc::new(
-            workbench
-                .prepare_tools(context.clone(), 2, vec![])
-                .await
-                .unwrap(),
-        );
-        assert!(
-            !Arc::ptr_eq(&first.dispatch, &second.dispatch),
-            "native installations own distinct dispatch roots"
-        );
-        let source = crate::CheckpointSourceLayer::default();
-        let expected = InstalledToolLease::new(context.actor, source.clone(), Some(first));
-        let replacement =
-            InstalledToolLease::new(context.actor, source.clone(), Some(second.clone()));
-        let state = InstalledToolsState::default();
-        state.publish(replacement);
-        let decision = tidepool_runtime::session::PublicationDecision::new();
-        assert!(matches!(
-            state.commit_spec_reload(
-                &expected,
-                second.clone(),
-                Box::new(NeverCommitted(source.clone())),
-                &decision
-            ),
-            crate::SourceLayerReload::Unavailable(_)
-        ));
-        assert_eq!(
-            decision.phase(),
-            tidepool_runtime::session::PublicationPhase::Running
-        );
-        assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
-        assert_eq!(
-            expected.tools().unwrap().install,
-            1,
-            "old accepted lease remains valid"
-        );
-        state.invalidate_source();
-        assert!(
-            state.current().is_none(),
-            "failed source cannot issue a snapshot"
-        );
-        assert!(
-            state.current_tools().is_none(),
-            "retained handlers are unavailable"
-        );
-        assert!(matches!(
-            state.commit_spec_reload(
-                &expected,
-                second.clone(),
-                Box::new(NeverCommitted(source.clone())),
-                &decision
-            ),
-            crate::SourceLayerReload::Unavailable(_)
-        ));
-        state.invalidate_source();
-        state.publish_source(context.actor, source.clone());
-        assert!(
-            Arc::ptr_eq(&state.current_tools().unwrap(), &second),
-            "helper-source recovery restores the same installed handlers"
-        );
-        state.invalidate_source();
-        state.clear();
-        assert!(matches!(
-            state.commit_spec_reload(
-                &expected,
-                second,
-                Box::new(NeverCommitted(source)),
-                &decision
-            ),
-            crate::SourceLayerReload::Unavailable(_)
-        ));
-        assert!(
-            state.current().is_none(),
-            "reload cannot resurrect a retired installation"
-        );
+    async fn explicit_replacement_fence_refuses_changed_dispatch_and_retired_actor() {
+        with_test_compiler_owner(async {
+            let (session,context,source,_root) = host_mount_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session,Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines,source,None).with_compilation_authority(crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()));
+            let first = Arc::new(workbench.prepare_tools(context.clone(),1,vec![]).await.unwrap());
+            let second = Arc::new(workbench.prepare_tools(context.clone(),2,vec![]).await.unwrap());
+            assert!(!Arc::ptr_eq(&first.dispatch,&second.dispatch));
+            let expected = InstalledToolLease::new(context.actor,crate::CheckpointSourceLayer::default(),Some(first));
+            let state = InstalledToolsState::default();
+            state.publish(InstalledToolLease::new(context.actor,crate::CheckpointSourceLayer::default(),Some(second.clone())));
+            assert!(matches!(state.replace_explicit(&expected,second.clone()),Err(SpecReplacementError::Unavailable)));
+            assert_eq!(state.current().unwrap().tools().unwrap().install,2);
+            assert_eq!(expected.tools().unwrap().install,1,"accepted original installation survives replacement");
+            state.invalidate_source();
+            assert!(state.snapshot().is_none(),"unavailable installation cannot issue new requests");
+            assert!(matches!(state.replace_explicit(&expected,second.clone()),Err(SpecReplacementError::Unavailable)));
+            state.clear();
+            assert!(matches!(state.replace_explicit(&expected,second),Err(SpecReplacementError::Unavailable)));
+            assert!(state.snapshot().is_none(),"replacement cannot resurrect a retired installation");
+        }).await;
     }
 
     #[tokio::test]

@@ -19,9 +19,10 @@ struct UnconfirmedSource {
 }
 
 impl exomonad_actor::ActorSourceLayers for UnconfirmedSource {
-    fn stage_spec_reload(
+    fn stage_reload(
         self: Arc<Self>,
         _: tidepool_repr::PrincipalId,
+        _: &exomonad_actor::CheckpointSourceLayer,
         _: &[String],
     ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
     {
@@ -48,45 +49,7 @@ impl exomonad_actor::ActorSourceLayers for UnconfirmedSource {
         }
     }
 
-    fn reload_helpers_with_publication(
-        &self,
-        _: tidepool_repr::PrincipalId,
-        _: &[String],
-        publication: &Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> exomonad_actor::SourceLayerReload {
-        let _source = self.source_gate.lock().unwrap();
-        let ordinal = self.reloads.fetch_add(1, Ordering::AcqRel);
-        if ordinal != 0 {
-            self.recovery_entered.notify_one();
-            let mut permit = self.recovery_permit.lock().unwrap();
-            while !*permit {
-                permit = self.recovery_released.wait(permit).unwrap();
-            }
-            drop(permit);
-            let Some(claim) = publication.claim_commit() else {
-                return exomonad_actor::SourceLayerReload::Cancelled;
-            };
-            self.refresh_failed.store(false, Ordering::Release);
-            claim.published();
-            return exomonad_actor::SourceLayerReload::Published {
-                previous: "visible-revision".into(),
-                revision: "recovered-revision".into(),
-                changed: Vec::new(),
-            };
-        }
-        let claim = publication.claim_commit().expect("source commit admitted");
-        self.publication
-            .set(publication.clone())
-            .expect("original uncertain reload");
-        // Model the source owner's visible rename followed by failed durable
-        // confirmation. Its native claim must remain unconfirmed.
-        self.refresh_failed.store(true, Ordering::Release);
-        drop(claim);
-        exomonad_actor::SourceLayerReload::PublicationUnconfirmed {
-            revision: "visible-revision".into(),
-            diagnostics: "active-record durability failed after rename".into(),
-        }
-    }
+
 }
 
 impl UnconfirmedSource {
