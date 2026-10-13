@@ -7,11 +7,27 @@ use super::{
     Architecture, Atom, DecodeLimits, Endianness, ExprFrame, Group, HeapBinding, HeapRhs,
     ParseError, PreparedProgram, ProgramDefinitions, ProgramEnvelope, ProgramRequirements,
     ProjectedGroup, ResultContract, RuntimeRep, ScalarLiteral, Signature, SignatureId,
-    SymbolIdentity, TargetDescriptor, TopBinding, ValueId, WireProgram, EXECUTION_ABI_VERSION,
+    SymbolIdentity, TypeIdentity, TypeVersion, ConstructorIdentity, TargetDescriptor, TopBinding, ValueId, WireProgram, EXECUTION_ABI_VERSION,
     SCHEMA_VERSION,
 };
 
 /// A stable identity for authored execution-schema fixtures.
+/// Explicit synthetic ABI evidence for representation fixtures, never production issuance.
+pub fn type_identity(symbol: SymbolIdentity) -> TypeIdentity {
+    TypeIdentity { symbol, version: TypeVersion::GhcAbi([0; 16]) }
+}
+pub fn constructor_identity(symbol: SymbolIdentity, family: SymbolIdentity) -> ConstructorIdentity {
+    ConstructorIdentity { symbol, family: type_identity(family) }
+}
+
+pub fn metadata_identity(symbol: SymbolIdentity, family_occurrence: &str) -> ConstructorIdentity {
+    let mut family = symbol.clone();
+    family.namespace = "type".into();
+    family.occurrence = family_occurrence.into();
+    family.record_parent = None;
+    constructor_identity(symbol, family)
+}
+
 pub fn identity(module: &str, occurrence: &str) -> SymbolIdentity {
     SymbolIdentity {
         unit: "fixture".into(),
@@ -203,7 +219,7 @@ pub fn closed_type_roots(
                 let node = nodes.len() as u32;
                 owners.insert(identity.clone(), (form.clone(), node));
                 nodes.push(TypeNode::Declaration {
-                    identity,
+                    identity: type_identity(identity),
                     parameters: vec![],
                     form: form.clone(),
                     restriction: SyntaxRestriction::None,

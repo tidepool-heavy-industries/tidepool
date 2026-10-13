@@ -1,6 +1,6 @@
 //! Data constructor metadata for Tidepool IR.
 
-use crate::execution_schema::SymbolIdentity;
+use crate::execution_schema::ConstructorIdentity;
 use crate::types::DataConId;
 
 /// Strictness annotation for a data constructor field.
@@ -19,7 +19,7 @@ pub enum SrcBang {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataCon {
     /// Complete defining symbol issued by the compiler.
-    pub identity: SymbolIdentity,
+    pub identity: ConstructorIdentity,
     /// Unique identifier for this constructor
     pub id: DataConId,
     /// Human-readable name (e.g., "Just", "Nothing", ":", "[]")

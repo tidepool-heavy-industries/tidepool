@@ -15,8 +15,8 @@ use crate::session_ids::SessionVarId;
 use crate::type_graph::TypeGraph;
 pub use crate::type_graph::TypeNode;
 
-pub const SCHEMA_VERSION: u64 = 17;
-pub const EXECUTION_ABI_VERSION: u64 = 9;
+pub const SCHEMA_VERSION: u64 = 18;
+pub const EXECUTION_ABI_VERSION: u64 = 10;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -345,11 +345,9 @@ pub struct CheckedLayout {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ConstructorDecl {
-    pub identity: SymbolIdentity,
-    /// Existing bridge identity minted by Tidepool.Identity.varId on GHC's
-    /// constructor worker. Never substitute the family-relative constructor tag.
+    pub identity: ConstructorIdentity,
+    /// Compiler-issued host ID from the complete versioned identity.
     pub host_id: crate::DataConId,
-    pub family: SymbolIdentity,
     pub result_rep: RuntimeRep,
     pub field_reps: Vec<RuntimeRep>,
     pub strict_fields: Vec<bool>,
@@ -358,6 +356,10 @@ pub struct ConstructorDecl {
     pub tag: u32,
     /// Authoritative family cardinality, not the number of declarations in this artifact.
     pub family_size: u32,
+}
+
+impl ConstructorDecl {
+    pub fn family(&self) -> &TypeIdentity { &self.identity.family }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -523,7 +525,7 @@ pub struct Alternative<B = usize> {
 /// an integrity failure, including when an upstream refinement was violated.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CaseKind {
-    Algebraic(SymbolIdentity),
+    Algebraic(TypeIdentity),
     Primitive(RuntimeRep),
     /// One tuple alternative binds the returned physical components directly.
     MultiValue,

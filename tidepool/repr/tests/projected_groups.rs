@@ -378,7 +378,7 @@ fn module_product_groups_share_one_operation_work_budget() {
     let row = |module: &str| {
         let mut wire = testing::wire_program();
         match &mut wire.bindings[0] {
-            Group::NonRecursive(top) => top.identity.module = module.into(),
+            Group::NonRecursive(top) => top.identity.symbol.module = module.into(),
             Group::Recursive(_) => unreachable!(),
         }
         let group = testing::projected_group(wire, 0).unwrap();

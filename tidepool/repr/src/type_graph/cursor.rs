@@ -13,7 +13,7 @@ use super::{
     TypeGraphError, TypeNode, TypeNodeId, TypeWorkBudget,
 };
 use crate::execution_schema::{
-    ConstructorId, RuntimeRep, SymbolIdentity, TypeNodeId as WireTypeNodeId,
+    ConstructorId, RuntimeRep, TypeIdentity, TypeNodeId as WireTypeNodeId,
 };
 
 #[derive(Clone, Default)]
@@ -330,7 +330,7 @@ impl fmt::Debug for DataView {
 }
 
 impl DataView {
-    pub fn family(&self) -> &SymbolIdentity {
+    pub fn family(&self) -> &TypeIdentity {
         match &self.owner.graph()[self.declaration] {
             TypeNode::Declaration { identity, .. } => identity,
             _ => unreachable!("a data view retains a validated declaration"),
@@ -1072,7 +1072,7 @@ mod tests {
         form: DeclarationForm,
     ) -> TypeNodeId {
         let declaration = graph.add_node(TypeNode::Declaration {
-            identity: identity(name, "type"),
+            identity: crate::execution_schema::testing::type_identity(identity(name, "type")),
             parameters: vec![ParameterFlag::NamedRequired; count],
             form,
             restriction: SyntaxRestriction::None,
@@ -1234,7 +1234,7 @@ mod tests {
         let mut none = physical(vec![]);
         none.family_size = 2;
         let mut some = physical(vec![RuntimeRep::LiftedRef]);
-        some.identity = identity("ReplySome", "data");
+        some.identity.symbol = identity("ReplySome", "data");
         some.host_id = crate::DataConId(78);
         some.tag = 2;
         some.family_size = 2;
@@ -1282,16 +1282,16 @@ mod tests {
         extra: bool,
     ) -> (Arc<TypeGraph>, WireTypeNodeId, ConstructorId, ConstructorId) {
         let mut nest = physical(vec![RuntimeRep::LiftedRef; 2]);
-        nest.identity = identity("Nest", "data");
+        nest.identity.symbol = identity("Nest", "data");
         let mut pair = physical(vec![RuntimeRep::LiftedRef; 2]);
-        pair.identity = identity("Pair", "data");
-        pair.family = identity("Pair", "type");
+        pair.identity.symbol = identity("Pair", "data");
+        pair.identity.family = crate::execution_schema::testing::type_identity(identity("Pair", "type"));
         pair.host_id = crate::DataConId(78);
         let mut inventory = vec![nest, pair];
         let (nest_id, pair_id) = if extra {
             let mut unused = physical(vec![]);
-            unused.identity = identity("Unused", "data");
-            unused.family = identity("Unused", "type");
+            unused.identity.symbol = identity("Unused", "data");
+            unused.identity.family = crate::execution_schema::testing::type_identity(identity("Unused", "type"));
             unused.host_id = crate::DataConId(79);
             inventory.insert(0, unused);
             (ConstructorId(1), ConstructorId(2))

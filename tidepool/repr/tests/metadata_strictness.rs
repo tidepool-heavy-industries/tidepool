@@ -287,13 +287,13 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // strictness must still accept.
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
                 unit: "fixture".into(),
                 module: "Fixture".into(),
                 namespace: "constructor".into(),
                 occurrence: "Nothing".into(),
                 record_parent: None,
-            },
+            }, &("Maybe".to_string())), 
             id: DataConId(1),
             name: "Nothing".to_string(),
             tag: 1,
@@ -306,13 +306,13 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // With a qualified name, field labels, and field types.
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
                 unit: "fixture".into(),
                 module: "Tidepool.Records".into(),
                 namespace: "constructor".into(),
                 occurrence: "Hit".into(),
                 record_parent: None,
-            },
+            }, &("Hit".to_string())), 
             id: DataConId(2),
             name: "Hit".to_string(),
             tag: 1,
@@ -393,7 +393,7 @@ fn paired_admission_requires_complete_rows_and_full_nominal_agreement() {
     let row = DataCon {
         identity: declared.identity.clone(),
         id: declared.host_id,
-        name: declared.identity.occurrence.clone(),
+        name: declared.identity.symbol.occurrence.clone(),
         tag: declared.tag,
         rep_arity: declared.field_reps.len() as u32,
         field_bangs: vec![],
@@ -412,7 +412,7 @@ fn paired_admission_requires_complete_rows_and_full_nominal_agreement() {
         ))
     ));
     let mut other = row;
-    other.identity.unit.push_str("-other");
+    other.identity.symbol.unit.push_str("-other");
     let mut table = DataConTable::new();
     table.insert_checked(other).unwrap();
     let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();

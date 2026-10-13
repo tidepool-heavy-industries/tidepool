@@ -167,7 +167,7 @@ fn build(families: &[Family]) -> Model {
         .enumerate()
         .map(|(i, family)| {
             model.node(TypeNode::Declaration {
-                identity: tests::identity(&format!("Family{i}"), "type"),
+                identity: crate::execution_schema::testing::type_identity(tests::identity(&format!("Family{i}"), "type")),
                 parameters: family
                     .parameters
                     .iter()
@@ -202,11 +202,11 @@ fn build(families: &[Family]) -> Model {
                 })
                 .collect();
             let mut physical = tests::physical(reps.clone());
-            physical.identity = tests::identity(
+            physical.identity.symbol = tests::identity(
                 &format!("Constructor{family_index}_{constructor_index}"),
                 "data",
             );
-            physical.family = tests::identity(&format!("Family{family_index}"), "type");
+            physical.identity.family = crate::execution_schema::testing::type_identity(tests::identity(&format!("Family{family_index}"), "type"));
             physical.tag = constructor_index as u32 + 1;
             physical.family_size = family.constructors.len() as u32;
             physical.host_id = crate::DataConId(model.inventory.len() as u64 + 1);
@@ -524,7 +524,7 @@ proptest! {
     ) {
         let mut model = build(&families);
         let opaque = model.node(TypeNode::Declaration {
-            identity: tests::identity("DisconnectedOpaque", "type"),
+            identity: crate::execution_schema::testing::type_identity(tests::identity("DisconnectedOpaque", "type")),
             parameters: Vec::new(),
             form: DeclarationForm::Opaque { head_kind: NominalHeadKind::Family, reason: "diagnostic".into() },
             restriction: SyntaxRestriction::None,
@@ -573,8 +573,8 @@ proptest! {
         let mut changed = original.clone();
         let physical = &mut changed[selected as usize % original.len()];
         match defect {
-            0 => physical.identity.occurrence.push_str("Wrong"),
-            1 => physical.family.occurrence.push_str("Wrong"),
+            0 => physical.identity.symbol.occurrence.push_str("Wrong"),
+            1 => physical.identity.family.symbol.occurrence.push_str("Wrong"),
             2 => physical.result_rep = RuntimeRep::Void,
             3 => physical.tag = 0,
             4 => physical.family_size += 1,
@@ -654,7 +654,7 @@ proptest! {
         let TypeView::Data(data) = cloned.view(&mut TypeWorkBudget::new(1_000_000))? else {
             return Err(TestCaseError::fail("saturated data root must yield a data view"));
         };
-        prop_assert_eq!(data.family(), &model.inventory[0].family);
+        prop_assert_eq!(data.family(), &model.inventory[0].identity.family);
         prop_assert_eq!(data.argument_count(), families[0].parameters.len());
         let expected_ids: Vec<_> = (0..families[0].constructors.len()).map(|i| ConstructorId(i as u32)).collect();
         prop_assert_eq!(data.constructors().collect::<Vec<_>>(), expected_ids);

@@ -14,7 +14,7 @@ use super::{
     ConstructorId, ConstructorReply, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout,
     GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationBudget,
     OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep,
-    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor,
+    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, ConstructorIdentity, TypeIdentity, SymbolIdentity, TargetDescriptor,
     TopBinding, TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
@@ -60,8 +60,8 @@ pub(super) fn encode_type_graph_value(graph: &TypeGraph) -> Value {
             RuntimeRep::Float(bits) => a([n(6_u64), n(bits)]),
         }
     }
-    fn symbol(value: &SymbolIdentity) -> Value {
-        super::symbol::encode(value)
+    fn symbol(value: &TypeIdentity) -> Value {
+        super::symbol::encode_type(value)
     }
     fn form(value: &DeclarationForm) -> Value {
         match value {
@@ -175,7 +175,7 @@ pub(super) fn encode_type_graph_value(graph: &TypeGraph) -> Value {
         }
     }
     a([
-        n(1_u64),
+        n(2_u64),
         a(graph.graph().node_weights().map(node)),
         a(graph.graph().node_indices().flat_map(|source| {
             graph.ordered_edges(source).map(move |edge| {
@@ -219,7 +219,7 @@ pub(super) fn decode_group_wire(
             "invalid projected group header".into(),
         ));
     }
-    if unsigned(&fields[1], "group schema version")? != 1 {
+    if unsigned(&fields[1], "group schema version")? != 2 {
         return Err(ParseError::Malformed(
             "unsupported projected group version".into(),
         ));
@@ -501,7 +501,7 @@ impl<'a> Decoder<'a> {
         constructors: &[ConstructorDecl],
     ) -> Result<Arc<TypeGraph>, ParseError> {
         let fields = array(value, 3, "finite type graph")?;
-        if unsigned(&fields[0], "finite type graph version")? != 1 {
+        if unsigned(&fields[0], "finite type graph version")? != 2 {
             return Err(ParseError::Malformed(
                 "unsupported finite type graph version".into(),
             ));
@@ -641,6 +641,15 @@ impl<'a> Decoder<'a> {
         super::symbol::decode(value, |value, what| self.text(value, what))
     }
 
+    fn type_identity(&mut self, value: &Value) -> Result<TypeIdentity, ParseError> {
+        self.charge(16)?;
+        super::symbol::decode_type(value, |value, what| self.text(value, what))
+    }
+    fn constructor_identity(&mut self, value: &Value) -> Result<ConstructorIdentity, ParseError> {
+        self.charge(16)?;
+        super::symbol::decode_constructor(value, |value, what| self.text(value, what))
+    }
+
     fn text(&mut self, value: &Value, what: &str) -> Result<String, ParseError> {
         let text = text_raw(value, what)?;
         self.strings = self
@@ -751,19 +760,18 @@ impl<'a> Decoder<'a> {
     }
 
     fn constructor(&mut self, value: &Value) -> Result<ConstructorDecl, ParseError> {
-        let fields = array(value, 9, "constructor declaration")?;
+        let fields = array(value, 8, "constructor declaration")?;
         Ok(ConstructorDecl {
-            identity: self.symbol(&fields[0])?,
-            host_id: crate::DataConId(unsigned(&fields[8], "constructor host ID")?),
-            family: self.symbol(&fields[1])?,
-            field_reps: self.list(&fields[2], false, |this, value| this.rep(value))?,
-            strict_fields: self.list(&fields[3], false, |_this, value| {
+            identity: self.constructor_identity(&fields[0])?,
+            host_id: crate::DataConId(unsigned(&fields[7], "constructor host ID")?),
+            field_reps: self.list(&fields[1], false, |this, value| this.rep(value))?,
+            strict_fields: self.list(&fields[2], false, |_this, value| {
                 bool_value(value, "strict field")
             })?,
-            layout: self.layout(&fields[4])?,
-            result_rep: self.rep(&fields[5])?,
-            tag: u32_value(&fields[6], "constructor tag")?,
-            family_size: u32_value(&fields[7], "constructor family size")?,
+            layout: self.layout(&fields[3])?,
+            result_rep: self.rep(&fields[4])?,
+            tag: u32_value(&fields[5], "constructor tag")?,
+            family_size: u32_value(&fields[6], "constructor family size")?,
         })
     }
 
@@ -791,7 +799,7 @@ impl<'a> Decoder<'a> {
                 rendered: self.text(&fields[3], "rendered root type")?,
             }),
             (1, 5) => Ok(TypeNode::Declaration {
-                identity: self.symbol(&fields[1])?,
+                identity: self.type_identity(&fields[1])?,
                 parameters: self.list(&fields[2], false, |_, value| {
                     match unsigned(value, "declaration parameter flag")? {
                         0 => Ok(ParameterFlag::NamedRequired),
@@ -813,7 +821,7 @@ impl<'a> Decoder<'a> {
                 let physical = constructors.get(constructor.0 as usize).ok_or_else(|| {
                     ParseError::InvalidReference("template constructor ID".into())
                 })?;
-                self.budget.charge_symbol_copy(&physical.identity)?;
+                self.budget.charge_constructor_copy(&physical.identity)?;
                 let identity = physical.identity.clone();
                 Ok(TypeNode::ConstructorTemplate {
                     constructor,
@@ -1232,7 +1240,7 @@ impl<'a> Decoder<'a> {
         let fields = tagged(value, "case kind")?;
         let tag = unsigned(&fields[0], "case kind tag")?;
         match (tag, fields.len()) {
-            (0, 2) => Ok(CaseKind::Algebraic(self.symbol(&fields[1])?)),
+            (0, 2) => Ok(CaseKind::Algebraic(self.type_identity(&fields[1])?)),
             (1, 2) => Ok(CaseKind::Primitive(self.rep(&fields[1])?)),
             (2, 1) => Ok(CaseKind::MultiValue),
             (3, 1) => Ok(CaseKind::Polymorphic),
@@ -1767,18 +1775,9 @@ mod operation_budget_tests {
             .program(&value)
             .unwrap()
             .constructors;
-        constructors[0].identity.occurrence = "X".repeat(4096);
+        constructors[0].identity.symbol.occurrence = "X".repeat(4096);
         let identity = &constructors[0].identity;
-        let copy_bytes = [
-            &identity.unit,
-            &identity.module,
-            &identity.namespace,
-            &identity.occurrence,
-        ]
-        .into_iter()
-        .chain(identity.record_parent.iter())
-        .map(|text| text.len())
-        .sum::<usize>();
+        let copy_bytes = OperationBudget::constructor_copy_work(identity).unwrap();
         let template = Value::Array(vec![Value::Integer(2.into()), Value::Integer(0.into())]);
         let mut budget = OperationBudget::new(copy_bytes - 1);
         let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);

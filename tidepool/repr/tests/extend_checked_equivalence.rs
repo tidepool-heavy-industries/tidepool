@@ -13,13 +13,13 @@ struct LogicalRow {
 
 fn issued(row: &LogicalRow) -> DataCon {
     DataCon {
-        identity: SymbolIdentity {
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(SymbolIdentity {
             unit: format!("unit-{}", row.unit),
             module: "Homonymous".into(),
             namespace: "constructor".into(),
             occurrence: "Ticket".into(),
             record_parent: None,
-        },
+        }, &("Ticket".into())), 
         id: DataConId(row.id.into()),
         name: "Ticket".into(),
         tag: 1,

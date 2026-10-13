@@ -1,7 +1,7 @@
 //! A lookup table for data constructor metadata.
 
 use crate::datacon::DataCon;
-use crate::execution_schema::{ConstructorDecl, JsonLayout, PreparedProgram, SymbolIdentity};
+use crate::execution_schema::{ConstructorDecl, JsonLayout, PreparedProgram, ConstructorIdentity};
 use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -11,18 +11,18 @@ use std::sync::Arc;
 pub enum DataConCollision {
     #[error("invalid constructor symbol {identity:?}: {detail}")]
     InvalidIdentity {
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
         detail: &'static str,
     },
     #[error("DataConId {id:?} belongs to {first:?}, not {second:?}")]
     Id {
         id: DataConId,
-        first: SymbolIdentity,
-        second: SymbolIdentity,
+        first: ConstructorIdentity,
+        second: ConstructorIdentity,
     },
     #[error("constructor {identity:?} has conflicting tags or arities: {first_tag}/{first_arity}, {second_tag}/{second_arity}")]
     Shape {
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
         first_tag: u32,
         first_arity: u32,
         second_tag: u32,
@@ -30,7 +30,7 @@ pub enum DataConCollision {
     },
     #[error("constructor {identity:?} claims two DataConIds: {first_id:?}, {second_id:?}")]
     Identity {
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
         first_id: DataConId,
         second_id: DataConId,
     },
@@ -42,7 +42,7 @@ pub enum DataConCollision {
 pub struct AmbiguousDataCon {
     pub name: String,
     pub arity: u32,
-    pub candidates: Vec<SymbolIdentity>,
+    pub candidates: Vec<ConstructorIdentity>,
 }
 
 /// The complete output table must agree with every emitted constructor.
@@ -51,18 +51,18 @@ pub enum ConstructorMetadataMismatch {
     #[error("constructor {identity:?} has no metadata at {host_id:?}")]
     Missing {
         host_id: DataConId,
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
     },
     #[error("constructor {prepared:?} at {host_id:?} resolves to {metadata:?}")]
     Identity {
         host_id: DataConId,
-        prepared: SymbolIdentity,
-        metadata: SymbolIdentity,
+        prepared: ConstructorIdentity,
+        metadata: ConstructorIdentity,
     },
     #[error("constructor {identity:?} at {host_id:?} has conflicting tag/arity metadata")]
     Shape {
         host_id: DataConId,
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
     },
 }
 
@@ -87,7 +87,7 @@ struct DataConMetadata {
     /// All nominal candidates for one diagnostic module-qualified spelling.
     by_qualified_name: HashMap<String, Vec<DataConId>>,
     /// The exact defining symbol, independently of diagnostic aliases.
-    by_identity: HashMap<SymbolIdentity, DataConId>,
+    by_identity: HashMap<ConstructorIdentity, DataConId>,
     /// Mapping from parent-type name (e.g. "Verdict") to all DataConIds of
     /// that type, kept sorted by constructor TAG (declaration order) by
     /// [`DataConTable::sort_type_name_bucket`] — see that function for why insertion
@@ -137,12 +137,12 @@ impl DataConTable {
 
     fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
         let identity = &dc.identity;
-        if identity.unit.is_empty()
-            || identity.module.is_empty()
-            || identity.occurrence.is_empty()
-            || identity.namespace != "constructor"
-            || identity.occurrence != dc.name
-            || identity
+        if identity.symbol.unit.is_empty()
+            || identity.symbol.module.is_empty()
+            || identity.symbol.occurrence.is_empty()
+            || identity.symbol.namespace != "constructor"
+            || identity.symbol.occurrence != dc.name
+            || identity.symbol
                 .record_parent
                 .as_ref()
                 .is_some_and(|parent| parent.is_empty())
@@ -356,7 +356,7 @@ impl DataConTable {
     }
 
     /// Resolve the exact compiler-issued symbol.
-    pub fn get_by_identity(&self, identity: &SymbolIdentity) -> Option<DataConId> {
+    pub fn get_by_identity(&self, identity: &ConstructorIdentity) -> Option<DataConId> {
         self.metadata.by_identity.get(identity).copied()
     }
 
@@ -513,7 +513,6 @@ impl DataConTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datacon::SrcBang;
 
     #[test]
     fn response_contexts_share_metadata_but_replace_json_authority() {
@@ -610,13 +609,13 @@ mod tests {
 
     fn nominal_row(id: u64, unit: &str, module: &str, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
-            identity: SymbolIdentity {
+            identity: crate::execution_schema::testing::metadata_identity(crate::execution_schema::SymbolIdentity {
                 unit: unit.into(),
                 module: module.into(),
                 namespace: "constructor".into(),
                 occurrence: occurrence.into(),
                 record_parent: None,
-            },
+            }, "Ticket"), 
             id: DataConId(id),
             name: occurrence.into(),
             tag: 1,
@@ -702,7 +701,7 @@ mod tests {
     #[test]
     fn malformed_nominal_identity_is_not_ingested() {
         let mut row = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
-        row.identity.unit.clear();
+        row.identity.symbol.unit.clear();
         let mut table = DataConTable::new();
         assert!(matches!(
             table.insert_checked(row),

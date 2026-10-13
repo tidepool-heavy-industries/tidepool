@@ -521,9 +521,8 @@ fn codec_decodes_type_graph_and_site_rows() {
     };
     let family = nominal("Phantom");
     program.constructors.push(ConstructorDecl {
-        identity: testing::identity("Types", "Recursive"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(testing::identity("Types", "Recursive"), family.clone()),
         host_id: tidepool_repr::DataConId(9001),
-        family: family.clone(),
         field_reps: vec![RuntimeRep::LiftedRef],
         strict_fields: vec![false],
         layout: CheckedLayout {
@@ -702,9 +701,8 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
         restriction: SyntaxRestriction::None,
     };
     program.constructors.push(ConstructorDecl {
-        identity: testing::identity("Finite", "Container"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(testing::identity("Finite", "Container"), identity("Container")),
         host_id: tidepool_repr::DataConId(9002),
-        family: identity("Container"),
         field_reps: vec![RuntimeRep::Int(64)],
         strict_fields: vec![false],
         layout: CheckedLayout {

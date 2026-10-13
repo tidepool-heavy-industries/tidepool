@@ -71,7 +71,7 @@ pub fn write_metadata(
             field_labels_value(table.field_labels_of(dc.id).unwrap_or(&[])),
             Value::Text(dc.type_name.clone()),
             field_types_value(table.field_types_of(dc.id).unwrap_or(&[])),
-            crate::execution_schema::symbol::encode(&dc.identity),
+            crate::execution_schema::symbol::encode_constructor(&dc.identity),
         ];
         entries.push(Value::Array(entry));
     }

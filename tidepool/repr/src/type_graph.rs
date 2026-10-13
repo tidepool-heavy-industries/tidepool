@@ -12,7 +12,7 @@ use petgraph::visit::{EdgeFiltered, EdgeRef};
 use petgraph::Directed;
 
 use crate::execution_schema::{
-    ConstructorDecl, ConstructorId, DecodeLimits, RuntimeRep, SymbolIdentity,
+    ConstructorDecl, ConstructorId, DecodeLimits, RuntimeRep, SymbolIdentity, TypeIdentity, TypeVersion, ConstructorIdentity,
 };
 
 mod cursor;
@@ -101,7 +101,7 @@ pub enum TypeNode {
         rendered: String,
     },
     Declaration {
-        identity: SymbolIdentity,
+        identity: TypeIdentity,
         parameters: Vec<ParameterFlag>,
         form: DeclarationForm,
         restriction: SyntaxRestriction,
@@ -109,7 +109,7 @@ pub enum TypeNode {
     ConstructorTemplate {
         constructor: ConstructorId,
         /// Derived from the physical inventory; the wire encodes only its ID.
-        identity: SymbolIdentity,
+        identity: ConstructorIdentity,
     },
     Bound(u32),
     NominalApplication,
@@ -275,7 +275,7 @@ impl TypeGraph {
                         .ok_or(TypeGraphError::InvalidConstructor(node.index()))?;
                     match (&self.graph[parent.source()], parent.weight()) {
                         (TypeNode::Declaration { identity, .. }, TypeEdge::Constructor(tag))
-                            if budget.identity_eq(identity, &physical.family)?
+                            if budget.identity_eq(identity, &physical.identity.family)?
                                 && *tag == physical.tag => {}
                         _ => return Err(TypeGraphError::InvalidConstructor(node.index())),
                     }
@@ -376,9 +376,9 @@ impl TypeGraph {
             sink(bytes);
         };
         frame(if evidence {
-            b"Tidepool.TypeGraph.evidence.v1"
+            b"Tidepool.TypeGraph.evidence.v2"
         } else {
-            b"Tidepool.TypeGraph.content.v1"
+            b"Tidepool.TypeGraph.content.v2"
         });
         frame(&(self.graph.node_count() as u64).to_le_bytes());
         frame(&(self.graph.edge_count() as u64).to_le_bytes());
@@ -606,11 +606,28 @@ fn evidence_metadata_work(node: &TypeNode) -> usize {
     }
 }
 
-fn symbol_work(name: &SymbolIdentity) -> usize {
+fn raw_symbol_work(name: &SymbolIdentity) -> usize {
     [&name.unit, &name.module, &name.namespace, &name.occurrence]
         .into_iter()
         .chain(name.record_parent.iter())
         .fold(0_usize, |work, text| work.saturating_add(text.len()))
+}
+
+trait IdentityWork: PartialEq {
+    fn symbols(&self) -> Vec<&SymbolIdentity>;
+    fn version(&self) -> &TypeVersion;
+}
+impl IdentityWork for TypeIdentity {
+    fn symbols(&self) -> Vec<&SymbolIdentity> { vec![&self.symbol] }
+    fn version(&self) -> &TypeVersion { &self.version }
+}
+impl IdentityWork for ConstructorIdentity {
+    fn symbols(&self) -> Vec<&SymbolIdentity> { vec![&self.symbol, &self.family.symbol] }
+    fn version(&self) -> &TypeVersion { &self.family.version }
+}
+fn symbol_work(identity: &impl IdentityWork) -> usize {
+    identity.symbols().into_iter().fold(1_usize, |work, symbol| work.saturating_add(raw_symbol_work(symbol)))
+        .saturating_add(match identity.version() { TypeVersion::WiredIn => 1, TypeVersion::GhcAbi(_) => 17 })
 }
 
 impl TypeEdge {
@@ -660,31 +677,24 @@ impl Budget {
         }
         self.work(bytes)
     }
-    fn identity(&mut self, identity: &SymbolIdentity) -> Result<(), TypeGraphError> {
-        for text in [
-            &identity.unit,
-            &identity.module,
-            &identity.namespace,
-            &identity.occurrence,
-        ] {
-            self.text(text.len())?;
+    fn identity(&mut self, identity: &impl IdentityWork) -> Result<(), TypeGraphError> {
+        for symbol in identity.symbols() {
+            for text in [&symbol.unit, &symbol.module, &symbol.namespace, &symbol.occurrence] {
+                self.text(text.len())?;
+            }
+            if let Some(parent) = &symbol.record_parent { self.text(parent.len())?; }
         }
-        if let Some(parent) = &identity.record_parent {
-            self.text(parent.len())?;
-        }
-        Ok(())
+        let version_bytes = match identity.version() { TypeVersion::WiredIn => 1, TypeVersion::GhcAbi(_) => 17 };
+        self.text(version_bytes)
     }
-    fn identity_eq(
-        &mut self,
-        first: &SymbolIdentity,
-        second: &SymbolIdentity,
-    ) -> Result<bool, TypeGraphError> {
+    fn identity_eq<T: IdentityWork>(&mut self, first: &T, second: &T) -> Result<bool, TypeGraphError> {
         self.work(symbol_work(first).max(symbol_work(second)))?;
         Ok(first == second)
     }
 }
 
-fn nominal(identity: &SymbolIdentity) -> bool {
+fn nominal(identity: &TypeIdentity) -> bool {
+    let identity = &identity.symbol;
     !identity.unit.is_empty()
         && !identity.module.is_empty()
         && !identity.occurrence.is_empty()
@@ -712,12 +722,12 @@ fn field_rep(rep: RuntimeRep) -> bool {
 fn family_counts<'a>(
     constructors: &'a [ConstructorDecl],
     budget: &mut Budget,
-) -> Result<HashMap<&'a SymbolIdentity, usize>, TypeGraphError> {
+) -> Result<HashMap<&'a TypeIdentity, usize>, TypeGraphError> {
     let mut families = HashMap::new();
     for constructor in constructors {
         budget.work(1)?;
-        budget.work(symbol_work(&constructor.family))?;
-        let count = families.entry(&constructor.family).or_insert(0_usize);
+        budget.work(symbol_work(&constructor.identity.family))?;
+        let count = families.entry(&constructor.identity.family).or_insert(0_usize);
         *count = count.checked_add(1).ok_or(TypeGraphError::Limit("work"))?;
     }
     Ok(families)
@@ -989,6 +999,18 @@ fn write_symbol(identity: &SymbolIdentity, frame: &mut impl FnMut(&[u8])) {
     }
 }
 
+fn write_type(identity: &TypeIdentity, frame: &mut impl FnMut(&[u8])) {
+    write_symbol(&identity.symbol, frame);
+    match &identity.version {
+        TypeVersion::WiredIn => frame(&[0]),
+        TypeVersion::GhcAbi(bytes) => { frame(&[1]); frame(bytes); }
+    }
+}
+fn write_constructor(identity: &ConstructorIdentity, frame: &mut impl FnMut(&[u8])) {
+    write_symbol(&identity.symbol, frame);
+    write_type(&identity.family, frame);
+}
+
 fn write_node(node: &TypeNode, evidence: bool, frame: &mut impl FnMut(&[u8])) {
     match node {
         TypeNode::Root {
@@ -1019,7 +1041,7 @@ fn write_node(node: &TypeNode, evidence: bool, frame: &mut impl FnMut(&[u8])) {
             restriction,
         } => {
             frame(&[1]);
-            write_symbol(identity, frame);
+            write_type(identity, frame);
             frame(&(parameters.len() as u64).to_le_bytes());
             for flag in parameters {
                 frame(&[match flag {
@@ -1064,7 +1086,7 @@ fn write_node(node: &TypeNode, evidence: bool, frame: &mut impl FnMut(&[u8])) {
         } => {
             frame(&[2]);
             frame(&constructor.0.to_le_bytes());
-            write_symbol(identity, frame);
+            write_constructor(identity, frame);
         }
         TypeNode::Bound(index) => {
             frame(&[3]);
@@ -1113,7 +1135,7 @@ fn validate_roles(
     graph: &GraphStorage,
     node: TypeNodeId,
     constructors: &[ConstructorDecl],
-    families: &HashMap<&SymbolIdentity, usize>,
+    families: &HashMap<&TypeIdentity, usize>,
     budget: &mut Budget,
 ) -> Result<(), TypeGraphError> {
     let index = node.index();
@@ -1229,7 +1251,7 @@ fn validate_roles(
                         ..
                     },
                     TypeEdge::Constructor(tag),
-                ) if budget.identity_eq(identity, &physical.family)?
+                ) if budget.identity_eq(identity, &physical.identity.family)?
                     && *tag == physical.tag
                     && *tag > 0 => {}
                 _ => return Err(TypeGraphError::InvalidConstructor(index)),
@@ -1345,8 +1367,7 @@ mod tests {
         let target = crate::execution_schema::testing::target();
         let storage = StorageLayout::for_reps(&target, &fields).unwrap();
         ConstructorDecl {
-            identity: identity("ReplyValue", "data"),
-            family: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::constructor_identity(identity("ReplyValue", "data"), identity("Reply", "type")),
             host_id: crate::DataConId(77),
             result_rep: RuntimeRep::LiftedRef,
             strict_fields: vec![false; fields.len()],
@@ -1386,7 +1407,7 @@ mod tests {
         }
         let root = root(&mut graph, RootDomain::Closed, vec![], "Reply 0");
         let declaration = graph.add_node(TypeNode::Declaration {
-            identity: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Reply", "type")),
             parameters: vec![ParameterFlag::NamedRequired],
             form: DeclarationForm::Data,
             restriction: SyntaxRestriction::None,
@@ -1512,7 +1533,7 @@ mod tests {
     fn newtype_rhs_uses_eta_prefix_instead_of_full_parameter_telescope() {
         let mut graph = GraphStorage::new();
         let declaration = graph.add_node(TypeNode::Declaration {
-            identity: identity("Eta", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Eta", "type")),
             parameters: vec![
                 ParameterFlag::NamedRequired,
                 ParameterFlag::AnonymousVisible,
@@ -1577,7 +1598,7 @@ mod tests {
         let mut graph = GraphStorage::new();
         let root = root(&mut graph, RootDomain::Closed, vec![], "Pair 0 0");
         let declaration = graph.add_node(TypeNode::Declaration {
-            identity: identity("Pair", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Pair", "type")),
             parameters: vec![ParameterFlag::NamedRequired; 2],
             form: DeclarationForm::Opaque {
                 head_kind: NominalHeadKind::Constructor,
@@ -1624,14 +1645,14 @@ mod tests {
             Err(TypeGraphError::InvalidConstructor(_))
         ));
         let mut changed = inventory.clone();
-        changed[0].family = identity("Other", "type");
+        changed[0].identity.family = crate::execution_schema::testing::type_identity(identity("Other", "type"));
         assert!(matches!(
             graph.check_constructor_pairing(&changed),
             Err(TypeGraphError::InvalidConstructor(_))
         ));
         let mut input = graph.graph().clone();
         input.add_node(TypeNode::Declaration {
-            identity: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Reply", "type")),
             parameters: vec![],
             form: DeclarationForm::Opaque {
                 head_kind: NominalHeadKind::Constructor,
@@ -1650,7 +1671,7 @@ mod tests {
         let inventory = vec![physical(vec![])];
         let mut complete = GraphStorage::new();
         let declaration = complete.add_node(TypeNode::Declaration {
-            identity: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Reply", "type")),
             parameters: vec![],
             form: DeclarationForm::Data,
             restriction: SyntaxRestriction::None,
@@ -1668,7 +1689,7 @@ mod tests {
         );
         let mut empty = GraphStorage::new();
         let declaration = empty.add_node(TypeNode::Declaration {
-            identity: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Reply", "type")),
             parameters: vec![],
             form: DeclarationForm::Data,
             restriction: SyntaxRestriction::None,
@@ -1687,7 +1708,7 @@ mod tests {
         let mut input = GraphStorage::new();
         let root = root(&mut input, RootDomain::Closed, vec![], "Reply 0 1");
         let declaration = input.add_node(TypeNode::Declaration {
-            identity: identity("Reply", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("Reply", "type")),
             parameters: vec![ParameterFlag::NamedRequired; 2],
             form: DeclarationForm::Data,
             restriction: SyntaxRestriction::None,
@@ -1755,8 +1776,8 @@ mod tests {
         let first_inventory = vec![physical.clone()];
         let (first, first_root, _) = recursive_graph(ConstructorId(0), &first_inventory, false);
         let mut unrelated = physical.clone();
-        unrelated.identity = identity("Unrelated", "data");
-        unrelated.family = identity("UnrelatedFamily", "type");
+        unrelated.identity.symbol = identity("Unrelated", "data");
+        unrelated.identity.family = crate::execution_schema::testing::type_identity(identity("UnrelatedFamily", "type"));
         unrelated.host_id = crate::DataConId(78);
         let second_inventory = vec![unrelated, physical];
         let (second, second_root, _) = recursive_graph(ConstructorId(1), &second_inventory, true);
@@ -1780,7 +1801,7 @@ mod tests {
         let mut first = GraphStorage::new();
         let root = root(&mut first, RootDomain::Closed, vec![], "F Int");
         let declaration = first.add_node(TypeNode::Declaration {
-            identity: identity("F", "type"),
+            identity: crate::execution_schema::testing::type_identity(identity("F", "type")),
             parameters: vec![],
             form: DeclarationForm::Opaque {
                 head_kind: NominalHeadKind::Family,

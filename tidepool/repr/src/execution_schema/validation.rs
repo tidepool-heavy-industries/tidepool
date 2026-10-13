@@ -1095,7 +1095,8 @@ impl<'w, 'p> Walker<'w, 'p> {
         };
         match kind {
             CaseKind::Algebraic(family) => {
-                self.validator.check_symbol(family)?;
+                self.validator.check_symbol(&family.symbol)?;
+                self.validator.bump_work(17)?;
                 if scrutinee_reps.is_some_and(|reps| {
                     !matches!(reps, [RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef])
                 }) {
@@ -1175,7 +1176,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 AlternativePattern::Default => PatternKey::Default,
                 AlternativePattern::Constructor(id) => {
                     let constructor = self.validator.constructor(*id)?;
-                    if !matches!(kind, CaseKind::Algebraic(family) if *family == constructor.family)
+                    if !matches!(kind, CaseKind::Algebraic(family) if *family == constructor.identity.family)
                     {
                         return Err(ParseError::InvalidLayout(
                             "constructor alternative disagrees with case family or kind".into(),
@@ -1396,22 +1397,23 @@ impl<'a> Validator<'a> {
         let mut family_tags = BTreeSet::new();
         for constructor in self.wire.constructors {
             self.bump_work(constructor.field_reps.len() + 1)?;
-            self.check_symbol(&constructor.identity)?;
-            self.check_symbol(&constructor.family)?;
+            self.check_symbol(&constructor.identity.symbol)?;
+            self.check_symbol(&constructor.identity.family.symbol)?;
+            self.bump_work(17)?;
             if constructor.tag == 0 || constructor.tag > constructor.family_size {
                 return Err(ParseError::InvalidLayout(
                     "constructor tag must be within its nonempty GHC family".into(),
                 ));
             }
             if family_sizes
-                .insert(constructor.family.clone(), constructor.family_size)
+                .insert(constructor.identity.family.clone(), constructor.family_size)
                 .is_some_and(|size| size != constructor.family_size)
             {
                 return Err(ParseError::InvalidLayout(
                     "inconsistent constructor family size".into(),
                 ));
             }
-            if !family_tags.insert((&constructor.family, constructor.tag)) {
+            if !family_tags.insert((&constructor.identity.family, constructor.tag)) {
                 return Err(ParseError::DuplicateDefinition(
                     "constructor tag within family".into(),
                 ));
@@ -1995,7 +1997,7 @@ impl<'a> Validator<'a> {
         first: &ConstructorDecl,
         other: &ConstructorDecl,
     ) -> Result<(), ParseError> {
-        if first.family != other.family || first.family_size != other.family_size {
+        if first.identity.family != other.identity.family || first.family_size != other.family_size {
             return Err(ParseError::Malformed(format!(
                 "JSON {role} constructors do not share declared nominal family evidence"
             )));
@@ -2017,8 +2019,8 @@ impl<'a> Validator<'a> {
         tag: u32,
         family_size: u32,
     ) -> Result<(), ParseError> {
-        let constructor = &declaration.identity;
-        let family = &declaration.family;
+        let constructor = &declaration.identity.symbol;
+        let family = &declaration.identity.family.symbol;
         if constructor.module != constructor_module
             || constructor.namespace != "constructor"
             || constructor.occurrence != constructor_occurrence
@@ -2601,9 +2603,8 @@ mod tests {
 
     fn empty_constructor(name: &str, tag: u32, family_size: u32) -> ConstructorDecl {
         ConstructorDecl {
-            identity: symbol(name),
+            identity: crate::execution_schema::testing::constructor_identity(symbol(name), symbol("Family")),
             host_id: crate::DataConId(u64::from(tag)),
-            family: symbol("Family"),
             tag,
             family_size,
             result_rep: RuntimeRep::LiftedRef,
@@ -2645,9 +2646,8 @@ mod tests {
         let storage = StorageLayout::for_reps(&target(), &field_reps)
             .expect("JSON fixture constructor layout");
         ConstructorDecl {
-            identity: json_symbol(constructor_module, "constructor", constructor_occurrence),
+            identity: crate::execution_schema::testing::constructor_identity(json_symbol(constructor_module, "constructor", constructor_occurrence), json_symbol(family_module, "type", family_occurrence)),
             host_id: crate::DataConId(host_id),
-            family: json_symbol(family_module, "type", family_occurrence),
             result_rep: RuntimeRep::LiftedRef,
             strict_fields: vec![false; field_reps.len()],
             layout: CheckedLayout {
@@ -2881,8 +2881,8 @@ mod tests {
     fn json_layout_rejects_reexported_standard_constructor_identity() {
         let mut program = admitted_json_program();
         let true_ = &mut program.constructors[8];
-        true_.identity.module = "GHC.Internal.Types".into();
-        true_.family.module = "GHC.Internal.Types".into();
+        true_.identity.symbol.module = "GHC.Internal.Types".into();
+        true_.identity.family.symbol.module = "GHC.Internal.Types".into();
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::Malformed(detail))
@@ -2926,7 +2926,7 @@ mod tests {
         validate_program(&program, &requirements(), DecodeLimits::default())
             .expect("admitted decode roles validate");
 
-        program.constructors[18].identity.occurrence = "SpoofedLeft".into();
+        program.constructors[18].identity.symbol.occurrence = "SpoofedLeft".into();
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::Malformed(detail))
@@ -2968,7 +2968,7 @@ mod tests {
     fn constructor_host_ids_are_distinct_from_family_tags() {
         let mut program = valid_program();
         let mut other = empty_constructor("Other", 1, 1);
-        other.family = symbol("OtherFamily");
+        other.identity.family = super::super::testing::type_identity(symbol("OtherFamily"));
         other.host_id = crate::DataConId(2);
         program.constructors = vec![empty_constructor("A", 1, 1), other];
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
@@ -2980,11 +2980,11 @@ mod tests {
         ));
     }
 
-    fn type_identity(name: &str) -> SymbolIdentity {
-        SymbolIdentity {
+    fn type_identity(name: &str) -> super::super::TypeIdentity {
+        super::super::testing::type_identity(SymbolIdentity {
             namespace: "type".into(),
             ..symbol(name)
-        }
+        })
     }
 
     fn declaration(name: &str, form: crate::type_graph::DeclarationForm) -> TypeNode {
@@ -2998,7 +2998,7 @@ mod tests {
 
     fn text_graph() -> std::sync::Arc<crate::type_graph::TypeGraph> {
         super::super::testing::closed_type_graph(
-            type_identity("Text"),
+            type_identity("Text").symbol,
             crate::type_graph::DeclarationForm::Text,
         )
     }
@@ -3059,7 +3059,7 @@ mod tests {
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
 
         let mut recursive = empty_constructor("Recursive", 1, 1);
-        recursive.family = type_identity("RecursiveFamily");
+        recursive.identity.family = type_identity("RecursiveFamily");
         recursive.field_reps = vec![RuntimeRep::LiftedRef];
         recursive.strict_fields = vec![false];
         recursive.layout = CheckedLayout {
@@ -3106,7 +3106,7 @@ mod tests {
         use crate::type_graph::{DeclarationForm, TypeEdge};
         let mut program = valid_program();
         let mut constructor = empty_constructor("Scalar", 1, 1);
-        constructor.family = type_identity("Family");
+        constructor.identity.family = type_identity("Family");
         constructor.field_reps = vec![RuntimeRep::Int(64)];
         constructor.strict_fields = vec![false];
         constructor.layout = CheckedLayout {
@@ -3238,7 +3238,7 @@ mod tests {
     fn constructor_replies_require_exact_constructors_nodes_and_carrier_layouts() {
         let mut program = valid_program();
         program.types = super::super::testing::closed_type_graph(
-            type_identity("Opaque"),
+            type_identity("Opaque").symbol,
             crate::type_graph::DeclarationForm::Opaque {
                 head_kind: crate::type_graph::NominalHeadKind::Constructor,
                 reason: "unsupported original".into(),
@@ -3296,7 +3296,7 @@ mod tests {
             empty_constructor("Second", 2, 2),
         ];
         for constructor in &mut program.constructors {
-            constructor.family = type_identity("Family");
+            constructor.identity.family = type_identity("Family");
         }
         program.types = super::super::testing::type_graph(
             vec![
@@ -4087,7 +4087,7 @@ mod tests {
     #[test]
     fn algebraic_cases_reject_mixed_families_and_literal_patterns() {
         let mut program = with_case(
-            CaseKind::Algebraic(symbol("T")),
+            CaseKind::Algebraic(super::super::testing::type_identity(symbol("T"))),
             vec![RuntimeRep::LiftedRef],
             vec![Alternative {
                 pattern: AlternativePattern::Constructor(ConstructorId(0)),
@@ -4096,9 +4096,8 @@ mod tests {
             }],
         );
         program.constructors.push(ConstructorDecl {
-            identity: symbol("C"),
+            identity: crate::execution_schema::testing::constructor_identity(symbol("C"), symbol("Other")),
             host_id: crate::DataConId(2),
-            family: symbol("Other"),
             tag: 1,
             family_size: 1,
             result_rep: RuntimeRep::LiftedRef,
@@ -4119,7 +4118,7 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidLayout(_))
         ));
-        program.constructors[0].family = symbol("T");
+        program.constructors[0].identity.family = super::super::testing::type_identity(symbol("T"));
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         let mut case = program.expressions.nodes.pop().unwrap();
         program
@@ -4622,9 +4621,8 @@ mod tests {
     fn rejects_unnaturally_aligned_managed_layout() {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
-            identity: symbol("C"),
+            identity: crate::execution_schema::testing::constructor_identity(symbol("C"), symbol("T")),
             host_id: crate::DataConId(3),
-            family: symbol("T"),
             tag: 1,
             family_size: 1,
             result_rep: RuntimeRep::LiftedRef,
@@ -4656,9 +4654,8 @@ mod tests {
     fn rejects_noncanonical_padding_between_storage_fields() {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
-            identity: symbol("Padded"),
+            identity: crate::execution_schema::testing::constructor_identity(symbol("Padded"), symbol("T")),
             host_id: crate::DataConId(4),
-            family: symbol("T"),
             tag: 1,
             family_size: 1,
             result_rep: RuntimeRep::LiftedRef,

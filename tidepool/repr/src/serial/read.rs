@@ -200,7 +200,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
         };
 
         let identity =
-            crate::execution_schema::symbol::decode(&arr[9], |value, what| match value {
+            crate::execution_schema::symbol::decode_constructor(&arr[9], |value, what| match value {
                 Value::Text(text) => Ok(text.clone()),
                 _ => Err(crate::execution_schema::ParseError::Malformed(format!(
                     "{what} must be text"
@@ -210,12 +210,12 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
                 field: "identity",
                 detail: error.to_string(),
             })?;
-        if identity.unit.is_empty()
-            || identity.module.is_empty()
-            || identity.occurrence.is_empty()
-            || identity.namespace != "constructor"
-            || identity.occurrence != name
-            || identity
+        if identity.symbol.unit.is_empty()
+            || identity.symbol.module.is_empty()
+            || identity.symbol.occurrence.is_empty()
+            || identity.symbol.namespace != "constructor"
+            || identity.symbol.occurrence != name
+            || identity.symbol
                 .record_parent
                 .as_ref()
                 .is_some_and(|parent| parent.is_empty())

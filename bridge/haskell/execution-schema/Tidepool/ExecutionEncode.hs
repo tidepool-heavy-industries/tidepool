@@ -57,7 +57,7 @@ encodeWireProgram program = toStrictByteString $ array
 encodeProjectedGroup :: ProjectedGroup -> ByteString
 encodeProjectedGroup group = toStrictByteString $ array
   [ encodeString "TPGRP"
-  , encodeWord64 1
+  , encodeWord64 2
   , encodeWord32 (projectedOriginalOrdinal group)
   , list encodeSymbol (projectedBinders group)
   , encodeWord64 (envelopeSchemaVersion envelope)
@@ -220,8 +220,7 @@ encodeLayout layout = array
 
 encodeConstructor :: ConstructorDecl -> Encoding
 encodeConstructor constructor = array
-  [ encodeSymbol (constructorIdentity constructor)
-  , encodeSymbol (constructorFamily constructor)
+  [ encodeConstructorIdentity (constructorIdentity constructor)
   , list encodeRep (constructorFieldReps constructor)
   , list encodeBool (constructorStrictFields constructor)
   , encodeLayout (constructorLayout constructor)
@@ -267,7 +266,7 @@ encodeJsonLayout layout = array (map encodeConstructorId
 
 encodeTypeGraph :: TypeGraph -> Encoding
 encodeTypeGraph graph = array
-  [ encodeWord 1
+  [ encodeWord 2
   , list encodeTypeNode (IntMap.elems (typeGraphNodes graph))
   , list encodeTypeEdge
       [ TypeEdge (TypeNodeId (fromIntegral source)) target role
@@ -281,7 +280,7 @@ encodeTypeNode node = case node of
     [ encodeWord (case domain of ClosedRoot -> 0; ConstructorSchemeRoot -> 1)
     , list (encodeWord . sourceFlag) binders, encodeString rendered ]
   TypeDeclaration identity parameters form restriction -> tagged 1
-    [ encodeSymbol identity, list (encodeWord . parameterFlag) parameters
+    [ encodeTypeIdentity identity, list (encodeWord . parameterFlag) parameters
     , encodeDeclarationForm form
     , encodeWord (case restriction of UnrestrictedSyntax -> 0; EffectHead -> 1) ]
   TypeConstructorTemplate constructor -> tagged 2 [encodeConstructorId constructor]
@@ -560,7 +559,7 @@ takeIndex [] = error "prepared frame child index missing"
 
 encodeCaseKind :: CaseKind -> Encoding
 encodeCaseKind kind = case kind of
-  AlgebraicCase family -> tagged 0 [encodeSymbol family]
+  AlgebraicCase family -> tagged 0 [encodeTypeIdentity family]
   PrimitiveCase rep -> tagged 1 [encodeRep rep]
   MultiValueCase -> tag 2
   PolymorphicCase -> tag 3

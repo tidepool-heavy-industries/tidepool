@@ -66,7 +66,7 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 ///
 /// `5.0` requires complete compiler-issued constructor symbols. Older payloads
 /// lack nominal owners and must be regenerated rather than reconstructed.
-pub const VERSION_MAJOR: u16 = 5;
+pub const VERSION_MAJOR: u16 = 6;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.

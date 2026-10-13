@@ -156,9 +156,8 @@ fn typed_fixture_decodes_record_parent_intrinsic_and_nonreturning_contract() {
     let mut record = identity("Fixture", "RecordField");
     record.record_parent = Some("FixtureRecord".into());
     wire.constructors.push(ConstructorDecl {
-        identity: record,
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(record, identity("Fixture", "FixtureRecord")),
         host_id: tidepool_repr::DataConId(100),
-        family: identity("Fixture", "FixtureRecord"),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![],
         strict_fields: vec![],
@@ -200,10 +199,10 @@ fn typed_fixture_decodes_record_parent_intrinsic_and_nonreturning_contract() {
     let constructor = program
         .constructors()
         .iter()
-        .find(|constructor| constructor.identity.occurrence == "RecordField")
+        .find(|constructor| constructor.identity.symbol.occurrence == "RecordField")
         .expect("typed fixture should retain its record-field identity");
     assert_eq!(
-        constructor.identity.record_parent.as_deref(),
+        constructor.identity.symbol.record_parent.as_deref(),
         Some("FixtureRecord")
     );
 

@@ -120,7 +120,7 @@ pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
     } = &definitions_value;
     let mut fields = vec![
         s("TPGRP"),
-        n(1_u64),
+        n(2_u64),
         n(group.original_ordinal()),
         list(group.binders(), symbol),
     ];
@@ -240,6 +240,16 @@ fn symbol(value: &SymbolIdentity) -> Value {
         option(record_parent, |value| s(value)),
     ])
 }
+fn type_identity_value(value: &TypeIdentity) -> Value {
+    a([symbol(&value.symbol), match &value.version {
+        TypeVersion::WiredIn => a([n(0_u64)]),
+        TypeVersion::GhcAbi(bytes) => a([n(1_u64), Value::Bytes(bytes.to_vec())]),
+    }])
+}
+fn constructor_identity_value(value: &ConstructorIdentity) -> Value {
+    a([symbol(&value.symbol), type_identity_value(&value.family)])
+}
+
 fn rep(value: &RuntimeRep) -> Value {
     match value {
         RuntimeRep::Void => a([n(0_u64)]),
@@ -286,7 +296,6 @@ fn constructor(value: &ConstructorDecl) -> Value {
     let ConstructorDecl {
         identity,
         host_id,
-        family,
         result_rep,
         field_reps,
         strict_fields,
@@ -295,8 +304,7 @@ fn constructor(value: &ConstructorDecl) -> Value {
         family_size,
     } = value;
     a([
-        symbol(identity),
-        symbol(family),
+        constructor_identity_value(identity),
         list(field_reps, rep),
         list(strict_fields, |value| Value::Bool(*value)),
         layout(storage),
@@ -526,7 +534,7 @@ fn alternative(value: &Alternative) -> Value {
 }
 fn kind(value: &CaseKind) -> Value {
     match value {
-        CaseKind::Algebraic(value) => a([n(0_u64), symbol(value)]),
+        CaseKind::Algebraic(value) => a([n(0_u64), type_identity_value(value)]),
         CaseKind::Primitive(value) => a([n(1_u64), rep(value)]),
         CaseKind::MultiValue => a([n(2_u64)]),
         CaseKind::Polymorphic => a([n(3_u64)]),
@@ -643,9 +651,8 @@ mod tests {
             required_generation: Some(19),
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: name.clone(),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(name.clone(), identity("Owner", "Record")),
             host_id: tidepool_repr::DataConId(100),
-            family: identity("Owner", "Record"),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: reps.clone(),
             strict_fields: vec![true, false],

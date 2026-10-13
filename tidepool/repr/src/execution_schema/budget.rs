@@ -1,4 +1,4 @@
-use super::{ParseError, SymbolIdentity};
+use super::{ConstructorIdentity, ParseError, SymbolIdentity};
 
 /// Work for one byte-entry operation, shared across all parsing/validation passes.
 /// Units are raw CBOR items, payload-copy bytes, typed visits/copies and the graph
@@ -48,6 +48,16 @@ impl OperationBudget {
         .try_fold(0_usize, |bytes, text| bytes.checked_add(text.len()))
         .ok_or(ParseError::LimitExceeded("work"))?;
         self.charge(bytes)
+    }
+
+    pub(super) fn constructor_copy_work(identity: &ConstructorIdentity) -> Result<usize, ParseError> {
+        [&identity.symbol, &identity.family.symbol].into_iter().try_fold(17_usize, |bytes, symbol| {
+            [&symbol.unit, &symbol.module, &symbol.namespace, &symbol.occurrence].into_iter()
+                .chain(symbol.record_parent.iter()).try_fold(bytes, |bytes, text| bytes.checked_add(text.len()).ok_or(ParseError::LimitExceeded("work")))
+        })
+    }
+    pub(super) fn charge_constructor_copy(&mut self, identity: &ConstructorIdentity) -> Result<(), ParseError> {
+        self.charge(Self::constructor_copy_work(identity)?)
     }
 
     #[cfg(test)]

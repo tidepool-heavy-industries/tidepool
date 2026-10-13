@@ -11,7 +11,7 @@ module Tidepool.ExecutionSchema
   , SignatureId(..), ValueRef(..), ScalarLiteral(..), Atom(..), Group(..)
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
   , AlternativePattern(..), Alternative(..), CaseKind(..), Expr(..), FieldLayout(..)
-  , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
+  , CheckedLayout(..), ConstructorDecl(..), constructorFamily, GlobalDecl(..), OperationDecl(..)
   , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   , ProjectedGroup(..), ProjectedGroupBody(..)
@@ -28,8 +28,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 17
-executionAbiVersion = 9
+schemaVersion = 18
+executionAbiVersion = 10
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -89,13 +89,16 @@ data CheckedLayout = CheckedLayout
   , layoutPayloadSize :: Word32, layoutRootMask :: [Bool]
   } deriving stock (Eq, Show, Generic)
 data ConstructorDecl = ConstructorDecl
-  { constructorIdentity :: SymbolIdentity, constructorFamily :: SymbolIdentity
+  { constructorIdentity :: ConstructorIdentity
   , constructorResultRep :: RuntimeRep
   , constructorFieldReps :: [RuntimeRep], constructorStrictFields :: [Bool]
   , constructorLayout :: CheckedLayout
   , constructorTag :: Word32, constructorFamilySize :: Word32
   , constructorHostId :: Word64
   } deriving stock (Eq, Show, Generic)
+constructorFamily :: ConstructorDecl -> TypeIdentity
+constructorFamily = constructorType . constructorIdentity
+
 data GlobalDecl = GlobalDecl
   { globalIdentity :: SymbolIdentity, globalRep :: RuntimeRep
   , globalEntrySignature :: Maybe SignatureId
@@ -160,7 +163,7 @@ data AlternativePattern = DefaultPattern | ConstructorPattern ConstructorId
 data Alternative = Alternative AlternativePattern [ValueId] Expr deriving stock (Eq, Show, Generic)
 -- | Authoritative post-unarisation case classification. Algebraic identity
 -- establishes family agreement, not a proof that every constructor is listed.
-data CaseKind = AlgebraicCase SymbolIdentity | PrimitiveCase RuntimeRep
+data CaseKind = AlgebraicCase TypeIdentity | PrimitiveCase RuntimeRep
   | MultiValueCase | PolymorphicCase deriving stock (Eq, Show, Generic)
 data Expr = Return [Atom] | Enter Atom SignatureId | Call Atom SignatureId [Atom] | Operation OperationId [Atom]
   | Construct ConstructorId [Atom]
@@ -175,8 +178,8 @@ data TypeGraphF constructor identity rep = TypeGraph
   { typeGraphNodes :: IntMap (TypeNodeF constructor identity rep)
   , typeGraphEdges :: IntMap [(TypeEdgeRoleF rep, TypeNodeId)]
   } deriving stock (Eq, Ord, Show, Generic)
-type TypeGraph = TypeGraphF ConstructorId SymbolIdentity RuntimeRep
-type TypeNode = TypeNodeF ConstructorId SymbolIdentity RuntimeRep
+type TypeGraph = TypeGraphF ConstructorId TypeIdentity RuntimeRep
+type TypeNode = TypeNodeF ConstructorId TypeIdentity RuntimeRep
 
 data RootDomain = ClosedRoot | ConstructorSchemeRoot
   deriving stock (Eq, Ord, Show, Generic)
