@@ -179,7 +179,12 @@ impl AfterToolLog {
 
     /// The first sighting of a diagnostic earns the diagnostic. Every later
     /// sighting earns a reference to the first and nothing more.
-    pub(crate) fn notice(&mut self, installation: u64, ordinal: u64, reason: &str) -> FailureNotice {
+    pub(crate) fn notice(
+        &mut self,
+        installation: u64,
+        ordinal: u64,
+        reason: &str,
+    ) -> FailureNotice {
         let key = (installation, reason.to_owned());
         match self.seen.get_mut(&key) {
             Some((first, count)) => {
@@ -405,7 +410,6 @@ mod tests {
         );
         log.record(failed_invocation(ordinal));
         assert!(log.seen.len() <= AFTER_TOOL_LOG);
-
     }
 
     fn failed_invocation(ordinal: u64) -> Invocation {

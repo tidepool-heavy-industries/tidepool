@@ -995,10 +995,12 @@ mod tests {
             custody.cleanup(&runner, parent.session).await.unwrap();
             custody.cleanup(&runner, parent.session).await.unwrap();
             let mut checkout = machines.checkout_run(parent.session).unwrap();
-            assert!(checkout
-                .machine()
-                .compile_view_in(actual.lexical_scope)
-                .is_none());
+            assert!(
+                checkout
+                    .machine()
+                    .compile_view_in(actual.lexical_scope)
+                    .is_none()
+            );
             assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
             checkout.restore_suspended(Vec::new());
             assert!(machines.kind(placeholder.session).is_none());
@@ -1049,10 +1051,12 @@ mod tests {
             let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
             custody.cleanup(&runner, parent).await.unwrap();
             let mut checkout = machines.checkout_run(parent).unwrap();
-            assert!(checkout
-                .machine()
-                .compile_view_in(actual.lexical_scope)
-                .is_none());
+            assert!(
+                checkout
+                    .machine()
+                    .compile_view_in(actual.lexical_scope)
+                    .is_none()
+            );
             assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
             checkout.restore_suspended(Vec::new());
         }
@@ -1194,14 +1198,18 @@ mod tests {
         assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
         let mut checkout = machines.checkout_run(parent.session).unwrap();
         assert!(checkout.machine().compile_view_in(actual_scope).is_none());
-        assert!(checkout
-            .machine()
-            .compile_view_in(provisional_scope)
-            .is_none());
-        assert!(checkout
-            .machine()
-            .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
-            .is_ok());
+        assert!(
+            checkout
+                .machine()
+                .compile_view_in(provisional_scope)
+                .is_none()
+        );
+        assert!(
+            checkout
+                .machine()
+                .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
+                .is_ok()
+        );
         checkout.restore_suspended(Vec::new());
         fixture.finish().await;
     }
@@ -1252,20 +1260,24 @@ mod tests {
         cleaned.unwrap();
         assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
         let mut checkout = machines.checkout_run(parent.session).unwrap();
-        assert!(checkout
-            .machine()
-            .compile_view_in(provisional_scope)
-            .is_none());
-        assert!(checkout
-            .machine()
-            .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
-            .is_ok());
+        assert!(
+            checkout
+                .machine()
+                .compile_view_in(provisional_scope)
+                .is_none()
+        );
+        assert!(
+            checkout
+                .machine()
+                .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
+                .is_ok()
+        );
         checkout.restore_suspended(Vec::new());
     }
 
     #[tokio::test]
-    async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement(
-    ) {
+    async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement()
+     {
         crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
             crate::RetainedActorExit::new(),
         )
@@ -1433,9 +1445,11 @@ mod tests {
         );
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
-        assert!(scope_owner
-            .retain_launch_placement(&context, custody)
-            .is_err());
+        assert!(
+            scope_owner
+                .retain_launch_placement(&context, custody)
+                .is_err()
+        );
         drop(startup);
         let first = work.cleanup(&fixture.environment, &fixture.kernel).await;
         assert!(first.uncertainty().is_some());
@@ -1493,9 +1507,11 @@ mod tests {
                 *custody.0.lock(),
                 ChildPlacementPhase::Reclaiming(placement)
             );
-            assert!(owner
-                .retain_launch_placement(&context, late_custody)
-                .is_err());
+            assert!(
+                owner
+                    .retain_launch_placement(&context, late_custody)
+                    .is_err()
+            );
             drop(late_startup);
             drop(checkout);
             assert!(cleanup.await.uncertainty().is_some());
@@ -1528,16 +1544,20 @@ mod tests {
         let machines = Arc::new(Machines::new());
         let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
         let custody = ChildPlacementCustody::new(placement);
-        assert!(release_failed_launch_placement(&runner, id, &custody)
-            .await
-            .is_err());
+        assert!(
+            release_failed_launch_placement(&runner, id, &custody)
+                .await
+                .is_err()
+        );
         assert_eq!(
             *custody.0.lock(),
             ChildPlacementPhase::CleanupRetained(placement)
         );
-        assert!(custody
-            .transfer_to_actor(ActorRef::first(crate::ActorId(977)), placement)
-            .is_err());
+        assert!(
+            custody
+                .transfer_to_actor(ActorRef::first(crate::ActorId(977)), placement)
+                .is_err()
+        );
         machines.insert_idle(id, Box::new(machine));
         assert!(capture_is_live(&machines, placement, &captured));
         release_failed_launch_placement(&runner, id, &custody)
@@ -1559,9 +1579,11 @@ mod tests {
         assert!(!capture_is_live(&machines, placement, &captured));
         assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
         assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-        assert!(custody
-            .transfer_to_actor(ActorRef::first(crate::ActorId(974)), placement)
-            .is_err());
+        assert!(
+            custody
+                .transfer_to_actor(ActorRef::first(crate::ActorId(974)), placement)
+                .is_err()
+        );
         release_failed_launch_placement(&runner, placement.session, &custody)
             .await
             .unwrap();
@@ -1583,14 +1605,16 @@ mod tests {
         assert!(!capture_is_live(&machines, placement, &captured));
         assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
         assert!(machines.kind(placeholder.session).is_none());
-        assert!(custody
-            .transfer_to_actor(ActorRef::first(crate::ActorId(976)), placement)
-            .is_err());
+        assert!(
+            custody
+                .transfer_to_actor(ActorRef::first(crate::ActorId(976)), placement)
+                .is_err()
+        );
     }
     fn bootstrap_program() -> Arc<tidepool_runtime::session::CompiledTurn> {
         use tidepool_repr::execution_schema::{
-            testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
-            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
+            Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout, Group,
+            HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef, testing,
         };
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);

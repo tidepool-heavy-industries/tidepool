@@ -6,8 +6,8 @@ use super::{LifecycleCommand, LifecycleHandle, LifecycleState};
 use crate::initial_context::InitialContextEvent;
 use crate::resident_actor::{ActorPublicOwnerPlane, WorkbenchPublicOwner};
 use crate::{ActorDescriptor, ActorSessionContext, InitialContextObservation, RootStartupIntent};
-use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -53,7 +53,10 @@ pub(crate) struct ResidentSnapshot {
 }
 
 impl ResidentSnapshot {
-    fn publish_generation(&mut self, generation: Arc<crate::resident_workbench::ActorGeneration>) -> Result<(), String> {
+    fn publish_generation(
+        &mut self,
+        generation: Arc<crate::resident_workbench::ActorGeneration>,
+    ) -> Result<(), String> {
         let context = &generation.context;
         let original = self.descriptor.placement();
         if context.actor != self.context.actor
@@ -74,7 +77,7 @@ impl ResidentSnapshot {
             same_owner,
         )? {
             GenerationPublicationOrder::Stale | GenerationPublicationOrder::Duplicate => {
-                return Ok(())
+                return Ok(());
             }
             GenerationPublicationOrder::Newer => {}
         }
@@ -108,7 +111,7 @@ fn generation_publication_order(
         Some(Ordering::Less) => GenerationPublicationOrder::Stale,
         Some(Ordering::Equal) if same_owner => GenerationPublicationOrder::Duplicate,
         Some(Ordering::Equal) => {
-            return Err("equal actor generation has a different issued owner".into())
+            return Err("equal actor generation has a different issued owner".into());
         }
     })
 }
@@ -227,7 +230,7 @@ pub(super) enum ResidentCommand {
         fresh_context_seed: Option<String>,
         reply: RpcReplyPort<Result<(), String>>,
     },
-    PolicyInstalled(Option<crate::InstalledToolLease>),
+    BootstrapPolicyInstalled(Option<crate::InstalledToolLease>),
     GenerationPublished(Arc<crate::resident_workbench::ActorGeneration>),
     Request(Request),
     Completed {
@@ -451,9 +454,9 @@ impl LifecycleHandle {
             .map_err(|_| "resident configuration owner ended".to_owned())?
     }
 
-    pub(crate) fn policy_installed(&self, policy: Option<crate::InstalledToolLease>) {
+    pub(crate) fn bootstrap_policy_installed(&self, policy: Option<crate::InstalledToolLease>) {
         let _ = self.address.cast(LifecycleCommand::Resident(Box::new(
-            ResidentCommand::PolicyInstalled(policy),
+            ResidentCommand::BootstrapPolicyInstalled(policy),
         )));
     }
 
@@ -656,10 +659,14 @@ pub(super) fn handle(
             state.publish();
             let _ = reply.send(result);
         }
-        ResidentCommand::PolicyInstalled(policy) => {
+        ResidentCommand::BootstrapPolicyInstalled(policy) => {
             if !state.is_closed() {
                 if let Some(resident) = &mut state.resident {
-                    resident.current.installed_policy = policy;
+                    // After publication, this compatibility notification must not
+                    // overwrite fields derived atomically from the issued generation.
+                    if resident.current.generation.is_none() {
+                        resident.current.installed_policy = policy;
+                    }
                 }
             }
         }
@@ -1483,7 +1490,7 @@ fn panicking_worker_completion_for_test() -> Completion {
 
 #[cfg(test)]
 mod generation_publication_tests {
-    use super::{generation_publication_order, GenerationPublicationOrder};
+    use super::{GenerationPublicationOrder, generation_publication_order};
     use tidepool_runtime::session::NotebookGenerationId;
 
     #[test]

@@ -65,7 +65,7 @@ mod tool_support;
 mod workbench_ledger;
 
 #[cfg(test)]
-pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
+pub(crate) use drain_wait::{DrainWaitEvent, wait_drain_event};
 pub(crate) use owned_workbench::{
     ExecutionResourceOwners, PreparedWorkbenchGenerationOwner, WorkbenchCompilationAuthority,
     WorkbenchPublicOwner,
@@ -76,11 +76,11 @@ use display_settlement::{
     DisplayReceiptSubmission,
 };
 use invocation_work::{
-    ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
+    InvocationWork, ensure_workbench_execution_id, retain_invocation_cleanup_summary,
 };
 use status_rendering::{
-    render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
-    render_source_drift_section, RevisionIdentities, RosterSnapshot,
+    RevisionIdentities, RosterSnapshot, render_bindings_section, render_job_line,
+    render_revisions_section, render_roster_changes, render_source_drift_section,
 };
 use workbench_ledger::{WorkbenchBoundaryRecord, WorkbenchExecutions, WorkbenchReplayFailure};
 
@@ -89,13 +89,13 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+    CellSourceSpan, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem,
+    WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId, WorkbenchFailureLayer,
+    WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
     WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
     WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    WorkbenchTerminalTransfer, truncate_preview_at_line,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -1396,9 +1396,11 @@ mod display_tests {
         assert_eq!(owner.slots[&slot].page_ordinal, 1);
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
-        assert!(owner
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
-            .is_err());
+        assert!(
+            owner
+                .stage(actor, terminal_page(), None, false, 8192, None, None)
+                .is_err()
+        );
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
 
@@ -2192,7 +2194,9 @@ enum ResidentBoot {
 #[derive(Clone)]
 enum InitialActorConfiguration {
     Unselected,
-    Fresh { source: crate::CheckpointSourceLayer },
+    Fresh {
+        source: crate::CheckpointSourceLayer,
+    },
     Restored {
         head: tidepool_runtime::session::ActiveNotebookGeneration,
         source: crate::CheckpointSourceLayer,
@@ -3333,9 +3337,11 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.invocation_work(),
 
             Self::Workbench(execution) => {
-                assert!(execution
-                    .invocation_work
-                    .matches(execution.context.actor, &execution.reservation_owner));
+                assert!(
+                    execution
+                        .invocation_work
+                        .matches(execution.context.actor, &execution.reservation_owner)
+                );
                 Some(execution.invocation_work.clone())
             }
             Self::Tool { work, .. } => Some(work.clone()),
@@ -5226,16 +5232,15 @@ where
                         "checkpoint retained-scope refusal: {refusal:?}"
                     ))
                 })?;
-            let source = effect_owner
-                .admitted_source()
-                .cloned()
-                .ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "child admission has no captured source capsule".into(),
-                    )
-                })?;
+            let source = effect_owner.admitted_source().cloned().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "child admission has no captured source capsule".into(),
+                )
+            })?;
             if let Some(layers) = &self.environment.source_layers {
-                layers.validate_source_authority(&source).map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                layers
+                    .validate_source_authority(&source)
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             }
             let inherited_source = Some(source);
             Ok(child_launch::ChildLaunchAdmission {
@@ -7854,7 +7859,9 @@ where
             return Ok(());
         }
         if self.descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable {
-            self.initial_configuration = InitialActorConfiguration::Fresh { source: self.capture_boot_source(context.actor)? };
+            self.initial_configuration = InitialActorConfiguration::Fresh {
+                source: self.capture_boot_source(context.actor)?,
+            };
             return Ok(());
         }
         let predecessor = self
@@ -7873,7 +7880,9 @@ where
                     "source-backed recovery has no durable notebook generation; legacy source-backed runs require an explicit migration".into(),
                 ));
             }
-            self.initial_configuration = InitialActorConfiguration::Fresh { source: self.capture_boot_source(context.actor)? };
+            self.initial_configuration = InitialActorConfiguration::Fresh {
+                source: self.capture_boot_source(context.actor)?,
+            };
             return Ok(());
         };
         head.references
@@ -7912,12 +7921,21 @@ where
         &self,
         actor: ActorRef,
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
-        if let Some(source) = self.admitted_checkpoint.as_ref().map(|(lease, _)| &lease.issuer_source_layer).or(self.spawn_source.as_ref()) {
+        if let Some(source) = self
+            .admitted_checkpoint
+            .as_ref()
+            .map(|(lease, _)| &lease.issuer_source_layer)
+            .or(self.spawn_source.as_ref())
+        {
             return Ok(source.clone());
         }
         self.environment.source_layers.as_ref().map_or_else(
             || Ok(crate::CheckpointSourceLayer::default()),
-            |layers| layers.freeze_checkpoint_layer(actor.into()).map_err(ResidentActorWorkbenchError::ActorProtocol),
+            |layers| {
+                layers
+                    .freeze_checkpoint_layer(actor.into())
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            },
         )
     }
 
@@ -7927,13 +7945,20 @@ where
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
         if let Some(lease) = self.installed_tools.current() {
             if lease.actor() != actor {
-                return Err(ResidentActorWorkbenchError::ActorProtocol("source installation belongs to another actor incarnation".into()));
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "source installation belongs to another actor incarnation".into(),
+                ));
             }
             return Ok(lease.source().clone());
         }
         match &self.initial_configuration {
-            InitialActorConfiguration::Fresh { source } | InitialActorConfiguration::Restored { source, .. } => Ok(source.clone()),
-            InitialActorConfiguration::Unselected => Err(ResidentActorWorkbenchError::ActorProtocol("initial configuration has not been selected".into())),
+            InitialActorConfiguration::Fresh { source }
+            | InitialActorConfiguration::Restored { source, .. } => Ok(source.clone()),
+            InitialActorConfiguration::Unselected => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "initial configuration has not been selected".into(),
+                ))
+            }
         }
     }
 
@@ -8061,7 +8086,7 @@ where
         self.actor_program_snapshot = self.installed_tools.snapshot();
         self.actor_callback_execution = None;
         if let Some(lifecycle) = &self.lifecycle {
-            lifecycle.policy_installed(self.installed_tools.current());
+            lifecycle.bootstrap_policy_installed(self.installed_tools.current());
         }
         for notice in self.deferred_child_failures.drain(..) {
             self.environment
@@ -8129,7 +8154,7 @@ where
             outcome => {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                     "native bootstrap public surface was not published: {outcome:?}",
-                )))
+                )));
             }
         }
         self.check_application_readiness(kernel, context).await?;
@@ -8301,7 +8326,7 @@ where
             InitialActorConfiguration::Unselected => {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "prompt composition preceded initial configuration selection".into(),
-                ))
+                ));
             }
             InitialActorConfiguration::Fresh { .. } => self
                 .descriptor
@@ -9187,9 +9212,9 @@ where
                             )
                         {
                             return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "initial-context startup does not admit {}: its continuation is not qualified in this launch phase",
-                            boundary.operation(),
-                        )));
+                                "initial-context startup does not admit {}: its continuation is not qualified in this launch phase",
+                                boundary.operation(),
+                            )));
                         }
                         let effect_owner = match current
                             .scopes
@@ -11740,7 +11765,7 @@ where
                     other => {
                         return Err(Self::failure(format!(
                             "durable actor public owner was not published: {other:?}",
-                        )))
+                        )));
                     }
                 }
             }
@@ -14473,7 +14498,7 @@ where
             Err(error) => {
                 return vec![crate::ForestRootShutdown::RunResources(
                     crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
-                )]
+                )];
             }
         };
         let preparation = self.directory.settle_preparations(budget).await;
@@ -14485,7 +14510,7 @@ where
                     crate::CleanupComponentOutcome::Unconfirmed(format!(
                         "preparation {preparation:?}; membership: {error}"
                     )),
-                )]
+                )];
             }
         };
         let mut outcomes = Vec::with_capacity(roots.len() + 1);
@@ -15468,10 +15493,9 @@ mod tests {
         }
     }
     use super::{
-        checkpoint_capture_delivered, disposition_for_non_command_failure,
+        ChildExitObservations, checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
-        ChildExitObservations,
     };
 
     #[test]
@@ -15594,37 +15618,45 @@ mod tests {
             incarnation: 1,
             watch_id: 9,
         };
-        assert!(super::CheckpointPublication::Route(boundary.clone())
+        assert!(
+            super::CheckpointPublication::Route(boundary.clone())
+                .hosted_boundary()
+                .is_none()
+        );
+        assert!(
+            super::CheckpointPublication::Workbench {
+                boundary: Some(boundary),
+                capture: None,
+            }
             .hosted_boundary()
-            .is_none());
-        assert!(super::CheckpointPublication::Workbench {
-            boundary: Some(boundary),
-            capture: None,
-        }
-        .hosted_boundary()
-        .is_none());
+            .is_none()
+        );
         let direct = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
             actor_id: 1,
             incarnation: 1,
             execution_id: WorkbenchExecutionId::from_digest([7; 16]),
         };
-        assert!(super::CheckpointPublication::Workbench {
-            boundary: Some(direct),
-            capture: None
-        }
-        .hosted_boundary()
-        .is_none());
+        assert!(
+            super::CheckpointPublication::Workbench {
+                boundary: Some(direct),
+                capture: None
+            }
+            .hosted_boundary()
+            .is_none()
+        );
         let hosted = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "request".into(),
             "call".into(),
         );
-        assert!(super::CheckpointPublication::Workbench {
-            boundary: Some(hosted),
-            capture: None
-        }
-        .hosted_boundary()
-        .is_some());
+        assert!(
+            super::CheckpointPublication::Workbench {
+                boundary: Some(hosted),
+                capture: None
+            }
+            .hosted_boundary()
+            .is_some()
+        );
     }
 
     #[tokio::test]
@@ -16069,9 +16101,11 @@ mod tests {
             response.results[2].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(response
-            .render_text()
-            .contains("awaitSettled :: Response result -> Await (Settlement result)"));
+        assert!(
+            response
+                .render_text()
+                .contains("awaitSettled :: Response result -> Await (Settlement result)")
+        );
         let structured = serde_json::to_value(&response).unwrap();
         assert_eq!(
             structured["results"][0]["outcome"]["matches"][0]["availability"],
@@ -16130,9 +16164,11 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(response
-            .render_text()
-            .contains("investigate :: FilePath -> IO ()"));
+        assert!(
+            response
+                .render_text()
+                .contains("investigate :: FilePath -> IO ()")
+        );
     }
 
     /// The defect this path exists for: `Cmd.CommandResult` is a qualified type
@@ -16370,9 +16406,11 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(response
-            .render_text()
-            .contains("readOutput :: Job -> IO Text"));
+        assert!(
+            response
+                .render_text()
+                .contains("readOutput :: Job -> IO Text")
+        );
     }
 
     /// Queries answered locally consume no compiler result and a dotted
@@ -16774,9 +16812,11 @@ mod tests {
             response.items[3].kind,
             Some(WorkbenchCellItemKind::Expression)
         );
-        assert!(response.items[2..]
-            .iter()
-            .all(|item| item.installed_bindings.is_empty()));
+        assert!(
+            response.items[2..]
+                .iter()
+                .all(|item| item.installed_bindings.is_empty())
+        );
     }
 
     #[test]
@@ -16922,9 +16962,11 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(receipt
-            .output
-            .contains("private bindings (discarded unless this cell publishes): commandJob"));
+        assert!(
+            receipt
+                .output
+                .contains("private bindings (discarded unless this cell publishes): commandJob")
+        );
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed
@@ -16963,9 +17005,11 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(receipt
-            .output
-            .contains("private bindings (discarded unless this cell publishes): commandJob"));
+        assert!(
+            receipt
+                .output
+                .contains("private bindings (discarded unless this cell publishes): commandJob")
+        );
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed

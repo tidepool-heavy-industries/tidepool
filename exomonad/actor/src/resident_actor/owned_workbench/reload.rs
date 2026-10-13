@@ -96,7 +96,7 @@ where
         {
             Ok(candidate) => candidate,
             Err(ResidentActorWorkbenchError::InvocationCancelled) => {
-                return Ok(SrReloadOutcome::ReloadCancelled(previous))
+                return Ok(SrReloadOutcome::ReloadCancelled(previous));
             }
             Err(error)
                 if error.failure_diagnostic().is_some_and(|diagnostic| {
@@ -318,15 +318,62 @@ fn reload_result(
     execution: tidepool_runtime::session::WorkbenchExecutionId,
 ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
     let disposition = source_effect::reload_disposition(&result);
-    let (output,value,warnings) = match result {
-        Ok(SrReloadOutcome::ReloadUnchanged(revision)) => (format!("unchanged: source {}; notebook names retained",revision.identity),serde_json::json!({"outcome":"unchanged","revision":revision_value(&revision)}),Vec::new()),
-        Ok(SrReloadOutcome::ReloadPublished(previous,next,changed)) => (format!("published: source {}; compatible handlers and prompts active; notebook reset",next.identity),serde_json::json!({"outcome":"published","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),Vec::new()),
-        Ok(SrReloadOutcome::ReloadPublishedWithWarnings(previous,next,changed,warnings)) => (format!("published: source {}; notebook reset; derived projections need repair",next.identity),serde_json::json!({"outcome":"publishedWithWarnings","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),warnings),
-        Ok(SrReloadOutcome::ReloadRejected(issued,candidate,diagnostics)) => (format!("rejected: candidate {}; reload changed no active configuration\n{}",candidate.identity,diagnostics),serde_json::json!({"outcome":"rejected","issuedRevision":revision_value(&issued),"candidate":revision_value(&candidate),"diagnostics":diagnostics}),Vec::new()),
-        Ok(SrReloadOutcome::ReloadCancelled(issued)) => ("cancelled before publication; reload changed no active configuration".into(),serde_json::json!({"outcome":"cancelled","issuedRevision":revision_value(&issued)}),Vec::new()),
-        Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(candidate,diagnostics)) => (format!("publication unconfirmed: candidate {}; admission blocked; reconcile before continuing\n{}",candidate.identity,diagnostics),serde_json::json!({"outcome":"publicationUnconfirmed","candidate":revision_value(&candidate),"diagnostics":diagnostics}),Vec::new()),
-        Err(SourceError::SourceUnavailable(detail)) => (format!("unavailable: {detail}"),serde_json::json!({"outcome":"unavailable","detail":detail}),Vec::new()),
-        Err(SourceError::SourceUnreadable(detail)) => (format!("source unreadable: {detail}"),serde_json::json!({"outcome":"unreadable","detail":detail}),Vec::new()),
+    let (output, value, warnings) = match result {
+        Ok(SrReloadOutcome::ReloadUnchanged(revision)) => (
+            format!(
+                "unchanged: source {}; notebook names retained",
+                revision.identity
+            ),
+            serde_json::json!({"outcome":"unchanged","revision":revision_value(&revision)}),
+            Vec::new(),
+        ),
+        Ok(SrReloadOutcome::ReloadPublished(previous, next, changed)) => (
+            format!(
+                "published: source {}; compatible handlers and prompts active; notebook reset",
+                next.identity
+            ),
+            serde_json::json!({"outcome":"published","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),
+            Vec::new(),
+        ),
+        Ok(SrReloadOutcome::ReloadPublishedWithWarnings(previous, next, changed, warnings)) => (
+            format!(
+                "published: source {}; notebook reset; derived projections need repair",
+                next.identity
+            ),
+            serde_json::json!({"outcome":"publishedWithWarnings","previous":revision_value(&previous),"revision":revision_value(&next),"changedModules":changed}),
+            warnings,
+        ),
+        Ok(SrReloadOutcome::ReloadRejected(issued, candidate, diagnostics)) => (
+            format!(
+                "rejected: candidate {}; reload changed no active configuration\n{}",
+                candidate.identity, diagnostics
+            ),
+            serde_json::json!({"outcome":"rejected","issuedRevision":revision_value(&issued),"candidate":revision_value(&candidate),"diagnostics":diagnostics}),
+            Vec::new(),
+        ),
+        Ok(SrReloadOutcome::ReloadCancelled(issued)) => (
+            "cancelled before publication; reload changed no active configuration".into(),
+            serde_json::json!({"outcome":"cancelled","issuedRevision":revision_value(&issued)}),
+            Vec::new(),
+        ),
+        Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(candidate, diagnostics)) => (
+            format!(
+                "publication unconfirmed: candidate {}; admission blocked; reconcile before continuing\n{}",
+                candidate.identity, diagnostics
+            ),
+            serde_json::json!({"outcome":"publicationUnconfirmed","candidate":revision_value(&candidate),"diagnostics":diagnostics}),
+            Vec::new(),
+        ),
+        Err(SourceError::SourceUnavailable(detail)) => (
+            format!("unavailable: {detail}"),
+            serde_json::json!({"outcome":"unavailable","detail":detail}),
+            Vec::new(),
+        ),
+        Err(SourceError::SourceUnreadable(detail)) => (
+            format!("source unreadable: {detail}"),
+            serde_json::json!({"outcome":"unreadable","detail":detail}),
+            Vec::new(),
+        ),
     };
     let (run_status, item_status, completed, layer) = match disposition {
         WorkbenchOperationDisposition::Read | WorkbenchOperationDisposition::Committed => (
