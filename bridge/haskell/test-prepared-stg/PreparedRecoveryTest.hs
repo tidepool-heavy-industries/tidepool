@@ -23,18 +23,24 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
+import GHC.Data.Maybe qualified as MaybeErr
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt)
+import Tidepool.ConstructorIdentity (captureIdentityResolver, resolveTypeIdentity, issueConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel)
-import GHC.Core.DataCon (dataConName)
-import GHC.Core.TyCon (tyConDataCons)
+import GHC.Core.DataCon (dataConName, dataConTyCon, dataConOrigArgTys)
+import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.TyCon (tyConDataCons, promoteDataCon)
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..))
+import GHC.Iface.Binary (writeBinIface, TraceBinIFace(..), CompressionIFace(..))
+import GHC.Iface.Load (readIface)
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.Metadata (DCMeta(..), MetadataConflict(..), metadataForConstructors)
+import Tidepool.Metadata (DCMeta(..), metadataForConstructors)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
 import GHC.Types.Id (mkVanillaGlobal, setIdType, isDataConWorkId_maybe)
@@ -52,7 +58,7 @@ import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet)
 import GHC.Stg.Syntax qualified as Stg
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile, removePathForcibly)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile, removePathForcibly, copyFile)
 import System.Environment (setEnv)
 import System.IO (openTempFile, stderr, hClose, hFlush, hPutStr, hSeek, hGetContents, SeekMode(..))
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -69,7 +75,7 @@ import Tidepool.ExecutionProjection
   , preparedTargetReferences, preparedRootIdentity, resolveTextPackageUnit )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
-  , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
+  , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), ConstructorIdentity(..), TypeIdentity(..), TypeVersion(..), TargetDescriptor(..)
   , TopBinding(..), WireProgram(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
@@ -86,8 +92,9 @@ import Tidepool.CompilerExecution (withCompilerExecutor, compilerExecutionGrant)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
-  ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
-  , newPreparedBodyCache, prepareModule, prepareRecoveredBodies, newPreparedComponentTaskPreparer, runPreparedBodyTask
+  ( PreparedCoverage(..), pmModule, pmIdentityResolver, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
+  , newPreparedBodyCache, prepareModule, acquirePreparedModule, runPreparedModuleTask
+  , prepareRecoveredBodies, newPreparedComponentTaskPreparer, runPreparedBodyTask
   , preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.Timing (timeSection)
@@ -106,9 +113,199 @@ tests = testGroup "test-prepared-stg"
   , testCase "component histories agree with complete reachability recomputation" reachHistoryProperty
   , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
+  , testCase "declaration ABI identities survive source edits and retained interfaces" declarationAbiIdentityRegression
+  , testCase "prepared identity resolver stays with acquisition across a later compile" preparedIdentityResolverCaptureRegression
   , testCase "homonymous real compiler units preserve closure and refuse host alias" homonymousUnitProperty
   , testCase "compiled original recovery and reachability closure" scenario
   ]
+
+-- Compare the finalized interface with its retained binary. The oracle compares
+-- declarations and sibling constructor identities; it never uses whole-interface
+-- hashes as type versions.
+declarationAbiIdentityRegression :: IO ()
+declarationAbiIdentityRegression = bracket scratch removePathForcibly $ \directory -> do
+  libdir <- getLibdir
+  observations <- forM variants $ \variant -> do
+    let work = directory </> variant
+        source = work </> "Probe.hs"
+    createDirectoryIfMissing True work
+    copyFile ("test-prepared-stg/declaration-abi/IdentityProbe" ++ capitalize variant ++ ".hs") source
+    copyFile "test-prepared-stg/declaration-abi/IdentityReexport.hs" (work </> "IdentityReexport.hs")
+    runGhc (Just libdir) $ do
+      flags <- getSessionDynFlags
+      _ <- setSessionDynFlags (updOptLevel 0 flags)
+        { importPaths = [work], backend = noBackend, ghcLink = NoLink }
+      target <- guessTarget source Nothing Nothing
+      setTargets [target]
+      loaded <- load LoadAllTargets
+      case loaded of
+        Failed -> fail ("identity variant did not compile: " ++ variant)
+        Succeeded -> pure ()
+      env <- getSession
+      summary <- getModSummary (mkModuleName "Probe")
+      home <- maybe (fail "identity variant lacks finalized interface") pure
+        (lookupHpt (hsc_HPT env) (mkModuleName "Probe"))
+      liftIO $ do
+        let iface = hm_iface home
+            tycons = typeEnvTyCons (md_types (hm_details home))
+            constructors = concatMap tyConDataCons tycons
+            demanded = tycons ++ map promoteDataCon constructors
+            require = either (fail . show) pure
+        fresh <- captureIdentityResolver env (Just iface)
+        freshTypes <- require (traverse (resolveTypeIdentity fresh) demanded)
+        freshCons <- require (traverse (issueConstructor fresh) constructors)
+        writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression
+          (ml_hi_file (ms_location summary)) iface
+        retainedResult <- readIface (hsc_dflags env) (hsc_NC env)
+          (mi_module iface) (ml_hi_file (ms_location summary))
+        retainedIface <- case retainedResult of
+          MaybeErr.Failed _ -> fail "retained identity interface could not be read"
+          MaybeErr.Succeeded value -> pure value
+        retained <- captureIdentityResolver env (Just retainedIface)
+        retainedTypes <- require (traverse (resolveTypeIdentity retained) demanded)
+        retainedCons <- require (traverse (issueConstructor retained) constructors)
+        assert (freshTypes == retainedTypes
+            && map issuedConstructorIdentity freshCons == map issuedConstructorIdentity retainedCons
+            && map issuedConstructorHostId freshCons == map issuedConstructorHostId retainedCons)
+          ("fresh/retained identity disagreement: " ++ variant)
+        assert (not (null freshTypes) && not (null freshCons))
+          "identity regression selected no compiler declarations"
+        imported <- case [con | con <- constructors,
+            occNameString (nameOccName (dataConName con)) == "ImportedControls"] of
+          [con] -> require (traverse (\field -> case splitTyConApp_maybe (scaledThing field) of
+              Just (tc,_) -> resolveTypeIdentity fresh tc
+              Nothing -> error "imported control lacks a nominal head") (dataConOrigArgTys con))
+          _ -> fail "identity variant lost its imported Text/effect control"
+        assert (length imported == 3 && imported !! 0 == imported !! 1)
+          "Text reexport changed its exact defining identity"
+        assert (symbolModule (typeSymbol (imported !! 0)) == "Data.Text.Internal"
+            && symbolModule (typeSymbol (imported !! 2)) == "Control.Monad.Freer.Internal")
+          "imported Text/effect identity borrowed the probe's owner"
+        let types = Map.fromList [(symbolOccurrence (typeSymbol identity),identity) | identity <- freshTypes]
+            cons = Map.fromList [(symbolOccurrence (constructorSymbol (issuedConstructorIdentity con)),
+              (issuedConstructorIdentity con,issuedConstructorHostId con)) | con <- freshCons]
+        forM_ freshCons $ \con -> do
+          let identity = issuedConstructorIdentity con
+          parent <- require (resolveTypeIdentity fresh (dataConTyCon (issuedDataCon con)))
+          assert (constructorType identity == parent) "constructor family disagrees with its compiler parent"
+        pure (variant,(types,cons,imported))
+  let observed variant = maybe (error "missing identity variant") id (lookup variant observations)
+      (baseTypes,baseCons,baseImported) = observed "base"
+      at name rows = maybe (error ("missing declaration: " ++ show name)) id (Map.lookup name rows)
+  forM_ ["comment","unrelated"] $ \variant -> do
+    let (types,cons,_) = observed variant
+    assert (types == baseTypes && cons == baseCons)
+      ("non-ABI source edit changed type/constructor identity: " ++ variant)
+  forM_ ["arity","fieldtype"] $ \variant -> do
+    let (types,cons,_) = observed variant
+    assert (at "Private" types /= at "Private" baseTypes
+        && all (\name -> at name cons /= at name baseCons) ["Priv0","Priv1"])
+      ("declaration ABI edit preserved a family or sibling constructor identity: " ++ variant)
+    forM_ ["Public","TrulyUnused","LeftR","RightR","Newtype","Classy"] $ \name ->
+      assert (at name types == at name baseTypes) "unrelated type borrowed another declaration's ABI"
+  let (classTypes,classCons,_) = observed "classabi"
+  assert (at "Classy" classTypes /= at "Classy" baseTypes
+      && at "C:Classy" classCons /= at "C:Classy" baseCons)
+    "class method edit preserved dictionary family identity"
+  let (familyTypes,familyCons,_) = observed "family"
+  forM_ ["Family","R:FamilyInt","Promotion","Proxy"] $ \name ->
+    assert (case typeVersion (at name familyTypes) of GhcAbi _ _ -> True; _ -> False)
+      "data family or promotion lacks its defining declaration ABI"
+  forM_ ["PromoA","PromoB"] $ \name -> do
+    let (con,_) = at name familyCons
+    assert (typeVersion (at name familyTypes) == typeVersion (constructorType con))
+      "promoted constructor identity did not resolve through its actual parent ABI"
+  forM_ observations $ \(variant,(_,_,imported)) ->
+    assert (imported == baseImported)
+      ("source edit changed imported Text/effect identity: " ++ variant)
+ where
+  variants = ["base","arity","fieldtype","comment","unrelated","classabi","family"]
+  capitalize "base" = "Base"
+  capitalize "arity" = "Arity"
+  capitalize "fieldtype" = "Fieldtype"
+  capitalize "comment" = "Comment"
+  capitalize "unrelated" = "Unrelated"
+  capitalize "classabi" = "Classabi"
+  capitalize _ = "Family"
+  scratch = do
+    (path, handle) <- openTempFile "/tmp" "declaration-abi-identity"
+    hClose handle
+    removeFile path
+    createDirectoryIfMissing True path
+    pure path
+
+preparedIdentityResolverCaptureRegression :: IO ()
+preparedIdentityResolverCaptureRegression = bracket scratch removePathForcibly $ \directory -> do
+  let work = directory </> "workspace"
+      source = work </> "Probe.hs"
+  createDirectoryIfMissing True work
+  copyFile "test-prepared-stg/declaration-abi/IdentityProbeBase.hs" source
+  copyFile "test-prepared-stg/declaration-abi/IdentityReexport.hs" (work </> "IdentityReexport.hs")
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (updOptLevel 0 flags)
+      { importPaths = [work], backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget source Nothing Nothing
+    setTargets [target]
+    firstLoad <- load LoadAllTargets
+    case firstLoad of
+      Failed -> fail "first declaration-identity source failed to compile"
+      Succeeded -> pure ()
+    firstEnv <- getSession
+    firstSummary <- getModSummary (mkModuleName "Probe")
+    firstParsed <- parseModule firstSummary
+    firstTyped <- typecheckModule firstParsed
+    firstDesugared <- desugarModule firstTyped
+    (firstGuts, _) <- liftIO (hscTidy firstEnv (coreModule firstDesugared))
+    firstHome <- maybe (fail "first declaration-identity source lacks its home interface") pure
+      (lookupHpt (hsc_HPT firstEnv) (mkModuleName "Probe"))
+    firstConstructor <- case
+        [constructor | tycon <- typeEnvTyCons (md_types (hm_details firstHome))
+          , constructor <- tyConDataCons tycon
+          , occNameString (nameOccName (dataConName constructor)) == "Priv0"] of
+      [constructor] -> pure constructor
+      _ -> fail "first declaration-identity source lacks Priv0"
+    firstTask <- liftIO (acquirePreparedModule firstEnv (ms_location firstSummary) mempty
+      (FinalizedModule firstHome firstGuts))
+    liftIO (copyFile "test-prepared-stg/declaration-abi/IdentityProbeArity.hs" source)
+    setTargets [target]
+    secondLoad <- load LoadAllTargets
+    case secondLoad of
+      Failed -> fail "changed declaration-identity source failed to compile"
+      Succeeded -> pure ()
+    secondEnv <- getSession
+    secondSummary <- getModSummary (mkModuleName "Probe")
+    secondParsed <- parseModule secondSummary
+    secondTyped <- typecheckModule secondParsed
+    secondDesugared <- desugarModule secondTyped
+    (secondGuts, _) <- liftIO (hscTidy secondEnv (coreModule secondDesugared))
+    secondHome <- maybe (fail "changed declaration-identity source lacks its home interface") pure
+      (lookupHpt (hsc_HPT secondEnv) (mkModuleName "Probe"))
+    secondConstructor <- case
+        [constructor | tycon <- typeEnvTyCons (md_types (hm_details secondHome))
+          , constructor <- tyConDataCons tycon
+          , occNameString (nameOccName (dataConName constructor)) == "Priv0"] of
+      [constructor] -> pure constructor
+      _ -> fail "changed declaration-identity source lacks Priv0"
+    secondPrepared <- liftIO (prepareModule secondEnv (ms_location secondSummary) mempty
+      (FinalizedModule secondHome secondGuts))
+    firstPrepared <- liftIO (runPreparedModuleTask firstTask)
+    let issue resolver constructor = either (fail . show) pure (issueConstructor resolver constructor)
+    firstIssued <- issue (pmIdentityResolver firstPrepared) firstConstructor
+    secondIssued <- issue (pmIdentityResolver secondPrepared) secondConstructor
+    liftIO $ assert
+      (constructorType (issuedConstructorIdentity firstIssued)
+          /= constructorType (issuedConstructorIdentity secondIssued)
+        && issuedConstructorHostId firstIssued /= issuedConstructorHostId secondIssued)
+      "running a task acquired before the changed compile borrowed its replacement identity resolver"
+ where
+  scratch = do
+    (path, handle) <- openTempFile "/tmp" "prepared-identity-resolver"
+    hClose handle
+    removeFile path
+    createDirectoryIfMissing True path
+    pure path
 
 -- Compile each owner independently. Names and constructors come from GHC;
 -- the oracle retains the issuing unit instead of reconstructing it from text.
@@ -150,10 +347,11 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
       prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
       let constructors = concatMap tyConDataCons (typeEnvTyCons (md_types (hm_details home)))
           tickets = [con | con <- constructors, occNameString (nameOccName (dataConName con)) == "Ticket"]
-      rows <- either (fail . show) pure (metadataForConstructors [] tickets)
+      issuedTickets <- either (fail . show) pure (traverse (issueConstructor (pmIdentityResolver prepared)) tickets)
+      rows <- either (fail . show) pure (metadataForConstructors issuedTickets)
       liftIO $ assert (length tickets == 1 && moduleUnit (pmModule prepared) == stringToUnit unit)
         "homonymous issuer did not retain the declared unit"
-      pure (env, prepared, tickets, rows)
+      pure (env, prepared, issuedTickets, rows)
   let modules = [prepared | (_,prepared,_,_) <- issued]
       roots = [SymbolIdentity (Text.pack (unitString (moduleUnit (pmModule prepared))))
           "Homonymous" "value" "result" Nothing | prepared <- modules]
@@ -167,29 +365,29 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
       ticketRows = [[row | row <- rows, dcmName row == "Ticket"] | (_,_,_,rows) <- issued]
   assert (roots !! 0 /= roots !! 1) "independent units collapsed their exact root identity"
   let issuedSymbols = [[dcmIdentity row | row <- rows] | rows <- ticketRows]
-  assert (map (map symbolUnit) issuedSymbols == [["unit-one"],["unit-two"]])
+  assert (map (map (symbolUnit . constructorSymbol)) issuedSymbols == [["unit-one"],["unit-two"]])
     "metadata dropped the actual independently issued GHC units"
   assert (issuedSymbols !! 0 /= issuedSymbols !! 1)
     "metadata collapsed full nominal constructor identity"
   let encoded = [encodeMetadata rows False Nothing [] | rows <- ticketRows]
   assert (encoded !! 0 /= encoded !! 1)
     "metadata wire erased the independently issued unit distinction"
-  assert (all ((== BS.pack [0x54,0x50,0x4c,0x52,0,5,0,0]) . BS.take 8) encoded)
+  assert (all ((== BS.pack [0x54,0x50,0x4c,0x52,0,6,0,0]) . BS.take 8) encoded)
     "actual constructor producer emitted an obsolete metadata format"
-  -- Runtime host ids and public aliases remain shared projections. Full
-  -- nominal identity survives independently of both, and conflicting ids refuse.
-  let hostSpellings = [[(dcmId row,dcmQualName row) | row <- rows] | rows <- ticketRows]
-  assert (hostSpellings !! 0 == hostSpellings !! 1 && length (head hostSpellings) == 1)
-    "homonymous control no longer exercises the shared runtime host projection"
+  let hostIds = [[dcmId row | row <- rows] | rows <- ticketRows]
+      aliases = [[dcmQualName row | row <- rows] | rows <- ticketRows]
+  assert (hostIds !! 0 /= hostIds !! 1 && aliases !! 0 == aliases !! 1)
+    "homonymous exact owners failed to coexist behind the same display alias"
   forM_ [issued, reverse issued] $ \ordered -> do
     let constructors = concat [cons | (_,_,cons,_) <- ordered]
-    case metadataForConstructors [] constructors of
-      Left MetadataNominalConflict{} -> pure ()
-      _ -> fail "genuine homonymous constructor batch escaped the nominal guard"
-    case preparedModuleProductConstructors
-        (projectPreparedModuleProducts (context roots) [prepared | (_,prepared,_,_) <- ordered]) of
-      Left InvalidPreparedIdentity{} -> pure ()
-      _ -> fail "genuine homonymous products escaped the exact host-ID guard"
+    rows <- either (fail . show) pure (metadataForConstructors constructors)
+    assert (length [row | row <- rows, dcmName row == "Ticket"] == 2)
+      "homonymous constructor metadata lost one exact owner"
+    projected <- either (fail . show) pure (preparedModuleProductConstructors
+      (projectPreparedModuleProducts (context roots) [prepared | (_,prepared,_,_) <- ordered]))
+    assert (Set.fromList (map issuedConstructorIdentity constructors)
+        `Set.isSubsetOf` Set.fromList (map issuedConstructorIdentity projected))
+      "homonymous original products lost an exact constructor owner"
   let (env,_,_,_) = head issued
       history choices = do
         cache <- newFatIfaceCache

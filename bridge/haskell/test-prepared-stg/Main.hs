@@ -994,7 +994,7 @@ verifyTypedPreparationCacheLifetime dir = do
     mapM_ (\name -> do
         let recovered = input name
             iface = hm_iface (finalizedHomeModInfo (finalizedFixtureOwner name cold))
-        context <- issueOwnerInterfaceContext (recoveredModule recovered) (mi_iface_hash (mi_final_exts iface))
+        context <- issueOwnerInterfaceContext (recoveredModule recovered) (mi_iface_hash (mi_final_exts iface)) iface
           (recoveredLocation recovered) (recoveredTyCons recovered) (recoveredEntries recovered)
         cacheOwnerInterface owners (recoveredModule recovered) context)
       ["TypedPreparationPlain", "TypedPreparationOwner"]

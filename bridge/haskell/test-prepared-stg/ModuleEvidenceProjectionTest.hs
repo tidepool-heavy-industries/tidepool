@@ -1,6 +1,7 @@
 module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..), PreparedEntryContext(..))
+import Tidepool.ConstructorIdentity (unionIdentityResolvers)
 import Control.Monad (forM_, unless)
 import Control.Monad.State.Strict (runStateT)
 import Data.List (sort)
@@ -137,6 +138,7 @@ verifyModuleEvidenceProjection = do
     Left failure -> error (show failure)
   prepared = PreparedModule
     { preparedModule = owner
+    , preparedIdentityResolver = unionIdentityResolvers []
     , preparedCoverage = CompleteSourceModule
     , preparedBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
                    | binder_ <- [alpha, beta, gamma]]
@@ -180,7 +182,7 @@ nominalHead graph root = do
   body <- child root TypeBody
   declaration <- child body TypeHead
   case node declaration of
-    Just (TypeDeclaration identity _ _ _) -> Just (symbolOccurrence identity)
+    Just (TypeDeclaration identity _ _ _) -> Just (symbolOccurrence (typeSymbol identity))
     _ -> Nothing
  where
   node (TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (typeGraphNodes graph)

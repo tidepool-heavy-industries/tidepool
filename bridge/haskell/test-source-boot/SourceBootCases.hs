@@ -143,7 +143,7 @@ import Tidepool.ExecutionProjection
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
 import Tidepool.PreparedStg
-  ( newPreparedBodyCache, PreparedBodyReuse(..), pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
+  ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
   , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
   , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
   , preparedSiteDependenciesEquivalent )
@@ -163,6 +163,7 @@ import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
 import GHC.Core.DataCon qualified as DC
 import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import Tidepool.ConstructorIdentity (issueConstructor, issuedDataCon, unionIdentityResolvers)
 import Tidepool.Metadata (DCMeta(..), MetadataConflict(..), metadataForConstructors, wiredInDataCons)
 import GHC.Core.TyCon (tyConDataCons)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -2658,7 +2659,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       warmProducts = settled warm Set.empty
       check label products = do
         cons <- either (fail . show) pure (preparedModuleProductConstructors products)
-        rows <- either (fail . show) pure (metadataForConstructors [] cons)
+        rows <- either (fail . show) pure (metadataForConstructors cons)
         wired <- either (fail . show) pure wiredInDataCons
         let declared = Set.fromList [constructorHostId con
               | (_,Right groups) <- preparedModuleProductOutcomes products
@@ -2761,9 +2762,9 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   unless (case lookup requestOwner (preparedModuleProductOutcomes (settled warm (Set.singleton requestOwner))) of
       Just (Left _) -> True
       _ -> False) $ fail "withdrawn original owner was admitted through its cached constructor census"
-  duplicateRows <- either (fail . show) pure (metadataForConstructors [] (cons ++ cons))
+  duplicateRows <- either (fail . show) pure (metadataForConstructors (cons ++ cons))
   unless (duplicateRows == coldRows) $ fail "equal actual constructor provenance changed metadata"
-  text <- case [con | con <- cons, getOccString (DC.dataConName con) == "Text",
+  text <- case [issuedDataCon issued | issued <- cons, let con = issuedDataCon issued, getOccString (DC.dataConName con) == "Text",
           maybe False ((== "Data.Text.Internal") . moduleNameString . moduleName) (nameModule_maybe (DC.dataConName con))] of
     con : _ -> pure con
     [] -> fail "successful native Text metadata lost its compiler declaration"
@@ -2781,14 +2782,16 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
         (mkModule (stringToUnit "wrong-text-unit") (mkModuleName "Data.Text.Internal"))
         (nameOccName name) (nameSrcSpan name)
       foreignOwner = clone foreignName (DC.dataConTag text)
-  forM_ [[text,conflict],[conflict,text]] $ \incoming ->
-    case metadataForConstructors [] incoming of
+  let resolver = unionIdentityResolvers (map pmIdentityResolver modules)
+  issuedText <- either (fail . show) pure (issueConstructor resolver text)
+  issuedConflict <- either (fail . show) pure (issueConstructor resolver conflict)
+  forM_ [[issuedText,issuedConflict],[issuedConflict,issuedText]] $ \incoming ->
+    case metadataForConstructors incoming of
       Left (MetadataFieldConflict _ _) -> pure ()
       failure -> fail ("conflicting actual constructor metadata did not refuse: " ++ show failure)
-  forM_ [[text,foreignOwner],[foreignOwner,text]] $ \incoming ->
-    case metadataForConstructors [] incoming of
-      Left (MetadataNominalConflict _ _ _) -> pure ()
-      failure -> fail ("distinct exact constructor owners did not refuse their shared host id: " ++ show failure)
+  case issueConstructor resolver foreignOwner of
+    Left _ -> pure ()
+    Right _ -> fail "constructor identity accepted a name outside its exact parent owner"
   unless (Set.fromList (map dcmId withdrawnRows) `Set.isSubsetOf` Set.fromList (map dcmId coldRows)) $
     fail "withdrawing an original introduced unrelated constructor metadata"
 

@@ -3,7 +3,7 @@
 
 module ExecutionCorpusCases where
 
-import GHC.Core.DataCon (DataCon)
+import Tidepool.ConstructorIdentity (IssuedConstructor)
 import Control.Monad (forM, unless, when)
 import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
@@ -41,7 +41,7 @@ import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
-  ( prBinds, prTyCons, prHscEnv, prCapturedType, prWarnings, PreparedPipelineResult, pprPipelineResult
+  ( prBinds, prHscEnv, prCapturedType, prWarnings, PreparedPipelineResult, pprPipelineResult
   , pprModules, preparedFreshDependencies )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
@@ -160,7 +160,7 @@ runProbe compile rawArguments = do
               targetInventories = [inventory | (_,inventory,_) <- rowsWithInventory]
               emittedConstructors = concat [cons | (_,_,cons) <- rowsWithInventory]
           let result = pprPipelineResult prepared
-          metadata <- either (fail . show) pure (metadataForConstructors (prTyCons result) (constructors ++ emittedConstructors))
+          metadata <- either (fail . show) pure (metadataForConstructors (constructors ++ emittedConstructors))
           let hasIO = any (targetBindingHasIO (prBinds result)) metadataNames
           BS.writeFile (outputDir </> "meta.cbor")
             (encodeMetadata metadata hasIO (Text.pack <$> prCapturedType result)
@@ -238,7 +238,7 @@ projectOneTarget
   -> Int
   -> String
   -> Maybe SymbolIdentity
-  -> IO (Record, TargetInventory, [DataCon])
+  -> IO (Record, TargetInventory, [IssuedConstructor])
 projectOneTarget recover formattingAuthority timeAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
   let name = missingName moduleNameArg occurrence
       reject reason = pure
@@ -258,7 +258,7 @@ projectOneIdentity
   -> FilePath
   -> Int
   -> SymbolIdentity
-  -> IO (Record, TargetInventory, [DataCon])
+  -> IO (Record, TargetInventory, [IssuedConstructor])
 projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index selected = do
   let context = projectionContext formattingAuthority timeAuthority textAuthority selected
       artifactName = numericArtifactName index
