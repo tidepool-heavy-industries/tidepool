@@ -172,11 +172,7 @@ where
         match result {
             ActorGenerationCommit::Published(generation) => {
                 if let Some(lifecycle) = self.lifecycle {
-                    lifecycle.generation_published(
-                        generation.context.clone(),
-                        generation.public_owner.clone(),
-                        generation.installation.clone(),
-                    );
+                    lifecycle.generation_published(generation);
                 }
                 Ok(SrReloadOutcome::ReloadPublished(
                     previous,
@@ -297,7 +293,6 @@ where
                         .installed_tools
                         .current_tools()
                         .map_or(behavior.spec_installs, |tools| tools.install);
-                    behavior.after_tool.forget_failures();
                 }
                 Ok(WorkbenchAdvance::Park({
                     let execution = owned

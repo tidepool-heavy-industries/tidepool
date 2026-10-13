@@ -144,9 +144,9 @@ pub(crate) struct Invocation {
 pub(crate) struct AfterToolLog {
     invocations: Vec<Invocation>,
     next: u64,
-    /// Failure reason to the invocation that first reported it, and how many
+    /// Captured installation and failure reason to the first invocation, and how many
     /// times it has been seen.
-    seen: HashMap<String, (u64, u64)>,
+    seen: HashMap<(u64, String), (u64, u64)>,
 }
 
 /// Whether a failure is the first of its kind, and therefore whether the
@@ -179,8 +179,9 @@ impl AfterToolLog {
 
     /// The first sighting of a diagnostic earns the diagnostic. Every later
     /// sighting earns a reference to the first and nothing more.
-    pub(crate) fn notice(&mut self, ordinal: u64, reason: &str) -> FailureNotice {
-        match self.seen.get_mut(reason) {
+    pub(crate) fn notice(&mut self, installation: u64, ordinal: u64, reason: &str) -> FailureNotice {
+        let key = (installation, reason.to_owned());
+        match self.seen.get_mut(&key) {
             Some((first, count)) => {
                 *count += 1;
                 FailureNotice::Again {
@@ -189,20 +190,13 @@ impl AfterToolLog {
                 }
             }
             None => {
-                self.seen.insert(reason.to_owned(), (ordinal, 1));
+                self.seen.insert(key, (ordinal, 1));
                 FailureNotice::First {
                     ordinal,
                     reason: reason.to_owned(),
                 }
             }
         }
-    }
-
-    /// A rebuilt slot starts with a clean record of what it has been told.
-    /// A failure that comes back after a repair is news, and the invocation
-    /// its reference would name may no longer be among the rows kept.
-    pub(crate) fn forget_failures(&mut self) {
-        self.seen.clear();
     }
 
     /// The status view's rows, newest last. Empty when no slot has ever run,
@@ -307,13 +301,13 @@ mod tests {
     fn one_diagnostic_is_reported_once_however_often_the_slot_fails() {
         let mut log = AfterToolLog::default();
         let first = log.begin();
-        let notice = log.notice(first, "divide by zero");
+        let notice = log.notice(1, first, "divide by zero");
         let once = failed("result", &notice);
         assert!(once.contains("divide by zero"), "{once}");
         assert!(once.contains("after-tool#1"), "{once}");
 
         let second = log.begin();
-        let notice = log.notice(second, "divide by zero");
+        let notice = log.notice(1, second, "divide by zero");
         let twice = failed("result", &notice);
         assert!(!twice.contains("divide by zero"), "{twice}");
         assert!(twice.contains("after-tool#1"), "{twice}");
@@ -321,10 +315,39 @@ mod tests {
 
         // A different diagnostic is a different thing to say.
         let third = log.begin();
-        let notice = log.notice(third, "no such binding");
+        let notice = log.notice(1, third, "no such binding");
         let other = failed("result", &notice);
         assert!(other.contains("no such binding"), "{other}");
         assert!(other.contains("after-tool#3"), "{other}");
+    }
+
+    #[test]
+    fn failure_deduplication_is_scoped_to_the_captured_installation() {
+        let mut log = AfterToolLog::default();
+        let first_a = log.begin();
+        assert!(matches!(
+            log.notice(10, first_a, "timeout"),
+            FailureNotice::First { ordinal, .. } if ordinal == first_a
+        ));
+
+        let first_b = log.begin();
+        assert!(matches!(
+            log.notice(11, first_b, "timeout"),
+            FailureNotice::First { ordinal, .. } if ordinal == first_b
+        ));
+
+        // This late A result still reports against A after B has run.
+        let late_a = log.begin();
+        assert!(matches!(
+            log.notice(10, late_a, "timeout"),
+            FailureNotice::Again { ordinal, count: 2 } if ordinal == first_a
+        ));
+
+        let second_b = log.begin();
+        assert!(matches!(
+            log.notice(11, second_b, "timeout"),
+            FailureNotice::Again { ordinal, count: 2 } if ordinal == first_b
+        ));
     }
 
     /// An abstention's reason reaches the log and nothing else; only the log
@@ -352,23 +375,23 @@ mod tests {
     fn evicted_failure_references_are_reannounced_and_deduplication_stays_bounded() {
         let mut log = AfterToolLog::default();
         let first = log.begin();
-        let notice = log.notice(first, "repeated failure");
+        let notice = log.notice(1, first, "repeated failure");
         assert!(matches!(notice, FailureNotice::First { ordinal: 1, .. }));
         log.record(failed_invocation(first));
 
         for index in 0..AFTER_TOOL_LOG + 2 {
             let ordinal = log.begin();
             let reason = format!("distinct failure {index}");
-            let notice = log.notice(ordinal, &reason);
+            let notice = log.notice(1, ordinal, &reason);
             log.record(failed_invocation(ordinal));
             assert!(matches!(notice, FailureNotice::First { .. }));
         }
 
         assert!(log.seen.len() <= AFTER_TOOL_LOG);
-        assert!(!log.seen.contains_key("repeated failure"));
+        assert!(!log.seen.contains_key(&(1, "repeated failure".into())));
 
         let ordinal = log.begin();
-        let notice = log.notice(ordinal, "repeated failure");
+        let notice = log.notice(1, ordinal, "repeated failure");
         assert!(
             matches!(notice, FailureNotice::First { ordinal: current, .. } if current == ordinal)
         );
@@ -376,15 +399,13 @@ mod tests {
         log.record(failed_invocation(ordinal));
 
         let ordinal = log.begin();
-        let notice = log.notice(ordinal, "repeated failure");
+        let notice = log.notice(1, ordinal, "repeated failure");
         assert!(
             matches!(notice, FailureNotice::Again { ordinal: first, count: 2 } if first == ordinal - 1)
         );
         log.record(failed_invocation(ordinal));
         assert!(log.seen.len() <= AFTER_TOOL_LOG);
 
-        log.forget_failures();
-        assert!(log.seen.is_empty());
     }
 
     fn failed_invocation(ordinal: u64) -> Invocation {

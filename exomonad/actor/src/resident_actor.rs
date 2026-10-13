@@ -2192,7 +2192,7 @@ enum ResidentBoot {
 #[derive(Clone)]
 enum InitialActorConfiguration {
     Unselected,
-    Fresh,
+    Fresh { source: crate::CheckpointSourceLayer },
     Restored {
         head: tidepool_runtime::session::ActiveNotebookGeneration,
         source: crate::CheckpointSourceLayer,
@@ -5226,21 +5226,18 @@ where
                         "checkpoint retained-scope refusal: {refusal:?}"
                     ))
                 })?;
-            let inherited_source =
-                if spawn.is_some() || descriptor.source_imports().inherited_scope()?.is_some() {
-                    let source = match effect_owner.admitted_source() {
-                        Some(source) => source.clone(),
-                        None => self.freeze_installed_source(context.actor)?,
-                    };
-                    if let Some(layers) = &self.environment.source_layers {
-                        layers
-                            .validate_source_authority(&source)
-                            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                    }
-                    Some(source)
-                } else {
-                    None
-                };
+            let source = effect_owner
+                .admitted_source()
+                .cloned()
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "child admission has no captured source capsule".into(),
+                    )
+                })?;
+            if let Some(layers) = &self.environment.source_layers {
+                layers.validate_source_authority(&source).map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            }
+            let inherited_source = Some(source);
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
@@ -6541,41 +6538,16 @@ where
                         })
                         .cloned()
                         .ok_or(crate::CheckpointRefusal::NoHostedBoundary)?;
-                    let freeze_source = || {
-                        self.environment
-                            .source_layers
-                            .as_ref()
-                            .map(|layers| layers.freeze_checkpoint_layer(context.actor.into()))
-                            .transpose()
-                            .map(|layer| layer.unwrap_or_default())
-                    };
-                    // Workbench admission already froze the revision paths.
-                    // The run source owner retains immutable revisions for the
-                    // run; a later reload cannot change this capture's source.
-                    let admitted_source = effect_owner.admitted_source().cloned();
-                    let before = admitted_source.clone().map_or_else(
-                        || freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed),
-                        Ok,
-                    )?;
+                    let before = effect_owner
+                        .admitted_source()
+                        .cloned()
+                        .ok_or(crate::CheckpointRefusal::CaptureFailed)?;
                     let (scope, retained_scope) = self
                         .environment
                         .runner
                         .capture_retained_context_scope(context.clone())
                         .await
                         .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
-                    let after = if admitted_source.is_some() {
-                        Ok(before.clone())
-                    } else {
-                        freeze_source()
-                    };
-                    if !matches!(after, Ok(ref layer) if layer.same_revision(&before)) {
-                        self.environment
-                            .runner
-                            .retire_context_scopes(context.clone(), vec![scope])
-                            .await
-                            .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
-                        return Err(crate::CheckpointRefusal::CaptureFailed);
-                    }
                     let attachment = match effect_owner.publication().capture() {
                         Some(capture) => match capture.capture(&name, &boundary) {
                             Ok(attachment) => Some(attachment),
@@ -7882,7 +7854,7 @@ where
             return Ok(());
         }
         if self.descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable {
-            self.initial_configuration = InitialActorConfiguration::Fresh;
+            self.initial_configuration = InitialActorConfiguration::Fresh { source: self.capture_boot_source(context.actor)? };
             return Ok(());
         }
         let predecessor = self
@@ -7901,7 +7873,7 @@ where
                     "source-backed recovery has no durable notebook generation; legacy source-backed runs require an explicit migration".into(),
                 ));
             }
-            self.initial_configuration = InitialActorConfiguration::Fresh;
+            self.initial_configuration = InitialActorConfiguration::Fresh { source: self.capture_boot_source(context.actor)? };
             return Ok(());
         };
         head.references
@@ -7936,29 +7908,33 @@ where
         Ok(())
     }
 
-    fn freeze_installed_source(
+    fn capture_boot_source(
         &self,
         actor: ActorRef,
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
-        if matches!(
-            self.initial_configuration,
-            InitialActorConfiguration::Unselected
-        ) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "initial configuration has not been selected".into(),
-            ));
-        }
-        if let InitialActorConfiguration::Restored { source, .. } = &self.initial_configuration {
+        if let Some(source) = self.admitted_checkpoint.as_ref().map(|(lease, _)| &lease.issuer_source_layer).or(self.spawn_source.as_ref()) {
             return Ok(source.clone());
         }
         self.environment.source_layers.as_ref().map_or_else(
             || Ok(crate::CheckpointSourceLayer::default()),
-            |layers| {
-                layers
-                    .freeze_checkpoint_layer(tidepool_repr::PrincipalId::from(actor))
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
-            },
+            |layers| layers.freeze_checkpoint_layer(actor.into()).map_err(ResidentActorWorkbenchError::ActorProtocol),
         )
+    }
+
+    fn freeze_installed_source(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
+        if let Some(lease) = self.installed_tools.current() {
+            if lease.actor() != actor {
+                return Err(ResidentActorWorkbenchError::ActorProtocol("source installation belongs to another actor incarnation".into()));
+            }
+            return Ok(lease.source().clone());
+        }
+        match &self.initial_configuration {
+            InitialActorConfiguration::Fresh { source } | InitialActorConfiguration::Restored { source, .. } => Ok(source.clone()),
+            InitialActorConfiguration::Unselected => Err(ResidentActorWorkbenchError::ActorProtocol("initial configuration has not been selected".into())),
+        }
     }
 
     async fn ready_public_owner(
@@ -8045,11 +8021,7 @@ where
         {
             crate::resident_workbench::ActorGenerationCommit::Published(generation) => {
                 if let Some(lifecycle) = &self.lifecycle {
-                    lifecycle.generation_published(
-                        generation.context.clone(),
-                        generation.public_owner.clone(),
-                        generation.installation.clone(),
-                    );
+                    lifecycle.generation_published(generation);
                 }
                 Ok(())
             }
@@ -8331,7 +8303,7 @@ where
                     "prompt composition preceded initial configuration selection".into(),
                 ))
             }
-            InitialActorConfiguration::Fresh => self
+            InitialActorConfiguration::Fresh { .. } => self
                 .descriptor
                 .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
@@ -10008,7 +9980,7 @@ where
                         "no answer within {}",
                         crate::after_tool::describe_wait(wait)
                     );
-                    let notice = self.after_tool.notice(ordinal, &reason);
+                    let notice = self.after_tool.notice(tools.install, ordinal, &reason);
                     (
                         crate::after_tool::failed(&output, &notice),
                         Disposition::TimedOut(wait),
@@ -10035,7 +10007,7 @@ where
                 ),
                 Some(Err(error)) => {
                     let reason = crate::after_tool::compact_reason(&error.to_string());
-                    let notice = self.after_tool.notice(ordinal, &reason);
+                    let notice = self.after_tool.notice(tools.install, ordinal, &reason);
                     (
                         crate::after_tool::failed(&output, &notice),
                         Disposition::Failed(reason.clone()),
@@ -10075,7 +10047,7 @@ where
                         // rewrite, so the original is delivered instead.
                         Err(error) => {
                             let reason = crate::after_tool::compact_reason(&error.to_string());
-                            let notice = self.after_tool.notice(ordinal, &reason);
+                            let notice = self.after_tool.notice(tools.install, ordinal, &reason);
                             (
                                 crate::after_tool::failed(&output, &notice),
                                 Disposition::Failed(reason.clone()),
@@ -12405,7 +12377,6 @@ where
                     .installed_tools
                     .current_tools()
                     .map_or(self.spec_installs, |tools| tools.install);
-                self.after_tool.forget_failures();
             }
             outcome
         }))

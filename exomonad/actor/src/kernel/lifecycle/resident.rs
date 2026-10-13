@@ -47,8 +47,70 @@ pub(crate) struct ResidentSnapshot {
     pub initial_context: Option<InitialContextObservation>,
     pub startup: Option<RootStartupState>,
     pub installed_policy: Option<crate::InstalledToolLease>,
+    generation: Option<Arc<crate::resident_workbench::ActorGeneration>>,
     pub fresh_context_seed: Option<String>,
     pub settlement: ResidentSettlement,
+}
+
+impl ResidentSnapshot {
+    fn publish_generation(&mut self, generation: Arc<crate::resident_workbench::ActorGeneration>) -> Result<(), String> {
+        let context = &generation.context;
+        let original = self.descriptor.placement();
+        if context.actor != self.context.actor
+            || generation.installation.actor() != context.actor
+            || context.placement.session != original.session
+            || context.placement.resource_scope != original.resource_scope
+            || !generation.public_owner.matches_context(context)
+        {
+            return Err("published generation differs from its original actor incarnation".into());
+        }
+        let same_owner = self
+            .generation
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &generation));
+        match generation_publication_order(
+            self.generation.as_ref().map(|current| current.id),
+            generation.id,
+            same_owner,
+        )? {
+            GenerationPublicationOrder::Stale | GenerationPublicationOrder::Duplicate => {
+                return Ok(())
+            }
+            GenerationPublicationOrder::Newer => {}
+        }
+        self.context = context.clone();
+        self.public_owner = if generation.public_owner.native_readiness().is_some() {
+            ActorPublicOwnerPlane::DurableCommitted(generation.public_owner.clone())
+        } else {
+            ActorPublicOwnerPlane::Ephemeral(generation.public_owner.clone())
+        };
+        self.installed_policy = Some(generation.installation.clone());
+        self.generation = Some(generation);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationPublicationOrder {
+    Stale,
+    Duplicate,
+    Newer,
+}
+
+fn generation_publication_order(
+    current: Option<tidepool_runtime::session::NotebookGenerationId>,
+    incoming: tidepool_runtime::session::NotebookGenerationId,
+    same_owner: bool,
+) -> Result<GenerationPublicationOrder, String> {
+    use std::cmp::Ordering;
+    Ok(match current.map(|current| incoming.cmp(&current)) {
+        None | Some(Ordering::Greater) => GenerationPublicationOrder::Newer,
+        Some(Ordering::Less) => GenerationPublicationOrder::Stale,
+        Some(Ordering::Equal) if same_owner => GenerationPublicationOrder::Duplicate,
+        Some(Ordering::Equal) => {
+            return Err("equal actor generation has a different issued owner".into())
+        }
+    })
 }
 
 pub(super) struct ResidentState {
@@ -166,11 +228,7 @@ pub(super) enum ResidentCommand {
         reply: RpcReplyPort<Result<(), String>>,
     },
     PolicyInstalled(Option<crate::InstalledToolLease>),
-    GenerationPublished {
-        context: ActorSessionContext,
-        owner: Arc<WorkbenchPublicOwner>,
-        installation: crate::InstalledToolLease,
-    },
+    GenerationPublished(Arc<crate::resident_workbench::ActorGeneration>),
     Request(Request),
     Completed {
         sequence: u64,
@@ -401,16 +459,10 @@ impl LifecycleHandle {
 
     pub(crate) fn generation_published(
         &self,
-        context: ActorSessionContext,
-        owner: Arc<WorkbenchPublicOwner>,
-        installation: crate::InstalledToolLease,
+        generation: Arc<crate::resident_workbench::ActorGeneration>,
     ) {
         let _ = self.address.cast(LifecycleCommand::Resident(Box::new(
-            ResidentCommand::GenerationPublished {
-                context,
-                owner,
-                installation,
-            },
+            ResidentCommand::GenerationPublished(generation),
         )));
     }
 
@@ -584,6 +636,7 @@ pub(super) fn handle(
                             initial_context: None,
                             startup: startup.as_ref().map(|_| RootStartupState::Pending),
                             installed_policy: None,
+                            generation: None,
                             fresh_context_seed,
                             settlement: ResidentSettlement::Confirmed,
                         },
@@ -610,28 +663,13 @@ pub(super) fn handle(
                 }
             }
         }
-        ResidentCommand::GenerationPublished {
-            context,
-            owner,
-            installation,
-        } => {
+        ResidentCommand::GenerationPublished(generation) => {
             if !state.is_closed() {
                 if let Some(resident) = &mut state.resident {
-                    let original = resident.current.descriptor.placement();
-                    if context.actor == resident.current.context.actor
-                        && context.placement.session == original.session
-                        && context.placement.resource_scope == original.resource_scope
-                        && owner.matches_context(&context)
-                    {
-                        resident.current.context = context;
-                        resident.current.public_owner = if owner.native_readiness().is_some() {
-                            ActorPublicOwnerPlane::DurableCommitted(owner)
-                        } else {
-                            ActorPublicOwnerPlane::Ephemeral(owner)
-                        };
-                        resident.current.installed_policy = Some(installation);
-                        state.publish();
+                    if let Err(error) = resident.current.publish_generation(generation) {
+                        resident.current.settlement = ResidentSettlement::NeedsAttention(error);
                     }
+                    state.publish();
                 }
             }
         }
@@ -1441,6 +1479,38 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
 #[cfg(test)]
 fn panicking_worker_completion_for_test() -> Completion {
     panic!("test owned resident worker panic")
+}
+
+#[cfg(test)]
+mod generation_publication_tests {
+    use super::{generation_publication_order, GenerationPublicationOrder};
+    use tidepool_runtime::session::NotebookGenerationId;
+
+    #[test]
+    fn later_publication_wins_over_delayed_older_notification() {
+        let a = NotebookGenerationId::INITIAL;
+        let b = a.next().unwrap();
+        let c = b.next().unwrap();
+
+        assert_eq!(
+            generation_publication_order(Some(a), c, false).unwrap(),
+            GenerationPublicationOrder::Newer
+        );
+        assert_eq!(
+            generation_publication_order(Some(c), b, false).unwrap(),
+            GenerationPublicationOrder::Stale
+        );
+    }
+
+    #[test]
+    fn equal_generation_requires_the_same_issued_owner() {
+        let generation = NotebookGenerationId::INITIAL;
+        assert_eq!(
+            generation_publication_order(Some(generation), generation, true).unwrap(),
+            GenerationPublicationOrder::Duplicate
+        );
+        assert!(generation_publication_order(Some(generation), generation, false).is_err());
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -457,15 +457,7 @@ where
         // its parent. Fix its own snapshot and include roots before a fresh
         // machine bootstraps those declarations.
         let source_layers = environment.source_layers.clone();
-        let helper_branch = if let Some(layers) = &source_layers {
-            Some(
-                layers
-                    .retain_helpers(context.actor.into())
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-            )
-        } else {
-            None
-        };
+        let helper_branch: Option<String> = None;
         if let Some(layers) = &source_layers {
             let layer = match &checkpoint_lease {
                 Some(lease) => layers
@@ -477,7 +469,7 @@ where
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                 None => match &inherited_source {
                     Some(source) => layers.admit_retained_layer(source),
-                    None => layers.layer_include_for(helper_branch.as_deref().unwrap_or_default()),
+                    None => layers.admit_retained_layer(&crate::CheckpointSourceLayer::default()),
                 }
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
             };

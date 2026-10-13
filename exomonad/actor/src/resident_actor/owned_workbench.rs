@@ -1696,7 +1696,7 @@ where
                     "no answer within {}",
                     crate::after_tool::describe_wait(wait)
                 );
-                let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                let notice = self.after_tool.notice(frame.installation(), frame.ordinal(), &reason);
                 (
                     crate::after_tool::failed(output, &notice),
                     Disposition::TimedOut(wait),
@@ -1717,7 +1717,7 @@ where
             }
             WorkbenchAfterToolAnswer::Settled(Err(error)) => {
                 let reason = crate::after_tool::compact_reason(&error.to_string());
-                let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                let notice = self.after_tool.notice(frame.installation(), frame.ordinal(), &reason);
                 (
                     crate::after_tool::failed(output, &notice),
                     Disposition::Failed(reason.clone()),
@@ -1746,7 +1746,7 @@ where
                 ),
                 Err(error) => {
                     let reason = crate::after_tool::compact_reason(&error.to_string());
-                    let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                    let notice = self.after_tool.notice(frame.installation(), frame.ordinal(), &reason);
                     (
                         crate::after_tool::failed(output, &notice),
                         Disposition::Failed(reason.clone()),

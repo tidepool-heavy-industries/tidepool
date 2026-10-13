@@ -84,6 +84,10 @@ impl AfterToolFrame {
         &self.handle
     }
 
+    pub(super) fn installation(&self) -> u64 {
+        self.handler.tools().install
+    }
+
     pub(super) fn provenance(&self) -> String {
         self.handler.tools().provenance()
     }
