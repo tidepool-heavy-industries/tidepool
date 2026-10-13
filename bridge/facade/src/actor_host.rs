@@ -112,6 +112,7 @@ use workspace::{ActiveWorkspace, PreparedWorkspace};
 mod fresh_child_tests;
 mod model_free;
 mod prompt_catalog;
+mod prompt_composition;
 mod provider_attachment;
 pub(crate) mod recipe_checks;
 
@@ -3833,6 +3834,7 @@ fn compile_root(
                 .map_err(std::io::Error::other)?,
         );
     }
+    descriptor = prompt_composition::install(descriptor, config, source.cloned());
     let source = host_workbench_source(config, preamble, include, toolset_support)?;
     Ok(CompiledRoot {
         source,

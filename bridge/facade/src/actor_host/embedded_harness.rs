@@ -913,8 +913,10 @@ impl HostActor for EmbeddedHostActor {
                 .map_err(|error| EmbeddedError::Surface(error.to_string()))?,
         );
         let sequence = self.next_surface.fetch_add(1, Ordering::Relaxed);
+        let generation = snapshot.request_generation().map_or_else(
+            || "control".to_owned(), |generation| generation.get().to_string());
         let version = format!(
-            "{}:{}:{}:{sequence}",
+            "{}:{}:{}:{generation}:{sequence}",
             self.identity.run, self.identity.actor.0, self.identity.incarnation
         );
         let manifest = snapshot.manifest();
@@ -1586,6 +1588,10 @@ fn workbench_publication_context(
 
 #[async_trait::async_trait]
 impl Provider for EmbeddedDispatcher {
+    fn request_instructions(&self) -> Option<&str> {
+        self.snapshot.request_instructions()
+    }
+
     fn holds_job_capacity(&self) -> bool {
         // The actor owns execution admission. Parked cells may await independent
         // model invocations that need this same scheduler's provider slots.

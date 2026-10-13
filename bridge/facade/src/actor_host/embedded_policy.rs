@@ -108,6 +108,14 @@ struct EmbeddedToolProjection {
 }
 
 impl EmbeddedPolicySnapshot {
+    pub(super) fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
+        self.policy.request_generation()
+    }
+
+    pub(super) fn request_instructions(&self) -> Option<&str> {
+        self.policy.request_instructions()
+    }
+
     #[cfg(test)]
     pub(super) fn actor(&self) -> ActorRef {
         self.actor
@@ -520,6 +528,8 @@ mod tests {
     }
 
     impl ResidentToolEndpoint for ProbePolicy {
+        fn request_instructions(&self) -> Option<&str> { Some(self.marker) }
+
         fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
             Ok(self
                 .request_policy
@@ -705,6 +715,38 @@ mod tests {
                 "async": true,
             })
         );
+    }
+
+    struct PromptOnlyReload {
+        tools: Vec<HostedTool>,
+        current: std::sync::Mutex<Arc<dyn ResidentToolEndpoint>>,
+    }
+    impl ResidentToolEndpoint for PromptOnlyReload {
+        fn tools(&self) -> &[HostedTool] { &self.tools }
+        fn instructions(&self) -> Option<&str> { None }
+        fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+            Ok(self.current.lock().unwrap().clone())
+        }
+        fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolDispatchFuture {
+            panic!("dispatch must retain the issued generation")
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_only_reload_keeps_cached_manifest_but_selects_new_prompt_and_dispatcher() {
+        let current = Arc::new(PromptOnlyReload { tools:declared_tools(), current:std::sync::Mutex::new(policy("A")) });
+        let installation = EmbeddedPolicyInstallation::new(
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)), current.clone());
+        let first = installation.request_snapshot().unwrap();
+        *current.current.lock().unwrap() = policy("B");
+        let second = installation.request_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&first.manifest,&second.manifest));
+        assert_eq!(first.request_instructions(),Some("A"));
+        assert_eq!(second.request_instructions(),Some("B"));
+        for (snapshot,expected) in [(first,"A"),(second,"B")] {
+            let result = snapshot.dispatch("haskell".into(),ToolArguments::Raw("1".into()),context(),None,None).await.unwrap();
+            assert_eq!(result["marker"],expected);
+        }
     }
 
     #[test]
