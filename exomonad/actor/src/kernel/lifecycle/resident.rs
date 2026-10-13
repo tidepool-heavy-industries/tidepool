@@ -1099,25 +1099,9 @@ fn complete(
                     resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
                     Ok(PublicManifestCommit::Durable)
                 }
-                DurablePublicOwnerPublication::CommittedContinuing {
-                    readiness,
-                    cancellation_pending,
-                } => {
-                    if cancellation_pending {
-                        return Err(
-                            "incarnation transfer cannot return a pending continuing publication"
-                                .into(),
-                        );
-                    }
-                    let owner = WorkbenchPublicOwner::issue(
-                        &resident.current.context,
-                        &resident.current.descriptor,
-                        Some(readiness),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
-                    Ok(PublicManifestCommit::Durable)
-                }
+                DurablePublicOwnerPublication::CommittedContinuing { .. } => Err(
+                    "incarnation transfer received a continuing publication result".into(),
+                ),
                 DurablePublicOwnerPublication::Refused { error } => {
                     Ok(PublicManifestCommit::Refused { error })
                 }
