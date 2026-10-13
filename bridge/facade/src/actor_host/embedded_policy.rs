@@ -229,12 +229,10 @@ fn project_model_result(
         );
     let mut projected = serde_json::to_value(&response)?;
     if successful {
-        for (position, (item, encoded)) in response
-            .items
-            .iter()
-            .zip(projected["items"].as_array_mut().unwrap())
-            .enumerate()
-        {
+        let Some(items) = projected.get_mut("items").and_then(Value::as_array_mut) else {
+            return Ok(projected);
+        };
+        for (position, (item, encoded)) in response.items.iter().zip(items).enumerate() {
             if item.status != WorkbenchItemStatus::Committed {
                 continue;
             }
@@ -246,9 +244,13 @@ fn project_model_result(
                 if matches!(
                     operation.display_publication,
                     Some(WorkbenchDisplayPublication::Published { .. })
-                ) {
-                    // The display settlement owner also appends this page to item.output.
-                    // Retain page identity, expansion and publication facts here.
+                ) && operation
+                    .display
+                    .as_ref()
+                    .is_some_and(|display| item.output.contains(&display.text))
+                {
+                    // Settlement appends exact pages, but afterTool may prune item.output.
+                    // Reference it only while the entire page remains in the final output.
                     if let Some(display) = encoded.get_mut("display").and_then(Value::as_object_mut)
                     {
                         display.remove("text");
@@ -399,6 +401,16 @@ mod tests {
             "observed value"
         );
 
+        let mut pruned = response.clone();
+        pruned.items[0].output = "selected summary".into();
+        assert_eq!(
+            project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
+                pruned.clone()
+            ))
+            .unwrap(),
+            serde_json::to_value(pruned).unwrap()
+        );
+
         // Partial execution and uncertain publication retain the entire receipt.
         for publication in [
             WorkbenchPublicationOutcome::NotPublished {
@@ -435,20 +447,69 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn model_projection_preserves_arbitrary_display_values(text in ".{0,2048}", published in proptest::bool::ANY) {
+        fn model_projection_preserves_arbitrary_display_values(
+            texts in proptest::collection::vec("(?s).{0,128}", 2..8),
+            budget in 0usize..1024,
+            published in proptest::bool::ANY,
+            refused in proptest::bool::ANY,
+        ) {
             use tidepool_runtime::session::*;
             let mut response = display_response();
-            response.items[0].output = text.clone();
-            response.items[0].operations[0].display.as_mut().unwrap().page.text = text;
+            let template = response.items[0].operations[0].clone();
+            response.items[0].operations = texts.iter().enumerate().map(|(ordinal, text)| {
+                let mut operation = template.clone();
+                operation.id.effect_ordinal = ordinal;
+                operation.display.as_mut().unwrap().page.text = text.clone();
+                if refused {
+                    operation.display_publication = Some(WorkbenchDisplayPublication::Refused {
+                        publication: WorkbenchDisplayPublicationIdentity { display: (1, 2, 3), page_ordinal: 1 },
+                        detail: "refused".into(),
+                    });
+                }
+                operation
+            }).collect();
+            // Simulate a final output selection/budget after exact display publication.
+            // The original published pages may outlive this shortened presentation.
+            let mut selected = texts.join("\n");
+            let mut end = budget.min(selected.len());
+            while !selected.is_char_boundary(end) {
+                end -= 1;
+            }
+            selected.truncate(end);
+            response.items[0].output = selected;
             if !published {
                 response.publication = Some(WorkbenchPublicationOutcome::RecoveryRequired { detail: "unknown".into() });
             }
-            let mut expected = serde_json::to_value(&response).unwrap();
-            if published {
-                expected["items"][0]["operations"][0]["display"].as_object_mut().unwrap().remove("text");
-                expected["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
+            let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(response.clone())).unwrap();
+            proptest::prop_assert_eq!(&projected["status"], &serde_json::to_value(response.status).unwrap());
+            proptest::prop_assert_eq!(&projected["total"], &json!(response.total));
+            proptest::prop_assert_eq!(&projected["nextIndex"], &json!(response.next_index));
+            proptest::prop_assert_eq!(&projected["publication"], &serde_json::to_value(&response.publication).unwrap());
+            proptest::prop_assert_eq!(&projected["items"][0]["output"], &json!(response.items[0].output));
+            proptest::prop_assert_eq!(&projected["items"][0]["installedBindings"], &json!(response.items[0].installed_bindings));
+            proptest::prop_assert_eq!(&projected["items"][0]["warnings"], &json!(response.items[0].warnings));
+            for (ordinal, original) in response.items[0].operations.iter().enumerate() {
+                let encoded = &projected["items"][0]["operations"][ordinal];
+                let display = original.display.as_ref().unwrap();
+                // Resolve the model's reference or inline value, then verify full page reachability.
+                let visible = if let Some(pointer) = encoded["display"]["textSource"].as_str() {
+                    projected.pointer(pointer).and_then(Value::as_str).unwrap()
+                } else {
+                    encoded["display"]["text"].as_str().unwrap()
+                };
+                proptest::prop_assert!(visible.contains(&display.text));
+                proptest::prop_assert_eq!(&encoded["id"], &serde_json::to_value(&original.id).unwrap());
+                proptest::prop_assert_eq!(&encoded["effect"], &json!(original.effect));
+                proptest::prop_assert_eq!(&encoded["disposition"], &serde_json::to_value(original.disposition).unwrap());
+                proptest::prop_assert_eq!(&encoded["displayPublication"], &serde_json::to_value(&original.display_publication).unwrap());
+                proptest::prop_assert_eq!(&encoded["display"]["identity"], &json!(display.identity));
+                proptest::prop_assert_eq!(&encoded["display"]["expansions"], &json!(display.expansions));
+                proptest::prop_assert_eq!(&encoded["display"]["unavailable"], &json!(display.unavailable));
+                proptest::prop_assert_eq!(&encoded["display"]["output"], &serde_json::to_value(&display.output).unwrap());
+                if !published || refused {
+                    proptest::prop_assert_eq!(encoded, &serde_json::to_value(original).unwrap());
+                }
             }
-            proptest::prop_assert_eq!(project_model_result(exomonad_actor::ResidentToolResponse::Workbench(response)).unwrap(), expected);
         }
     }
 
