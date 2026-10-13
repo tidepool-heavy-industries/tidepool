@@ -710,6 +710,9 @@ struct Coverage {
     carrier_qualified_refusals: usize,
     duplicate_scope_views: usize,
     cross_scope_group_carriers: usize,
+    indexed_unique: usize,
+    indexed_unavailable: usize,
+    indexed_ambiguous: usize,
 }
 
 fn prefix() -> Vec<Op> {
@@ -901,6 +904,84 @@ fn prefix() -> Vec<Op> {
             to: 7,
         },
     ]
+}
+
+// The oracle intentionally retains the old linear iterator and reads graph
+// edges directly, independently of the index's construction and lookup.
+fn check_native_selection_index(
+    view: &ArtifactView,
+    coverage: &mut Coverage,
+) -> Result<(), TestCaseError> {
+    fn outcome(
+        result: Result<NativeGroupBinding, CompileError>,
+    ) -> Result<NativeGroupBinding, ArtifactInventoryFailure> {
+        result.map_err(|error| match error {
+            CompileError::ArtifactInventory(error) => error.failure,
+            other => panic!("unexpected group lookup failure: {other:?}"),
+        })
+    }
+    let state = view.lease.inventory.0.lock().expect("inventory lock");
+    let projection = view.read_projection(&state);
+    let index = projection.native_selection(&state);
+    prop_assert!(std::ptr::eq(
+        index,
+        view.clone()
+            .read_projection(&state)
+            .native_selection(&state)
+    ));
+    let mut ordinals = projection
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            InventoryNodeKey::Group(group) => Some(group.original_ordinal),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    ordinals.insert(u32::MAX);
+    for node in &projection.nodes {
+        let InventoryNodeKey::Artifact(carrier) = node else {
+            continue;
+        };
+        let expected_ordinals = projection
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) if group.binding.artifact == carrier.artifact => {
+                    Some(group.original_ordinal)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        prop_assert_eq!(
+            index
+                .ordinals
+                .get(&carrier.artifact)
+                .cloned()
+                .unwrap_or_default(),
+            expected_ordinals
+        );
+        for &ordinal in &ordinals {
+            let actual = outcome(index.resolve(*carrier, ordinal));
+            let expected = outcome(resolve_group_binding(
+                &state,
+                &projection.nodes,
+                *carrier,
+                ordinal,
+            ));
+            prop_assert_eq!(&actual, &expected);
+            match actual {
+                Ok(_) => coverage.indexed_unique += 1,
+                Err(ArtifactInventoryFailure::NativeGroupUnavailable { .. }) => {
+                    coverage.indexed_unavailable += 1
+                }
+                Err(ArtifactInventoryFailure::BindingAmbiguity { .. }) => {
+                    coverage.indexed_ambiguous += 1
+                }
+                Err(other) => panic!("unexpected index outcome: {other:?}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError> {
@@ -1228,6 +1309,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         matches!(row.fact, Fact::Group(_)) && rows.carrier(**row).scope != row.scope
                     })
                     .count();
+                check_native_selection_index(observed, &mut coverage)?;
                 let graph = observed.capture_graph_selection();
                 let expected_handles = view
                     .physical
@@ -1526,6 +1608,11 @@ fn same_carrier_branch_groups_remain_ambiguous_after_readmission() {
         },
     ];
     let coverage = run_history(&catalog, &history).unwrap();
+    assert!(
+        coverage.indexed_ambiguous > 0
+            && coverage.indexed_unique > 0
+            && coverage.indexed_unavailable > 0
+    );
     assert_eq!(coverage.carrier_qualified_refusals, 3);
     assert_eq!(coverage.read_refusals, 3);
     assert_eq!(coverage.recoveries, 1);
@@ -1578,6 +1665,7 @@ proptest! {
         prop_assert!(coverage.cross_merges > 0 && coverage.reclaimed > 0 && coverage.read_refusals >= 3);
         prop_assert!(coverage.recoveries > 0 && coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
         prop_assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
+        prop_assert!(coverage.indexed_unique > 0 && coverage.indexed_unavailable > 0);
         eprintln!("native history coverage: {coverage:?}");
     }
 }
@@ -1906,4 +1994,97 @@ proptest! {
         let catalog = Catalog::new(&masks, &generations, 1);
         check_unrecorded_global_dependency(&catalog, reverse)?;
     }
+}
+
+#[test]
+fn native_selection_index_duplicate_edges_do_not_create_ambiguity() {
+    let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let view = inventory
+        .admit_recovery_selection(
+            &empty,
+            catalog.entries(false, false),
+            &catalog.selection(&catalog.group_closure(&root_groups(0))),
+        )
+        .unwrap();
+    let mut state = inventory.0.lock().expect("inventory lock");
+    let projection = view.read_projection(&state);
+    let (group, carrier, source, target) = projection
+        .nodes
+        .iter()
+        .find_map(|key| {
+            let InventoryNodeKey::Group(group) = key else {
+                return None;
+            };
+            state.graph.edges(state.indices[key]).find_map(|edge| {
+                let InventoryNodeKey::Artifact(carrier) = state.graph[edge.target()] else {
+                    return None;
+                };
+                (*edge.weight() == ArtifactDependency::Interface
+                    && carrier.artifact == group.binding.artifact)
+                    .then_some((*group, carrier, state.indices[key], edge.target()))
+            })
+        })
+        .expect("production admission issued a group and exact carrier");
+    // Adversarial duplicate row tests the same-group any(edge) contract; it
+    // neither creates another group nor changes its carrier.
+    state
+        .graph
+        .add_edge(source, target, ArtifactDependency::Interface);
+    let index = NativeSelectionIndex::build(&state, &projection.nodes);
+    assert_eq!(
+        index.resolve(carrier, group.original_ordinal).unwrap(),
+        group
+    );
+    assert_eq!(
+        resolve_group_binding(&state, &projection.nodes, carrier, group.original_ordinal).unwrap(),
+        group
+    );
+}
+
+#[test]
+fn native_selection_index_is_lazy_and_does_not_retain_parent_read_cache() {
+    let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let view = inventory
+        .admit_recovery_selection(
+            &empty,
+            catalog.entries(false, false),
+            &catalog.selection(&catalog.group_closure(&root_groups(0))),
+        )
+        .unwrap();
+    let _ = view.descriptors();
+    let _ = view.dependencies();
+    assert!(view
+        .reads
+        .read_projection
+        .get()
+        .unwrap()
+        .native_selection
+        .get()
+        .is_none());
+    let selected = view
+        .select_roots(vec![catalog.originals[0].descriptor.id])
+        .unwrap();
+    let state = inventory.0.lock().expect("inventory lock");
+    let index = view.read_projection(&state).native_selection(&state);
+    assert!(std::ptr::eq(
+        index,
+        view.clone()
+            .read_projection(&state)
+            .native_selection(&state)
+    ));
+    drop(state);
+    let cache = Arc::downgrade(&view.reads);
+    drop(view);
+    assert!(
+        cache.upgrade().is_none(),
+        "child custody must not retain parent's index/read cache"
+    );
+    assert!(!selected.selected_native_groups().is_empty());
+    drop(selected);
+    drop(empty);
+    assert_eq!(inventory.node_count(), 0);
 }

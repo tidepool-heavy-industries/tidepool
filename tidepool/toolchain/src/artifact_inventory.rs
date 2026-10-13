@@ -2487,6 +2487,7 @@ impl ArtifactInventory {
             entries: closed_entries,
             issuing_ids,
             dependencies: OnceLock::new(),
+            native_selection: OnceLock::new(),
         };
         commit.commit(&mut state);
         scope_proof::install(&mut state, prepared_proofs);
@@ -2537,6 +2538,7 @@ impl ArtifactInventory {
                 entries: previous.entries.clone(),
                 issuing_ids: previous.issuing_ids.clone(),
                 dependencies: OnceLock::new(),
+                native_selection: OnceLock::new(),
             })
         };
         let totals = (
@@ -3490,7 +3492,85 @@ struct ViewReadProjection {
     entries: imbl::Vector<Arc<ArtifactEntry>>,
     issuing_ids: imbl::OrdSet<ArtifactId>,
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
+    native_selection: OnceLock<NativeSelectionIndex>,
 }
+
+/// Exact group lookup within one immutable view. Ordinal availability is kept
+/// separately because a group can exist without naming the selected carrier.
+#[derive(Default)]
+struct NativeSelectionIndex {
+    ordinals: BTreeMap<ArtifactId, BTreeSet<u32>>,
+    groups: BTreeMap<(ArtifactBinding, u32), NativeGroupResolution>,
+}
+
+#[derive(Clone, Copy)]
+enum NativeGroupResolution {
+    Unique(NativeGroupBinding),
+    Ambiguous,
+}
+
+impl NativeSelectionIndex {
+    fn build(state: &InventoryState, owned: &imbl::OrdSet<InventoryNodeKey>) -> Self {
+        let mut index = Self::default();
+        for key in owned {
+            let InventoryNodeKey::Group(group) = key else {
+                continue;
+            };
+            index
+                .ordinals
+                .entry(group.binding.artifact)
+                .or_default()
+                .insert(group.original_ordinal);
+            for edge in state.graph.edges(state.indices[key]) {
+                let InventoryNodeKey::Artifact(carrier) = state.graph[edge.target()] else {
+                    continue;
+                };
+                if carrier.artifact != group.binding.artifact
+                    || *edge.weight() != ArtifactDependency::Interface
+                {
+                    continue;
+                }
+                index.groups.entry((carrier, group.original_ordinal))
+                    .and_modify(|resolution| {
+                        if matches!(resolution, NativeGroupResolution::Unique(prior) if prior != group) {
+                            *resolution = NativeGroupResolution::Ambiguous;
+                        }
+                    })
+                    .or_insert(NativeGroupResolution::Unique(*group));
+            }
+        }
+        index
+    }
+
+    fn resolve(
+        &self,
+        carrier: ArtifactBinding,
+        ordinal: u32,
+    ) -> Result<NativeGroupBinding, CompileError> {
+        match self.groups.get(&(carrier, ordinal)) {
+            Some(NativeGroupResolution::Unique(group)) => Ok(*group),
+            Some(NativeGroupResolution::Ambiguous) => Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: carrier.artifact,
+                },
+            )),
+            None => Err(admission_failure(
+                ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: carrier.artifact,
+                    original_ordinal: ordinal,
+                },
+            )),
+        }
+    }
+}
+
+impl ViewReadProjection {
+    fn native_selection(&self, state: &InventoryState) -> &NativeSelectionIndex {
+        self.native_selection
+            .get_or_init(|| NativeSelectionIndex::build(state, &self.nodes))
+    }
+}
+
 impl ViewLease {
     fn lock_materialization(
         &self,
@@ -3938,6 +4018,7 @@ impl ArtifactView {
                 nodes,
                 entries: entries.into_iter().collect(),
                 dependencies: OnceLock::new(),
+                native_selection: OnceLock::new(),
             }
         })
     }
@@ -4641,7 +4722,9 @@ impl ArtifactView {
     /// source view's lifetime. Hidden dependencies remain graph-owned.
     pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
+        let projection = self.read_projection(&state);
+        let owned = &projection.nodes;
+        let native_selection = projection.native_selection(&state);
         let ids = roots.iter().copied().collect::<BTreeSet<_>>();
         let mut selected = roots
             .into_iter()
@@ -4652,17 +4735,9 @@ impl ArtifactView {
             .collect::<Result<Vec<_>, _>>()?;
         for id in ids {
             let carrier = self.resolve_binding(id, owned)?;
-            let ordinals = owned
-                .iter()
-                .filter_map(|key| match key {
-                    InventoryNodeKey::Group(group) if group.binding.artifact == id => {
-                        Some(group.original_ordinal)
-                    }
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
-            for ordinal in ordinals {
-                match resolve_group_binding(&state, owned, carrier, ordinal) {
+            let ordinals = native_selection.ordinals.get(&id).into_iter().flatten();
+            for &ordinal in ordinals {
+                match native_selection.resolve(carrier, ordinal) {
                     Ok(group) => selected.push(InventoryNodeKey::Group(group)),
                     Err(CompileError::ArtifactInventory(error))
                         if matches!(
