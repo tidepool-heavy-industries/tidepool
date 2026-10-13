@@ -3466,6 +3466,16 @@ mod tests {
 
     #[tokio::test]
     async fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
+        for interrupted in [false, true] {
+            root_startup_context_history(interrupted).await;
+        }
+    }
+
+    async fn root_startup_context_history(interrupted: bool) {
+        use crate::initial_context::{
+            InitialContextEvent, InitialContextIdentity, InitialContextObservation,
+            InitialContextPublication, InitialContextState, RetainedContextSeed,
+        };
         let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let binding = run.path().join("binding.json");
@@ -3500,6 +3510,74 @@ mod tests {
             .bind_application_conversation(a, initial.conversation.clone())
             .await
             .unwrap();
+        let identity = InitialContextIdentity {
+            operation: tidepool_runtime::session::WorkbenchExecutionId::from_digest([47; 16]),
+            actor: a,
+            spec_install: 1,
+            spec_revision: Some("source-revision".into()),
+            spec_entry: Some("AgentSpec.agentSpec".into()),
+            spec_source: "startup-source".into(),
+        };
+        journal
+            .record_initial_context(
+                a,
+                InitialContextEvent::Begin {
+                    identity: identity.clone(),
+                    caller_seed: None,
+                },
+            )
+            .await
+            .unwrap();
+        let result = RetainedContextSeed {
+            sections: vec![],
+            rendered: "retained startup".into(),
+        };
+        let receipts = serde_json::json!({"observed": "startup effect"});
+        let publication = InitialContextPublication {
+            conversation: initial.conversation.clone(),
+            request: "startup-publication".into(),
+            caller_reference: None,
+            authored_reference: Some("authored-startup".into()),
+        };
+        if !interrupted {
+            journal
+                .record_initial_context(
+                    a,
+                    InitialContextEvent::Retain {
+                        result: result.clone(),
+                        receipts: receipts.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            journal
+                .record_initial_context(
+                    a,
+                    InitialContextEvent::Publish {
+                        publication: publication.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let inherited = InitialContextObservation {
+            identity: Some(identity),
+            caller_seed: None,
+            state: if interrupted {
+                InitialContextState::RecoveryRequired {
+                    detail: "host loss interrupted initialization; retained effects must not be replayed".into(),
+                }
+            } else {
+                InitialContextState::Published
+            },
+            result: (!interrupted).then_some(result),
+            publication: (!interrupted).then_some(publication),
+            receipts: if interrupted {
+                serde_json::Value::Null
+            } else {
+                receipts
+            },
+        };
         drop(permit);
         drop(reservation);
         drop(control);
@@ -3542,6 +3620,19 @@ mod tests {
             .admit_with_startup(b, &root, &[], Some(second), Some(&permit))
             .await
             .unwrap();
+        assert_eq!(
+            journal.initial_context(b).await.unwrap(),
+            Some(inherited.clone())
+        );
+        assert!(journal
+            .records()
+            .await
+            .unwrap()
+            .iter()
+            .find(|record| record.admission.actor == b)
+            .unwrap()
+            .initial_context
+            .is_none());
         drop(permit);
         drop(reservation);
         drop(control);
@@ -3631,6 +3722,14 @@ mod tests {
             Some(&branch)
         )
         .is_err());
+        // Resolution follows both unpublished successors, while raw records
+        // retain a single issuing owner's facts rather than copied snapshots.
+        assert_eq!(
+            journal.initial_context(c).await.unwrap(),
+            Some(inherited.clone())
+        );
+        assert!(records[&b].initial_context.is_none());
+        assert!(records[&c].initial_context.is_none());
         assert!(startup_chain_contains(&records, c, a));
         journal
             .bind_application_conversation(c, third.conversation.clone())
