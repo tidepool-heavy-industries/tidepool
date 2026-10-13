@@ -481,9 +481,11 @@ qualification contract, so it is retained as an unqualified diagnostic rather
 than evidence for the four-case cohort.
 
 The `persona-startup` cohort runs three ordinary production controls from the
-same frozen descriptor: the shipped initializer before its first request,
-graceful retirement with physical lease release and terminal-root recovery
-ineligibility, and genuine process-loss recovery of the edited Persona context.
+same frozen descriptor: full memory arrival and explicit refresh without startup
+judgment, Web selection with native judgment and empty-input control, and genuine
+process-loss recovery of the edited Persona context. Arrival also checks authored
+prompts through the frozen workspace and first provider request, physical lease
+release on graceful retirement, and terminal-root recovery ineligibility.
 The crash history kills and waits for the actual subprocess, reopens the same
 source and run, and checks native binding transfer and retained context without
 initializer replay. It requires the bundle's browser assets, fixtures, catalog
