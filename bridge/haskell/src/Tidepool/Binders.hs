@@ -104,6 +104,7 @@ import Tidepool.CheckedCell
   ( renderCheckedTypeWitness, renderRequestTypeSignatures
   , CellExpressionPlan(..), ExpressionLiftPlan(..) )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
+import Tidepool.ExecutionSchema (TypeIdentity)
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
@@ -1493,7 +1494,7 @@ data BoundBinder = BoundBinder
   , bbModule      :: String
   , bbTier        :: ValueTier
   , bbTypeDisplay :: String
-  , bbRootHead    :: Maybe NominalHead
+  , bbRootHead    :: Maybe TypeIdentity
   , bbHostAuthority :: Maybe HostBindingAuthority
   } deriving (Eq, Show)
 

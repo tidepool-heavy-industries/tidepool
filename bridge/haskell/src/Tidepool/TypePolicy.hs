@@ -3,6 +3,7 @@ module Tidepool.TypePolicy
   , isGhcCompilerTyCon
   , modulesOfType
   , nominalHeadsOfType
+  , rootTyConOfType
   , rootNominalHeadOfType
   , NominalHead(..)
   , TypeNodeId(..)
@@ -503,22 +504,26 @@ nominalHeadsOfType ty = List.sort . List.nub $ headTyCon ty ++
 -- 'nominalHeadsOfType', this never descends into arguments: a @Text@ nested
 -- in @Job Text@ is not evidence that the value itself is @Text@.
 rootNominalHeadOfType :: Type -> Maybe NominalHead
-rootNominalHeadOfType ty = go body
+rootNominalHeadOfType ty = do
+  tc <- rootTyConOfType ty
+  m <- nameModule_maybe (tyConName tc)
+  pure NominalHead
+    { nhUnit = T.pack (unitIdString (moduleUnitId m))
+    , nhModule = T.pack (moduleNameString (moduleName m))
+    , nhName = T.pack (occNameString (nameOccName (tyConName tc)))
+    }
+
+-- | Select the exact root constructor while preserving the original GHC type
+-- evidence for callers that must issue identity from a selected interface.
+rootTyConOfType :: Type -> Maybe TyCon
+rootTyConOfType ty = go body
   where
     (_, _, body) = tcSplitSigmaTy ty
     go candidate = case coreView candidate of
       Just expanded -> go expanded
       Nothing -> case candidate of
         CastTy inner _ -> go inner
-        _ -> case splitTyConApp_maybe candidate of
-          Just (tc, _) -> do
-            m <- nameModule_maybe (tyConName tc)
-            pure NominalHead
-              { nhUnit = T.pack (unitIdString (moduleUnitId m))
-              , nhModule = T.pack (moduleNameString (moduleName m))
-              , nhName = T.pack (occNameString (nameOccName (tyConName tc)))
-              }
-          Nothing -> Nothing
+        _ -> fst <$> splitTyConApp_maybe candidate
 
 -- | Replace effect-row aliases with their exact underlying @Eff '[...]@ type.
 --

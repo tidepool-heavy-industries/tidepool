@@ -55,6 +55,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
   , finalizedValueInterfaceSeals, finalizedInterfaceSeals )
 import Tidepool.CheckedCell (captureCheckedSignature, resolveCheckedSignature)
+import Tidepool.ConstructorIdentity (captureIdentityResolver)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), withResidentPipelineSelectedRequests
   , preparedSegmentCaptures )
@@ -482,10 +483,12 @@ verifyBatch :: [SessionModule] -> PendingTypedSegment -> PreparedTypedSegmentBin
 verifyBatch owners typed prepared = do
   let captures = concatMap typedItemCaptures (pendingSegmentItems typed)
       pairs = typedSegmentSessionGlobals prepared
-      bindings = concatMap snd (typedSegmentSessionBinders prepared)
       dependencies = typedSegmentSessionRetainedGlobals prepared
       expectedDependencies = [(global,generation)
         | (SessionModule _ (Generation generation),(_,global)) <- zip owners pairs]
+  resolver <- captureIdentityResolver (typedSegmentSessionEnvironment prepared) Nothing
+  bindings <- either (fail . show) (pure . concatMap snd)
+    (typedSegmentSessionBinders resolver prepared)
   unless (dependencies == expectedDependencies)
     (fail "native capture dependency generation differs from its exact hydrated global")
   unless (length captures == 2 && length pairs == 2 && length bindings == 2

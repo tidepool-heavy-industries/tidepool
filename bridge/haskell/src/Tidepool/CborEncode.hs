@@ -12,7 +12,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Metadata (DCMeta(..))
-import Tidepool.ExecutionEncode (encodeConstructorIdentity)
+import Tidepool.ExecutionEncode (encodeConstructorIdentity, encodeTypeIdentity)
 import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..), HostBindingAuthority(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
@@ -258,11 +258,9 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead hostAuthorit
       ForceData -> "ForceData"
       RetainOpaque -> "RetainOpaque")
   <> encodeString (T.pack tdisp)
-  <> maybe encodeNull encodeHead rootHead
+  <> maybe encodeNull encodeTypeIdentity rootHead
   <> maybe encodeNull encodeAuthority hostAuthority
   where
-    encodeHead (NominalHead unit headModule headName) =
-      encodeListLen 3 <> encodeString unit <> encodeString headModule <> encodeString headName
     encodeAuthority JsonValueAuthority = encodeString "JsonValue"
     encodeAuthority TextAuthority = encodeString "Text"
     encodeAuthority CommandJobAuthority = encodeString "CommandJob"

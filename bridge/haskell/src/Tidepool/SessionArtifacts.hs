@@ -16,7 +16,7 @@ module Tidepool.SessionArtifacts
   ) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Exception (bracket, mask, onException)
+import Control.Exception (bracket, mask, onException, throwIO)
 import Control.Monad (forM, foldM)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (nub, isPrefixOf)
@@ -55,9 +55,11 @@ import Tidepool.Binders (BoundBinder(..), ValueTier(..))
 import Tidepool.GhcPipeline
   ( PipelineResult, prHscEnv, prCanonicalInterfaceAdmissions, prResultType, prTargetTcGblEnv, isClosureType
   , renderType, stripMonadHead, splitTupleType )
+import Tidepool.ConstructorIdentity
+  ( IdentityResolver, TypeIdentityFailure, captureIdentityResolver, resolveTypeIdentity )
 import Tidepool.Identity (stableVarId)
 import Tidepool.HostBindingAuthority
-  ( HostBindingRepresentation, hostBindingRepresentationForType
+  ( HostBindingAuthority(..), HostBindingRepresentation, hostBindingRepresentationForType
   , hostBindingRepresentationAuthority, resolveHostBindingAuthorities )
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
@@ -78,7 +80,7 @@ import Tidepool.DeclarationJoin (BindingInterfacePurpose(..))
 import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImport(..), encodePackageImports, packageImportRoot)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
-import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
+import Tidepool.TypePolicy (rootTyConOfType, stabilizeEffectRows)
 import Tidepool.TypedSegment.Types
   ( PendingTypedSegment, pendingSegmentItems, typedItemPlan, typedItemCaptures
   , TypedItemPlan(..), typedCaptureIdentifier, typedCaptureType
@@ -134,7 +136,13 @@ data PreparedTypedSegmentBindings = PreparedTypedSegmentBindings HscEnv
 
 data PreparedTypedItemBindings
   = UncapturedTypedItem Int
-  | CapturedTypedItem Int SessionModule [BoundBinder] [(Id, Id)] CapturedSessionInterface
+  | CapturedTypedItem Int SessionModule [CapturedBoundBinder] [(Id, Id)] CapturedSessionInterface
+
+-- Keep the persisted compiler type until the final target module's immutable
+-- identity resolver is available. A staged session interface can precede the
+-- compiler's completed view of the selected defining interfaces.
+data CapturedBoundBinder = CapturedBoundBinder
+  String Word64 String ValueTier String Type (Maybe HostBindingAuthority)
 
 typedSegmentSessionEnvironment :: PreparedTypedSegmentBindings -> HscEnv
 typedSegmentSessionEnvironment (PreparedTypedSegmentBindings env _ _) = env
@@ -161,12 +169,23 @@ typedSegmentSessionInterfaces :: PreparedTypedSegmentBindings -> [CapturedSessio
 typedSegmentSessionInterfaces (PreparedTypedSegmentBindings _ items _) =
   [captured | CapturedTypedItem _ _ _ _ captured <- items]
 
-typedSegmentSessionBinders :: PreparedTypedSegmentBindings -> [(Int, [BoundBinder])]
-typedSegmentSessionBinders (PreparedTypedSegmentBindings _ items _) =
-  map itemBinders items
+typedSegmentSessionBinders
+  :: IdentityResolver -> PreparedTypedSegmentBindings
+  -> Either TypeIdentityFailure [(Int, [BoundBinder])]
+typedSegmentSessionBinders resolver (PreparedTypedSegmentBindings _ items _) =
+  traverse itemBinders items
   where
-    itemBinders (UncapturedTypedItem ordinal) = (ordinal, [])
-    itemBinders (CapturedTypedItem ordinal _ binders _ _) = (ordinal, binders)
+    itemBinders (UncapturedTypedItem ordinal) = Right (ordinal, [])
+    itemBinders (CapturedTypedItem ordinal _ binders _ _) = do
+      resolved <- traverse (resolveCapturedBoundBinder resolver) binders
+      pure (ordinal, resolved)
+
+resolveCapturedBoundBinder
+  :: IdentityResolver -> CapturedBoundBinder -> Either TypeIdentityFailure BoundBinder
+resolveCapturedBoundBinder resolver
+  (CapturedBoundBinder name varId modul tier displayType persistedType hostAuthority) = do
+    rootHead <- traverse (resolveTypeIdentity resolver) (rootTyConOfType persistedType)
+    pure (BoundBinder name varId modul tier displayType rootHead hostAuthority)
 
 typedSegmentSessionBindingRepresentations :: PreparedTypedSegmentBindings -> [HostBindingRepresentation]
 typedSegmentSessionBindingRepresentations (PreparedTypedSegmentBindings _ _ representations) = representations
@@ -227,12 +246,12 @@ prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
         let binders = zipWith (captureBinder owner representation) selected (map snd pairs)
         pure (hydrated, CapturedTypedItem ordinal owner binders pairs captured : completed)
 
-    captureBinder owner representation capture global = BoundBinder
-      (occNameString (nameOccName (idName global))) (stableVarId (idName global))
-      (sessionModuleString owner)
-      (if isClosureType (idType global) then RetainOpaque else ForceData)
-      (renderType (typedCaptureType capture)) (rootNominalHeadOfType (idType global))
-      (hostBindingRepresentationAuthority <$> representation capture)
+    captureBinder owner representation capture global = CapturedBoundBinder
+        (occNameString (nameOccName (idName global))) (stableVarId (idName global))
+        (sessionModuleString owner)
+        (if isClosureType (idType global) then RetainOpaque else ForceData)
+        (renderType (typedCaptureType capture)) (idType global)
+        (hostBindingRepresentationAuthority <$> representation capture)
 
 -- Publish only the immutable bytes that supplied the substituted global Ids.
 -- Exclusive links refuse an existing generation, including a racing publisher;
@@ -338,19 +357,22 @@ writeNativeSessionBindings
   -> [(String, Type, Type, Maybe HostBindingRepresentation)] -> [(OccName, Fixity)]
   -> IO [BoundBinder]
 writeNativeSessionBindings hsc generation root bindings fixities = do
+  resolver <- captureIdentityResolver hsc Nothing
   let
       sessionModule = SessionModule ValMod (Generation generation)
       build (name, ty, persistedType, representation) =
-        let
-            occurrence = mkVarOcc name
+        let occurrence = mkVarOcc name
             varId = stableVarId (sessionBinderName hsc sessionModule occurrence)
             moduleName = sessionModuleString sessionModule
             tier = if isClosureType persistedType then RetainOpaque else ForceData
             displayType = renderType ty
-            rootHead = rootNominalHeadOfType persistedType
             hostAuthority = hostBindingRepresentationAuthority <$> representation
-        in (BoundBinder name varId moduleName tier displayType rootHead hostAuthority, occurrence, persistedType)
-      built = map build bindings
+        in do
+          rootHead <- traverse (resolveTypeIdentity resolver) (rootTyConOfType persistedType)
+          pure (BoundBinder name varId moduleName tier displayType rootHead hostAuthority,
+            occurrence, persistedType)
+  built <- either throwIO pure (traverse build bindings)
+  let
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIfaceWithFixities hsc sessionModule [(occ, ty) | (_, occ, ty) <- built] fixities
   writeSessionIface hsc root sessionModule iface

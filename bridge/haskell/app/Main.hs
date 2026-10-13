@@ -93,7 +93,7 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
-  ( pmModule, pmYieldSites )
+  ( pmModule, pmIdentityResolver, pmYieldSites )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
@@ -1491,6 +1491,13 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
               targets = map (plannedItemEntry . typedItemPlan) items
               binds = prBinds result
               sourceOwner = moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv result)))
+          targetPreparedModule <- case
+              [preparedModule | preparedModule <- pprModules prepared,
+                pmModule preparedModule == tcg_mod (prTargetTcGblEnv result)] of
+            [value] -> pure value
+            values -> fail ("prepared target module selection was not unique: " ++ show (length values))
+          capturesByItem <- either throwIO pure
+            (typedSegmentSessionBinders (pmIdentityResolver targetPreparedModule) batch)
           attempts <- readIORef preparationAttempt
           emitCount timing "typed_segment_kept_entries" (toInteger (length items))
           emitCount timing "typed_segment_generated_instance_retries" (toInteger (attempts - 1))
@@ -1526,7 +1533,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                 index = plannedItemOrdinal itemPlan
                 generation = plannedItemGeneration itemPlan
                 itemDirectory = outDir </> "item-" ++ show index
-                captures = case lookup index (typedSegmentSessionBinders batch) of
+                captures = case lookup index capturesByItem of
                   Just values -> values
                   Nothing -> error "typed Session batch lost an item"
                 outputArtifact = artifact {paTarget=preparedScaffoldTargetName}
