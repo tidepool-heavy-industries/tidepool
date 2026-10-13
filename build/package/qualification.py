@@ -51,8 +51,8 @@ UNIFIED_REGRESSION_TESTS = [
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 PERSONA_STARTUP_TESTS = [
-    "actor_host::startup_persona_acceptance_tests::shipped_persona_initializer_uses_actual_preparation_before_first_request",
-    "actor_host::startup_persona_acceptance_tests::actual_persona_prepares_saves_activates_and_retires_without_resurrection",
+    "actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment",
+    "actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control",
     "actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization",
 ]
 HARNESS_PERFORMANCE_TESTS = [
