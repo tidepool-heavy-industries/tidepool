@@ -678,8 +678,10 @@ async fn drive_browser(
                     raw_completed |= barrier.phase == "raw_result";
                     cancel_wait |= barrier.phase == "cancel_wait";
                     continued |= barrier.phase == "continued";
+                    let display_projection = committed_display.as_ref()
+                        .map(harness::server::browser_contract::ActorOutputProjection::from);
                     process.send_frame(&json!({"type":"provider_barrier", "id":barrier.id,
-                        "phase":barrier.phase, "request_id":barrier.request_id, "committed_display":committed_display,
+                        "phase":barrier.phase, "request_id":barrier.request_id, "committed_display":display_projection,
                         "request_summary":{"input":barrier.request.input}})).await?;
                     waiting = Some(barrier);
                 }

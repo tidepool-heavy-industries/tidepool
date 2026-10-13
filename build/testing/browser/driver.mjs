@@ -179,7 +179,7 @@ async function retainedOperations(page) {
   });
 }
 
-function assertEnvelopeId(value, message) {
+function assertPositiveWireI64(value, message) {
   // The browser contract carries i64 identifiers as lossless decimal strings.
   assert.equal(typeof value, 'string', message);
   assert.match(value, /^[1-9][0-9]*$/, message);
@@ -191,8 +191,13 @@ function assertAdmittedOperation(record, original) {
   assert.deepEqual(record.submission, original, 'retained operation changed its original ID or payload');
   assert.ok(['status', 'receipt'].includes(record.authority), 'admission must have authoritative evidence');
   assert.equal(record.state, 'input_admitted', 'original browser input was not admitted');
-  assertEnvelopeId(record.envelopeId, 'admission omitted its canonical envelope ID');
   assert.equal(record.receipt?.outcome, 'admitted', 'admission omitted its original receipt');
+  assert.equal(record.receipt.commandId, original.operation_id, 'admission receipt belongs to another operation');
+  assert.deepEqual(record.receipt.target, original.command.target, 'admission receipt belongs to another actor');
+  assertPositiveWireI64(record.receipt.envelopeId, 'admission omitted its canonical envelope ID');
+  if (record.envelopeId != null) {
+    assert.equal(record.envelopeId, record.receipt.envelopeId, 'status and receipt disagree on the admitted envelope');
+  }
 }
 
 async function runJourney(ready) {
@@ -386,6 +391,13 @@ async function runJourney(ready) {
         receiptWaiters.set(operationId, waiter);
       });
     };
+    const showLatestChatEntry = async (entry) => {
+      const newActivity = page.getByRole('region', { name: 'Selected worker Chat' })
+        .getByRole('button', { name: 'New activity ↓', exact: true });
+      await entry.or(newActivity).first().waitFor({ timeout: 30_000 });
+      if (!await entry.isVisible()) await newActivity.click();
+      await entry.waitFor({ timeout: 30_000 });
+    };
     const assertCanonicalDisplay = async () => {
       if (!canonicalDisplay) throw new Error('browser has no canonical explicit display');
       const projection = hostActor(latestSnapshot, actor);
@@ -403,14 +415,16 @@ async function runJourney(ready) {
       assert.deepEqual(committedDisplayEvents.filter((row) =>
         row.reference?.sequence === canonicalDisplay.reference.sequence), [canonicalDisplay],
       'canonical display must have exactly one committed event');
-      const row = page.getByRole('region', { name: 'Selected worker Chat' })
-        .locator(`[data-sequence="${canonicalDisplay.reference.sequence}"]`);
-      await row.getByRole('heading', { name: 'Displayed values', exact: true }).waitFor({ timeout: 30_000 });
+      const chat = page.getByRole('region', { name: 'Selected worker Chat' });
+      const row = chat.locator(`[data-sequence="${canonicalDisplay.reference.sequence}"]`);
+      await showLatestChatEntry(row.getByRole('heading', { name: 'Displayed values', exact: true }));
       assert.equal(await row.count(), 1, 'canonical display appears more than once in unified chat');
       assert.equal(await row.locator('pre').innerText(), '42', 'unified chat changed the committed page');
     };
     const observeDisplay = async (row) => {
-      assert.ok(row?.reference?.sequence > 0 && row?.emission?.execution?.kind === 'notebook',
+      assertPositiveWireI64(row?.reference?.sequence,
+        'provider barrier omitted the canonical output sequence');
+      assert.equal(row?.emission?.execution?.kind, 'notebook',
         'provider barrier omitted the canonical notebook display');
       assert.deepEqual(row.reference.origin, row.emission.origin);
       assert.equal(row.emission.page.text, '42');
@@ -427,10 +441,10 @@ async function runJourney(ready) {
     const inspectRequestHistory = async (expectedText, conversationId, requestId) => {
       requireString(requestId, 'provider barrier request_id');
       const request = await waitForCompletedRequest(conversationId, requestId);
-      await page.getByRole('region', { name: 'Selected worker Chat' })
+      await showLatestChatEntry(page.getByRole('region', { name: 'Selected worker Chat' })
         .getByRole('region', { name: 'Conversation', exact: true })
         .getByRole('list', { name: 'Conversation entries' })
-        .getByText(expectedText, { exact: false }).waitFor({ timeout: 30_000 });
+        .getByText(expectedText, { exact: false }));
       await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Timeline', exact: true }).click();
       const row = page.getByRole('table', { name: 'Conversation activity timeline' })
         .getByRole('row').filter({ hasText: request.id })
@@ -522,7 +536,7 @@ async function runJourney(ready) {
             assert.equal(status.operationId, lastOperation.operation_id, 'restored lookup returned another operation');
             assert.deepEqual(status.command, lastOperation.command, 'restored lookup changed the original payload');
             assert.equal(status.state, 'input_admitted', 'restored lookup did not prove original admission');
-            assertEnvelopeId(status.envelopeId, 'restored lookup omitted its canonical envelope ID');
+            assertPositiveWireI64(status.envelopeId, 'restored lookup omitted its canonical envelope ID');
             assert.equal(status.receipt?.outcome, 'admitted', 'restored lookup omitted its admitted receipt');
             await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
               .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
@@ -535,8 +549,16 @@ async function runJourney(ready) {
             historyRequestId = await releaseBarrier(barrier, text, observeDisplay);
           }
           if (step.wait_for_receipt !== false) {
-            await page.getByRole('region', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });
-            await page.getByText('Admitted for processing').last().waitFor({ timeout: 30_000 });
+            const receipt = await waitForReceipt(lastOperation.operation_id);
+            assert.equal(receipt.commandId, lastOperation.operation_id);
+            assert.equal(receipt.outcome, 'admitted');
+            assert.deepEqual(receipt.target, lastOperation.command.target);
+            assertPositiveWireI64(receipt.envelopeId, 'input receipt omitted its canonical envelope ID');
+            await openHostOperations(page);
+            await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
+              .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
+            assertAdmittedOperation((await retainedOperations(page)).find((record) =>
+              record.submission?.operation_id === lastOperation.operation_id), lastOperation);
           }
           if (typeof step.wait_for_text === 'string') {
             await inspectRequestHistory(step.wait_for_text, historyConversationId, historyRequestId);
@@ -579,6 +601,7 @@ async function runJourney(ready) {
           const retirement = hostOperations.at(-1);
           assert.equal(retirement?.command?.action, 'retire', 'browser did not send a retire operation');
           assert.deepEqual(retirement.command.target, actorProjection.identity, 'retire targeted another actor identity');
+          await openHostOperations(page);
           const retireReceipt = waitForReceipt(retirement.operation_id);
           const requested = page.getByText('Retire requested').last().waitFor({ timeout: 30_000 });
           const [, receipt] = await Promise.all([
