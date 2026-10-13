@@ -1062,8 +1062,10 @@ mod tests {
 
     fn empty_constructor(index: u64) -> ConstructorDecl {
         ConstructorDecl {
-            identity: testing::identity("Arrays", &format!("C{index}")),
-            family: testing::identity("Arrays", &format!("T{index}")),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Arrays", &format!("C{index}")),
+                testing::identity("Arrays", &format!("T{index}")),
+            ),
             host_id: tidepool_repr::DataConId(1000 + index),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -1901,8 +1903,10 @@ mod tests {
                 results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
             });
             wire.constructors.push(ConstructorDecl {
-                identity: testing::identity("Arrays", "C"),
-                family: testing::identity("Arrays", "T"),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("Arrays", "C"),
+                    testing::identity("Arrays", "T"),
+                ),
                 host_id: tidepool_repr::DataConId(999),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,

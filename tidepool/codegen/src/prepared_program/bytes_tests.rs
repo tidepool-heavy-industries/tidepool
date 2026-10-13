@@ -734,8 +734,10 @@ fn heap_top_scalar_bytes_resolve_without_a_bytes_top() {
     {
         let layout = StorageLayout::for_reps(&wire.envelope.target, &reps).unwrap();
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Bytes", &format!("C{id}")),
-            family: testing::identity("Bytes", &format!("T{id}")),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Bytes", &format!("C{id}")),
+                testing::identity("Bytes", &format!("T{id}")),
+            ),
             host_id: tidepool_repr::DataConId(960 + id as u64),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,

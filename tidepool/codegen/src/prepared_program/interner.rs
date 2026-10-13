@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::{
-    ConstructorDecl, StorageLayout, SymbolIdentity, TargetDescriptor,
+    ConstructorDecl, ConstructorIdentity, StorageLayout, TargetDescriptor,
 };
 
 use super::CompileError;
@@ -32,8 +32,8 @@ pub(super) enum AbsorbConflict {
     },
     HostId {
         host_id: DataConId,
-        identity: Box<SymbolIdentity>,
-        existing: Box<SymbolIdentity>,
+        identity: Box<ConstructorIdentity>,
+        existing: Box<ConstructorIdentity>,
     },
 }
 
@@ -181,8 +181,8 @@ type ConstructorEntry = (ConstructorDecl, Arc<ObjectDescriptor>);
 
 #[derive(Clone, Default)]
 struct Tables {
-    constructors: BTreeMap<SymbolIdentity, ConstructorEntry>,
-    by_host: BTreeMap<DataConId, SymbolIdentity>,
+    constructors: BTreeMap<ConstructorIdentity, ConstructorEntry>,
+    by_host: BTreeMap<DataConId, ConstructorIdentity>,
 }
 
 /// One shared descriptor per constructor identity, with the declaration it
@@ -204,14 +204,14 @@ pub struct DescriptorInterner {
 }
 
 impl DescriptorInterner {
-    fn constructor(&self, identity: &SymbolIdentity) -> Option<&ConstructorEntry> {
+    fn constructor(&self, identity: &ConstructorIdentity) -> Option<&ConstructorEntry> {
         self.local
             .constructors
             .get(identity)
             .or_else(|| self.base.constructors.get(identity))
     }
 
-    fn host_identity(&self, host_id: &DataConId) -> Option<&SymbolIdentity> {
+    fn host_identity(&self, host_id: &DataConId) -> Option<&ConstructorIdentity> {
         self.local
             .by_host
             .get(host_id)
@@ -387,7 +387,7 @@ mod tests {
     use tidepool_repr::DataConId;
 
     fn declaration(name: &str, host: u64) -> ConstructorDecl {
-        let identity = SymbolIdentity {
+        let identity = tidepool_repr::execution_schema::SymbolIdentity {
             unit: "test".into(),
             module: "Test".into(),
             namespace: "constructor".into(),
@@ -395,8 +395,10 @@ mod tests {
             record_parent: None,
         };
         ConstructorDecl {
-            family: identity.clone(),
-            identity,
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                identity.clone(),
+                identity,
+            ),
             host_id: DataConId(host),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],
@@ -555,6 +557,7 @@ mod tests {
                 .unwrap()
                 .0
                 .identity
+                .symbol
                 .occurrence,
             "First"
         );
@@ -587,6 +590,7 @@ mod tests {
                 .unwrap()
                 .0
                 .identity
+                .symbol
                 .occurrence,
             "First"
         );
@@ -770,5 +774,93 @@ mod tests {
             .is_err());
         assert_eq!(interner.constructor_count(), 0);
         assert_eq!(interner.host_count(), 0);
+    }
+
+    fn revised_declaration(name: u8, revision: u8) -> ConstructorDecl {
+        let mut declared = declaration(
+            &format!("VersionedSibling{name}"),
+            60000 + u64::from(name) * 4 + u64::from(revision),
+        );
+        declared.identity.family.symbol.occurrence = "VersionedFamily".into();
+        declared.identity.family.version =
+            tidepool_repr::execution_schema::TypeVersion::GhcAbi([revision; 16]);
+        declared
+    }
+
+    #[test]
+    fn same_layout_siblings_of_changed_families_have_distinct_descriptors() {
+        let mut interner = DescriptorInterner::default();
+        let a = revised_declaration(0, 0);
+        let b = revised_declaration(0, 1);
+        assert_eq!(a.field_reps, b.field_reps);
+        assert_eq!(a.identity.symbol, b.identity.symbol);
+        let descriptor_a = interner.intern(&target(), &a).unwrap();
+        let descriptor_b = interner.intern(&target(), &b).unwrap();
+        assert!(!Arc::ptr_eq(&descriptor_a, &descriptor_b));
+        let reused = DescriptorInterner::default().intern(&target(), &a).unwrap();
+        assert!(Arc::ptr_eq(&descriptor_a, &reused));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn versioned_admission_histories_preserve_nominal_identity_and_atomic_refusal(
+            operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..3), 1..64)
+        ) {
+            let target = target();
+            let mut interner = DescriptorInterner::default();
+            // The oracle keys logical spelling/revision, independently of production identity encoding.
+            let mut model = BTreeMap::<(u8, u8), usize>::new();
+            for (operation, name, revision) in operations {
+                let declared = revised_declaration(name, revision);
+                let logical = (name, revision);
+                let descriptor = interner.intern(&target, &declared).unwrap();
+                let header = descriptor.initial_header_word();
+                if let Some(previous) = model.insert(logical, header) {
+                    proptest::prop_assert_eq!(header, previous);
+                }
+                for (other, other_header) in &model {
+                    if *other != logical {
+                        proptest::prop_assert_ne!(header, *other_header);
+                    }
+                }
+                match operation {
+                    0 => {},
+                    1 => {
+                        let independent = DescriptorInterner::default().intern(&target, &declared).unwrap();
+                        proptest::prop_assert!(Arc::ptr_eq(&descriptor, &independent));
+                    },
+                    2 => {
+                        let mut clone = interner.clone();
+                        let reused = clone.intern(&target, &declared).unwrap();
+                        interner.absorb(&[(declared.clone(), reused)]).unwrap();
+                    },
+                    3 | 4 => {
+                        let new = declaration("AtomicVersionedAddition", 61000);
+                        let fresh = DescriptorInterner::default().intern(&target, &new).unwrap();
+                        let mut conflicting = declared.clone();
+                        if operation == 3 {
+                            // Even a tag-only mismatch under the same complete identity refuses.
+                            conflicting.tag += 1;
+                        } else {
+                            conflicting.identity.family.version = tidepool_repr::execution_schema::TypeVersion::GhcAbi([9; 16]);
+                        }
+                        let refused = interner.absorb(&[(new.clone(), fresh), (conflicting, descriptor.clone())]);
+                        proptest::prop_assert!(refused.is_err());
+                        proptest::prop_assert!(interner.constructor(&new.identity).is_none());
+                        proptest::prop_assert!(interner.by_host(new.host_id).is_none());
+                    },
+                    _ => unreachable!(),
+                }
+                proptest::prop_assert_eq!(interner.constructor_count(), model.len());
+                proptest::prop_assert_eq!(interner.host_count(), model.len());
+                for ((name, revision), header) in &model {
+                    let expected = revised_declaration(*name, *revision);
+                    let (observed, descriptor) = interner.by_host(expected.host_id).unwrap();
+                    proptest::prop_assert_eq!(observed, &expected);
+                    proptest::prop_assert_eq!(descriptor.initial_header_word(), *header);
+                }
+            }
+        }
     }
 }

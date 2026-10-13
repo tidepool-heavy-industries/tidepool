@@ -280,8 +280,10 @@ mod tests {
             signature: SignatureId(1),
         });
         wire.constructors = vec![ConstructorDecl {
-            identity: testing::identity("Formatting", "Text"),
-            family: testing::identity("Formatting", "TextType"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Formatting", "Text"),
+                testing::identity("Formatting", "TextType"),
+            ),
             host_id: tidepool_repr::DataConId(1901),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -299,8 +301,10 @@ mod tests {
             },
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Formatting", "Garbage"),
-            family: testing::identity("Formatting", "GarbageType"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Formatting", "Garbage"),
+                testing::identity("Formatting", "GarbageType"),
+            ),
             host_id: tidepool_repr::DataConId(1902),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,

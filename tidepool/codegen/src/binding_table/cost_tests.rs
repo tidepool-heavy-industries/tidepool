@@ -161,8 +161,10 @@ fn source_image() -> (DemandedImage, SourceBinder) {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("CostCaf", "Value"),
-        family: testing::identity("CostCaf", "Value"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("CostCaf", "Value"),
+            testing::identity("CostCaf", "Value"),
+        ),
         host_id: tidepool_repr::DataConId(90_091),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![],

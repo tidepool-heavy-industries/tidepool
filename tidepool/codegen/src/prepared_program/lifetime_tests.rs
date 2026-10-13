@@ -51,8 +51,10 @@ fn owner_constructor() -> ConstructorDecl {
     let reps = vec![RuntimeRep::UnliftedRef];
     let layout = StorageLayout::for_reps(&testing::target(), &reps).unwrap();
     ConstructorDecl {
-        identity: testing::identity("Lifetime", "Owner"),
-        family: testing::identity("Lifetime", "OwnerT"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Lifetime", "Owner"),
+            testing::identity("Lifetime", "OwnerT"),
+        ),
         host_id: tidepool_repr::DataConId(991),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

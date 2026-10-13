@@ -900,8 +900,10 @@ mod tests {
     fn cyclic_heap_top(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
         let mut wire = testing::wire_program();
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Cycle", "Node"),
-            family: testing::identity("Cycle", "Node"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Cycle", "Node"),
+                testing::identity("Cycle", "Node"),
+            ),
             host_id: tidepool_repr::DataConId(90_003),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![RuntimeRep::LiftedRef],
@@ -955,8 +957,10 @@ mod tests {
     fn static_group() -> Arc<CompiledProgram> {
         let mut wire = testing::wire_program();
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Static", "Tag"),
-            family: testing::identity("Static", "Tag"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Static", "Tag"),
+                testing::identity("Static", "Tag"),
+            ),
             host_id: tidepool_repr::DataConId(90_001),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],
@@ -1001,8 +1005,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Caf", "Value"),
-            family: testing::identity("Caf", "Value"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Caf", "Value"),
+                testing::identity("Caf", "Value"),
+            ),
             host_id: tidepool_repr::DataConId(90_002),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],
@@ -1049,8 +1055,10 @@ mod tests {
         let mut producer = testing::wire_program();
         producer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         producer.constructors.push(ConstructorDecl {
-            identity: testing::identity("Literal", "Value"),
-            family: testing::identity("Literal", "Value"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Literal", "Value"),
+                testing::identity("Literal", "Value"),
+            ),
             host_id: tidepool_repr::DataConId(90_004),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],

@@ -1888,8 +1888,10 @@ mod tests {
     fn constructor(identity: &str, host_id: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
         let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
         ConstructorDecl {
-            identity: testing::identity("JsonTraversal", identity),
-            family: testing::identity("JsonTraversal", &format!("{identity}Family")),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("JsonTraversal", identity),
+                testing::identity("JsonTraversal", &format!("{identity}Family")),
+            ),
             host_id: DataConId(host_id),
             result_rep: RuntimeRep::LiftedRef,
             strict_fields: vec![false; fields.len()],

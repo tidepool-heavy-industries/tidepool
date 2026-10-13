@@ -47,8 +47,10 @@ use tidepool_repr::execution_schema::{
 fn con(host_id: u64, name: &str, fields: Vec<RuntimeRep>) -> ConstructorDecl {
     let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
     ConstructorDecl {
-        identity: testing::identity("Freer", name),
-        family: testing::identity("Freer", name),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Freer", name),
+            testing::identity("Freer", name),
+        ),
         host_id: tidepool_repr::DataConId(host_id),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

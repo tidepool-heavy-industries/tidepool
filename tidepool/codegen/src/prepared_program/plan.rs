@@ -8,7 +8,7 @@ use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, Objec
 use tidepool_repr::execution_schema::{
     AlternativePattern, Atom, CaseKind, ConstructorDecl, DefinitionsView, ExprFrame, Group,
     HeapBinding, HeapRhs, ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout,
-    SymbolIdentity, ValueId, ValueRef,
+    SymbolIdentity, TypeIdentity, ValueId, ValueRef,
 };
 
 pub(super) struct FunctionPlan<'a> {
@@ -171,7 +171,7 @@ pub(super) struct ProgramPlan<'a> {
     pub descriptor_slots: BTreeMap<usize, usize>,
     /// Each constructor family's descriptors in declaration order, for
     /// algebraic case dispatch.
-    pub constructor_families: BTreeMap<SymbolIdentity, Vec<Arc<ObjectDescriptor>>>,
+    pub constructor_families: BTreeMap<TypeIdentity, Vec<Arc<ObjectDescriptor>>>,
     /// Each declaration with the descriptor it compiled against (interned or
     /// fresh), handed to the installing machine.
     pub interned_constructors: Vec<(ConstructorDecl, Arc<ObjectDescriptor>)>,
@@ -316,13 +316,13 @@ impl<'a> ProgramPlan<'a> {
         let target = &program.envelope().target;
         let mut constructors = Vec::with_capacity(program.constructors().len());
         let mut interned_constructors = Vec::with_capacity(program.constructors().len());
-        let mut constructor_families: BTreeMap<SymbolIdentity, Vec<Arc<ObjectDescriptor>>> =
+        let mut constructor_families: BTreeMap<TypeIdentity, Vec<Arc<ObjectDescriptor>>> =
             BTreeMap::new();
         for declaration in program.constructors() {
             let descriptor = interner.intern(target, declaration)?;
             interned_constructors.push((declaration.clone(), Arc::clone(&descriptor)));
             constructor_families
-                .entry(declaration.family.clone())
+                .entry(declaration.family().clone())
                 .or_default()
                 .push(Arc::clone(&descriptor));
             constructors.push(descriptor);

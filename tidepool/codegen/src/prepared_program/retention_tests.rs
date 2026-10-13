@@ -6,8 +6,10 @@ use tidepool_repr::execution_schema::{self, testing, *};
 fn constructor(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
     let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
     ConstructorDecl {
-        identity: testing::identity("W5A5", &format!("C{index}")),
-        family: testing::identity("W5A5", &format!("T{index}")),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5A5", &format!("C{index}")),
+            testing::identity("W5A5", &format!("T{index}")),
+        ),
         host_id: tidepool_repr::DataConId(950 + index),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

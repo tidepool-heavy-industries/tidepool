@@ -242,8 +242,8 @@ pub enum CompileError {
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
     HostIdConflict {
         host_id: tidepool_repr::DataConId,
-        identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
-        existing: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+        identity: Box<tidepool_repr::execution_schema::ConstructorIdentity>,
+        existing: Box<tidepool_repr::execution_schema::ConstructorIdentity>,
     },
     #[error(
         "constructor {identity:?} is declared differently from the descriptor already interned \
@@ -253,7 +253,7 @@ pub enum CompileError {
         incoming_arity = incoming_field_reps.len(),
     )]
     DescriptorShape {
-        identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+        identity: Box<tidepool_repr::execution_schema::ConstructorIdentity>,
         existing_field_reps: Vec<RuntimeRep>,
         incoming_field_reps: Vec<RuntimeRep>,
     },

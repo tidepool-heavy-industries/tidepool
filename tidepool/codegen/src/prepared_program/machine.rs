@@ -3782,8 +3782,10 @@ mod tests {
             results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("PreparedMachine", "Unit"),
-            family: testing::identity("PreparedMachine", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("PreparedMachine", "Unit"),
+                testing::identity("PreparedMachine", "Unit"),
+            ),
             host_id: tidepool_repr::DataConId(990),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -3861,8 +3863,10 @@ mod tests {
             results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("PreparedOuter", "Envelope"),
-            family: testing::identity("PreparedOuter", "Envelope"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("PreparedOuter", "Envelope"),
+                testing::identity("PreparedOuter", "Envelope"),
+            ),
             host_id: tidepool_repr::DataConId(991),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -3886,8 +3890,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("PreparedOuter", "Unit"),
-            family: testing::identity("PreparedOuter", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("PreparedOuter", "Unit"),
+                testing::identity("PreparedOuter", "Unit"),
+            ),
             host_id: tidepool_repr::DataConId(992),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -3991,7 +3997,7 @@ mod tests {
         let effect = prepared
             .constructors()
             .iter()
-            .find(|constructor| constructor.identity.occurrence == "E")
+            .find(|constructor| constructor.identity.symbol.occurrence == "E")
             .expect("FreerRetention artifact includes the real freer E constructor")
             .host_id;
         let linked = link_program(prepared, &MachineImports::default())
@@ -4013,8 +4019,10 @@ mod tests {
         // declare the same constructor identity differently.
         let unit = format!("Unit{host_id}");
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineMulti", &unit),
-            family: testing::identity("MachineMulti", &unit),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineMulti", &unit),
+                testing::identity("MachineMulti", &unit),
+            ),
             host_id: tidepool_repr::DataConId(host_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -4043,6 +4051,128 @@ mod tests {
         };
         let prepared = testing::prepare(wire).expect("base_program fixture");
         link_program(prepared, &MachineImports::default()).expect("base_program fixture links")
+    }
+
+    fn versioned_family_program(revision: u8) -> tidepool_repr::execution_schema::LinkedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        let family = testing::identity("RetainedVersions", "Family");
+        let mut sibling = ConstructorDecl {
+            identity: testing::constructor_identity(
+                testing::identity("RetainedVersions", "Sibling"),
+                family.clone(),
+            ),
+            host_id: DataConId(62000 + u64::from(revision) * 2),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 2,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        };
+        sibling.identity.family.version =
+            tidepool_repr::execution_schema::TypeVersion::GhcAbi([revision; 16]);
+        let mut changed = sibling.clone();
+        changed.identity.symbol.occurrence = "Changed".into();
+        changed.host_id.0 += 1;
+        changed.tag = 2;
+        let rep = if revision == 0 {
+            RuntimeRep::Int(64)
+        } else {
+            RuntimeRep::Word(64)
+        };
+        changed.field_reps = vec![rep];
+        changed.strict_fields = vec![true];
+        changed.layout = CheckedLayout {
+            fields: vec![FieldLayout { rep, offset: 0 }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![false],
+        };
+        wire.constructors = vec![sibling, changed];
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap()
+    }
+
+    #[test]
+    fn retained_type_versions_coexist_and_transfer_after_the_old_image_retires() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let a = versioned_family_program(0);
+        let b = versioned_family_program(1);
+        let (mut source, program_a) = PreparedMachine::new(first(&a), options).unwrap();
+        let program_b = install_linked(&mut source, &b, ImportBindings::new()).unwrap();
+        let b_top = source.retain_top(program_b, ValueId(0)).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let old = source
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(old)] = old.values.as_slice() else {
+            panic!("managed A sibling")
+        };
+        let old = *old;
+        let current = source
+            .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        assert!(
+            matches!(current.values.as_slice(), [HaskellValue::Con(DataConId(62002), fields)] if fields.is_empty())
+        );
+        let descriptor_a = source.interner.by_host(DataConId(62000)).unwrap().1.clone();
+        let descriptor_b = source.interner.by_host(DataConId(62002)).unwrap().1.clone();
+        assert!(
+            !Arc::ptr_eq(&descriptor_a, &descriptor_b),
+            "unchanged sibling belongs to its changed family"
+        );
+
+        let retired = source.collect_major(source.quiesce().unwrap()).unwrap();
+        assert!(retired.programs.contains(&program_a));
+        assert!(!retired.programs.contains(&program_b));
+        let parcel = source.export_parcel(old).unwrap();
+        assert!(
+            parcel.images().is_empty(),
+            "A's constructor survives without its code image"
+        );
+        assert_eq!(parcel.constructors().len(), 1);
+
+        let (mut destination, destination_b) = PreparedMachine::new(first(&b), options).unwrap();
+        assert!(Arc::ptr_eq(
+            &descriptor_b,
+            &destination.interner.by_host(DataConId(62002)).unwrap().1
+        ));
+        let arrived = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .unwrap()
+            .value;
+        drop(source);
+        assert!(
+            matches!(destination.observe_handle(destination_b, arrived, 100).unwrap(), HaskellValue::Con(DataConId(62000), fields) if fields.is_empty())
+        );
+        assert!(
+            matches!(destination.run_entry(destination_b, ValueId(0), &[], call, RealmId::ROOT).unwrap().values.as_slice(), [HaskellValue::Con(DataConId(62002), fields)] if fields.is_empty())
+        );
+        assert!(destination.release(arrived));
+        let _ = b_top;
     }
 
     fn empty_static_program(mut program: CompiledProgram) -> CompiledProgram {
@@ -5749,8 +5879,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors = vec![ConstructorDecl {
-            identity: testing::identity("ParcelCycle", "Pair"),
-            family: testing::identity("ParcelCycle", "Pair"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("ParcelCycle", "Pair"),
+                testing::identity("ParcelCycle", "Pair"),
+            ),
             host_id: DataConId(935),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -6400,8 +6532,10 @@ mod tests {
         testing::identity("P7Case", "producer")
     }
 
-    fn p7_case_family_identity() -> SymbolIdentity {
-        testing::identity("P7Case", "Family")
+    fn p7_case_family_identity() -> tidepool_repr::execution_schema::TypeIdentity {
+        tidepool_repr::execution_schema::testing::type_identity(testing::identity(
+            "P7Case", "Family",
+        ))
     }
 
     /// A's two declared constructors for the algebraic-case parcel test:
@@ -6409,8 +6543,10 @@ mod tests {
     fn p7_case_constructor_decls() -> Vec<ConstructorDecl> {
         vec![
             ConstructorDecl {
-                identity: testing::identity("P7Case", "First"),
-                family: p7_case_family_identity(),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("P7Case", "First"),
+                    testing::identity("P7Case", "Family"),
+                ),
                 host_id: tidepool_repr::DataConId(7_801),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,
@@ -6425,8 +6561,10 @@ mod tests {
                 },
             },
             ConstructorDecl {
-                identity: testing::identity("P7Case", "Second"),
-                family: p7_case_family_identity(),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("P7Case", "Second"),
+                    testing::identity("P7Case", "Family"),
+                ),
                 host_id: tidepool_repr::DataConId(7_802),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 2,
@@ -6456,8 +6594,10 @@ mod tests {
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.extend(p7_case_constructor_decls());
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("P7Marker", "Tag"),
-            family: testing::identity("P7Marker", "Tag"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("P7Marker", "Tag"),
+                testing::identity("P7Marker", "Tag"),
+            ),
             host_id: tidepool_repr::DataConId(7_803),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -6529,8 +6669,10 @@ mod tests {
         }];
         wire.constructors.extend(p7_case_constructor_decls());
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("P7CaseResult", "SawFirst"),
-            family: testing::identity("P7CaseResult", "Family"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("P7CaseResult", "SawFirst"),
+                testing::identity("P7CaseResult", "Family"),
+            ),
             host_id: tidepool_repr::DataConId(7_811),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -6545,8 +6687,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("P7CaseResult", "SawSecond"),
-            family: testing::identity("P7CaseResult", "Family"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("P7CaseResult", "SawSecond"),
+                testing::identity("P7CaseResult", "Family"),
+            ),
             host_id: tidepool_repr::DataConId(7_812),
             result_rep: RuntimeRep::LiftedRef,
             tag: 2,
@@ -7013,8 +7157,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineImports", "Field"),
-            family: testing::identity("MachineImports", "Field"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineImports", "Field"),
+                testing::identity("MachineImports", "Field"),
+            ),
             host_id: tidepool_repr::DataConId(host_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7064,8 +7210,10 @@ mod tests {
             results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         };
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineImports", "Filler"),
-            family: testing::identity("MachineImports", "Filler"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineImports", "Filler"),
+                testing::identity("MachineImports", "Filler"),
+            ),
             host_id: tidepool_repr::DataConId(971),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7296,8 +7444,10 @@ mod tests {
             results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineClosure", "Envelope"),
-            family: testing::identity("MachineClosure", "Envelope"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineClosure", "Envelope"),
+                testing::identity("MachineClosure", "Envelope"),
+            ),
             host_id: tidepool_repr::DataConId(981),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7321,8 +7471,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineClosure", "Unit"),
-            family: testing::identity("MachineClosure", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineClosure", "Unit"),
+                testing::identity("MachineClosure", "Unit"),
+            ),
             host_id: tidepool_repr::DataConId(982),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7337,8 +7489,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineClosure", "MakeResult"),
-            family: testing::identity("MachineClosure", "MakeResult"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineClosure", "MakeResult"),
+                testing::identity("MachineClosure", "MakeResult"),
+            ),
             host_id: tidepool_repr::DataConId(983),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7793,8 +7947,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("ThunkToClosure", "Ready"),
-            family: testing::identity("ThunkToClosure", "Ready"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("ThunkToClosure", "Ready"),
+                testing::identity("ThunkToClosure", "Ready"),
+            ),
             host_id: tidepool_repr::DataConId(1_301),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -7887,8 +8043,10 @@ mod tests {
         };
         if with_heap_top {
             wire.constructors.push(ConstructorDecl {
-                identity: testing::identity("ParcelRollback", "Unused"),
-                family: testing::identity("ParcelRollback", "Unused"),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("ParcelRollback", "Unused"),
+                    testing::identity("ParcelRollback", "Unused"),
+                ),
                 host_id: tidepool_repr::DataConId(7_960),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,
@@ -7995,8 +8153,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("X2ThunkForce", "Filler"),
-            family: testing::identity("X2ThunkForce", "Filler"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("X2ThunkForce", "Filler"),
+                testing::identity("X2ThunkForce", "Filler"),
+            ),
             host_id: tidepool_repr::DataConId(994),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -8011,8 +8171,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("X2ThunkForce", "Ready"),
-            family: testing::identity("X2ThunkForce", "Ready"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("X2ThunkForce", "Ready"),
+                testing::identity("X2ThunkForce", "Ready"),
+            ),
             host_id: tidepool_repr::DataConId(995),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -8209,8 +8371,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("S3Import", "Field"),
-            family: testing::identity("S3Import", "Field"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("S3Import", "Field"),
+                testing::identity("S3Import", "Field"),
+            ),
             host_id: tidepool_repr::DataConId(960),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -8439,8 +8603,10 @@ mod tests {
             required_generation: None,
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("S3Import", "Field"),
-            family: testing::identity("S3Import", "Field"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("S3Import", "Field"),
+                testing::identity("S3Import", "Field"),
+            ),
             host_id: tidepool_repr::DataConId(960),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -8464,7 +8630,9 @@ mod tests {
                 scrutinee: 0,
                 binder: ValueId(49),
                 scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                kind: CaseKind::Algebraic(testing::identity("S3Import", "Field")),
+                kind: CaseKind::Algebraic(tidepool_repr::execution_schema::testing::type_identity(
+                    testing::identity("S3Import", "Field"),
+                )),
                 alternatives: vec![Alternative {
                     pattern: AlternativePattern::Constructor(ConstructorId(0)),
                     binders: vec![ValueId(50)],
@@ -8628,7 +8796,9 @@ mod tests {
                 scrutinee: 0,
                 binder: ValueId(49),
                 scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                kind: CaseKind::Algebraic(testing::identity("S3Import", "Field")),
+                kind: CaseKind::Algebraic(tidepool_repr::execution_schema::testing::type_identity(
+                    testing::identity("S3Import", "Field"),
+                )),
                 alternatives: vec![],
             },
         ];
@@ -8704,8 +8874,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("S3Import", "Field"),
-            family: testing::identity("S3Import", "Field"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("S3Import", "Field"),
+                testing::identity("S3Import", "Field"),
+            ),
             host_id: tidepool_repr::DataConId(960),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -8762,8 +8934,10 @@ mod tests {
             let mut wire = testing::wire_program();
             wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
             wire.constructors.push(ConstructorDecl {
-                identity: testing::identity("StaleReservation", "Unit"),
-                family: testing::identity("StaleReservation", "Unit"),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("StaleReservation", "Unit"),
+                    testing::identity("StaleReservation", "Unit"),
+                ),
                 host_id: tidepool_repr::DataConId(961),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,
@@ -8958,8 +9132,10 @@ mod tests {
             required_generation: None,
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("S3ImportClosure", "Filler"),
-            family: testing::identity("S3ImportClosure", "Filler"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("S3ImportClosure", "Filler"),
+                testing::identity("S3ImportClosure", "Filler"),
+            ),
             host_id: tidepool_repr::DataConId(970),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -9418,8 +9594,10 @@ mod tests {
             required_generation: None,
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("S3bImportTop", "Pair"),
-            family: testing::identity("S3bImportTop", "Pair"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("S3bImportTop", "Pair"),
+                testing::identity("S3bImportTop", "Pair"),
+            ),
             host_id: tidepool_repr::DataConId(965),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -9619,7 +9797,9 @@ mod tests {
                 scrutinee: 0,
                 binder: ValueId(49),
                 scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                kind: CaseKind::Algebraic(testing::identity("S3ImportStandalone", "Field")),
+                kind: CaseKind::Algebraic(tidepool_repr::execution_schema::testing::type_identity(
+                    testing::identity("S3ImportStandalone", "Field"),
+                )),
                 alternatives: vec![Alternative {
                     pattern: AlternativePattern::Default,
                     binders: vec![],
@@ -9737,8 +9917,10 @@ mod tests {
         family: &str,
     ) {
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity(family, "Nil"),
-            family: testing::identity(family, "List"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity(family, "Nil"),
+                testing::identity(family, "List"),
+            ),
             host_id: tidepool_repr::DataConId(0), // overwritten per call site below
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -9753,8 +9935,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity(family, "Cons"),
-            family: testing::identity(family, "List"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity(family, "Cons"),
+                testing::identity(family, "List"),
+            ),
             host_id: tidepool_repr::DataConId(0), // overwritten per call site below
             result_rep: RuntimeRep::LiftedRef,
             tag: 2,
@@ -10355,8 +10539,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("NumericSite", "Number"),
-            family: testing::identity("NumericSite", "Number"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("NumericSite", "Number"),
+                testing::identity("NumericSite", "Number"),
+            ),
             host_id: DataConId(40_501),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11165,8 +11351,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineImports", "Unit"),
-            family: testing::identity("MachineImports", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineImports", "Unit"),
+                testing::identity("MachineImports", "Unit"),
+            ),
             host_id: tidepool_repr::DataConId(unit_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11181,8 +11369,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Data.Text.Internal", "Text"),
-            family: testing::identity("Data.Text.Internal", "Text"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("Data.Text.Internal", "Text"),
+                testing::identity("Data.Text.Internal", "Text"),
+            ),
             host_id: tidepool_repr::DataConId(text_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11393,8 +11583,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("W5", "Unit"),
-            family: testing::identity("W5", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("W5", "Unit"),
+                testing::identity("W5", "Unit"),
+            ),
             host_id: tidepool_repr::DataConId(900),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11826,8 +12018,10 @@ mod tests {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineCompaction", "Unit"),
-            family: testing::identity("MachineCompaction", "Unit"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineCompaction", "Unit"),
+                testing::identity("MachineCompaction", "Unit"),
+            ),
             host_id: DataConId(unit_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11842,8 +12036,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineCompaction", "Box"),
-            family: testing::identity("MachineCompaction", "Box"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineCompaction", "Box"),
+                testing::identity("MachineCompaction", "Box"),
+            ),
             host_id: DataConId(box_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -11861,8 +12057,10 @@ mod tests {
             },
         });
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineCompaction", "Pair"),
-            family: testing::identity("MachineCompaction", "Pair"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("MachineCompaction", "Pair"),
+                testing::identity("MachineCompaction", "Pair"),
+            ),
             host_id: DataConId(932),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,

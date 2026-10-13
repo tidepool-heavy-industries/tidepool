@@ -8,8 +8,10 @@ use tidepool_repr::execution_schema::{testing, *};
 
 fn constructor(index: u64) -> ConstructorDecl {
     ConstructorDecl {
-        identity: testing::identity("W5Apply", &format!("C{index}")),
-        family: testing::identity("W5Apply", &format!("T{index}")),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5Apply", &format!("C{index}")),
+            testing::identity("W5Apply", &format!("T{index}")),
+        ),
         host_id: tidepool_repr::DataConId(980 + index),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

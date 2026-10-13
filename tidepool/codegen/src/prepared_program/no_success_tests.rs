@@ -52,9 +52,11 @@ pub(super) fn raised_caf() -> WireProgram {
         signature: SignatureId(1),
     });
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("Failure", "Exception"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Failure", "Exception"),
+            testing::identity("Failure", "ExceptionType"),
+        ),
         host_id: tidepool_repr::DataConId(971),
-        family: testing::identity("Failure", "ExceptionType"),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![],
         strict_fields: vec![],
@@ -210,9 +212,11 @@ fn bottoming_wire(call: BottomCall) -> WireProgram {
         signature: SignatureId(3),
     });
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("Bottoming", "Exception"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Bottoming", "Exception"),
+            testing::identity("Bottoming", "ExceptionType"),
+        ),
         host_id: tidepool_repr::DataConId(972),
-        family: testing::identity("Bottoming", "ExceptionType"),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![],
         strict_fields: vec![],

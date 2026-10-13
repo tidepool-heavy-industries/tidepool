@@ -81,8 +81,10 @@ mod tests {
 
     fn constructor(tag: u32, family_size: u32) -> ConstructorDecl {
         ConstructorDecl {
-            identity: testing::identity("DataTag", &format!("C{tag}")),
-            family: testing::identity("DataTag", "Family"),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("DataTag", &format!("C{tag}")),
+                testing::identity("DataTag", "Family"),
+            ),
             host_id: tidepool_repr::DataConId(990 + u64::from(tag)),
             result_rep: RuntimeRep::LiftedRef,
             tag,

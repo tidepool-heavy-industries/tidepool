@@ -168,8 +168,10 @@ fn captured_caf_program(policy: UpdatePolicy) -> CompiledProgram {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("W5", "CapturedUnit"),
-        family: testing::identity("W5", "CapturedUnit"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5", "CapturedUnit"),
+            testing::identity("W5", "CapturedUnit"),
+        ),
         host_id: tidepool_repr::DataConId(900),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,
@@ -226,8 +228,10 @@ fn captured_raise_io_caf_program(policy: UpdatePolicy) -> CompiledProgram {
         signature: SignatureId(1),
     });
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("W5", "RaisedException"),
-        family: testing::identity("W5", "RaisedException"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5", "RaisedException"),
+            testing::identity("W5", "RaisedException"),
+        ),
         host_id: tidepool_repr::DataConId(900),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

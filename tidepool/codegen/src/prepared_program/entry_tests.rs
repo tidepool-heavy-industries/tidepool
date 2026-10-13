@@ -15,8 +15,10 @@ fn w5_a4_observation_forces_constructor_child() {
     {
         let layout = StorageLayout::for_reps(&wire.envelope.target, &fields).unwrap();
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("W5", &format!("C{index}")),
-            family: testing::identity("W5", &format!("T{index}")),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                testing::identity("W5", &format!("C{index}")),
+                testing::identity("W5", &format!("T{index}")),
+            ),
             host_id: tidepool_repr::DataConId(920 + index as u64),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -106,8 +108,10 @@ pub(super) fn caf_linked(
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("W5", "Unit"),
-        family: testing::identity("W5", "Unit"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5", "Unit"),
+            testing::identity("W5", "Unit"),
+        ),
         host_id: tidepool_repr::DataConId(900),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,
@@ -252,8 +256,10 @@ fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("W5", "Unit"),
-        family: testing::identity("W5", "Unit"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5", "Unit"),
+            testing::identity("W5", "Unit"),
+        ),
         host_id: tidepool_repr::DataConId(901),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,
@@ -363,8 +369,10 @@ fn compile_wire(wire: WireProgram) -> CompiledProgram {
 fn constructor_decl(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
     let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
     ConstructorDecl {
-        identity: testing::identity("W5", &format!("C{index}")),
-        family: testing::identity("W5", &format!("T{index}")),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("W5", &format!("C{index}")),
+            testing::identity("W5", &format!("T{index}")),
+        ),
         host_id: tidepool_repr::DataConId(940 + index),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

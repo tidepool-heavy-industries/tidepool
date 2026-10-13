@@ -125,8 +125,10 @@ fn package_literal_static_constructor_field_is_not_traced() {
     let mut wire = group_wire(false, true);
     wire.expressions.nodes.clear();
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("PackageLiteral", "Holder"),
-        family: testing::identity("PackageLiteral", "Holder"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("PackageLiteral", "Holder"),
+            testing::identity("PackageLiteral", "Holder"),
+        ),
         host_id: tidepool_repr::DataConId(90_103),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![RuntimeRep::Address],

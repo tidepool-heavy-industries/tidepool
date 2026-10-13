@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    ConstructorReply, DefinitionsView, Group, HeapRhs, JsonLayout, Signature, SiteRow,
-    SymbolIdentity, ValueId,
+    ConstructorIdentity, ConstructorReply, DefinitionsView, Group, HeapRhs, JsonLayout, Signature,
+    SiteRow, SymbolIdentity, ValueId,
 };
 use tidepool_repr::type_graph::TypeGraph;
 use tidepool_repr::DataConId;
@@ -17,8 +17,8 @@ pub struct DefinitionFacts {
     pub types: Arc<TypeGraph>,
     /// Exact bridge request constructor IDs paired with reply evidence.
     pub constructor_replies: Vec<(DataConId, ConstructorReply)>,
-    /// Identity, bridge ID and family, indexed by the local `ConstructorId`.
-    pub constructors: Arc<[(SymbolIdentity, DataConId, SymbolIdentity)]>,
+    /// Complete identity and bridge ID, indexed by the local `ConstructorId`.
+    pub constructors: Arc<[(ConstructorIdentity, DataConId)]>,
     pub json_layout: Option<JsonLayout<DataConId>>,
     /// Constructor row indexes by module and occurrence. Preserve every row
     /// so runtime authority checks can reject conflicting declarations.
@@ -46,23 +46,17 @@ impl DefinitionFacts {
                 (top.binding.id, (top.identity.clone(), export))
             })
             .collect();
-        let constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)> = prepared
+        let constructors: Vec<(ConstructorIdentity, DataConId)> = prepared
             .constructors()
             .iter()
-            .map(|declaration| {
-                (
-                    declaration.identity.clone(),
-                    declaration.host_id,
-                    declaration.family.clone(),
-                )
-            })
+            .map(|declaration| (declaration.identity.clone(), declaration.host_id))
             .collect();
         let mut by_identity = BTreeMap::<_, BTreeMap<_, Vec<usize>>>::new();
-        for (index, (identity, _, _)) in constructors.iter().enumerate() {
+        for (index, (identity, _)) in constructors.iter().enumerate() {
             by_identity
-                .entry(identity.module.clone())
+                .entry(identity.symbol.module.clone())
                 .or_default()
-                .entry(identity.occurrence.clone())
+                .entry(identity.symbol.occurrence.clone())
                 .or_default()
                 .push(index);
         }

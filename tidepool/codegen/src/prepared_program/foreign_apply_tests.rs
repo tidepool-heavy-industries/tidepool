@@ -99,8 +99,10 @@ fn owner(results: ResultContract) -> WireProgram {
         results: results.clone(),
     }];
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("ForeignApply", "Token"),
-        family: testing::identity("ForeignApply", "Token"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("ForeignApply", "Token"),
+            testing::identity("ForeignApply", "Token"),
+        ),
         host_id: DataConId(997),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

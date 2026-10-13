@@ -52,8 +52,10 @@ fn function(
 
 fn constructor() -> ConstructorDecl {
     ConstructorDecl {
-        identity: testing::identity("CallerResult", "Answer"),
-        family: testing::identity("CallerResult", "AnswerType"),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("CallerResult", "Answer"),
+            testing::identity("CallerResult", "AnswerType"),
+        ),
         host_id: DataConId(1980),
         result_rep: RuntimeRep::LiftedRef,
         tag: 1,

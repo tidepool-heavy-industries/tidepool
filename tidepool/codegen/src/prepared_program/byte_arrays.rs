@@ -1191,8 +1191,10 @@ mod tests {
         let mut after_write = 4;
         if garbage != 0 {
             wire.constructors.push(ConstructorDecl {
-                identity: testing::identity("Bytes", "C"),
-                family: testing::identity("Bytes", "T"),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("Bytes", "C"),
+                    testing::identity("Bytes", "T"),
+                ),
                 host_id: tidepool_repr::DataConId(1890),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,

@@ -1723,8 +1723,10 @@ mod tests {
         fn base_wire() -> WireProgram {
             let mut wire = testing::wire_program();
             wire.constructors.push(ConstructorDecl {
-                identity: testing::identity("W6", "Unit"),
-                family: testing::identity("W6", "Unit"),
+                identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                    testing::identity("W6", "Unit"),
+                    testing::identity("W6", "Unit"),
+                ),
                 host_id: tidepool_repr::DataConId(960),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: 1,
