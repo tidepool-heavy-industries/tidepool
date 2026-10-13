@@ -37,6 +37,29 @@ struct RecoveryTransport {
     phase: String,
     calls: AtomicUsize,
 }
+impl RecoveryTransport {
+    fn assert_authored_value(&self, output: &serde_json::Value, expected: &str) {
+        // Readiness carries the actor actually admitted in this process. The
+        // display receipt selects its retained page, not the aggregate model text.
+        let ready: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(self.root.join(format!("{}.ready", self.phase))).unwrap(),
+        )
+        .unwrap();
+        let actor: ActorRef = serde_json::from_value(ready["actor"].clone()).unwrap();
+        let run = self.root.join("run");
+        let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
+        assert_eq!(
+            super::test_campaign::retained_committed_display_text(
+                &store,
+                &super::test_campaign::actor_output_origin(&super::runtime_namespace(&run), actor),
+                output,
+            ),
+            expected,
+            "{output}"
+        );
+    }
+}
+
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for RecoveryTransport {
     fn response_contract(
@@ -112,26 +135,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                 let output: serde_json::Value =
                     serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
                 assert_eq!(output["status"], "committed", "{output}");
-                let ready: serde_json::Value = serde_json::from_slice(
-                    &std::fs::read(self.root.join(format!("{}.ready", self.phase))).unwrap(),
-                )
-                .unwrap();
-                let actor: ActorRef = serde_json::from_value(ready["actor"].clone()).unwrap();
-                let run = self.root.join("run");
-                let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
-                assert_eq!(
-                    super::test_campaign::retained_committed_display_text(
-                        &store,
-                        &harness::store::actor_output::ActorOutputOrigin {
-                            run: super::runtime_namespace(&run),
-                            native_actor: actor.id.0,
-                            incarnation: actor.incarnation.0,
-                        },
-                        &output,
-                    ),
-                    "True",
-                    "{output}"
-                );
+                self.assert_authored_value(&output, "True");
                 std::fs::write(
                     self.root.join(format!("{}.{previous}.json", self.phase)),
                     serde_json::to_vec(&output).unwrap(),
@@ -192,10 +196,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                             .all(|item| item["status"] == "committed"),
                         "{output}"
                     );
-                    assert_eq!(
-                        super::test_campaign::committed_display_text(&output),
-                        "True"
-                    );
+                    self.assert_authored_value(&output, "True");
                     std::fs::write(
                         self.root.join(format!("{}.{call}.json", self.phase)),
                         serde_json::to_vec(&output).unwrap(),
@@ -280,11 +281,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                         assert_eq!(output["total"], 1, "{output}");
                         assert_eq!(output["nextIndex"], 1, "{output}");
                         assert_eq!(receipts.len(), 1, "{output}");
-                        assert_eq!(
-                            super::test_campaign::committed_display_text(&output).trim(),
-                            "42",
-                            "cold original constructor/value returned a different result: {output}"
-                        );
+                        self.assert_authored_value(&output, "42");
                     }
                     std::fs::write(
                         self.root.join(format!("{}.settled", self.phase)),
@@ -993,13 +990,11 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
     let after_crash =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
-    assert!(
-        latest_durable_root_application(&after_crash)
-            .unwrap()
-            .unwrap()
-            .terminal
-            .is_none()
-    );
+    assert!(latest_durable_root_application(&after_crash)
+        .unwrap()
+        .unwrap()
+        .terminal
+        .is_none());
     std::fs::write(
         root.join("project/.exomonad/state/memory/persona.md"),
         "changed-after-crash",
@@ -1149,11 +1144,9 @@ async fn coherent_recovery_history(fault: InstallerFault) {
         &std::fs::read(root.join("coherent-original.request-3.json")).unwrap(),
     )
     .unwrap();
-    assert!(
-        request_b
-            .instructions
-            .contains(include_str!("fixtures/coherent_reload_prompt_b.md"))
-    );
+    assert!(request_b
+        .instructions
+        .contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
     let before =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
@@ -1238,11 +1231,9 @@ async fn coherent_recovery_history(fault: InstallerFault) {
         retained_users.as_slice()
     );
     assert_eq!(resumed_users.len(), retained_users.len() + 1);
-    assert!(
-        !serde_json::to_string(&resumed_users)
-            .unwrap()
-            .contains("memory-C")
-    );
+    assert!(!serde_json::to_string(&resumed_users)
+        .unwrap()
+        .contains("memory-C"));
     let after =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
@@ -1630,14 +1621,12 @@ async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_
     let journal = root.join("run/actor-lifecycle.v2.jsonl");
     let journal_bytes = std::fs::read(&journal).unwrap();
     let database = root.join("run/recovery.sqlite");
-    assert!(
-        tidepool_runtime::session::observe_declaration_domain(
-            &database,
-            tidepool_runtime::session::RecoveryDomainId::Root,
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert!(tidepool_runtime::session::observe_declaration_domain(
+        &database,
+        tidepool_runtime::session::RecoveryDomainId::Root,
+    )
+    .unwrap()
+    .is_some());
     let mut retained_files = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let original = root.join(format!("run/recovery.sqlite{suffix}"));
@@ -1758,8 +1747,8 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let initial_identity =
         embedded_recovery::host_identity(&root.join("run"), "/root", initial_actor);
     use tidepool_runtime::session::{
-        RecoveryArtifactClosure, RecoveryDomainId, RecoveryExportKind, RecoveryNodeKind,
-        observe_declaration_domain,
+        observe_declaration_domain, RecoveryArtifactClosure, RecoveryDomainId, RecoveryExportKind,
+        RecoveryNodeKind,
     };
     let recovery_path = root.join("run/recovery.sqlite");
     let before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
