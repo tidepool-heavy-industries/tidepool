@@ -14145,13 +14145,18 @@ where
         }
         let mut visible = std::collections::HashSet::new();
         let mut lifecycles = std::collections::HashMap::new();
-        for actor in records.keys() {
+        for (actor, record) in &records {
             if let Some(requester) = requester {
                 if !self.directory.authorize_observe(requester, *actor).await? {
                     continue;
                 }
             }
             visible.insert(*actor);
+            // Retired metadata already owns the exact published terminal. Its
+            // observation must not depend on the directory remaining live.
+            if record.terminal.is_some() {
+                continue;
+            }
             lifecycles.insert(
                 *actor,
                 self.directory

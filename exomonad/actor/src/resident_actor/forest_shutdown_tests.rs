@@ -1218,4 +1218,21 @@ async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
         None
     );
     without_directory.directory.stop_owner_for_test().await;
+    assert!(matches!(
+        without_directory.inspect_host_graph().await,
+        Err(crate::DirectoryError::Unavailable)
+    ));
+    forest
+        .environment
+        .actors
+        .lock()
+        .get_mut(&identity)
+        .unwrap()
+        .terminal = actor.terminal().get();
+    let retired = without_directory.inspect_host_graph().await.unwrap();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].actor, identity);
+    assert_eq!(retired[0].terminal(), Some(&terminal));
+    assert!(retired[0].active_requests.is_empty());
+    assert!(retired[0].queued_requests.is_empty());
 }
