@@ -1173,7 +1173,6 @@ rust_filegroup(
         "src/exomonad/source.rs": "bridge/facade/src/exomonad/source.rs",
         "src/exomonad/source/generation.rs": "bridge/facade/src/exomonad/source/generation.rs",
         "src/exomonad/source/prompt_files.rs": "bridge/facade/src/exomonad/source/prompt_files.rs",
-        "src/exomonad/source/publication_fault_tests.rs": "bridge/facade/src/exomonad/source/publication_fault_tests.rs",
         "src/exomonad/workspace.hs": "bridge/facade/src/exomonad/workspace.hs",
         "src/exomonad/workspace.rs": "bridge/facade/src/exomonad/workspace.rs",
         "src/exomonad/workspace/source_capture_tests.rs": "bridge/facade/src/exomonad/workspace/source_capture_tests.rs",
@@ -1281,7 +1280,6 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/startup_context_acceptance_tests.rs",
         "bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs",
         "bridge/facade/src/actor_host/workspace_admission_tests.rs",
-        "bridge/facade/src/exomonad/source/publication_fault_tests.rs",
         "bridge/facade/src/exomonad/workspace/source_capture_tests.rs",
         "bridge/facade/src/lib.rs",
     ],
@@ -1344,7 +1342,6 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/prepared_runtime_spec.hs",
         "bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs",
         "bridge/facade/src/actor_host/restart_effect_once.hs",
-        "bridge/facade/src/exomonad/source/publication_fault_driver.hs",
     ],
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],
@@ -2947,7 +2944,6 @@ filegroup(
         "bridge/facade/src/exomonad/source.rs": "src/exomonad/source.rs",
         "bridge/facade/src/exomonad/source/generation.rs": "src/exomonad/source/generation.rs",
         "bridge/facade/src/exomonad/source/prompt_files.rs": "src/exomonad/source/prompt_files.rs",
-        "bridge/facade/src/exomonad/source/publication_fault_tests.rs": "src/exomonad/source/publication_fault_tests.rs",
         "bridge/facade/src/exomonad/workspace.hs": "src/exomonad/workspace.hs",
         "bridge/facade/src/exomonad/workspace.rs": "src/exomonad/workspace.rs",
         "bridge/facade/src/exomonad/workspace/source_capture_tests.rs": "src/exomonad/workspace/source_capture_tests.rs",
@@ -4838,13 +4834,6 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f61637469766174696f6e5f707265766965775f73657475702e6873",
     src = "src/actor_host_fixtures/generic_actor/activation_preview_setup.hs",
     out = "activation_preview_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f65786f6d6f6e61642f736f757263652f7075626c69636174696f6e5f6661756c745f6472697665722e6873",
-    src = "src/exomonad/source/publication_fault_driver.hs",
-    out = "publication_fault_driver.hs",
     visibility = ["PUBLIC"],
 )
 

@@ -50,7 +50,6 @@ TEST_ONLY_MODULES = {
         'bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs',
         'bridge/facade/src/actor_host/scripted_recursive_acceptance.rs',
         'bridge/facade/src/actor_host/workspace_admission_tests.rs',
-        'bridge/facade/src/exomonad/source/publication_fault_tests.rs',
         'bridge/facade/src/exomonad/workspace/source_capture_tests.rs',
     }),
     'exomonad-actor': frozenset({
@@ -172,7 +171,6 @@ TEST_ONLY_FIXTURES = {
         'bridge/facade/src/actor_host/prepared_runtime_spec.hs',
         'bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs',
         'bridge/facade/src/actor_host/restart_effect_once.hs',
-        'bridge/facade/src/exomonad/source/publication_fault_driver.hs',
     }),
     'exomonad-actor': frozenset({
         'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',

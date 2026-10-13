@@ -273,7 +273,6 @@
     "bridge/facade/src/actor_host/typed_site_return_contract.hs",
     "bridge/facade/src/actor_host/work_notification.hs",
     "bridge/facade/src/actor_host_fixtures/generic_actor/activation_preview_setup.hs",
-    "bridge/facade/src/exomonad/source/publication_fault_driver.hs",
     "bridge/facade/src/exomonad/workspace.hs",
     "bridge/facade/src/exomonad/workspace_pinned_check.hs",
     "bridge/facade/tests/exomonad_action_surface/ExternalRowProtocol.hs",
