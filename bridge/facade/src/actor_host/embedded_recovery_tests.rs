@@ -1140,6 +1140,102 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     );
     recovered.0.kill().unwrap();
     assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
+    // The recovery owner selects the installer; the draft and derived manifests
+    // never locate an artifact for this refusal control.
+    let path = tidepool_repr::ActorPath::parse("/root").unwrap();
+    let owner =
+        tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor_b.incarnation.0).unwrap();
+    let selected = tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
+        &run.join("recovery.sqlite"),
+        tidepool_runtime::session::RecoveryDomainId::Root,
+        &owner,
+    )
+    .unwrap()
+    .expect("cold B has a durable selected generation");
+    let installation = exomonad_actor::PersistedActorInstallation::decode(
+        &selected.references.installation,
+        &selected.references.source,
+    )
+    .unwrap();
+    let (recipe, original) = installation
+        .acquisition()
+        .completed_entry_selection()
+        .unwrap();
+    let mut config = configuration(root);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            config.run_directory.path(),
+        )
+        .unwrap(),
+    );
+    let lease = Arc::new(HostIncarnationLease::claim(&config.run_directory).unwrap());
+    let (worktrees, bindings, allocation) =
+        actor_worktree_resources(&config.workspace, &config.run_directory, || {}).unwrap();
+    let source_owner = source_service(
+        &config,
+        &run,
+        worktrees,
+        crate::exomonad::source::SourceRootOwner::Host(lease.clone()),
+    )
+    .unwrap()
+    .unwrap();
+    use exomonad_actor::ActorSourceLayers;
+    let source = source_owner
+        .restore_source_with_acquisition(&selected.references.source, installation.acquisition())
+        .unwrap();
+    let exomonad_actor::SourceEntryStorage::CompletedOriginal {
+        directory,
+        selections,
+    } = source.prepared_entries().unwrap()
+    else {
+        panic!("selected installer must use completed source-owned storage");
+    };
+    assert_eq!(selections.get(recipe), Some(&original));
+    let installer = directory.join(recipe).join(original.to_string());
+    let output = installer.join("entry");
+    let retained_output = installer.join("entry.retained-for-refusal");
+    let wrapper = installer.join("Expr.hs");
+    let original_wrapper = std::fs::read(&wrapper).unwrap();
+    drop(source);
+    drop(source_owner);
+    drop(bindings);
+    drop(allocation);
+    drop(lease);
+    std::fs::rename(&output, &retained_output).unwrap();
+    let mut missing = start(root, "coherent-missing-installer");
+    refused(
+        root,
+        "coherent-missing-installer",
+        &mut missing,
+        "selected completed installer is unavailable",
+    )
+    .await;
+    std::fs::rename(&retained_output, &output).unwrap();
+    std::fs::write(
+        &wrapper,
+        b"module Expr where\ncorruptSelectedInstaller = ()\n",
+    )
+    .unwrap();
+    let mut corrupt = start(root, "coherent-corrupt-installer");
+    refused(
+        root,
+        "coherent-corrupt-installer",
+        &mut corrupt,
+        "recovered installer source closure differs from its owner",
+    )
+    .await;
+    std::fs::write(&wrapper, original_wrapper).unwrap();
+    assert_eq!(
+        tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
+            &run.join("recovery.sqlite"),
+            tidepool_runtime::session::RecoveryDomainId::Root,
+            &owner,
+        )
+        .unwrap(),
+        Some(selected),
+        "refusal does not select the draft or rewrite B"
+    );
     finish_fixture(retained_root);
 }
 
