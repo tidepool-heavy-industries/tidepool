@@ -6,8 +6,8 @@ use super::{LifecycleCommand, LifecycleHandle, LifecycleState};
 use crate::initial_context::InitialContextEvent;
 use crate::resident_actor::{ActorPublicOwnerPlane, WorkbenchPublicOwner};
 use crate::{ActorDescriptor, ActorSessionContext, InitialContextObservation, RootStartupIntent};
-use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -1099,6 +1099,25 @@ fn complete(
                     resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
                     Ok(PublicManifestCommit::Durable)
                 }
+                DurablePublicOwnerPublication::CommittedContinuing {
+                    readiness,
+                    cancellation_pending,
+                } => {
+                    if cancellation_pending {
+                        return Err(
+                            "incarnation transfer cannot return a pending continuing publication"
+                                .into(),
+                        );
+                    }
+                    let owner = WorkbenchPublicOwner::issue(
+                        &resident.current.context,
+                        &resident.current.descriptor,
+                        Some(readiness),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
+                    Ok(PublicManifestCommit::Durable)
+                }
                 DurablePublicOwnerPublication::Refused { error } => {
                     Ok(PublicManifestCommit::Refused { error })
                 }
@@ -1490,7 +1509,7 @@ fn panicking_worker_completion_for_test() -> Completion {
 
 #[cfg(test)]
 mod generation_publication_tests {
-    use super::{GenerationPublicationOrder, generation_publication_order};
+    use super::{generation_publication_order, GenerationPublicationOrder};
     use tidepool_runtime::session::NotebookGenerationId;
 
     #[test]

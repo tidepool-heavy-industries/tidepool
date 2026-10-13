@@ -1687,9 +1687,18 @@ pub(crate) struct PreparedActorGeneration {
 }
 
 pub(crate) enum ActorGenerationCommit {
-    Published(Arc<ActorGeneration>),
+    Published {
+        generation: Arc<ActorGeneration>,
+        cancellation_pending: bool,
+    },
     Refused(String),
     Unconfirmed(String),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ActorGenerationPublication {
+    Terminal,
+    Continuing,
 }
 
 /// Bootstrap policies precede generation publication. Production requests
@@ -2043,6 +2052,7 @@ where
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
         configuration_digest: [u8; 32],
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
+        publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
         self.access.with_machine(context, move |session, _, _| {
             let mut current = state.0.lock();
@@ -2070,23 +2080,32 @@ where
                     let owner = public_owner.bind(Some(readiness));
                     let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                     *current = InstalledToolsAvailability::Generation(generation.clone());
-                    visible=Some(generation);
+                    visible=Some((generation, false));
                 },
                 PreparedGenerationCommit::Ephemeral(id) => {
                     let owner = public_owner.bind(None);
                     let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
                     let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
                     *current = InstalledToolsAvailability::Generation(generation.clone());
-                    claim.published();
-                    visible = Some(generation);
+                    let cancellation_pending = match publication_kind {
+                        ActorGenerationPublication::Terminal => claim.published(),
+                        ActorGenerationPublication::Continuing => claim.published_continuing(),
+                    };
+                    visible = Some((generation, cancellation_pending));
                 },
                 PreparedGenerationCommit::Durable { prepared, selected } => {
-                    let result = session.commit_notebook_generation(prepared,&publication,|readiness| {
+                    let on_visible = |readiness| {
                         let owner = public_owner.bind(Some(readiness));
                         let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                         *current = InstalledToolsAvailability::Generation(generation.clone());
-                        visible = Some(generation);
-                    });
+                        visible = Some((generation, false));
+                    };
+                    let result = match publication_kind {
+                        ActorGenerationPublication::Terminal => session
+                            .commit_notebook_generation(prepared, &publication, on_visible),
+                        ActorGenerationPublication::Continuing => session
+                            .commit_notebook_generation_continuing(prepared, &publication, on_visible),
+                    };
                     let result = match result {
                         Ok(result) => result,
                         Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
@@ -2098,6 +2117,9 @@ where
                         Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
                     };
                     match result {
+                        tidepool_runtime::session::DurablePublicOwnerPublication::CommittedContinuing { cancellation_pending, .. } => {
+                            visible = visible.map(|(generation, _)| (generation, cancellation_pending));
+                        },
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
                         tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),
                         tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
@@ -2110,7 +2132,10 @@ where
                 },
             }
             match visible {
-                Some(generation) => Ok(ActorGenerationCommit::Published(generation)),
+                Some((generation, cancellation_pending)) => Ok(ActorGenerationCommit::Published {
+                    generation,
+                    cancellation_pending,
+                }),
                 None => {
                     if let InstalledToolsAvailability::Generation(generation)=&*current {
                         *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());

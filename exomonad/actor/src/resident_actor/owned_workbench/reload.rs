@@ -166,11 +166,22 @@ where
                 prompts,
                 staged.configuration_digest(),
                 publication,
+                if self.control.is_some() {
+                    crate::resident_workbench::ActorGenerationPublication::Continuing
+                } else {
+                    crate::resident_workbench::ActorGenerationPublication::Terminal
+                },
             )
             .await
             .map_err(unreadable)?;
         match result {
-            ActorGenerationCommit::Published(generation) => {
+            ActorGenerationCommit::Published {
+                generation,
+                cancellation_pending,
+            } => {
+                if let Some(control) = self.control.as_ref() {
+                    control.complete_continuing_publication(cancellation_pending);
+                }
                 if let Some(lifecycle) = self.lifecycle {
                     lifecycle.generation_published(generation);
                 }

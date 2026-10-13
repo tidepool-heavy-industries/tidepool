@@ -8041,10 +8041,11 @@ where
                 prompts.clone(),
                 evidence.configuration_digest,
                 tidepool_runtime::session::PublicationDecision::new(),
+                crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
             .await?
         {
-            crate::resident_workbench::ActorGenerationCommit::Published(generation) => {
+            crate::resident_workbench::ActorGenerationCommit::Published { generation, .. } => {
                 if let Some(lifecycle) = &self.lifecycle {
                     lifecycle.generation_published(generation);
                 }

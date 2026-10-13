@@ -145,6 +145,34 @@ impl WorkbenchExecutionControl {
         Arc::clone(&self.publication)
     }
 
+    /// Complete a nested, visible publication without settling the whole
+    /// invocation. A cancellation that arrived while that publication was
+    /// claimed becomes actionable only after its durable outcome is known.
+    pub(crate) fn complete_continuing_publication(&self, cancellation_pending: bool) {
+        if !cancellation_pending {
+            return;
+        }
+        let terminal = self.cell_terminal.lock();
+        if terminal.is_some() || self.terminal_reply().is_some() {
+            return;
+        }
+        self.native_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.phase.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |phase| match phase {
+                WORKBENCH_CANCELLED => None,
+                _ => Some(WORKBENCH_CANCEL_REQUESTED),
+            },
+        );
+        drop(terminal);
+        for receipt in self.compiler_work.lock().clone() {
+            receipt.request_cancellation();
+        }
+        self.changed.notify_waiters();
+    }
+
     pub(crate) fn execution_id(&self, actor: crate::ActorRef) -> WorkbenchExecutionId {
         self.execution
             .get_or_init(|| {
@@ -2327,6 +2355,38 @@ mod tests {
             control.cancellation_outcome(execution, control.settled().await),
             WorkbenchCancellationOutcome::PublicationSettled { reply: Ok(_), .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn continuing_generation_publication_delivers_pending_cancellation_to_cell() {
+        let control = WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let decision = control.publication_decision();
+        let claim = decision.claim_commit().unwrap();
+        let (claimed, admitted) = control.admit_cancellation();
+        assert!(!claimed);
+        assert_eq!(
+            admitted,
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(!control.cancellation_requested());
+        assert_eq!(
+            control.phase.load(std::sync::atomic::Ordering::Acquire),
+            WORKBENCH_SLEEPING
+        );
+
+        let cancellation_pending = claim.published_continuing();
+        assert!(cancellation_pending);
+        assert_eq!(decision.phase(), PublicationPhase::CancellationRequested);
+        control.complete_continuing_publication(cancellation_pending);
+        assert!(control.cancellation_requested());
+        assert!(control
+            .native_cancel()
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            control.phase.load(std::sync::atomic::Ordering::Acquire),
+            WORKBENCH_CANCEL_REQUESTED
+        );
     }
 
     #[tokio::test]
