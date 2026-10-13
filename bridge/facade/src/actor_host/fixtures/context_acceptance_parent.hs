@@ -15,7 +15,7 @@ do
       { spawnModel = Just (Literal "child-preparation-model"), spawnLabel = Just name }))
     ["first", "second"]
   workers <- mapM (\admitted -> case admitted of
-    Left issue -> error (show issue)
+    Left issue -> error (ContextText.pack (show issue))
     Right actor -> do
       Right reply <- request @Text actor ("specialize this child" :: Text) defaultRequestOptions
       pure reply) idle

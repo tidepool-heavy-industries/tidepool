@@ -1,0 +1,5 @@
+cargo_env = ["CARGO_MANIFEST_DIR", "CARGO_MANIFEST_LINKS"]
+
+[buildscript.run]
+rustc_link_lib = true
+rustc_link_search = true

@@ -1,0 +1,2 @@
+# The build script changes cfg only for wasm/hermit; native targets need no action.
+buildscript.run = false

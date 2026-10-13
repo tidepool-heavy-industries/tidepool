@@ -19,7 +19,7 @@ do
       { spawnModel = Just (Literal "test-model"), spawnLabel = Just name }))
     ["first", "second"]
   workers <- mapM (\admitted -> case admitted of
-    Left issue -> error (show issue)
+    Left issue -> error (ContextText.pack (show issue))
     Right actor -> do
       Right reply <- request @Text actor ("reuse the curated build result" :: Text) defaultRequestOptions
       pure reply) idle
