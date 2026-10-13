@@ -5789,6 +5789,37 @@ where
         )
     }
 
+    /// Load only the completed installer selected by the durable generation.
+    pub(crate) async fn prepare_recovered_tools(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        recovered: &PersistedActorInstallation,
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
+        let source_support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        let support = self.access.with_machine(context.clone(), move |session, _, _| {
+            let mut support = source_support;
+            for key in observer(session.handlers()) {
+                if !support.contains(&key) { support.push(key); }
+            }
+            Ok(support)
+        }).await?;
+        let authority = self.compilation_authority.as_ref().ok_or_else(||
+            ResidentActorWorkbenchError::ActorProtocol("recovered installation requires exact source authority".into()))?;
+        let source = authority.toolset_source().map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let registry = self.access.image_registry.clone().unwrap_or_else(||
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()));
+        let ready = self.access.source.restore_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            source, recovered, &granted_effects, &support, registry,
+        ).await?;
+        self.install_tools_action(context, install, granted_effects, ready.effects,
+            InstalledToolCode::SourcePrepared(ready.prepared), ToolInstallationPurpose::InitialTools)
+            .await.map(|installation| installation.tools)
+    }
+
     /// Prepare a replacement without publishing into its continuing namespace.
     pub(crate) fn prepare_candidate_tools<'a>(
         &'a self,

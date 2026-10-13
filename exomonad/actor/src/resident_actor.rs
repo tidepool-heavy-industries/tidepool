@@ -8229,6 +8229,16 @@ where
                     self.prepared_request_receiver = Some(receiver);
                     tools
                 }),
+            None if matches!(self.initial_configuration, InitialActorConfiguration::Restored { .. }) => {
+                let InitialActorConfiguration::Restored { head, .. } = &self.initial_configuration else { unreachable!() };
+                let recovered = crate::PersistedActorInstallation::decode(
+                    &head.references.installation, &head.references.source,
+                ).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                compiler_owner.scope(application_workbench.prepare_recovered_tools(
+                    compile_context.clone(), self.spec_installs,
+                    self.descriptor.capabilities().effect_keys().to_vec(), &recovered,
+                )).await
+            }
             None => {
                 compiler_owner
                     .scope(application_workbench.prepare_tools(
