@@ -47,6 +47,9 @@ use tidepool_repr::PrincipalId;
 
 use super::workspace::FrozenWorkspace;
 
+mod prompt_files;
+pub(crate) use prompt_files::CapturedPromptFiles;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Separates a source revision's content identity from every other identity
@@ -905,6 +908,7 @@ pub(crate) struct ExomonadSourceReload {
     /// read from. Drift is read on a timer for every actor; while neither the
     /// disk nor the active revision has moved, the answer has not either.
     drift_seen: Mutex<HashMap<String, (String, String, exomonad_actor::SourceLayerDrift)>>,
+    prompt_composers: RwLock<HashMap<PrincipalId, prompt_files::PromptComposer>>,
 }
 
 impl ExomonadSourceReload {
@@ -965,6 +969,7 @@ impl ExomonadSourceReload {
             helper_scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
             drift_seen: Mutex::new(HashMap::new()),
+            prompt_composers: RwLock::new(HashMap::new()),
         })
     }
 
