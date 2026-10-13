@@ -701,6 +701,41 @@ async fn settled_frontier(root: &Path, identity: &harness::embedding::HostIdenti
     .expect("provider continuation settles before the crash");
 }
 
+async fn actor_refused(root: &Path, phase: &str, process: &mut Process, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(360), async {
+        loop {
+            if let Some(current) = observed_root(root) {
+                if Some(current.admission.actor) != process.1 {
+                    if let Some(terminal) = current.terminal {
+                        assert_eq!(terminal.kind, exomonad_actor::ActorExitKind::Failed);
+                        assert!(
+                            terminal.summary.contains(expected),
+                            "wrong actor refusal: {terminal:?}"
+                        );
+                        assert!(!root.join(format!("{phase}.ready")).exists());
+                        assert!(!root.join(format!("{phase}.calls")).exists());
+                        return;
+                    }
+                }
+            }
+            if let Some(status) = process.0.try_wait().unwrap() {
+                panic!(
+                    "production {phase} exited {status} without the expected actor refusal: {}",
+                    std::fs::read_to_string(root.join(format!("{phase}.log"))).unwrap()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovered actor did not publish its installer refusal");
+    // Actor retirement does not require the host's administrative service to exit.
+    if process.0.try_wait().unwrap().is_none() {
+        process.0.kill().unwrap();
+    }
+    process.0.wait().unwrap();
+}
+
 async fn refused(root: &Path, phase: &str, process: &mut Process, expected: &str) {
     tokio::time::timeout(Duration::from_secs(360), async {
         loop {
@@ -1298,7 +1333,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     };
     std::fs::rename(&output, &retained_output).unwrap();
     let mut missing = start(root, "coherent-missing-installer");
-    refused(
+    actor_refused(
         root,
         "coherent-missing-installer",
         &mut missing,
@@ -1313,7 +1348,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     )
     .unwrap();
     let mut corrupt = start(root, "coherent-corrupt-installer");
-    refused(
+    actor_refused(
         root,
         "coherent-corrupt-installer",
         &mut corrupt,
