@@ -68,7 +68,12 @@ fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run:
     config.root_binding_path = run.join("root-binding.json");
 }
 
-pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str) {
+/// Author the complete fixture before its single immutable production selection.
+pub(super) fn configure_persona(
+    config: &mut super::ActorHostConfig,
+    entry: &str,
+    author: impl FnOnce(&Path, &mut crate::exomonad::ExomonadConfig),
+) {
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Persona")).unwrap();
     std::fs::create_dir_all(authored.join("Jev")).unwrap();
@@ -154,6 +159,7 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             .haskell
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
+        author(&config.workspace, project);
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
@@ -211,7 +217,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     let (entered, mut judgments) = mpsc::unbounded_channel();
     let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
         retained_location(config, &workspace, &run);
-        configure_persona(config, "AgentSpec.agentSpec");
+        configure_persona(config, "AgentSpec.agentSpec", |_, _| {});
         config.jev = Some(Arc::new(PersonaJevGate(entered)));
     })
     .await
@@ -421,7 +427,7 @@ async fn persona_web_selection_retains_native_judgment_and_empty_control() {
     let (provider, mut requests) = hosted_script_provider();
     let (entered, mut judgments) = mpsc::unbounded_channel();
     let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        configure_persona(config, "Persona.Spec.agentSpec");
+        configure_persona(config, "Persona.Spec.agentSpec", |_, _| {});
         config.jev = Some(Arc::new(PersonaJevGate(entered)));
     })
     .await

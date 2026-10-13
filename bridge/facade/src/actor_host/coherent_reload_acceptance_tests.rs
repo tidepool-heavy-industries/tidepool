@@ -1,7 +1,7 @@
 //! One history through provider issuance, ordinary workspace edits and coherent reload.
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    hosted_script_provider, hosted_test_settings, next_hosted_script_round,
 };
 use serde_json::Value;
 use std::{
@@ -136,47 +136,57 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
     let (provider, mut requests) = hosted_script_provider();
     let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
     let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        super::startup_persona_acceptance_tests::configure_persona(config, "AgentSpec.agentSpec");
         config.jev = Some(judgments.clone());
-        let authored = config.workspace.join(".exomonad");
-        std::fs::create_dir_all(authored.join("Project")).unwrap();
-        std::fs::write(
-            authored.join("Project/Work.hs"),
-            include_str!("fixtures/coherent_reload_work_a.hs"),
-        )
-        .unwrap();
-        crate::exomonad::edit_fixture_project_config(&authored, |project| {
-            project.haskell.modules.push("Project.Work".into());
-        });
-        let inputs = config.workspace.join("reload-inputs");
-        std::fs::create_dir_all(&inputs).unwrap();
-        for (name, body) in [
-            (
-                "work-a.txt",
-                include_str!("fixtures/coherent_reload_work_a.hs"),
-            ),
-            (
-                "work-b.txt",
-                include_str!("fixtures/coherent_reload_work_b.hs"),
-            ),
-            (
-                "work-invalid.txt",
-                include_str!("fixtures/coherent_reload_work_invalid.hs"),
-            ),
-            (
-                "prompt-b.txt",
-                include_str!("fixtures/coherent_reload_prompt_b.md"),
-            ),
-        ] {
-            std::fs::write(inputs.join(name), body).unwrap();
-        }
-        commit_workspace(&config.workspace);
-        config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(
-                &config.workspace,
-                &config.run_directory.path(),
-            )
-            .unwrap(),
+        super::startup_persona_acceptance_tests::configure_persona(
+            config,
+            "AgentSpec.agentSpec",
+            |workspace, project| {
+                let authored = workspace.join(".exomonad");
+                std::fs::create_dir_all(authored.join("Project")).unwrap();
+                std::fs::write(
+                    authored.join("Project/Work.hs"),
+                    include_str!("fixtures/coherent_reload_work_a.hs"),
+                )
+                .unwrap();
+                project.haskell.modules.push("Project.Work".into());
+                let inputs = workspace.join("reload-inputs");
+                std::fs::create_dir_all(&inputs).unwrap();
+                for (name, body) in [
+                    (
+                        "work-a.txt",
+                        include_str!("fixtures/coherent_reload_work_a.hs"),
+                    ),
+                    (
+                        "work-b.txt",
+                        include_str!("fixtures/coherent_reload_work_b.hs"),
+                    ),
+                    (
+                        "work-invalid.txt",
+                        include_str!("fixtures/coherent_reload_work_invalid.hs"),
+                    ),
+                    (
+                        "prompt-b.txt",
+                        include_str!("fixtures/coherent_reload_prompt_b.md"),
+                    ),
+                ] {
+                    std::fs::write(inputs.join(name), body).unwrap();
+                }
+            },
+        );
+        let selected = config.workspace_inputs.as_ref().unwrap();
+        assert!(selected
+            .modules
+            .iter()
+            .any(|module| module == "Project.Work"));
+        let work = selected
+            .captured_source_roots()
+            .iter()
+            .map(|root| root.join("Project/Work.hs"))
+            .find(|path| path.is_file())
+            .expect("the selected immutable graph contains Work");
+        assert_eq!(
+            std::fs::read_to_string(work).unwrap(),
+            include_str!("fixtures/coherent_reload_work_a.hs")
         );
     })
     .await

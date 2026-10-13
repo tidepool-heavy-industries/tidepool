@@ -1358,6 +1358,7 @@ fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool)
         } else {
             "Persona.Spec.agentSpec"
         },
+        |_, _| {},
     );
     let outside = config.workspace.join(".agents/skills/exomonad-jev");
     std::fs::create_dir_all(&outside).unwrap();

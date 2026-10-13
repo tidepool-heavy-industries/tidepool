@@ -289,7 +289,7 @@ fn production_recovery_process() {
         let mut config = configuration(&root);
         if matches!(phase.as_str(), "persona-original" | "persona-recovered") {
             if phase == "persona-original" {
-                super::startup_persona_acceptance_tests::configure_persona(&mut config, "Persona.Spec.agentSpec");
+                super::startup_persona_acceptance_tests::configure_persona(&mut config, "Persona.Spec.agentSpec", |_, _| {});
             } else {
                 config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, config.run_directory.path()).unwrap());
             }
