@@ -480,7 +480,7 @@ assertion. That attempt did not execute the frozen bundle's owned-resident
 qualification contract, so it is retained as an unqualified diagnostic rather
 than evidence for the four-case cohort.
 
-The `persona-startup` cohort runs five ordinary production controls from the
+The `persona-startup` cohort runs six ordinary production controls from the
 same frozen descriptor: full memory arrival and explicit refresh without startup
 judgment, Web selection with native judgment and empty-input control, and genuine
 process-loss recovery of the edited Persona context. Arrival also checks authored
@@ -492,7 +492,7 @@ initializer replay. It requires the bundle's browser assets, fixtures, catalog
 and root entry, retains artifacts, and runs serially with an owned compiler.
 The coherent reload history checks new source and type behavior, fresh notebook
 bindings, immutable issued requests, prompt selection, no-op and refusal outcomes.
-The coherent cold history restores published B despite edited draft C and refuses
+Independent coherent cold histories restore published B despite edited draft C and refuse
 missing or corrupt selected installers while retaining the configuration through
 legitimate incarnation transfers. All five exact cases must execute and pass.
 The crash case has no graceful

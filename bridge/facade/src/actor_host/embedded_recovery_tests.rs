@@ -704,6 +704,8 @@ async fn settled_frontier(root: &Path, identity: &harness::embedding::HostIdenti
 async fn actor_refused(root: &Path, phase: &str, process: &mut Process, expected: &str) {
     tokio::time::timeout(Duration::from_secs(360), async {
         loop {
+            assert!(!root.join(format!("{phase}.ready")).exists());
+            assert!(!root.join(format!("{phase}.calls")).exists());
             if let Some(current) = observed_root(root) {
                 if Some(current.admission.actor) != process.1 {
                     if let Some(terminal) = current.terminal {
@@ -712,8 +714,6 @@ async fn actor_refused(root: &Path, phase: &str, process: &mut Process, expected
                             terminal.summary.contains(expected),
                             "wrong actor refusal: {terminal:?}"
                         );
-                        assert!(!root.join(format!("{phase}.ready")).exists());
-                        assert!(!root.join(format!("{phase}.calls")).exists());
                         return;
                     }
                 }
@@ -1119,6 +1119,20 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
 
 #[tokio::test]
 async fn production_coherent_reload_recovers_published_configuration_without_recapturing_draft() {
+    coherent_recovery_history(InstallerFault::Missing).await;
+}
+
+#[tokio::test]
+async fn production_coherent_reload_recovery_refuses_corrupt_selected_installer() {
+    coherent_recovery_history(InstallerFault::Corrupt).await;
+}
+
+enum InstallerFault {
+    Missing,
+    Corrupt,
+}
+
+async fn coherent_recovery_history(fault: InstallerFault) {
     use std::os::unix::process::ExitStatusExt;
     tidepool_testing::eval_harness::require_extract();
     let retained_root = fixture();
@@ -1294,7 +1308,6 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     let output = installer.join("entry");
     let retained_output = installer.join("entry.retained-for-refusal");
     let wrapper = installer.join("Expr.hs");
-    let original_wrapper = std::fs::read(&wrapper).unwrap();
     drop(source);
     drop(source_owner);
     drop(bindings);
@@ -1331,31 +1344,29 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
             "installer refusal preserves exact B configuration through ownership transfer"
         );
     };
-    std::fs::rename(&output, &retained_output).unwrap();
-    let mut missing = start(root, "coherent-missing-installer");
-    actor_refused(
-        root,
-        "coherent-missing-installer",
-        &mut missing,
-        "selected completed installer is unavailable",
-    )
-    .await;
-    assert_configuration_preserved();
-    std::fs::rename(&retained_output, &output).unwrap();
-    std::fs::write(
-        &wrapper,
-        b"module Expr where\ncorruptSelectedInstaller = ()\n",
-    )
-    .unwrap();
-    let mut corrupt = start(root, "coherent-corrupt-installer");
-    actor_refused(
-        root,
-        "coherent-corrupt-installer",
-        &mut corrupt,
-        "recovered installer source closure differs from its owner",
-    )
-    .await;
-    std::fs::write(&wrapper, original_wrapper).unwrap();
+    // Each refusal retires its root permanently; another fault needs its own history.
+    let (phase, expected) = match fault {
+        InstallerFault::Missing => {
+            std::fs::rename(&output, &retained_output).unwrap();
+            (
+                "coherent-missing-installer",
+                "selected completed installer is unavailable",
+            )
+        }
+        InstallerFault::Corrupt => {
+            std::fs::write(
+                &wrapper,
+                b"module Expr where\ncorruptSelectedInstaller = ()\n",
+            )
+            .unwrap();
+            (
+                "coherent-corrupt-installer",
+                "recovered installer source closure differs from its owner",
+            )
+        }
+    };
+    let mut rejected = start(root, phase);
+    actor_refused(root, phase, &mut rejected, expected).await;
     assert_configuration_preserved();
     finish_fixture(retained_root);
 }
