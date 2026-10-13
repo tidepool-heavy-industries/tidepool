@@ -63,6 +63,21 @@ impl PartialEq for ActorSourceImports {
 }
 impl Eq for ActorSourceImports {}
 
+/// Complete immutable facts required by a source-backed actor generation.
+#[derive(Clone)]
+pub struct SourceGenerationEvidence {
+    pub reference: tidepool_runtime::session::GenerationArtifactReference,
+    pub configuration_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SourceInspectionError {
+    #[error("source unavailable: {0}")]
+    Unavailable(String),
+    #[error("source unreadable: {0}")]
+    Unreadable(String),
+}
+
 /// A source graph retained by the configured host source owner.
 ///
 /// Implementations retain the actual run or capture guard. These observations
@@ -87,11 +102,7 @@ pub trait RetainedSourceLayer: Send + Sync {
         None
     }
 
-    fn source_reference(&self) -> Option<&tidepool_runtime::session::GenerationArtifactReference> {
-        None
-    }
-
-    fn configuration_digest(&self) -> Option<[u8; 32]> {
+    fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
         None
     }
 
@@ -210,13 +221,8 @@ impl CheckpointSourceLayer {
     }
 
     #[must_use]
-    pub fn source_reference(&self) -> Option<&tidepool_runtime::session::GenerationArtifactReference> {
-        self.retained.as_ref()?._owner.source_reference()
-    }
-
-    #[must_use]
-    pub fn configuration_digest(&self) -> Option<[u8; 32]> {
-        self.retained.as_ref()?._owner.configuration_digest()
+    pub fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
+        self.retained.as_ref()?._owner.generation_evidence()
     }
 
     #[must_use]
@@ -486,13 +492,17 @@ pub trait ActorSourceLayers: Send + Sync {
 
     fn bind_for(&self, _actor: PrincipalId, _helper_source: &str) {}
 
-    /// Inspect exactly the issued immutable graph, without selecting a live head.
-    fn read_from(&self, _source: &CheckpointSourceLayer, _module: &str) -> Result<(String, String), String> {
-        Err("issued source inspection is unavailable".into())
+    fn restore_source(&self, _reference: &tidepool_runtime::session::GenerationArtifactReference) -> Result<CheckpointSourceLayer, String> {
+        Err("source recovery is unavailable".into())
     }
 
-    fn observe(&self, _source: &CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrStatus, String> {
-        Err("issued source status is unavailable".into())
+    /// Inspect exactly the issued immutable graph, without selecting a live head.
+    fn read_from(&self, _source: &CheckpointSourceLayer, _module: &str) -> Result<(String, String), SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable("issued source inspection is unavailable".into()))
+    }
+
+    fn observe(&self, _source: &CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrStatus, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable("issued source status is unavailable".into()))
     }
 
     /// Capture an immutable candidate relative to the actor-issued generation.
@@ -510,10 +520,15 @@ pub trait ActorSourceLayers: Send + Sync {
 /// ownership used by ordinary installer admission.
 pub trait StagedActorSourceReload: Send + Sync {
     fn source(&self) -> &CheckpointSourceLayer;
-    fn source_reference(&self) -> &tidepool_runtime::session::GenerationArtifactReference;
+    fn evidence(&self) -> &SourceGenerationEvidence;
+    fn source_reference(&self) -> &tidepool_runtime::session::GenerationArtifactReference {
+        &self.evidence().reference
+    }
     fn validation_imports(&self) -> &tidepool_runtime::session::SourceImports;
     fn prompt_snapshot(&self) -> &tidepool_runtime::session::ComposedPromptSnapshot;
-    fn configuration_digest(&self) -> [u8; 32];
+    fn configuration_digest(&self) -> [u8; 32] {
+        self.evidence().configuration_digest
+    }
     /// Repair derived filesystem projections after authoritative publication.
     fn finalize_projection(&self) -> Result<(), String>;
 }
