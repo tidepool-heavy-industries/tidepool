@@ -855,9 +855,10 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        if source.generation_evidence().is_none_or(|evidence| {
-            evidence.reference.sha256() != &installation.source_sha256
-        }) {
+        if source
+            .generation_evidence()
+            .is_none_or(|evidence| evidence.reference.sha256() != &installation.source_sha256)
+        {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "recovered installer selects a different source artifact".into(),
             ));
@@ -867,15 +868,22 @@ impl ActorWorkbenchSource {
         // Metadata is resolved against immutable source with the persisted
         // entry pin. These imports are never used to locate or load the entry.
         let (mut recipe, resolved) = pinned.installer_recipe_selected(
-            &source, granted_effects, supported_effects, Some(&SourceImports::default()),
+            &source,
+            granted_effects,
+            supported_effects,
+            Some(&SourceImports::default()),
         )?;
         if resolved.entry.as_deref() != installation.entry() {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "recovered installer entry differs from its immutable source".into(),
             ));
         }
-        if let crate::ToolsetAcquisition::BuiltinDeploymentProgram { program } = installation.acquisition() {
-            if builtin_toolset_policy(resolved.rule, &recipe.effects, supported_effects) != Some(program.policy) {
+        if let crate::ToolsetAcquisition::BuiltinDeploymentProgram { program } =
+            installation.acquisition()
+        {
+            if builtin_toolset_policy(resolved.rule, &recipe.effects, supported_effects)
+                != Some(program.policy)
+            {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "recovered built-in installer does not match the actor contract".into(),
                 ));
@@ -883,15 +891,32 @@ impl ActorWorkbenchSource {
             recipe.source_revision = program.manifest_blake3.clone();
         }
         let effects = recipe.effects.clone();
-        let prepared = self.toolset_preparation.restore(
-            workload, recipe, resolved, source, installation.acquisition().clone(), registry,
-        ).await.map_err(|failure| match failure {
-            crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => ResidentActorWorkbenchError::PreparedEntryAbsent { recipe },
-            crate::agent_spec::preparation::PreparationFailure::Admission(error) => ResidentActorWorkbenchError::PreparationAdmission(error),
-            crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => ResidentActorWorkbenchError::CompileInfrastructure(diagnostic),
-            crate::agent_spec::preparation::PreparationFailure::Source(detail)
-            | crate::agent_spec::preparation::PreparationFailure::Native(detail) => ResidentActorWorkbenchError::ActorProtocol(detail),
-        })?;
+        let prepared = self
+            .toolset_preparation
+            .restore(
+                workload,
+                recipe,
+                resolved,
+                source,
+                installation.acquisition().clone(),
+                registry,
+            )
+            .await
+            .map_err(|failure| match failure {
+                crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
+                    ResidentActorWorkbenchError::PreparedEntryAbsent { recipe }
+                }
+                crate::agent_spec::preparation::PreparationFailure::Admission(error) => {
+                    ResidentActorWorkbenchError::PreparationAdmission(error)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => {
+                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Source(detail)
+                | crate::agent_spec::preparation::PreparationFailure::Native(detail) => {
+                    ResidentActorWorkbenchError::ActorProtocol(detail)
+                }
+            })?;
         Ok(PreparedSourceToolset { prepared, effects })
     }
 

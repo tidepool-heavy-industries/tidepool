@@ -1339,6 +1339,17 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         self.restore_graph(reference)
             .map_err(|error| error.to_string())
     }
+
+    fn restore_source_with_acquisition(
+        &self,
+        reference: &tidepool_runtime::session::GenerationArtifactReference,
+        acquisition: &exomonad_actor::ToolsetAcquisition,
+    ) -> std::result::Result<
+        exomonad_actor::CheckpointSourceLayer,
+        exomonad_actor::SourceInspectionError,
+    > {
+        self.restore_graph_with_acquisition(reference, acquisition)
+    }
 }
 
 fn changed_modules(active: &SourceRevision, candidate: &SourceRevision) -> Vec<String> {
@@ -3028,6 +3039,43 @@ mod tests {
             .action
             .expect("one native installer compile validates a newly authored module");
         assert!(ready.completed_entry_selection().is_some());
+        let reference_b = b.evidence().reference.clone();
+        let prompt_b = b.prompt_snapshot().clone();
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 99\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/agent.md"),
+            "Draft instructions C",
+        )
+        .unwrap();
+        let SourceRootOwner::Temporary(run) = reload.source_owner.as_ref() else {
+            panic!("generation fixture must own temporary run storage")
+        };
+        let cold = runtime_reload_for_run(project.path(), Arc::clone(run)).unwrap();
+        let restored = cold
+            .restore_source_with_acquisition(&reference_b, ready.acquisition())
+            .unwrap();
+        assert_eq!(
+            restored.generation_evidence().unwrap().reference,
+            reference_b
+        );
+        assert_eq!(
+            cold.read_from(&restored, "Project.Work").unwrap(),
+            reload.read_from(b.source(), "Project.Work").unwrap()
+        );
+        assert_eq!(prompt_b.instructions(), "Instructions A");
+        let (recipe, original) = ready.completed_entry_selection().unwrap();
+        assert!(
+            matches!(restored.prepared_entries(), Some(exomonad_actor::SourceEntryStorage::CompletedOriginal { selections, .. })
+            if selections.get(recipe) == Some(&original))
+        );
+        assert_ne!(
+            cold.observe(&restored).unwrap().active.identity,
+            cold.observe(&restored).unwrap().disk.identity
+        );
         let warm = owner
             .scope(workbench.prepare_source_toolset_with_validation(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,

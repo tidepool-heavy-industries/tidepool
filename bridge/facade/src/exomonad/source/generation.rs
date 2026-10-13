@@ -433,7 +433,10 @@ impl ExomonadSourceReload {
                 .expect("restored source has manifests")
                 .to_vec(),
             entries,
-            evidence: source.generation_evidence().expect("restored source has evidence").clone(),
+            evidence: source
+                .generation_evidence()
+                .expect("restored source has evidence")
+                .clone(),
         })))
     }
 
@@ -444,23 +447,36 @@ impl ExomonadSourceReload {
     ) -> std::result::Result<CheckpointSourceLayer, SourceInspectionError> {
         let restore = || -> Result<CheckpointSourceLayer> {
             let source = self.restore_graph(reference)?;
-            if matches!(acquisition, exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. }) {
+            if matches!(
+                acquisition,
+                exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. }
+            ) {
                 return Ok(source);
             }
-            let (recipe, original) = acquisition.completed_entry_selection()
+            let (recipe, original) = acquisition
+                .completed_entry_selection()
                 .ok_or("source recovery requires a retained installer acquisition")?;
             if recipe.len() != 64 || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err("source recovery carries an invalid installer recipe selection".into());
             }
-            let directory = source.prepared_entries().expect("restored source has entry storage")
-                .directory().to_owned();
-            self.reissue_graph_with_entries(&source, exomonad_actor::SourceEntryStorage::CompletedOriginal {
-                directory,
-                selections: BTreeMap::from([(recipe.to_owned(), original)]),
-            })
+            let directory = source
+                .prepared_entries()
+                .expect("restored source has entry storage")
+                .directory()
+                .to_owned();
+            self.reissue_graph_with_entries(
+                &source,
+                exomonad_actor::SourceEntryStorage::CompletedOriginal {
+                    directory,
+                    selections: BTreeMap::from([(recipe.to_owned(), original)]),
+                },
+            )
         };
         restore().map_err(|error| {
-            if error.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
                 SourceInspectionError::Unavailable(error.to_string())
             } else {
                 SourceInspectionError::Unreadable(error.to_string())

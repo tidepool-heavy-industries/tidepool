@@ -418,7 +418,11 @@ impl ToolsetPreparation {
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let compiler_work = crate::resident_workbench::CompilerCloseOwner::current()
-            .and_then(|owner| owner.shared_preparation(self.compiler_owner.clone()).register_work())
+            .and_then(|owner| {
+                owner
+                    .shared_preparation(self.compiler_owner.clone())
+                    .register_work()
+            })
             .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         tidepool_runtime::spawn_blocking_in_span(move || {
             compiler_work.run_for_workload(workload, |_settlement| {
@@ -1221,17 +1225,29 @@ fn restore_installer(
     };
     use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
     tidepool_extract_cmd::compiler_host_checkpoint().map_err(preparation_io_failure)?;
-    let source_error = |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
+    let source_error =
+        |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
     let compiled = match &acquisition {
-        ToolsetAcquisition::BuiltinDeploymentProgram { program } => load_builtin_installer(program)?,
+        ToolsetAcquisition::BuiltinDeploymentProgram { program } => {
+            load_builtin_installer(program)?
+        }
         _ => {
-            let (key, original) = acquisition.completed_entry_selection()
-                .ok_or_else(|| PreparationFailure::Source("installer recovery has no completed original".into()))?;
+            let (key, original) = acquisition.completed_entry_selection().ok_or_else(|| {
+                PreparationFailure::Source("installer recovery has no completed original".into())
+            })?;
             if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(PreparationFailure::Source("invalid retained installer recipe selection".into()));
+                return Err(PreparationFailure::Source(
+                    "invalid retained installer recipe selection".into(),
+                ));
             }
-            let Some(crate::SourceEntryStorage::CompletedOriginal { directory, selections }) = source.prepared_entries() else {
-                return Err(PreparationFailure::Source("installer recovery requires source-owned completed storage".into()));
+            let Some(crate::SourceEntryStorage::CompletedOriginal {
+                directory,
+                selections,
+            }) = source.prepared_entries()
+            else {
+                return Err(PreparationFailure::Source(
+                    "installer recovery requires source-owned completed storage".into(),
+                ));
             };
             if selections.get(key) != Some(&original) {
                 return Err(PreparationFailure::AbsentSelection { recipe: key.into() });
@@ -1239,31 +1255,56 @@ fn restore_installer(
             let root = std::fs::canonicalize(directory).map_err(|error| source_error(&error))?;
             let selected = root.join(key).join(original.to_string());
             if std::fs::canonicalize(&selected).map_err(|error| source_error(&error))? != selected {
-                return Err(PreparationFailure::Source("retained installer escapes its selected owner".into()));
+                return Err(PreparationFailure::Source(
+                    "retained installer escapes its selected owner".into(),
+                ));
             }
             let wrapper = selected.join("Expr.hs");
-            if !std::fs::symlink_metadata(&wrapper).map_err(|error| source_error(&error))?.file_type().is_file() {
-                return Err(PreparationFailure::Source("retained installer wrapper is not a regular file".into()));
+            if !std::fs::symlink_metadata(&wrapper)
+                .map_err(|error| source_error(&error))?
+                .file_type()
+                .is_file()
+            {
+                return Err(PreparationFailure::Source(
+                    "retained installer wrapper is not a regular file".into(),
+                ));
             }
             let output = selected.join("entry");
             if !entry_path_present(&output)? {
-                return Err(PreparationFailure::Source("selected completed installer is unavailable".into()));
+                return Err(PreparationFailure::Source(
+                    "selected completed installer is unavailable".into(),
+                ));
             }
             let sources = FrozenEntrySources::capture(source.include_paths(), &wrapper)
                 .map_err(preparation_auth_failure)?;
-            if sources.source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
-                .map_err(|error| source_error(&error))? != recipe.source_revision {
-                return Err(PreparationFailure::Source("recovered installer source closure differs from its owner".into()));
+            if sources
+                .source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
+                .map_err(|error| source_error(&error))?
+                != recipe.source_revision
+            {
+                return Err(PreparationFailure::Source(
+                    "recovered installer source closure differs from its owner".into(),
+                ));
             }
-            let CompilerDeploymentConfiguration::Configured(authority) = CompilerDeploymentConfiguration::from_env()
-                .map_err(|error| source_error(&error))? else {
-                return Err(PreparationFailure::Source("installer recovery requires configured compiler deployment".into()));
+            let CompilerDeploymentConfiguration::Configured(authority) =
+                CompilerDeploymentConfiguration::from_env()
+                    .map_err(|error| source_error(&error))?
+            else {
+                return Err(PreparationFailure::Source(
+                    "installer recovery requires configured compiler deployment".into(),
+                ));
             };
-            let loaded = load_selected_production_entry_with_catalog(&output, &authority,
-                &ProductionEntrySources::FrozenWorkspace(sources), &source.catalog_selection())
-                .map_err(preparation_auth_failure)?;
+            let loaded = load_selected_production_entry_with_catalog(
+                &output,
+                &authority,
+                &ProductionEntrySources::FrozenWorkspace(sources),
+                &source.catalog_selection(),
+            )
+            .map_err(preparation_auth_failure)?;
             if loaded.source_path() != wrapper {
-                return Err(PreparationFailure::Source("recovered installer selects another wrapper".into()));
+                return Err(PreparationFailure::Source(
+                    "recovered installer selects another wrapper".into(),
+                ));
             }
             CompiledTurn::from_production_entry(&loaded).map_err(preparation_auth_failure)?
         }
