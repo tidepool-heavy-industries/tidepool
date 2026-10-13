@@ -1236,6 +1236,37 @@ impl InstalledToolLease {
         })
     }
 
+    pub(crate) fn generation_references(
+        &self,
+        source: tidepool_runtime::session::GenerationArtifactReference,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
+        #[derive(serde::Serialize)]
+        struct Installation<'a> {
+            version: u32,
+            source_sha256: &'a [u8;32],
+            acquisition: &'a crate::ToolsetAcquisition,
+            entry: Option<&'a str>,
+            effects: &'a str,
+            declarations: &'a [exomonad_tool::HostedTool],
+            slots: &'a [String],
+        }
+        let evidence = self.source().generation_evidence().ok_or("source-backed generation has no complete retained artifact evidence")?;
+        if evidence.reference != source { return Err("installation and generation select different source artifacts".into()); }
+        let tools = self.tools().ok_or("generation has no native installation")?;
+        let acquisition = self.toolset_acquisition().ok_or("generation has no compiler-issued installation acquisition")?;
+        if acquisition.selection().is_none() { return Err("generation installer has no retained original for recovery".into()); }
+        let installation = Installation {
+            version:1,source_sha256:source.sha256(),acquisition,
+            entry:tools.origin.resolved().and_then(|resolved|resolved.entry.as_deref()),
+            effects:tools.dispatcher_effects.expression(),declarations:&tools.declarations,slots:&tools.slots,
+        };
+        let bytes = serde_json::to_vec(&installation).map_err(|error|error.to_string())?;
+        Ok(tidepool_runtime::session::DurableGenerationReferences {
+            source, installation:tidepool_runtime::session::GenerationArtifactReference::capture(bytes), prompts,
+        })
+    }
+
     pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {
         Self {
             source,
@@ -1470,7 +1501,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                     let owner = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path, context.actor.incarnation.0))
                         .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("durable generation has no canonical actor owner".into()))?;
                     let prepared = session.prepare_notebook_generation(scope.scope(), &owner,
-                        expected.as_ref().and_then(|generation| generation.durable.clone()), references)?;
+                        expected.as_ref().and_then(|generation| generation.durable.clone()), references).map_err(ResidentError::Session)?;
                     let selected = prepared.selection();
                     PreparedGenerationCommit::Durable { prepared, selected }
                 },
@@ -1522,7 +1553,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                         let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                         *current = InstalledToolsAvailability::Generation(generation.clone());
                         visible = Some(generation);
-                    })?;
+                    }).map_err(ResidentError::Session)?;
                     match result {
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
                         tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),

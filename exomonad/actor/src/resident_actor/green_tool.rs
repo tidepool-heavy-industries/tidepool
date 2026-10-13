@@ -14,6 +14,7 @@ pub(super) struct ToolCursor {
     work: Arc<InvocationWork>,
     control: Arc<crate::WorkbenchExecutionControl>,
     publication: CheckpointPublication,
+    issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
 }
 
 impl ToolCursor {
@@ -21,6 +22,7 @@ impl ToolCursor {
         work: Arc<InvocationWork>,
         control: Arc<crate::WorkbenchExecutionControl>,
         publication: CheckpointPublication,
+        issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     ) -> Self {
         Self {
             execution: Default::default(),
@@ -28,6 +30,7 @@ impl ToolCursor {
             work,
             control,
             publication,
+            issued_snapshot,
         }
     }
 
@@ -77,6 +80,7 @@ impl ToolCursor {
 
     fn owner(&self) -> CurrentEffectOwner<'static> {
         let base = CurrentEffectOwner::Tool {
+            issued_snapshot: self.issued_snapshot.clone(),
             work: self.work.clone(),
             publication: self.publication.clone(),
             control: self.control.clone(),
@@ -344,6 +348,7 @@ mod tests {
             work.clone(),
             control.clone(),
             CheckpointPublication::Resident,
+            None,
         );
         let owner = cursor.owner();
         assert!(Arc::ptr_eq(&owner.invocation_work().unwrap(), &work));
@@ -380,7 +385,7 @@ mod tests {
         };
         let control = crate::WorkbenchExecutionControl::untracked();
         let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
-        let mut cursor = ToolCursor::new(work, control, CheckpointPublication::Resident);
+        let mut cursor = ToolCursor::new(work, control, CheckpointPublication::Resident, None);
         let session = tidepool_repr::SessionId(993);
         let machines = Arc::new(SessionRegistry::<(), u8>::new());
         assert!(machines.insert_idle(session, Box::new(())).is_none());

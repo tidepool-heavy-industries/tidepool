@@ -166,6 +166,7 @@ pub(super) enum ResidentCommand {
         reply: RpcReplyPort<Result<(), String>>,
     },
     PolicyInstalled(Option<crate::InstalledToolLease>),
+    GenerationPublished { context:ActorSessionContext, owner:Arc<WorkbenchPublicOwner>, installation:crate::InstalledToolLease },
     Request(Request),
     Completed {
         sequence: u64,
@@ -394,6 +395,10 @@ impl LifecycleHandle {
         )));
     }
 
+    pub(crate) fn generation_published(&self, context:ActorSessionContext, owner:Arc<WorkbenchPublicOwner>, installation:crate::InstalledToolLease) {
+        let _ = self.address.cast(LifecycleCommand::Resident(Box::new(ResidentCommand::GenerationPublished { context,owner,installation })));
+    }
+
     pub(crate) fn retire_resident(&self, terminal: crate::ActorTerminal) {
         let _ = self.address.cast(LifecycleCommand::Resident(Box::new(
             ResidentCommand::Retire(terminal),
@@ -587,6 +592,22 @@ pub(super) fn handle(
             if !state.is_closed() {
                 if let Some(resident) = &mut state.resident {
                     resident.current.installed_policy = policy;
+                }
+            }
+        }
+        ResidentCommand::GenerationPublished { context,owner,installation } => {
+            if !state.is_closed() {
+                if let Some(resident) = &mut state.resident {
+                    let original = resident.current.descriptor.placement();
+                    if context.actor == resident.current.context.actor
+                        && context.placement.session == original.session
+                        && context.placement.resource_scope == original.resource_scope
+                        && owner.matches_context(&context) {
+                        resident.current.context = context;
+                        resident.current.public_owner = if owner.native_readiness().is_some() { ActorPublicOwnerPlane::DurableCommitted(owner) } else { ActorPublicOwnerPlane::Ephemeral(owner) };
+                        resident.current.installed_policy = Some(installation);
+                        state.publish();
+                    }
                 }
             }
         }
@@ -1104,12 +1125,15 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                 provider,
                 reply,
             } => {
-                let owner = current.public_owner.ready().cloned();
+                // Provider attachment is stable actor authority. Issued owners
+                // may name an earlier notebook generation retained by live work.
+                let owner = expected.or_else(||current.public_owner.ready().cloned());
                 if closed
                     || owner.as_ref().is_none_or(|owner| {
-                        expected
-                            .as_ref()
-                            .is_some_and(|expected| !Arc::ptr_eq(owner, expected))
+                        let placement = owner.placement();
+                        owner.actor() != current.context.actor
+                            || placement.session != current.context.placement.session
+                            || placement.resource_scope != current.context.placement.resource_scope
                     })
                     || (provider
                         && (state.resident.as_ref().unwrap().successor.is_some()

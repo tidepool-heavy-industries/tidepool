@@ -2727,6 +2727,7 @@ pub struct ResidentKernelBehavior<H, O> {
     prepared_workspace: Option<crate::PreparedWorkspaceAttachment>,
     worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     policy_installed: bool,
+    actor_program_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
     /// the first-install latch; a reload is a second, explicit path that
@@ -2969,7 +2970,7 @@ where
 }
 
 struct WorkbenchEffectState {
-    generation: Option<Arc<crate::resident_workbench::ActorGeneration>>,
+    issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
@@ -3228,11 +3229,13 @@ enum CurrentEffectOwner<'a> {
         wait_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
     Tool {
+        issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
         work: Arc<InvocationWork>,
         publication: CheckpointPublication,
         control: Arc<crate::WorkbenchExecutionControl>,
     },
     Actor {
+        issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
         ephemeral_work: Arc<InvocationWork>,
         publication: CheckpointPublication,
         reservation_owner: Option<RequestReservationOwner>,
@@ -3241,6 +3244,14 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn issued_snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
+        match self {
+            Self::Scoped { base, .. } => base.issued_snapshot(),
+            Self::Workbench(execution) => execution.issued_snapshot.as_ref(),
+            Self::Tool { issued_snapshot, .. } | Self::Actor { issued_snapshot, .. } => issued_snapshot.as_ref(),
+        }
+    }
+
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
             Self::Scoped { base, .. } => base.context_binding(),
@@ -3396,7 +3407,7 @@ fn prepare_execution_effect(
 }
 
 struct WorkbenchAdmission {
-    generation: Option<Arc<crate::resident_workbench::ActorGeneration>>,
+    issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     initial_context: bool,
     context: ActorSessionContext,
     request: WorkbenchRequest,
@@ -3620,6 +3631,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             prepared_workspace: None,
             worktree_custody: None,
             policy_installed: false,
+            actor_program_snapshot: None,
             installed_tools: Arc::default(),
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
@@ -3648,7 +3660,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
-        self.descriptor.session_context(actor)
+        self.actor_program_snapshot.as_ref().and_then(|snapshot| snapshot.generation())
+            .map_or_else(|| self.descriptor.session_context(actor), |generation| generation.context.clone())
     }
 
     fn preflight_workbench(
@@ -3928,7 +3941,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             control.bind_context(binding.clone());
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
-            generation: issued_generation,
+            issued_snapshot: issued,
             initial_context: invocation.initial_context,
             context,
             public_owner,
@@ -3954,6 +3967,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => self.workbench_executions.lock().actor_scope_root(actor),
         };
         CurrentEffectOwner::Actor {
+            issued_snapshot: self.actor_program_snapshot.clone(),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner: control
@@ -7784,6 +7798,7 @@ where
         }
         self.publish_installation(installation);
         self.policy_installed = true;
+        self.actor_program_snapshot = self.installed_tools.snapshot();
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.policy_installed(self.installed_tools.current());
         }
@@ -8012,6 +8027,12 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        if self.actor_program_snapshot.is_none() {
+            let source = self.freeze_installed_source(context.actor)?;
+            let bootstrap = crate::InstalledToolLease::new(context.actor,source,None);
+            self.installed_tools.publish(bootstrap.clone());
+            self.actor_program_snapshot = Some(crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap));
+        }
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench
             .actor_initialization_cleanup(context.clone())
@@ -11893,7 +11914,7 @@ where
                     )
                 })?;
             let mut cursor =
-                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
+                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone(), self.actor_program_snapshot.clone());
             let mut outcome = cursor
                 .native(&self.environment, &context)
                 .resume_tool_invocation(awaiting.continuation, invocation.name, arguments)
@@ -12131,7 +12152,7 @@ where
             }
             let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
             let WorkbenchAdmission {
-                generation,
+                issued_snapshot,
                 initial_context,
                 context,
                 request,
@@ -12216,7 +12237,7 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
-                    generation,
+                    issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,

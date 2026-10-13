@@ -937,7 +937,7 @@ where
             Err(error) => return terminal_task(Err(error)),
         };
         let WorkbenchAdmission {
-            generation,
+            issued_snapshot,
             initial_context,
             context,
             request,
@@ -1069,7 +1069,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
-                    generation,
+                    issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
