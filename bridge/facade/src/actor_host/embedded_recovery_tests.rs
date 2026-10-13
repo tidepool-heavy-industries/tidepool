@@ -112,8 +112,23 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                 let output: serde_json::Value =
                     serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
                 assert_eq!(output["status"], "committed", "{output}");
+                let ready: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(self.root.join(format!("{}.ready", self.phase))).unwrap(),
+                )
+                .unwrap();
+                let actor: ActorRef = serde_json::from_value(ready["actor"].clone()).unwrap();
+                let run = self.root.join("run");
+                let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
                 assert_eq!(
-                    super::test_campaign::committed_display_text(&output),
+                    super::test_campaign::retained_committed_display_text(
+                        &store,
+                        &harness::store::actor_output::ActorOutputOrigin {
+                            run: super::runtime_namespace(&run),
+                            native_actor: actor.id.0,
+                            incarnation: actor.incarnation.0,
+                        },
+                        &output,
+                    ),
                     "True",
                     "{output}"
                 );

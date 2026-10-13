@@ -27,58 +27,21 @@ impl exomonad_actor::JevBackend for UnexpectedJudgment {
     }
 }
 
-/// Follow the exact published page receipt to its retained Store row. The
-/// rendered response may omit page text when it provides an output reference.
+/// Compare the authored page through its exact receipt and retained Store owner.
 fn assert_true_page(host: &HostedTestRuntime, result: &Value) {
-    assert_eq!(result["status"], "committed", "{result}");
-    let operations: Vec<_> = result["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
-        .filter(|operation| operation.get("display").is_some())
-        .collect();
-    assert_eq!(operations.len(), 1, "{result}");
-    let operation = operations[0];
-    let display = &operation["display"];
-    let publication = &operation["displayPublication"];
-    assert_eq!(publication["status"], "published", "{result}");
-    assert_eq!(publication["publication"]["display"], display["identity"]);
-    assert_eq!(publication["output"], display["output"]);
     let actor = host.context.actor.identity();
-    let origin = harness::store::actor_output::ActorOutputOrigin {
-        run: display["output"]["run"].as_str().unwrap().into(),
-        native_actor: display["identity"][0].as_u64().unwrap(),
-        incarnation: display["identity"][1].as_u64().unwrap(),
-    };
-    assert_eq!(origin.native_actor, actor.id.0);
-    assert_eq!(origin.incarnation, actor.incarnation.0);
-    let sequence = display["output"]["sequence"].as_i64().unwrap();
-    let page = host
-        .runtime
-        .store()
-        .actor_output_page(&origin, sequence - 1, 1)
-        .unwrap();
-    assert_eq!(page.outputs.len(), 1);
-    let row = &page.outputs[0];
-    assert_eq!(row.reference().sequence, sequence);
     assert_eq!(
-        row.emission().id.display_slot,
-        display["identity"][2].as_u64().unwrap()
+        super::test_campaign::retained_committed_display_text(
+            &host.runtime.store(),
+            &harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: actor.id.0,
+                incarnation: actor.incarnation.0,
+            },
+            result,
+        ),
+        "True",
     );
-    assert_eq!(
-        row.emission().id.page_ordinal,
-        publication["publication"]["pageOrdinal"].as_u64().unwrap()
-    );
-    assert_eq!(
-        row.emission().execution,
-        harness::store::actor_output::ActorOutputExecution::Notebook {
-            execution: operation["id"]["execution"].as_str().unwrap().into(),
-            input_unit_index: operation["id"]["inputUnitIndex"].as_u64().unwrap(),
-            effect_ordinal: operation["id"]["effectOrdinal"].as_u64().unwrap(),
-        }
-    );
-    assert_eq!(row.emission().page.text, "True");
 }
 
 fn assert_reload_disposition(
