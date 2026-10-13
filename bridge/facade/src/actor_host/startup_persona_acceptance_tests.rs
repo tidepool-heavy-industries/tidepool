@@ -40,6 +40,15 @@ impl exomonad_actor::JevBackend for PersonaJevGate {
     }
 }
 
+const PERSONA_MEMORIES: [(&str, &str); 3] = [
+    ("persona", "persona-memory-original"),
+    (
+        "human",
+        "A saved correction: answer from supplied memory when asked what you already remember.",
+    ),
+    ("curiosities", "curiosity-memory-original"),
+];
+
 fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run: &Path) {
     config.workspace = workspace.to_owned();
     config.run_directory =
@@ -139,14 +148,7 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     );
     let memory = authored.join("state/memory");
     std::fs::create_dir_all(&memory).unwrap();
-    for (name, body) in [
-        ("persona", "persona-memory-original"),
-        (
-            "human",
-            "A saved correction: answer from supplied memory when asked what you already remember.",
-        ),
-        ("curiosities", "curiosity-memory-original"),
-    ] {
+    for (name, body) in PERSONA_MEMORIES {
         std::fs::write(memory.join(format!("{name}.md")), body).unwrap();
     }
 }
@@ -207,15 +209,16 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         assert_eq!(retained.state, InitialContextState::Published);
         let result = retained.result.as_ref().unwrap();
         assert_eq!(result.sections.len(), 1);
-        let original = ["persona", "human", "curiosities"]
-            .map(|name| {
-                format!(
-                    "[Memory file: .exomonad/state/memory/{name}.md]\n{}",
+        let original = PERSONA_MEMORIES
+            .map(|(name, expected)| {
+                assert_eq!(
                     std::fs::read_to_string(
                         workspace.join(format!(".exomonad/state/memory/{name}.md"))
                     )
-                    .unwrap()
-                )
+                    .unwrap(),
+                    expected
+                );
+                format!("[Memory file: .exomonad/state/memory/{name}.md]\n{expected}")
             })
             .join("\n\n");
         assert_eq!(result.sections[0].body, original);
