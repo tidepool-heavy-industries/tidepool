@@ -406,6 +406,29 @@ impl ToolsetPreparation {
         task.wait().await
     }
 
+    /// Reopen the exact completed original selected by durable installation
+    /// evidence. Initial-install imports are not the candidate's recipe.
+    pub(crate) async fn restore(
+        self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        recipe: InstallerRecipe,
+        resolved: ResolvedSpec,
+        source: crate::CheckpointSourceLayer,
+        acquisition: ToolsetAcquisition,
+        registry: Arc<ImageRegistry>,
+    ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
+        let compiler_work = crate::resident_workbench::CompilerCloseOwner::current()
+            .and_then(|owner| owner.shared_preparation(self.compiler_owner.clone()).register_work())
+            .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
+        tidepool_runtime::spawn_blocking_in_span(move || {
+            compiler_work.run_for_workload(workload, |_settlement| {
+                restore_installer(recipe, resolved, source, acquisition, registry)
+            })
+        })
+        .await
+        .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())))
+    }
+
     fn settle(
         &self,
         key: InstallerRecipe,
@@ -1174,6 +1197,79 @@ fn compile_installer(
     let compiled: Arc<CompiledTurn> = Arc::new(compiled);
     let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
     let entry = PreparedSourceEntry::prepare(compiled, registry)
+        .map_err(|error| PreparationFailure::Native(error.to_string()))?;
+    Ok(Arc::new(PreparedToolset {
+        entry,
+        entry_name: recipe.entry,
+        resolved,
+        source_revision: recipe.source_revision,
+        acquisition,
+        _source: Some(source),
+        _nominal_artifacts: nominal_artifacts,
+    }))
+}
+
+fn restore_installer(
+    recipe: InstallerRecipe,
+    resolved: ResolvedSpec,
+    source: crate::CheckpointSourceLayer,
+    acquisition: ToolsetAcquisition,
+    registry: Arc<ImageRegistry>,
+) -> Result<Arc<PreparedToolset>, PreparationFailure> {
+    use tidepool_toolchain::artifacts::{
+        load_selected_production_entry_with_catalog, FrozenEntrySources, ProductionEntrySources,
+    };
+    use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
+    tidepool_extract_cmd::compiler_host_checkpoint().map_err(preparation_io_failure)?;
+    let source_error = |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
+    let compiled = match &acquisition {
+        ToolsetAcquisition::BuiltinDeploymentProgram { program } => load_builtin_installer(program)?,
+        _ => {
+            let (key, original) = acquisition.completed_entry_selection()
+                .ok_or_else(|| PreparationFailure::Source("installer recovery has no completed original".into()))?;
+            if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(PreparationFailure::Source("invalid retained installer recipe selection".into()));
+            }
+            let Some(crate::SourceEntryStorage::CompletedOriginal { directory, selections }) = source.prepared_entries() else {
+                return Err(PreparationFailure::Source("installer recovery requires source-owned completed storage".into()));
+            };
+            if selections.get(key) != Some(&original) {
+                return Err(PreparationFailure::AbsentSelection { recipe: key.into() });
+            }
+            let root = std::fs::canonicalize(directory).map_err(|error| source_error(&error))?;
+            let selected = root.join(key).join(original.to_string());
+            if std::fs::canonicalize(&selected).map_err(|error| source_error(&error))? != selected {
+                return Err(PreparationFailure::Source("retained installer escapes its selected owner".into()));
+            }
+            let wrapper = selected.join("Expr.hs");
+            if !std::fs::symlink_metadata(&wrapper).map_err(|error| source_error(&error))?.file_type().is_file() {
+                return Err(PreparationFailure::Source("retained installer wrapper is not a regular file".into()));
+            }
+            let output = selected.join("entry");
+            if !entry_path_present(&output)? {
+                return Err(PreparationFailure::Source("selected completed installer is unavailable".into()));
+            }
+            let sources = FrozenEntrySources::capture(source.include_paths(), &wrapper)
+                .map_err(preparation_auth_failure)?;
+            if sources.source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
+                .map_err(|error| source_error(&error))? != recipe.source_revision {
+                return Err(PreparationFailure::Source("recovered installer source closure differs from its owner".into()));
+            }
+            let CompilerDeploymentConfiguration::Configured(authority) = CompilerDeploymentConfiguration::from_env()
+                .map_err(|error| source_error(&error))? else {
+                return Err(PreparationFailure::Source("installer recovery requires configured compiler deployment".into()));
+            };
+            let loaded = load_selected_production_entry_with_catalog(&output, &authority,
+                &ProductionEntrySources::FrozenWorkspace(sources), &source.catalog_selection())
+                .map_err(preparation_auth_failure)?;
+            if loaded.source_path() != wrapper {
+                return Err(PreparationFailure::Source("recovered installer selects another wrapper".into()));
+            }
+            CompiledTurn::from_production_entry(&loaded).map_err(preparation_auth_failure)?
+        }
+    };
+    let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+    let entry = PreparedSourceEntry::prepare(Arc::new(compiled), registry)
         .map_err(|error| PreparationFailure::Native(error.to_string()))?;
     Ok(Arc::new(PreparedToolset {
         entry,
