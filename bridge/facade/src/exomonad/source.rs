@@ -55,8 +55,9 @@ const REVISION_MODULE: &str = "Exomonad/Source/Revision.hs";
 /// One captured state of the workspace's source roots.
 ///
 /// `identity` describes the ordered source snapshot, independently from
-/// compiler dependency selection. `generation` is the publication ordinal:
-/// it is 1-based, and 0 means "this snapshot has never been published".
+/// compiler dependency selection. `generation` is reserved serialized metadata,
+/// always zero for content-issued snapshots. Notebook publication ordinals belong
+/// to `NotebookGenerationId`, not the reusable source graph.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SourceRevision {
     pub(crate) identity: String,
@@ -67,6 +68,14 @@ pub(crate) struct SourceRevision {
 }
 
 impl SourceRevision {
+    fn from_content(identity: String, modules: Vec<(String, String)>) -> Self {
+        Self {
+            identity,
+            generation: 0,
+            modules,
+        }
+    }
+
     /// Module names whose source differs from `previous`, including modules
     /// `previous` did not have.
     fn changed_since(&self, previous: &Self) -> Vec<String> {
@@ -212,7 +221,7 @@ impl SourceLayer {
             .unwrap_or_default())
     }
 
-    /// Materialize revision one from the run's own frozen capture, unless a
+    /// Materialize the initial revision from the run's own frozen capture, unless a
     /// revision is already active. Idempotent, and the only way `active` comes
     /// into existence: every compile in the run needs it to resolve.
     pub(crate) fn ensure_active(&self, frozen: &FrozenWorkspace) -> Result<SourceRevision> {
@@ -263,7 +272,7 @@ impl SourceLayer {
     }
 
     /// As [`Self::ensure_active`], for a layer with no frozen capture of its
-    /// own: revision one is captured from `roots` as they stand.
+    /// own: the initial revision is captured from `roots` as they stand.
     pub(crate) fn ensure_active_from(
         &self,
         domain: &str,
@@ -320,9 +329,10 @@ impl SourceLayer {
         // The link is the publication point. A stale or absent side record is
         // the bounded crash window after its rename; reconstruct it from the
         // exact immutable target before admitting another compile.
+        let recovered = SourceRevision::from_content(identity, revision_modules(&revision, roots)?);
         let record = ActiveRecord {
-            identity,
-            generation: recorded.map_or(1, |record| record.generation.saturating_add(1)),
+            identity: recovered.identity,
+            generation: recovered.generation,
             roots,
         };
         tidepool_atomic_write::write_durable(
@@ -339,11 +349,10 @@ impl SourceLayer {
             return Ok(None);
         };
         let directory = self.revisions().join(&record.identity);
-        Ok(Some(SourceRevision {
-            modules: revision_modules(&directory, record.roots)?,
-            identity: record.identity,
-            generation: record.generation,
-        }))
+        Ok(Some(SourceRevision::from_content(
+            record.identity,
+            revision_modules(&directory, record.roots)?,
+        )))
     }
 
     /// Re-read the workspace's declared source roots and capture them as a
@@ -1392,11 +1401,10 @@ fn source_revision(
             }
         }
     }
-    SourceRevision {
-        identity: tidepool_toolchain::cache::source_manifests_identity(&domain, roots),
-        generation: 0,
-        modules: modules.into_iter().collect(),
-    }
+    SourceRevision::from_content(
+        tidepool_toolchain::cache::source_manifests_identity(&domain, roots),
+        modules.into_iter().collect(),
+    )
 }
 
 /// Read every module the roots provide, with the same first-root-wins
@@ -2507,7 +2515,6 @@ mod tests {
         let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
         let layer = SourceLayer::new(run.path());
         let first = layer.ensure_active(&frozen).unwrap();
-        assert_eq!(first.generation, 1);
 
         std::fs::write(
             project.path().join(".exomonad/Project/Work.hs"),
@@ -2519,7 +2526,13 @@ mod tests {
             .unwrap();
         let include = layer.include_paths(1);
         let published = layer.publish(pending).unwrap();
-        assert_eq!(published.generation, 2);
+        assert_ne!(published.identity, first.identity);
+        assert_eq!(
+            published,
+            layer
+                .observe_from_workspace(&frozen, project.path())
+                .unwrap()
+        );
         assert_eq!(layer.read_active().unwrap().unwrap(), published);
 
         // The include vector is unchanged; only what it resolves to moved.
@@ -2681,6 +2694,94 @@ mod tests {
         // record became durable.
         std::fs::write(layer.active_record(), old_record).unwrap();
         assert_eq!(layer.read_active().unwrap(), Some(second));
+    }
+
+    #[test]
+    fn source_publication_histories_preserve_revisions_through_record_recovery() {
+        use proptest::prelude::*;
+
+        #[derive(Clone, Debug)]
+        enum RecordState {
+            Current,
+            Missing,
+            Stale,
+        }
+
+        let state = prop_oneof![
+            Just(RecordState::Current),
+            Just(RecordState::Missing),
+            Just(RecordState::Stale),
+        ];
+        let histories = proptest::collection::vec((-2i16..3, state), 1..12);
+        let mut config = proptest::test_runner::Config::default();
+        config.cases = 32;
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::source_publication_histories_preserve_revisions_through_record_recovery"
+        ));
+        let mut runner = proptest::test_runner::TestRunner::new(config);
+        let coverage = std::cell::RefCell::new([0usize; 4]);
+        runner
+            .run(&histories, |history| {
+                let (project, run) =
+                    workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+                let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+                let layer = SourceLayer::new(run.path());
+                let mut active = layer.ensure_active(&frozen).unwrap();
+                // Guarantee recovery and repeated identical publication alongside
+                // arbitrary publication/recovery ordering in every history.
+                let support = [
+                    (1, RecordState::Current),
+                    (2, RecordState::Missing),
+                    (3, RecordState::Stale),
+                    (3, RecordState::Missing),
+                ];
+                for (work, state) in support.iter().chain(&history) {
+                    let previous_record = std::fs::read(layer.active_record()).unwrap();
+                    let body = format!("module Project.Work where\nwork :: Int\nwork = {work}\n");
+                    std::fs::write(project.path().join(".exomonad/Project/Work.hs"), &body)
+                        .unwrap();
+                    let expected = layer
+                        .publish(
+                            layer
+                                .capture_from_workspace(&frozen, project.path())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    if expected.identity == active.identity {
+                        coverage.borrow_mut()[3] += 1;
+                    }
+                    match state {
+                        RecordState::Current => coverage.borrow_mut()[0] += 1,
+                        RecordState::Missing => {
+                            coverage.borrow_mut()[1] += 1;
+                            std::fs::remove_file(layer.active_record()).unwrap();
+                        }
+                        RecordState::Stale => {
+                            coverage.borrow_mut()[2] += 1;
+                            std::fs::write(layer.active_record(), &previous_record).unwrap();
+                        }
+                    }
+                    let recovered = layer.read_active().unwrap();
+                    prop_assert_eq!(&recovered, &Some(expected.clone()));
+                    prop_assert_eq!(layer.read_active().unwrap(), recovered);
+                    prop_assert_eq!(
+                        std::fs::read_to_string(layer.include_paths(1)[0].join("Project/Work.hs"))
+                            .unwrap(),
+                        body
+                    );
+                    active = expected;
+                }
+                Ok(())
+            })
+            .unwrap();
+        eprintln!(
+            "source publication current/missing/stale/repeated coverage: {:?}",
+            coverage.borrow()
+        );
+        assert!(coverage.borrow().iter().all(|count| *count > 0));
     }
 
     // ------------------------------------------------------------------

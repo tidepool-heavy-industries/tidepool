@@ -81,9 +81,9 @@ pub fn source() -> Effect {
                     "One snapshot of the workspace's source roots. `revisionIdentity` is",
                     "content — the same source always names the same revision, changed",
                     "source never does; it is not a time, a path or a commit, and an",
-                    "experiment needs no clean tree. `revisionGeneration` is a 1-based",
-                    "publication counter for display only, and is 0 for a snapshot that has",
-                    "never been published.",
+                    "experiment needs no clean tree. `revisionGeneration` is reserved",
+                    "metadata and is 0 for content-issued source snapshots; it does not",
+                    "indicate publication state or the actor's notebook generation.",
                 ],
             },
             TypeDef {
