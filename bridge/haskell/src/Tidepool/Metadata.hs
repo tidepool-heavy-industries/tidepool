@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as Map
 import GHC.Builtin.Names (ioTyConKey)
 import GHC.Builtin.Types
   ( charDataCon, consDataCon, doubleDataCon, falseDataCon, floatDataCon
-  , intDataCon, nilDataCon, ordEQDataCon, ordGTDataCon, ordLTDataCon
+  , intDataCon, nilDataCon
   , trueDataCon, tupleDataCon, unitDataCon, wordDataCon )
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon
@@ -150,7 +150,7 @@ wiredInConstructors =
   [ consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon
   , intDataCon, wordDataCon, doubleDataCon, floatDataCon
   ] ++ map (tupleDataCon Boxed) [2 .. 5]
-    ++ [ordLTDataCon, ordEQDataCon, ordGTDataCon]
+
 
 valueRepArity :: DataCon -> Int
 valueRepArity dc = length
