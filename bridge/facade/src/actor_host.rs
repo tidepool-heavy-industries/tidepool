@@ -3994,7 +3994,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         temporary.clone(),
     )
     .await?;
-    let (forest, _) = ResidentForest::new(
+    let (mut forest, _) = ResidentForest::new(
         workbench.clone(),
         tidepool_runtime::session::fresh_session_id(),
         machine,
@@ -4002,6 +4002,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         exomonad_actor::Incarnation::FIRST,
     )
     .await?;
+    forest.set_source_layers(source.clone());
     let forest = with_host_interpreters(
         forest,
         &config,

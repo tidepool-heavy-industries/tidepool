@@ -2383,6 +2383,12 @@ mod tests {
             "immediate selection carries immutable readiness"
         );
         assert!(
+            first_inputs.prepared_toolset_coverage().unwrap()[0]
+                .effective_effects
+                .contains(&exomonad_actor::ActorEffectKey::Source),
+            "preparation installs the same source authority as the live host"
+        );
+        assert!(
             second_inputs.prepared_toolset.is_none(),
             "durable reopening authenticates the original independently"
         );
