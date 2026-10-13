@@ -3670,13 +3670,10 @@ impl ExactCompilationRequest {
             .chain(selected_originals.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        let compiler_projection = context
-            .compiler_projection
-            .merge(&issued.for_source_owners(&persistent_owners))?;
-        context.inventory = context
+        let persistent = issued.for_source_owners(&persistent_owners);
+        (context.inventory, context.compiler_projection) = context
             .inventory
-            .merge_selected(support, &compiler_projection)?;
-        context.compiler_projection = compiler_projection;
+            .merge_compiler_inputs(&context.compiler_projection, support, &persistent)?;
         let context = Arc::new(context.finish()?);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -4970,9 +4967,11 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             self.admit_producer(descriptor.producer_sha256)?;
         }
-        let projection = self.compiler_projection.merge(projection)?;
-        self.inventory = self.inventory.merge_selected(artifacts, &projection)?;
-        self.compiler_projection = projection;
+        (self.inventory, self.compiler_projection) = self.inventory.merge_compiler_inputs(
+            &self.compiler_projection,
+            artifacts,
+            projection,
+        )?;
         self.finish()
     }
 

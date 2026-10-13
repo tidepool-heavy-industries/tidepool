@@ -10489,6 +10489,111 @@ mod tests {
     }
 
     #[test]
+    fn compiler_support_extension_keeps_native_issuer_roots_and_historical_custody() {
+        use crate::declaration_context::ExactDeclarationContext;
+        let inventory = ArtifactInventory::default();
+        let child = Arc::new(entry("Child", &[]));
+        let native = Arc::new(issued_native_groups(
+            "Root",
+            vec![(7, Vec::new())],
+            &[&child],
+            &BTreeMap::new(),
+        ));
+        let old = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![native.clone(), child.clone(), Arc::new(entry("Left", &[]))],
+            )
+            .unwrap();
+        let new = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![native.clone(), child, Arc::new(entry("Right", &[]))],
+            )
+            .unwrap();
+        let old_projection = CompilerInputProjection::from_issued_entries(&old.entries()).unwrap();
+        let new_projection = CompilerInputProjection::from_issued_entries(&new.entries()).unwrap();
+        let owner = native.descriptor.owner.clone();
+        let support = new_projection
+            .source_support(&new, &BTreeSet::from([owner.clone()]))
+            .unwrap();
+        let context = ExactDeclarationContext::from_authenticated_execution(
+            [2; 32],
+            &old,
+            old_projection,
+            vec![],
+            owner,
+            &[],
+        )
+        .unwrap();
+        let grown = context.extend_issued_compiler_support(&support).unwrap();
+        let view = grown.artifact_view();
+        let expected = old.capture_graph_selection().native_groups;
+        let recovery = ArtifactInventory::default();
+        let restored = recovery
+            .recover_selection(
+                &recovery.empty_view(),
+                view.entries(),
+                &view.capture_graph_selection(),
+                &view.binding_dependencies(),
+            )
+            .unwrap();
+        for (inventory, view) in [(&inventory, view), (&recovery, &restored)] {
+            let requirements = NativeOriginalRequirement::for_projection(
+                grown.compiler_input_projection(),
+                view,
+                &[],
+            )
+            .unwrap();
+            let observed = requirements
+                .iter()
+                .flat_map(|requirement| requirement.selection.graph_selection().roots.iter())
+                .filter_map(|root| match root {
+                    InventoryNodeKey::Group(group)
+                        if group.binding.artifact == native.descriptor.id =>
+                    {
+                        Some(*group)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, expected);
+            let mut certified =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    grown.compiler_input_projection(),
+                    &view.metadata_snapshot(),
+                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            certified
+                .with_native_original_requirements(&view.metadata_snapshot(), &requirements)
+                .unwrap();
+            let mut bound = inventory.bind_segment(view, vec![], &certified).unwrap();
+            let selected = inventory
+                .admit_bound_target(
+                    &mut bound,
+                    view,
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 7)]),
+                    vec![],
+                    &certified,
+                )
+                .unwrap();
+            let actual = selected
+                .native_groups_for_target(None, &[issued_source(&native, 7)])
+                .unwrap();
+            assert_eq!(actual, expected.iter().copied().collect());
+            assert!(new
+                .capture_graph_selection()
+                .native_groups
+                .iter()
+                .all(|group| selected
+                    .capture_graph_selection()
+                    .native_groups
+                    .contains(group)));
+        }
+    }
+
+    #[test]
     fn shared_native_group_keeps_each_issued_canonical_child_closure() {
         let inventory = ArtifactInventory::default();
         let child = entry("Child", &[]);
