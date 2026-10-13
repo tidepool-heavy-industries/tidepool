@@ -786,7 +786,7 @@ verifyBuiltinTypeIdentity = do
     nodes <- project authority entry
     require (builtin `notElem` [form | TypeDeclaration _ _ form _ <- nodes]) "foreign nominal type acquired builtin evidence"
     require (any (\node -> case node of
-        TypeDeclaration family _ _ _ -> family == SymbolIdentity "main" owner "type" name Nothing
+        TypeDeclaration family _ _ _ -> typeSymbol family == SymbolIdentity "main" owner "type" name Nothing
         _ -> False) nodes) "foreign numeric family lost its nominal graph identity"
   forM_ [(authority, "foreignText"), (Nothing, "realText")] $ \(text, entry) ->
     case projectPreparedTarget (context text entry) (pprModules prepared) of
@@ -1319,8 +1319,8 @@ verifyTagToEnumProjection = do
             , let tag = fromIntegral (BS.last bytes) :: Int
             , bytes == BS.pack (replicate 7 0 <> [fromIntegral tag])
             , declaration <- take 1 (drop (fromIntegral index) (programConstructors program))
-            , symbolOccurrence (constructorFamily declaration) == family
-            , let constructor = symbolOccurrence (constructorIdentity declaration)
+            , symbolOccurrence (typeSymbol (constructorFamily declaration)) == family
+            , let constructor = symbolOccurrence (constructorSymbol (constructorIdentity declaration))
             , constructorTag declaration == fromIntegral tag + 1
             ]
       unless (length actual == length alternatives && actual == expected)

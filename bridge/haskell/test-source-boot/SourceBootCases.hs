@@ -6418,8 +6418,8 @@ verifyRetainedPackageWitness producer evidence = do
       synthetic = constructor { symbolOccurrence = "$internalSyntheticPackageSibling" }
       localProgram identities = (program [])
         { programConstructors = [ConstructorDecl
-            (constructor { symbolNamespace = "constructor" })
-            (constructor { symbolNamespace = "type", symbolOccurrence = "CallStack" })
+            (ConstructorIdentity (constructor { symbolNamespace = "constructor" })
+              (TypeIdentity (constructor { symbolNamespace = "type", symbolOccurrence = "CallStack" }) (GhcAbi 0 0)))
             LiftedRefRep [] [] (CheckedLayout [] 8 0 []) 0 2 0]
         , programBindings = [NonRecursive (TopBinding identity
             (HeapBinding (ValueId (fromIntegral index)) (Constructor (ConstructorId 0) [])))

@@ -88,7 +88,7 @@ runTypeEvidenceChecks directory = do
       requireHead entry name form = do
         (wire, expression) <- answer entry
         let (identity, actual, _) = nominal (programTypes wire) expression
-        assert (symbolOccurrence identity == name && actual == form)
+        assert (symbolOccurrence (typeSymbol identity) == name && actual == form)
           (Text.unpack entry ++ ": wrong declaration " ++ show (identity, actual))
         pure wire
   bool <- requireHead "boolAnswer" "Bool" DataDeclaration
@@ -122,7 +122,7 @@ runTypeEvidenceChecks directory = do
     \(entry, name, expected) -> do
       (wire, expression) <- answer entry
       let (identity, _, arguments) = nominal (programTypes wire) expression
-      assert (symbolOccurrence identity == name
+      assert (symbolOccurrence (typeSymbol identity) == name
         && map (headName (programTypes wire)) arguments == expected)
         "nominal type arguments lost their order or phantom identity"
   forM_ [("textAnswer", "Text", TextDeclaration, ["Text"]),
@@ -130,7 +130,7 @@ runTypeEvidenceChecks directory = do
          ("naturalAnswer", "Natural", NaturalDeclaration, ["NS", "NB"])] $
     \(entry, name, form, constructors) -> do
       wire <- requireHead entry name form
-      assert (all (`elem` map (symbolOccurrence . constructorIdentity) (programConstructors wire)) constructors)
+      assert (all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors wire)) constructors)
         "special building mode lost its authenticated physical constructors"
   forM_ [("printRequest", "Print"), ("customSend", "Print")] $ \(entry, occurrence) -> do
     wire <- program entry
@@ -163,7 +163,7 @@ runTypeEvidenceChecks directory = do
     \(entry, occurrence, name, arities) -> do
       wire <- program entry
       let (identity, form, arguments) = nominal (programTypes wire) (replyBody wire "TypeEvidence" occurrence)
-      assert (symbolOccurrence identity == name && form == DataDeclaration
+      assert (symbolOccurrence (typeSymbol identity) == name && form == DataDeclaration
         && map (length . snd) (templates wire name) == arities
         && map (nodeAt (programTypes wire)) arguments == [TypeBound 0])
         "partial algebraic reply lost fieldless branches or its unresolved parameter"
@@ -211,7 +211,7 @@ runTypeEvidenceChecks directory = do
   assert (null (programSites empty) && IntMap.null (typeGraphNodes (programTypes empty)))
     "unselected typed sites leaked into the artifact"
   auxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootDecode"])
-  assert (all (`elem` map (symbolOccurrence . constructorIdentity) (programConstructors auxiliary)) ["Left", "Right"])
+  assert (all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors auxiliary)) ["Left", "Right"])
     "auxiliary root lost its own result constructors"
   verifyOriginalScopes original alpha
   let cast = CastTy boolTy (mkNomReflCo (typeKind boolTy))
@@ -312,20 +312,20 @@ edge graph root role = case [target | (actual, target) <- outgoing graph root, a
   _ -> error ("missing/duplicate finite graph edge " ++ show role)
 rootBody :: TypeGraph -> TypeNodeId -> TypeNodeId
 rootBody graph root = case nodeAt graph root of TypeRoot{} -> edge graph root TypeBody; _ -> error "reply is not a scoped root"
-nominal :: TypeGraph -> TypeNodeId -> (SymbolIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
+nominal :: TypeGraph -> TypeNodeId -> (TypeIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
 nominal graph expression = case nodeAt graph expression of
   TypeNominalApplication -> case nodeAt graph (edge graph expression TypeHead) of
     TypeDeclaration identity _ form _ -> (identity, form, [target | (TypeArgument _, target) <- outgoing graph expression])
     _ -> error "nominal expression has no declaration"
   other -> error ("expected nominal expression, got " ++ show other)
 headName :: TypeGraph -> TypeNodeId -> Text.Text
-headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence identity
+headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence (typeSymbol identity)
 namedConstructors :: WireProgram -> Text.Text -> [ConstructorDecl]
-namedConstructors wire name = filter ((== name) . symbolOccurrence . constructorIdentity) (programConstructors wire)
+namedConstructors wire name = filter ((== name) . symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors wire)
 replyFor :: WireProgram -> Text.Text -> Text.Text -> [ConstructorReply]
 replyFor wire owner name = [reply | (ConstructorId index, reply) <- programConstructorReplies wire,
-  let identity = constructorIdentity (programConstructors wire !! fromIntegral index),
-  symbolModule identity == owner, symbolOccurrence identity == name]
+  let identity = constructorSymbol (constructorIdentity (programConstructors wire !! fromIntegral index)),
+  symbolModule identity == owner, symbolOccurrence (typeSymbol identity) == name]
 replyRoot :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId
 replyRoot wire owner name = case replyFor wire owner name of [StaticReply root] -> root; other -> error (show other)
 replyBody :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId
@@ -333,5 +333,5 @@ replyBody wire owner name = rootBody (programTypes wire) (replyRoot wire owner n
 templates :: WireProgram -> Text.Text -> [(Word, [(TypeEdgeRoleF RuntimeRep, TypeNodeId)])]
 templates wire name = [(fromIntegral tag, outgoing graph target)
   | (index, TypeDeclaration identity _ DataDeclaration _) <- IntMap.toAscList (typeGraphNodes graph),
-    symbolOccurrence identity == name, (TypeConstructor tag, target) <- outgoing graph (TypeNodeId (fromIntegral index))]
+    symbolOccurrence (typeSymbol identity) == name, (TypeConstructor tag, target) <- outgoing graph (TypeNodeId (fromIntegral index))]
  where graph = programTypes wire

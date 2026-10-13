@@ -651,8 +651,8 @@ verifyConstructorRepresentations dir = do
     declarations -> ioError (userError ("expected one " ++ occurrence
       ++ " declaration, got " ++ show declarations))
   hasOccurrence occurrence declaration =
-    Schema.symbolModule (Schema.constructorIdentity declaration) == "Tidepool.Aeson.Scientific"
-      && Schema.symbolOccurrence (Schema.constructorIdentity declaration) == fromString occurrence
+    Schema.symbolModule (Schema.constructorSymbol (Schema.constructorIdentity declaration)) == "Tidepool.Aeson.Scientific"
+      && Schema.symbolOccurrence (Schema.constructorSymbol (Schema.constructorIdentity declaration)) == fromString occurrence
 
 -- Independently construct conflicting GHC evidence at the shared projection
 -- boundary. Equal GHC uniques are not proof of equal physical declarations.

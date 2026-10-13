@@ -191,15 +191,16 @@ retainWatchReplyEvidence work result = do
         ++ " originals=" ++ show originalRows)
       pure (occurrence, targetRows, originalRows)
  where
+  replyRows :: T.Text -> [ConstructorDecl] -> TypeGraph -> [(ConstructorId, ConstructorReply)] -> [Bool]
   replyRows occurrence constructors types replies =
     [case do
        body <- child (TypeNodeId index) TypeBody
        declaration <- child body TypeHead
        node <- nodeAt declaration
-       case node of TypeDeclaration family _ _ _ -> Just (symbolOccurrence family == "Int"); _ -> Nothing
+       case node of TypeDeclaration family _ _ _ -> Just (symbolOccurrence (typeSymbol family) == "Int"); _ -> Nothing
      of Just True -> True; _ -> False
     | (ConstructorId constructor, StaticReply (TypeNodeId index)) <- replies
-    , symbolOccurrence (constructorIdentity (constructors !! fromIntegral constructor)) == occurrence
+    , symbolOccurrence (constructorSymbol (constructorIdentity (constructors !! fromIntegral constructor))) == occurrence
     ]
    where
     nodeAt (TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (typeGraphNodes types)
