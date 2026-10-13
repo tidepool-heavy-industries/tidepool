@@ -2978,33 +2978,465 @@ mod tests {
         assert_eq!(reload.read_from(&a, "Project.Work").unwrap(), a_text);
     }
 
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config::with_cases(8))]
-        #[test]
-        fn source_generation_histories_preserve_issued_reads_and_exact_recovery(actions in proptest::collection::vec((0u8..3, -20i16..20), 1..7)) {
-            use exomonad_actor::ActorSourceLayers;
-            let (project, reload) = generation_owner();
-            let mut current = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
-            let mut retained = vec![(current.clone(), "module Project.Work where\nwork :: Int\nwork = 1\n".to_owned())];
-            let mut work = retained[0].1.clone();
-            for (kind, value) in actions {
-                let authored = project.path().join(".exomonad");
-                match kind {
-                    0 => { work = format!("module Project.Work where\nwork :: Int\nwork = {value}\n"); std::fs::write(authored.join("Project/Work.hs"), &work).unwrap(); }
-                    1 => { std::fs::write(authored.join("agent.md"), format!("Instructions {value}")).unwrap(); }
-                    _ => { let path = authored.join("Project/Extra.hs"); if path.exists() { std::fs::remove_file(path).unwrap(); } else { std::fs::write(path, "module Project.Extra where\nextra = ()\n").unwrap(); } }
+    /// Capsule staging does not publish an actor generation. The model records
+    /// authored facts and explicit retained selections, never the active links.
+    #[derive(Clone, Debug)]
+    enum SourceHistoryOp {
+        Work(i16),
+        Prompt(i16),
+        Memory(i16),
+        Extra(Option<i16>),
+        Stage(u8),
+        Abandon,
+        Retain,
+        Read(u8, bool),
+        Restore(u8),
+        Observe(u8),
+        CorruptReference(u8, u8),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SourceHistoryModel {
+        work: i16,
+        extra: Option<i16>,
+        prompt: String,
+    }
+
+    impl SourceHistoryModel {
+        fn modules(&self) -> BTreeMap<String, String> {
+            let mut modules = BTreeMap::from([(
+                "Project.Work".into(),
+                format!(
+                    "module Project.Work where\nwork :: Int\nwork = {}\n",
+                    self.work
+                ),
+            )]);
+            if let Some(extra) = self.extra {
+                modules.insert(
+                    "Project.Extra".into(),
+                    format!("module Project.Extra where\nextra = {extra}\n"),
+                );
+            }
+            modules
+        }
+    }
+
+    #[derive(Default, Debug)]
+    struct SourceHistoryCoverage {
+        stages: usize,
+        unchanged_stages: usize,
+        prompt_only_stages: usize,
+        memory_only_stages: usize,
+        abandoned: usize,
+        retained: usize,
+        delayed_reads: usize,
+        missing_reads: usize,
+        restores: usize,
+        refusals: usize,
+        deletion_stages: usize,
+        readd_stages: usize,
+        empty_candidate_ops: usize,
+    }
+
+    struct HistoryCapsule {
+        source: exomonad_actor::CheckpointSourceLayer,
+        model: SourceHistoryModel,
+    }
+
+    fn source_history_ops() -> impl proptest::strategy::Strategy<Value = Vec<SourceHistoryOp>> {
+        use proptest::prelude::*;
+        use SourceHistoryOp::*;
+        let op = prop_oneof![
+            3 => (-3i16..4).prop_map(Work),
+            2 => (-3i16..4).prop_map(Prompt),
+            1 => (-3i16..4).prop_map(Memory),
+            2 => proptest::option::of(-3i16..4).prop_map(Extra),
+            4 => (0u8..4).prop_map(Stage),
+            1 => Just(Abandon),
+            3 => Just(Retain),
+            3 => (0u8..4, any::<bool>()).prop_map(|(slot, extra)| Read(slot, extra)),
+            2 => (0u8..4).prop_map(Restore),
+            1 => (0u8..4).prop_map(Observe),
+            2 => (0u8..4, 0u8..4).prop_map(|(slot, mode)| CorruptReference(slot, mode)),
+        ];
+        // Embed one interaction among arbitrary operations, preserving both
+        // arbitrary ordering and support for the important delayed observations.
+        let arbitrary = proptest::collection::vec(op.clone(), 1..32);
+        let interactions = (
+            proptest::collection::vec(op.clone(), 0..12),
+            0u8..4,
+            proptest::collection::vec(op, 0..12),
+        )
+            .prop_map(|(mut prefix, kind, suffix)| {
+                prefix.extend(source_history_scenario(kind));
+                prefix.extend(suffix);
+                prefix
+            });
+        prop_oneof![4 => arbitrary, 1 => interactions]
+    }
+
+    fn source_history_scenario(kind: u8) -> Vec<SourceHistoryOp> {
+        use SourceHistoryOp::*;
+        match kind {
+            0 => vec![
+                Work(2),
+                Stage(0),
+                Retain,
+                Abandon,
+                Work(3),
+                Read(0, false),
+                Restore(0),
+                Observe(0),
+            ],
+            1 => vec![
+                Stage(0),
+                Retain,
+                Prompt(2),
+                Stage(0),
+                Retain,
+                Memory(2),
+                Stage(0),
+                Stage(0),
+                Abandon,
+                Restore(1),
+            ],
+            2 => vec![
+                Extra(Some(2)),
+                Stage(0),
+                Retain,
+                Extra(None),
+                Stage(0),
+                Retain,
+                Read(0, true),
+                Extra(Some(3)),
+                Stage(0),
+                Retain,
+                Read(2, true),
+                Read(0, true),
+                Restore(1),
+            ],
+            _ => vec![
+                Work(2),
+                Stage(0),
+                Retain,
+                Abandon,
+                Work(3),
+                Stage(0),
+                CorruptReference(0, 0),
+                CorruptReference(0, 1),
+                CorruptReference(0, 2),
+                CorruptReference(0, 3),
+                Read(0, false),
+                Restore(0),
+            ],
+        }
+    }
+
+    fn check_history_read(
+        reload: &ExomonadSourceReload,
+        capsule: &HistoryCapsule,
+        extra: bool,
+    ) -> proptest::test_runner::TestCaseResult {
+        use exomonad_actor::ActorSourceLayers;
+        let module = if extra {
+            "Project.Extra"
+        } else {
+            "Project.Work"
+        };
+        let expected = capsule.model.modules();
+        let read = reload.read_from(&capsule.source, module);
+        if let Some(text) = expected.get(module) {
+            proptest::prop_assert_eq!(read.unwrap().1, text.clone());
+        } else {
+            proptest::prop_assert!(read.is_err(), "absent module was exposed: {module}");
+        }
+        Ok(())
+    }
+
+    fn replay_source_history(
+        actions: &[SourceHistoryOp],
+        coverage: &mut SourceHistoryCoverage,
+    ) -> proptest::test_runner::TestCaseResult {
+        use exomonad_actor::ActorSourceLayers;
+        use SourceHistoryOp::*;
+        let (project, reload) = generation_owner();
+        let authored = project.path().join(".exomonad");
+        let mut draft = SourceHistoryModel {
+            work: 1,
+            extra: None,
+            prompt: "Instructions A".into(),
+        };
+        let initial = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let mut captures = vec![(
+            draft.clone(),
+            initial.generation_evidence().unwrap().configuration_digest,
+            reload.revision(&initial).unwrap().identity,
+        )];
+        let mut retained = vec![HistoryCapsule {
+            source: initial,
+            model: draft.clone(),
+        }];
+        let mut candidate: Option<(
+            Box<dyn exomonad_actor::StagedActorSourceReload>,
+            SourceHistoryModel,
+        )> = None;
+        let mut memory_since_stage = false;
+        let mut extra_was_deleted = false;
+        for action in actions {
+            // Logical slots are counted backwards from the newest retained
+            // capsule; the initial capsule makes reads and restores always valid.
+            let slot = |pick: u8| retained.len() - 1 - usize::from(pick) % retained.len();
+            match *action {
+                Work(value) => {
+                    draft.work = value;
+                    std::fs::write(
+                        authored.join("Project/Work.hs"),
+                        &draft.modules()["Project.Work"],
+                    )
+                    .unwrap();
                 }
-                let staged = reload.clone().stage_reload(PrincipalId::SYSTEM, &current, &[]).unwrap();
-                let next = staged.source().clone();
-                let restored = reload.restore_source(&staged.evidence().reference).unwrap();
-                proptest::prop_assert_eq!(restored.include_paths(), next.include_paths());
-                proptest::prop_assert_eq!(reload.read_from(&restored, "Project.Work").unwrap().1, work.clone());
-                let disk = reload.observe(&next).unwrap();
-                proptest::prop_assert_eq!(disk.active.identity, disk.disk.identity);
-                for (source, expected) in &retained { proptest::prop_assert_eq!(reload.read_from(source, "Project.Work").unwrap().1, expected.clone()); }
-                retained.push((next.clone(), work.clone())); current = next;
+                Prompt(value) => {
+                    draft.prompt = format!("Instructions {value}");
+                    std::fs::write(authored.join("agent.md"), &draft.prompt).unwrap();
+                }
+                Memory(value) => {
+                    std::fs::create_dir_all(authored.join("state")).unwrap();
+                    std::fs::write(
+                        authored.join("state/Memory.hs"),
+                        format!("durable memory {value}"),
+                    )
+                    .unwrap();
+                    memory_since_stage = true;
+                }
+                Extra(value) => {
+                    draft.extra = value;
+                    if let Some(text) = draft.modules().get("Project.Extra") {
+                        std::fs::write(authored.join("Project/Extra.hs"), text).unwrap();
+                    } else if authored.join("Project/Extra.hs").exists() {
+                        std::fs::remove_file(authored.join("Project/Extra.hs")).unwrap();
+                    }
+                }
+                Stage(pick) => {
+                    let previous = &retained[slot(pick)];
+                    let staged = reload
+                        .clone()
+                        .stage_reload(PrincipalId::SYSTEM, &previous.source, &[])
+                        .unwrap();
+                    let previous_modules = previous.model.modules();
+                    let draft_modules = draft.modules();
+                    let expected_changes = previous_modules
+                        .keys()
+                        .chain(draft_modules.keys())
+                        .filter(|name| previous_modules.get(*name) != draft_modules.get(*name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let observed_changes = staged
+                        .changed_modules()
+                        .iter()
+                        .filter(|name| name.starts_with("Project."))
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    proptest::prop_assert_eq!(observed_changes, expected_changes);
+                    proptest::prop_assert_eq!(
+                        staged.prompt_snapshot().instructions(),
+                        draft.prompt.as_str()
+                    );
+                    proptest::prop_assert_eq!(
+                        &staged.previous_revision().identity,
+                        &reload.revision(&previous.source).unwrap().identity
+                    );
+                    let digest = staged.configuration_digest();
+                    let identity = staged.candidate_revision().identity.clone();
+                    for (model, old_digest, old_identity) in &captures {
+                        let same_modules = model.modules() == draft.modules();
+                        proptest::prop_assert_eq!(*old_identity == identity, same_modules);
+                        proptest::prop_assert_eq!(
+                            *old_digest == digest,
+                            same_modules && model.prompt == draft.prompt
+                        );
+                    }
+                    if let Some((last, _, _)) = captures.last() {
+                        if last == &draft {
+                            coverage.unchanged_stages += 1;
+                            if memory_since_stage {
+                                coverage.memory_only_stages += 1;
+                            }
+                        } else if last.modules() == draft.modules() {
+                            coverage.prompt_only_stages += 1;
+                        }
+                        if last.extra.is_some() && draft.extra.is_none() {
+                            coverage.deletion_stages += 1;
+                            extra_was_deleted = true;
+                        }
+                    }
+                    if extra_was_deleted && draft.extra.is_some() {
+                        coverage.readd_stages += 1;
+                        extra_was_deleted = false;
+                    }
+                    captures.push((draft.clone(), digest, identity));
+                    memory_since_stage = false;
+                    coverage.stages += 1;
+                    candidate = Some((staged, draft.clone()));
+                }
+                Abandon => {
+                    if candidate.take().is_some() {
+                        coverage.abandoned += 1;
+                    } else {
+                        coverage.empty_candidate_ops += 1;
+                    }
+                }
+                Retain => {
+                    if let Some((staged, model)) = &candidate {
+                        retained.push(HistoryCapsule {
+                            source: staged.source().clone(),
+                            model: model.clone(),
+                        });
+                        coverage.retained += 1;
+                    } else {
+                        coverage.empty_candidate_ops += 1;
+                    }
+                }
+                Read(pick, extra) => {
+                    let capsule = &retained[slot(pick)];
+                    check_history_read(&reload, capsule, extra)?;
+                    if capsule.model.modules() != draft.modules() {
+                        coverage.delayed_reads += 1;
+                    }
+                    if extra && capsule.model.extra.is_none() {
+                        coverage.missing_reads += 1;
+                    }
+                }
+                Restore(pick) => {
+                    let capsule = &retained[slot(pick)];
+                    let reference = &capsule.source.generation_evidence().unwrap().reference;
+                    let restored = reload.restore_source(reference).unwrap();
+                    proptest::prop_assert_eq!(restored.identities(), capsule.source.identities());
+                    proptest::prop_assert_eq!(
+                        restored.include_paths(),
+                        capsule.source.include_paths()
+                    );
+                    proptest::prop_assert_eq!(
+                        restored.generation_evidence().unwrap().reference.bytes(),
+                        reference.bytes()
+                    );
+                    let restored = HistoryCapsule {
+                        source: restored,
+                        model: capsule.model.clone(),
+                    };
+                    check_history_read(&reload, &restored, false)?;
+                    check_history_read(&reload, &restored, true)?;
+                    coverage.restores += 1;
+                }
+                Observe(pick) => {
+                    let capsule = &retained[slot(pick)];
+                    let status = reload.observe(&capsule.source).unwrap();
+                    proptest::prop_assert_eq!(
+                        status.active.identity == status.disk.identity,
+                        capsule.model.modules() == draft.modules()
+                    );
+                    for (observed, expected) in [
+                        (&status.active.modules, capsule.model.modules()),
+                        (&status.disk.modules, draft.modules()),
+                    ] {
+                        let observed = observed
+                            .iter()
+                            .filter(|m| m.name.starts_with("Project."))
+                            .map(|m| m.name.clone())
+                            .collect::<BTreeSet<_>>();
+                        proptest::prop_assert_eq!(
+                            observed,
+                            expected.into_keys().collect::<BTreeSet<_>>()
+                        );
+                    }
+                }
+                CorruptReference(pick, mode) => {
+                    let capsule = &retained[slot(pick)];
+                    let reference = &capsule.source.generation_evidence().unwrap().reference;
+                    // The valid reference must restore before changing exactly
+                    // one nearby fact; refusal cannot pass on malformed setup.
+                    reload.restore_source(reference).unwrap();
+                    let mut graph: serde_json::Value =
+                        serde_json::from_slice(reference.bytes()).unwrap();
+                    match mode % 4 {
+                        0 => {
+                            graph["roots"].as_array_mut().unwrap().pop();
+                        }
+                        1 => {
+                            graph["roots"].as_array_mut().unwrap().swap(0, 1);
+                        }
+                        2 => {
+                            graph["roots"][0]["path"] = serde_json::json!(authored);
+                        }
+                        _ => {
+                            graph["prompts"]["files"][0][2] = serde_json::json!("0".repeat(64));
+                        }
+                    }
+                    let corrupted = tidepool_runtime::session::GenerationArtifactReference::capture(
+                        serde_json::to_vec(&graph).unwrap(),
+                    );
+                    proptest::prop_assert!(reload.restore_source(&corrupted).is_err());
+                    // Explicit refusal observation, not an invariant read after
+                    // every edit: all issued snapshots survive the bad reference.
+                    for old in &retained {
+                        check_history_read(&reload, old, false)?;
+                        check_history_read(&reload, old, true)?;
+                    }
+                    coverage.refusals += 1;
+                }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn source_generation_history_support_reaches_delayed_reads_and_refusals() {
+        let mut coverage = SourceHistoryCoverage::default();
+        for kind in 0..4 {
+            replay_source_history(&source_history_scenario(kind), &mut coverage).unwrap();
+        }
+        eprintln!("source history deterministic support: {coverage:?}");
+        assert!(
+            coverage.unchanged_stages > 0
+                && coverage.prompt_only_stages > 0
+                && coverage.memory_only_stages > 0
+        );
+        assert!(
+            coverage.abandoned > 0
+                && coverage.retained > 1
+                && coverage.delayed_reads > 0
+                && coverage.missing_reads > 0
+        );
+        assert!(
+            coverage.restores > 0
+                && coverage.refusals == 4
+                && coverage.deletion_stages > 0
+                && coverage.readd_stages > 0
+        );
+    }
+
+    #[test]
+    fn source_generation_histories_preserve_issued_reads_and_exact_recovery() {
+        let mut config = proptest::test_runner::Config::default();
+        config.cases = 16;
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::source_generation_histories_preserve_issued_reads_and_exact_recovery"
+        ));
+        let mut runner = proptest::test_runner::TestRunner::new(config);
+        let coverage = std::cell::RefCell::new(SourceHistoryCoverage::default());
+        let callbacks = std::cell::Cell::new(0usize);
+        let result = runner.run(&source_history_ops(), |actions| {
+            callbacks.set(callbacks.get() + 1);
+            replay_source_history(&actions, &mut coverage.borrow_mut())
+        });
+        eprintln!(
+            "source history callbacks={} coverage={:?}",
+            callbacks.get(),
+            coverage.borrow()
+        );
+        result.unwrap();
     }
 
     #[tokio::test]
