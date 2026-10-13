@@ -6,7 +6,6 @@ pub mod exec;
 pub mod journal;
 pub mod model_call;
 pub mod repo_event;
-pub mod source;
 pub mod web;
 pub mod worktree;
 pub mod worktree_adapters;

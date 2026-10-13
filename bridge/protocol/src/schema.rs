@@ -1345,8 +1345,6 @@ pub enum OuterEffect {
     Exec,
     /// The durable run journal.
     Journal,
-    /// The run's live workspace source layer.
-    Source,
     /// Model invocations owned by the admitted cell.
     Model,
     /// The admitted cell's editable context document and next-model choice.

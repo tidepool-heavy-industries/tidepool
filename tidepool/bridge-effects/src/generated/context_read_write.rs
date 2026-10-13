@@ -2,6 +2,47 @@
 
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
+/// Owner-issued startup operation, actor, installed spec and exact source identity.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub struct InitialContextIdentity {
+    pub operation: String,
+    pub actor: (i64, i64),
+    pub spec_install: i64,
+    pub spec_revision: Option<String>,
+    pub spec_entry: Option<String>,
+    pub spec_source: String,
+}
+
+/// Historical publication association and independently preserved caller seed reference.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub struct InitialContextPublicationReceipt {
+    pub run: String,
+    pub actor_path: String,
+    pub conversation_incarnation: String,
+    pub request: String,
+    pub caller_reference: Option<ContextReference>,
+}
+
+/// Retained startup status, with successful empty output distinct from an absent hook and failure.
+/// Published text is historical evidence; read current context before replacing its exact issued reference.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum InitialContextObservation {
+    InitialContextAbsent,
+    InitialContextCaptured,
+    InitialContextPreparing(InitialContextIdentity),
+    InitialContextRetained(InitialContextIdentity, String),
+    InitialContextPublishedEmpty(InitialContextIdentity, InitialContextPublicationReceipt),
+    InitialContextPublished(
+        InitialContextIdentity,
+        InitialContextPublicationReceipt,
+        String,
+        ContextReference,
+    ),
+    InitialContextFailed(InitialContextIdentity, String),
+    InitialContextCancelled(InitialContextIdentity),
+    InitialContextUncertain(InitialContextIdentity, String),
+}
+
 /// Opaque serialized reference to host-owned context evidence; the context host validates it.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub struct ContextReference {

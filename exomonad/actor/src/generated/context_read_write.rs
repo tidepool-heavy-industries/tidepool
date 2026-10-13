@@ -21,6 +21,7 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum ContextReadWriteReq {
+    GetInitialContextWith,
     GetContextWith,
     PutContextWith(tidepool_bridge_effects::ContextDocument),
     SetNextModelWith(String),

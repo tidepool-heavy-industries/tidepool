@@ -43,7 +43,7 @@ pub fn commands_decl() -> crate::EffectDecl {
             "data CommandSource = CommandSource { sourceDirectory :: Text, sourceCommit :: Maybe Text, sourceDirty :: Bool } deriving (Show, Eq)",
             "data CommandReport = CommandReport { reportCommand :: [Text], reportSource :: Maybe CommandSource, reportResult :: CommandResult, reportOutputComplete :: Bool, reportTail :: Text } deriving (Show, Eq)",
             "data CommandPresentation = CommandVisible Text Int | CommandQuiet deriving (Show, Eq)",
-            "data CommandError = CommandUnavailable Text | CommandInvalid Text | CommandUnauthorized | CommandOutputPending | CommandInputRejected Text | CommandInputAcceptedCloseUnconfirmed Text deriving (Show, Eq)",
+            "data CommandError = CommandUnavailable Text | CommandJobNotFound | CommandInvalid Text | CommandUnauthorized | CommandOutputPending | CommandInputRejected Text | CommandInputAcceptedCloseUnconfirmed Text deriving (Show, Eq)",
         ],
         extra_imports: &[
             "import qualified Tidepool.Command as Cmd",
