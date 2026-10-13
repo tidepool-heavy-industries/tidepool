@@ -455,6 +455,32 @@ fn observed_root(root: &Path) -> Option<exomonad_actor::DurableActorRecord> {
     let records = exomonad_actor::ActorRecoveryJournal::read_observed(&journal).unwrap();
     latest_durable_root_application(&records).unwrap().cloned()
 }
+
+fn persisted_root_owner(
+    records: &[exomonad_actor::DurableActorRecord],
+    actor: ActorRef,
+) -> tidepool_runtime::session::RecoveryPublicOwner {
+    // This cold-process assertion has no live ResidentForest handle. Bind the
+    // lookup to the exact canonical path retained in that actor's admission.
+    let admission = records
+        .iter()
+        .find(|record| record.admission.actor == actor)
+        .map(|record| &record.admission)
+        .expect("exact root incarnation has retained admission evidence");
+    assert!(admission.creator.is_none());
+    assert!(admission.supervisor_parent.is_none());
+    assert!(admission.context_parent.is_none());
+    let rendered = admission
+        .actor_path
+        .as_deref()
+        .expect("durable root admission retains its actor path");
+    let path = tidepool_repr::ActorPath::parse(rendered)
+        .expect("durable root admission path is canonical");
+    assert_eq!(path.to_string(), rendered);
+    tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor.incarnation.0)
+        .expect("durable root incarnation issues a recovery owner")
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
@@ -1142,9 +1168,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
     // The recovery owner selects the installer; the draft and derived manifests
     // never locate an artifact for this refusal control.
-    let path = tidepool_repr::ActorPath::parse("/root").unwrap();
-    let owner =
-        tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor_b.incarnation.0).unwrap();
+    let owner = persisted_root_owner(&after, actor_b);
     let selected = tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
         &run.join("recovery.sqlite"),
         tidepool_runtime::session::RecoveryDomainId::Root,
@@ -1214,9 +1238,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
             .chain(startup.startup.as_ref().unwrap().manifest_predecessor);
         let heads = actors
             .filter_map(|actor| {
-                let lookup =
-                    tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor.incarnation.0)
-                        .unwrap();
+                let lookup = persisted_root_owner(&records, actor);
                 tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
                     &run.join("recovery.sqlite"),
                     tidepool_runtime::session::RecoveryDomainId::Root,

@@ -104,17 +104,20 @@ fn assert_reload_disposition(
     );
 }
 
-fn selected_root_generation(
+async fn selected_root_generation(
     host: &HostedTestRuntime,
 ) -> tidepool_runtime::session::ActiveNotebookGeneration {
     let actor = host.context.actor.identity();
-    let path = tidepool_repr::ActorPath::parse("/root").expect("hosted root path");
-    let owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor.incarnation.0)
+    let placement = host
+        .context
+        .forest
+        .root_recovery_placement(actor)
+        .await
         .expect("live actor incarnation");
     tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
         host.context.recovery_store.path(),
         tidepool_runtime::session::RecoveryDomainId::Root,
-        &owner,
+        placement.owner(),
     )
     .expect("read exact active notebook generation")
     .expect("published actor generation has a durable selected head")
@@ -273,7 +276,7 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 &round.settled_output("publish-b"),
                 tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
             );
-            let durable_b = selected_root_generation(host);
+            let durable_b = selected_root_generation(host).await;
             assert_eq!(
                 old_request.request_instructions(),
                 Some(instructions_a.as_str()),
@@ -300,7 +303,7 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 "{late}"
             );
             assert_eq!(
-                selected_root_generation(host),
+                selected_root_generation(host).await,
                 durable_b,
                 "late A private publication leaves B's exact durable selected generation intact"
             );
