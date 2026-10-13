@@ -1,12 +1,6 @@
-//! Reloading source from inside a live notebook — the run's, and a
-//! checkout's.
-//!
-//! The reload mechanism's own transaction — identity, the rebuilt
-//! reverse-dependency closure, and what a rejected candidate leaves behind —
-//! is checked in `crate::exomonad::source`. What is checked HERE is what only a
-//! live session can answer: a changed revision starts a fresh notebook while
-//! an already-issued request keeps its original bindings and source, and an
-//! actor's reload reaches its own layer and no other.
+//! Source reload through the live actor: changed source starts a fresh
+//! notebook while issued requests and children retain their exact source.
+//! Capsule capture and recovery histories live in `crate::exomonad::source`.
 #![allow(
     clippy::disallowed_methods,
     reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
@@ -116,48 +110,41 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     .join(runtime_namespace(campaign.session_root.path()))
                     .join("helpers");
                 let draft = helper_root.join("drafts/run/SessionHelpers.hs");
-                let active = helper_root.join("layers/run/active");
                 let root = campaign.root_installation.policy.clone();
                 assert!(std::fs::read_to_string(&draft)
                     .unwrap()
                     .contains("helperAnswer = 41"));
-                let initial = std::fs::read_link(&active).unwrap();
+                let initial = issued_source_identity(root.as_ref()).await;
 
-                let published = dispatch_structured_tool(
-                    root.as_ref(),
-                    "reload_helpers",
-                    serde_json::json!({}),
-                )
-                .await;
-                assert!(
-                    published.to_string().contains("outcome: published"),
+                let published =
+                    dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
+                assert_eq!(
+                    published["items"][0]["value"]["outcome"], "unchanged",
                     "{published}"
                 );
-                let first = std::fs::read_link(&active).unwrap();
-                assert_ne!(first, initial);
-                assert!(published
-                    .to_string()
-                    .contains(first.file_name().unwrap().to_str().unwrap()));
+                let first = issued_source_identity(root.as_ref()).await;
+                assert_eq!(first, initial);
+                assert_eq!(
+                    published["items"][0]["value"]["revision"]["identity"],
+                    first
+                );
                 committed(root.as_ref(), "import SessionHelpers").await;
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "41", "{answer}");
 
                 let invalid = "module SessionHelpers where\nhelperAnswer = (\n";
                 std::fs::write(&draft, invalid).unwrap();
-                let rejected = dispatch_structured_tool(
-                    root.as_ref(),
-                    "reload_helpers",
-                    serde_json::json!({}),
-                )
-                .await;
-                assert!(
-                    rejected.to_string().contains("outcome: rejected"),
+                let rejected =
+                    dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
+                assert_eq!(
+                    rejected["items"][0]["value"]["outcome"], "rejected",
                     "{rejected}"
                 );
-                assert!(rejected
-                    .to_string()
-                    .contains(first.file_name().unwrap().to_str().unwrap()));
-                assert_eq!(std::fs::read_link(&active).unwrap(), first);
+                assert_eq!(
+                    rejected["items"][0]["value"]["issuedRevision"]["identity"],
+                    first
+                );
+                assert_eq!(issued_source_identity(root.as_ref()).await, first);
                 assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "41", "{answer}");
@@ -167,21 +154,19 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 42\n",
                 )
                 .unwrap();
-                let published = dispatch_structured_tool(
-                    root.as_ref(),
-                    "reload_helpers",
-                    serde_json::json!({}),
-                )
-                .await;
-                assert!(
-                    published.to_string().contains("outcome: published"),
+                let published =
+                    dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
+                assert_eq!(
+                    published["items"][0]["value"]["outcome"], "published",
                     "{published}"
                 );
-                let second = std::fs::read_link(&active).unwrap();
+                let second = issued_source_identity(root.as_ref()).await;
                 assert_ne!(second, first);
-                assert!(published
-                    .to_string()
-                    .contains(second.file_name().unwrap().to_str().unwrap()));
+                assert_eq!(
+                    published["items"][0]["value"]["revision"]["identity"],
+                    second
+                );
+                committed(root.as_ref(), "import SessionHelpers").await;
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "42", "{answer}");
 
@@ -203,16 +188,13 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 43\n",
                 )
                 .unwrap();
-                let published = dispatch_structured_tool(
-                    root.as_ref(),
-                    "reload_helpers",
-                    serde_json::json!({}),
-                )
-                .await;
-                assert!(
-                    published.to_string().contains("outcome: published"),
+                let published =
+                    dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
+                assert_eq!(
+                    published["items"][0]["value"]["outcome"], "published",
                     "{published}"
                 );
+                committed(root.as_ref(), "import SessionHelpers").await;
                 let parent_answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(parent_answer["items"][0]["output"], "43", "{parent_answer}");
                 let child_answer =
@@ -232,11 +214,17 @@ fn ignore_workspace(workspace: &Path) {
     commit(workspace, "keep the authored package out of the repository");
 }
 
-/// Where the run's own layer currently points. Reading the symlink is the
-/// honest question "did a reload move the run's source?", because the
-/// publication IS that one rename.
-fn run_layer_target(campaign: &TestCampaign) -> std::path::PathBuf {
-    std::fs::read_link(campaign.session_root.path().join("workspace/active")).unwrap()
+/// Read source identity through a newly issued request's production Source effect.
+async fn issued_source_identity(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
+    let issued = policy
+        .snapshot_for_request()
+        .expect("issued source generation");
+    let result = committed(
+        issued.as_ref(),
+        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource))",
+    )
+    .await;
+    result["items"][1]["output"].as_str().unwrap().to_owned()
 }
 
 /// Admit the next child, grant it its worktree, and let it run.
@@ -304,7 +292,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     };
     let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = run_layer_target(campaign);
+    let published_before = issued_source_identity(root.as_ref()).await;
 
     // The checkout carries a historical copy of the authored package.
     let checkout = campaign
@@ -330,7 +318,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(run_layer_target(campaign), published_before);
+    assert_eq!(issued_source_identity(root.as_ref()).await, published_before);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 
@@ -382,7 +370,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     };
     let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = run_layer_target(campaign);
+    let published_before = issued_source_identity(root.as_ref()).await;
 
     let checkout = campaign
         .worktrees
@@ -420,7 +408,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(run_layer_target(campaign), published_before);
+    assert_eq!(issued_source_identity(root.as_ref()).await, published_before);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 })).await;
@@ -531,7 +519,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     campaign.run_scenario(|campaign| Box::pin(async move {
     let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
-    let published_before = run_layer_target(campaign);
+    let published_before = issued_source_identity(policy.as_ref()).await;
     let new_module = workspace.join(".exomonad/Project/Vibe.hs");
     std::fs::write(
         &new_module,
@@ -550,7 +538,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
         new_module.is_file(),
         "publication leaves the authored edit in place"
     );
-    assert_ne!(run_layer_target(campaign), published_before);
+    assert_ne!(issued_source_identity(policy.as_ref()).await, published_before);
     let fresh = committed(policy.as_ref(), "import Project.Vibe\ninspectFull vibeAnswer").await;
     assert_eq!(fresh["items"][1]["output"], "42", "{fresh}");
 })).await;

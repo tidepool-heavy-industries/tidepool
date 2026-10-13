@@ -678,13 +678,9 @@ impl ExomonadSourceReload {
         drop(_helpers);
         drop(_gate);
         Ok(Box::new(StagedGenerationSource {
-            owner: self,
             source,
             validation_imports,
             prompt_snapshot,
-            run,
-            helper,
-            helper_branch,
             previous_revision,
             candidate_revision,
             changed_modules,
@@ -801,13 +797,9 @@ impl ExomonadSourceReload {
 }
 
 struct StagedGenerationSource {
-    owner: Arc<ExomonadSourceReload>,
     source: CheckpointSourceLayer,
     validation_imports: SourceImports,
     prompt_snapshot: ComposedPromptSnapshot,
-    run: PendingRevision,
-    helper: PendingRevision,
-    helper_branch: String,
     previous_revision: tidepool_bridge_effects::SrRevision,
     candidate_revision: tidepool_bridge_effects::SrRevision,
     changed_modules: Vec<String>,
@@ -836,25 +828,6 @@ impl exomonad_actor::StagedActorSourceReload for StagedGenerationSource {
     }
     fn changed_modules(&self) -> &[String] {
         &self.changed_modules
-    }
-    fn finalize_projection(&self) -> std::result::Result<(), String> {
-        // One full selection is projected after the recovery owner commits it.
-        // Neither these links nor their side records decide live admission.
-        let result = (|| -> Result<()> {
-            tidepool_atomic_write::write_durable(
-                &self
-                    .owner
-                    .run_root
-                    .join("workspace/selected-generation.json"),
-                self.evidence().reference.bytes(),
-            )?;
-            self.owner.layer.project_revision(&self.run)?;
-            self.owner
-                .helper_layer(&self.helper_branch)
-                .project_revision(&self.helper)?;
-            Ok(())
-        })();
-        result.map_err(|error| error.to_string())
     }
 }
 

@@ -1,40 +1,32 @@
-//! Live source layers: the run's authored tooling and branch-local notebook helpers.
+//! Immutable workspace and branch-local helper source graphs.
 //!
 //! An ordinary run freezes its authored Haskell roots under
-//! `<run_root>/workspace/sources/<capture>/<index>`, and verifies that capture
-//! when the run is reloaded ([`super::workspace::FrozenWorkspace::load`]). A
-//! completed prepared workspace keeps those roots in its separately owned
-//! deployment; the run publishes a local active link to that exact prepared
-//! source revision as its initial live revision. Neither path is rewritten by
-//! this module. Later live reloads publish run-owned revisions in front of
-//! that immutable floor. The run's layer is shared by every actor:
+//! `<run_root>/workspace/sources/<capture>/<index>` and verifies that capture
+//! when the run is loaded ([`super::workspace::FrozenWorkspace::load`]). A
+//! completed prepared workspace retains those roots in its deployment.
+//!
+//! Boot preparation publishes an `active` link to the initial revision:
 //!
 //! ```text
 //! <run_root>/workspace/revisions/<identity>/{0,1,…,resources}
 //! <run_root>/workspace/active -> revisions/<identity>
 //! ```
 //!
-//! For a prepared workspace, the initial `revisions/<identity>` entry points
-//! to the deployment-owned source revision; subsequent candidates are regular
-//! run-owned revision directories.
+//! The initial revision may refer to a prepared deployment. Reload candidates
+//! are complete run-owned revision directories. The generated
+//! `Exomonad.Workspace` resource and immutable shared libraries have explicit
+//! roots; an older workspace or cache cannot restore a removed module.
 //!
-//! The generated `Exomonad.Workspace` resource is retained as its own exact
-//! root after the run source roots. A managed checkout's historical
-//! `.exomonad` package is not silently added to the graph. Every actor uses the
-//! run's current tooling, while `SessionHelpers` remain branch-local.
+//! Once a generation is issued, source reads, compilation, children and
+//! checkpoints consume its opaque source capsule. Reload stages another exact
+//! graph and installer for the actor's generation publication; it does not
+//! move the boot links. Durable generation references restore the same graph
+//! without consulting those links. Every capsule retains the configured run
+//! owner until its last admitted capture releases.
 //!
-//! Publishing a revision is one `rename(2)` of a symlink: a compile that opens
-//! `active/0` sees either the whole previous revision or the whole new one,
-//! never a mixture. Workbench and checkpoint admission resolve that publication
-//! to immutable revision paths and issue an opaque source capsule. Its clones
-//! retain the configured run owner until every admitted capture releases.
-//!
-//! `exomonad check --recipes` compiles against the frozen capture. A run reload
-//! that removes an authored module is rejected before the frozen floor can
-//! expose it. AgentSpec reload stages an immutable source capsule and prepares
-//! its installer before declared-surface comparison. The existing publication
-//! owner replaces source and the actor's installed dispatcher at the same
-//! visibility boundary; durability confirmation follows that paired commit.
+//! `exomonad check --recipes` compiles against the frozen capture. Native
+//! installer preparation validates the complete staged source graph before
+//! the actor publishes source, tools, prompts and notebook together.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -105,7 +97,7 @@ struct CapturedRevision {
     revision: SourceRevision,
 }
 
-/// A retained revision that exists on disk but is not yet the active one.
+/// A captured immutable revision available for boot publication or staging.
 pub(crate) struct PendingRevision {
     directory: PathBuf,
     source_roots: Vec<PathBuf>,
@@ -117,15 +109,15 @@ impl PendingRevision {
         &self.revision
     }
 
-    /// The include roots that stand in for `active/*` while this candidate is
-    /// being checked. Same order, same count.
+    /// The exact include roots for this captured candidate, in source order.
     pub(crate) fn include_paths(&self, roots: usize) -> Vec<PathBuf> {
         revision_include_paths(&self.directory, roots)
     }
 }
 
-/// One mutable source layer: its revisions and the symlink naming the live one.
-/// The run and each helper branch have separate layers.
+/// One source revision store with an initial boot selection.
+/// The run and each helper branch have separate stores. Issued generations
+/// retain exact revisions independently of this store's boot link.
 #[derive(Clone, Debug)]
 pub(crate) struct SourceLayer {
     directory: PathBuf,
@@ -663,12 +655,9 @@ fn inspect_retained_revision(
 /// this point, because by then the layer is already decided.
 #[derive(Clone)]
 enum ActorSourceScope {
-    /// The run's own layer. Publishing here changes what every actor compiles
-    /// against, so it belongs to the actor that owns the run.
+    /// The run's editable source. Only its owning actor may stage reloads.
     Run,
-    /// The run's layer, readable but not publishable. This actor compiles
-    /// against it — that is what `sourceStatus` reports — and has no source of
-    /// its own to publish.
+    /// The run's source without authority to stage reloads.
     RunReadOnly,
     /// The child compiles against immutable revisions from a delegated
     /// checkpoint. Reload must not switch its source graph behind that view.
@@ -810,17 +799,14 @@ pub(crate) struct ExomonadSourceReload {
     haskell_root: PathBuf,
     layer: SourceLayer,
     /// Helper branches are keyed by `run` for the root and by worktree id for
-    /// forked actors. Each branch has its own draft and active revision.
+    /// forked actors. Each branch has its own draft and boot revision.
     helpers: Mutex<HashMap<String, SourceLayer>>,
     /// What each actor's own source calls reach.
     scopes: RwLock<HashMap<PrincipalId, ActorSourceScope>>,
     helper_scopes: RwLock<HashMap<PrincipalId, String>>,
-    /// One reload at a time: a publication's check and its `rename(2)` must
-    /// not interleave with another actor's.
+    /// Serialize boot selection and capture of the run's source stores.
+    /// The actor's generation owner fences publication separately.
     gate: Mutex<()>,
-    /// The last drift read per layer, and the signature of the disk it was
-    /// read from. Drift is read on a timer for every actor; while neither the
-    /// disk nor the active revision has moved, the answer has not either.
     prompt_composers: RwLock<HashMap<PrincipalId, prompt_files::PromptComposer>>,
 }
 
@@ -2860,7 +2846,20 @@ mod tests {
             .contains("work = 41"));
         let observation = reload.observe(&b).unwrap();
         assert_eq!(observation.active.identity, observation.disk.identity);
-        staged.finalize_projection().unwrap();
+        // A staged generation leaves the boot selection at A. Its issued
+        // reads and durable reference select B even with these stale links.
+        assert!(reload
+            .layer
+            .read_active()
+            .unwrap()
+            .unwrap()
+            .modules
+            .iter()
+            .all(|(module, _)| module != "Project.New"));
+        assert_eq!(
+            reload.restore_source(&reference_b).unwrap().identities(),
+            b.identities()
+        );
         for layer in [&reload.layer, &reload.helper_layer("run")] {
             std::fs::remove_file(layer.active_link()).unwrap();
             std::fs::remove_file(layer.active_record()).unwrap();
