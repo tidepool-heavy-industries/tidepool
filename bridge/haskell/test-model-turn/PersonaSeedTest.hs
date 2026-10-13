@@ -49,8 +49,8 @@ personaSeedTests = testGroup "persona seed"
             _ <- M.note "map" "A place to return to"
             M.initialise
           (_,files) = run (runState (Map.empty :: Map.Map Text Text) (interpret writeHost action))
-      assertEqual "identity is not reseeded" (Just "I have discovered a fondness for tiny maps.") (Map.lookup "memory/persona.md" files)
-      assertEqual "notes survive" (Just "A place to return to") (Map.lookup "notes/map.md" files)
+      assertEqual "identity is not reseeded" (Just "I have discovered a fondness for tiny maps.") (Map.lookup ".exomonad/state/memory/persona.md" files)
+      assertEqual "notes survive" (Just "A place to return to") (Map.lookup ".exomonad/state/notes/map.md" files)
   , testCase "multiple branches decode in authored order and ignore inactive input" $ do
       let form = F.branchesMany "doors"
             [F.option (V.text "a") (F.textInput "a" Nothing), F.option (V.text "b") (F.textInput "b" Nothing)]
