@@ -525,6 +525,12 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
                 Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })));
             host.http_input("Run the recursive captured-helper scenario.").await.unwrap();
             let root = AgentPath("/root".into());
+            let actor = host.context.actor.identity();
+            let output_origin = harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: actor.id.0,
+                incarnation: actor.incarnation.0,
+            };
             let mut pending = VecDeque::new();
             if !immediate {
                 next_hosted_script_round(&mut requests, &mut pending, &root).await
@@ -537,10 +543,24 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
                     .call("first-notebook", "onlyFirstHost <- pure (41 :: Int)\nfreshValue <- pure (41 :: Int)\ndisplay freshValue");
             }
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            first.assert_value("first-notebook", "41");
+            assert_eq!(
+                super::test_campaign::retained_committed_display_text(
+                    &host.runtime.store(),
+                    &output_origin,
+                    &first.settled_output("first-notebook"),
+                ),
+                "41"
+            );
             first.call("warm-notebook", "display freshValue");
             let warm = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            warm.assert_value("warm-notebook", "41");
+            assert_eq!(
+                super::test_campaign::retained_committed_display_text(
+                    &host.runtime.store(),
+                    &output_origin,
+                    &warm.settled_output("warm-notebook"),
+                ),
+                "41"
+            );
             warm.finish();
         })).await;
     }
