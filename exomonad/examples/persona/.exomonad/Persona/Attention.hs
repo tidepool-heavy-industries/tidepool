@@ -290,7 +290,7 @@ connections values = View (map (connectionKey . memoryId) linked)
         (memoryId m : related m)) [] (map memoryKey (memoryId m : related m))
 
 memoryKey :: Text -> Text
-memoryKey key = "memory/" <> key
+memoryKey key = ".exomonad/state/memory/" <> key
 connectionKey :: Text -> Text
 connectionKey key = "connection/" <> key
 memoryNode :: Memory -> Node

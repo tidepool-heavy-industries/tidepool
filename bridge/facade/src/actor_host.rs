@@ -256,7 +256,7 @@ type ExomonadHandlerStack = HCons<
 type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
 
 fn host_handlers(
-    state_root: &Path,
+    workspace_root: &Path,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     journal: tidepool_handlers::JournalHandler,
     events: RepoEventHandler,
@@ -272,8 +272,8 @@ fn host_handlers(
         ActorWorktreeIntegrationHandler::new(worktrees.clone()),
         worktrees,
         tidepool_handlers::WebHandler,
-        tidepool_handlers::FsReadHandler::new(state_root.to_owned()),
-        tidepool_handlers::FsWriteHandler::new(state_root.to_owned()),
+        tidepool_handlers::FsReadHandler::new(workspace_root.to_owned()),
+        tidepool_handlers::FsWriteHandler::new(workspace_root.to_owned()),
     ]
 }
 
@@ -3640,7 +3640,7 @@ fn compile_root(
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let state_root = config.workspace.join(".exomonad/state");
     std::fs::create_dir_all(&state_root)?;
-    let child_state_root = state_root.clone();
+    let child_workspace_root = config.workspace.clone();
     let run_root = run_directory.path();
     let CompiledExomonadDriver {
         preamble,
@@ -3777,7 +3777,7 @@ fn compile_root(
         let child_worktree_handler = child_worktree_handler.clone();
         let mut machine = ResidentSession::unbootstrapped(
             host_handlers(
-                &child_state_root,
+                &child_workspace_root,
                 child_source_service.as_ref(),
                 child_journal.clone(),
                 child_event_handler,
@@ -3798,7 +3798,7 @@ fn compile_root(
     });
     let mut machine = ResidentSession::unbootstrapped(
         host_handlers(
-            &state_root,
+            &config.workspace,
             source,
             journal,
             event_handler,

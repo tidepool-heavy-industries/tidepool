@@ -440,7 +440,6 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
 
@@ -457,7 +456,11 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     assert_eq!(status["items"][1]["output"], "True", "{status}");
 
     // Edit the module with ordinary file tools, then reload from a cell.
-    std::fs::write(workspace.join(".exomonad/Project/Work.hs"), work_module(41)).unwrap();
+    let edited = committed(policy, &format!(
+        "import qualified Tidepool.Effects.Authored as Files\nRight () <- Files.writeFile \".exomonad/Project/Work.hs\" {}\ninspectFull answer",
+        serde_json::to_string(&work_module(41)).unwrap()
+    )).await;
+    assert_eq!(edited["items"][1]["output"], "1", "draft edits preserve active code: {edited}");
     let reloaded = committed(
         policy,
         "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ changed _ -> changed; _ -> [\"not published\"] })",
@@ -563,7 +566,11 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
 
     let broken =
         "module Project.Work (answer) where\n\nanswer :: Int\nanswer = undefinedByThisReload\n";
-    std::fs::write(workspace.join(".exomonad/Project/Work.hs"), broken).unwrap();
+    let edited = committed(policy, &format!(
+        "import qualified Tidepool.Effects.Authored as Files\nRight () <- Files.writeFile \".exomonad/Project/Work.hs\" {}",
+        serde_json::to_string(broken).unwrap()
+    )).await;
+    assert!(!edited["items"].as_array().unwrap().is_empty(), "{edited}");
     let rejected = committed(
         policy,
         "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False })\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False })",

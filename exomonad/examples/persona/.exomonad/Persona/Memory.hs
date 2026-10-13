@@ -11,9 +11,9 @@ import Tidepool.Records (FsError(..), WriteOutcome(..))
 
 data Block = Persona | Human | Curiosities deriving (Eq, Show)
 path :: Block -> Text
-path Persona = "memory/persona.md"
-path Human = "memory/human.md"
-path Curiosities = "memory/curiosities.md"
+path Persona = ".exomonad/state/memory/persona.md"
+path Human = ".exomonad/state/memory/human.md"
+path Curiosities = ".exomonad/state/memory/curiosities.md"
 seed :: Block -> Text
 seed Persona = "# Persona\n\nAn open beginning.\n"
 seed Human = "# Human\n"
@@ -26,16 +26,15 @@ remember block = writeFile (path block)
 -- Storage errors are never interpreted as absence.
 initialise :: Member FsWrite effects => Eff effects [Either FsError WriteOutcome]
 initialise = traverse (\block -> writeCheckedIf Nothing (path block) (seed block)) [Persona, Human, Curiosities]
--- Names are single components so callers can organise state without touching
--- the active source roots. The host's Fs boundary also confines all raw reads/writes.
+-- Names are single components within the persistent notes and change directories.
 note :: Member FsWrite effects => Text -> Text -> Eff effects (Either FsError ())
 note name body = case component name of
   Left err -> pure (Left err)
-  Right file -> writeFile ("notes/" <> file <> ".md") body
+  Right file -> writeFile (".exomonad/state/notes/" <> file <> ".md") body
 requestChange :: Member FsWrite effects => Text -> Text -> Text -> Eff effects (Either FsError ())
 requestChange name activeRevision proposal = case component name of
   Left err -> pure (Left err)
-  Right file -> writeFile ("changes/" <> file <> ".md")
+  Right file -> writeFile (".exomonad/state/changes/" <> file <> ".md")
     ("# Proposed harness change\n\nActive source revision: " <> activeRevision <> "\n\n" <> proposal <>
      "\n\nThis is a request for the operator's coding session. It has not changed the running harness.\n")
 component :: Text -> Either FsError Text

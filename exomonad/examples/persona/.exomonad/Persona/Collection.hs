@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
--- | State-rooted observations. Existing memory paths are preserved; the optional
+-- | Persistent-state observations. Manifest paths remain relative to .exomonad/state; the optional
 -- manifest adds sources without turning a missing file into an empty memory.
 module Persona.Collection
   ( Entry(..), Manifest(..), LoadError(..), Loaded(..)
@@ -56,10 +56,10 @@ load = do
   case sequence outcomes of
     Left _ -> pure (Left (InitialisationFailed outcomes))
     Right _ -> do
-      observed <- readFile "memory/collection.json"
+      observed <- readFile ".exomonad/state/memory/collection.json"
       case observed of
         Left (FsNotFound _) -> assemble outcomes Nothing (Manifest [])
-        Left err -> pure (Left (Storage "memory/collection.json" err))
+        Left err -> pure (Left (Storage ".exomonad/state/memory/collection.json" err))
         Right body -> case eitherDecode body of
           Left err -> pure (Left (ManifestInvalid err))
           Right manifest -> assemble outcomes (Just body) manifest
@@ -81,7 +81,9 @@ loadEntries (Manifest extra) = case A.collection (map (memory "") entries) of
     entries = [Entry "persona" "memory/persona.md" [] [] Nothing,
                Entry "human" "memory/human.md" [] [] Nothing,
                Entry "curiosities" "memory/curiosities.md" [] [] Nothing] <> extra
-    memory body e = A.Memory (entryId e) (entryPath e) body (entryTags e) (entryRelated e) (entryAvailableAt e)
+    memory body e = A.Memory (entryId e) (workspacePath e) body (entryTags e) (entryRelated e) (entryAvailableAt e)
     observe e = do
-      value <- readFile (entryPath e)
-      pure $ either (Left . Storage (entryPath e)) (Right . (`memory` e)) value
+      value <- readFile (workspacePath e)
+      pure $ either (Left . Storage (workspacePath e)) (Right . (`memory` e)) value
+
+    workspacePath e = ".exomonad/state/" <> entryPath e

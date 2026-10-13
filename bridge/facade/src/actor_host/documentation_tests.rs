@@ -1361,7 +1361,7 @@ fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool)
     );
     let outside = config.workspace.join(".agents/skills/exomonad-jev");
     std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("SKILL.md"), "outside the state root").unwrap();
+    std::fs::write(outside.join("SKILL.md"), "workspace marker").unwrap();
     std::fs::write(
         config.workspace.join(".exomonad/state/probe.md"),
         "state marker",
@@ -1370,7 +1370,7 @@ fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool)
 }
 
 #[tokio::test]
-async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confined() {
+async fn persona_and_helper_lookup_deliver_pinned_skills_with_workspace_files_confined() {
     let expected = [
         include_str!("../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
         include_str!("../../../../.exomonad/workspace/skills/exomonad-agent-work/SKILL.md"),
@@ -1445,6 +1445,10 @@ async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confin
                         received["writer_status"],
                         serde_json::json!([!helper, helper]),
                         "the installed notebook must use the selected persona/helper row"
+                    );
+                    assert_eq!(
+                        received["workspace_accessible"], true,
+                        "helper={helper}: {received}"
                     );
                     assert_eq!(
                         received["files_confined"], true,
