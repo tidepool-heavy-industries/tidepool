@@ -1599,7 +1599,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=3a698a5cd7c2c25688726d7062f5fee002f9c62c#3a698a5cd7c2c25688726d7062f5fee002f9c62c"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
 dependencies = [
  "async-trait",
  "axum",
@@ -1623,12 +1623,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
 name = "harness-presentation"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=3a698a5cd7c2c25688726d7062f5fee002f9c62c#3a698a5cd7c2c25688726d7062f5fee002f9c62c"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
 dependencies = [
  "roxmltree",
  "schemars 1.2.2",
@@ -1639,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "harness-schema"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=3a698a5cd7c2c25688726d7062f5fee002f9c62c#3a698a5cd7c2c25688726d7062f5fee002f9c62c"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -4823,3 +4824,31 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.1+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

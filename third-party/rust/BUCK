@@ -9,12 +9,12 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "3a698a5cd7c2c25688726d7062f5fee002f9c62c",
-    nar_hash = "sha256-Ncg/xEfZg6ZljWCfwCkd3D2U+YJioX5LzIb3i7Xcsbg=",
+    revision = "91ab82f2e32314cb35391c0649fa133cd08e4f27",
+    nar_hash = "sha256-iLjs7BD+x1zbfpK1zg5ctKbfZyoLEUnA8BDe4HAF77c=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
-    store_path = "/nix/store/b50b8gbxy5fz0svc490f5v9jp0jfr0m0-source",
+    store_path = "/nix/store/xw6jv8vlm2qdrklz25qkzspg6y3b8sqh-source",
     visibility = [],
 )
 
@@ -6519,6 +6519,7 @@ tidepool_cargo_rust_library(
         ":tokio-util-0.7",
         ":tracing-0.1",
         ":uuid-1",
+        ":zstd-0.13",
     ],
 )
 
@@ -17094,6 +17095,130 @@ tidepool_cargo_rust_library(
         "CARGO_PKG_VERSION_PRE": "",
     },
     visibility = [],
+)
+
+http_archive(
+    name = "zstd-0.13.3.crate",
+    sha256 = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a",
+    strip_prefix = "zstd-0.13.3",
+    urls = ["https://static.crates.io/crates/zstd/0.13.3/download"],
+    visibility = [],
+)
+
+tidepool_cargo_rust_library(
+    name = "zstd-0.13",
+    srcs = [":zstd-0.13.3.crate"],
+    crate = "zstd",
+    crate_root = "zstd-0.13.3.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "zstd",
+        "CARGO_CRATE_NAME": "zstd",
+        "CARGO_MANIFEST_DIR": "zstd-0.13.3.crate",
+        "CARGO_PKG_AUTHORS": "Alexandre Bury <alexandre.bury@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Binding for the zstd compression library.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "zstd",
+        "CARGO_PKG_README": "Readme.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/gyscos/zstd-rs",
+        "CARGO_PKG_RUST_VERSION": "1.64",
+        "CARGO_PKG_VERSION": "0.13.3",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "13",
+        "CARGO_PKG_VERSION_PATCH": "3",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+    deps = [":zstd-safe-7"],
+)
+
+http_archive(
+    name = "zstd-safe-7.3.0.crate",
+    sha256 = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882",
+    strip_prefix = "zstd-safe-7.3.0",
+    urls = ["https://static.crates.io/crates/zstd-safe/7.3.0/download"],
+    visibility = [],
+)
+
+tidepool_cargo_rust_library(
+    name = "zstd-safe-7",
+    srcs = [":zstd-safe-7.3.0.crate"],
+    crate = "zstd_safe",
+    crate_root = "zstd-safe-7.3.0.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "zstd_safe",
+        "CARGO_CRATE_NAME": "zstd_safe",
+        "CARGO_MANIFEST_DIR": "zstd-safe-7.3.0.crate",
+        "CARGO_PKG_AUTHORS": "Alexandre Bury <alexandre.bury@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Safe low-level bindings for the zstd compression library.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "zstd-safe",
+        "CARGO_PKG_README": "Readme.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/gyscos/zstd-rs",
+        "CARGO_PKG_RUST_VERSION": "1.64",
+        "CARGO_PKG_VERSION": "7.3.0",
+        "CARGO_PKG_VERSION_MAJOR": "7",
+        "CARGO_PKG_VERSION_MINOR": "3",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = ["std"],
+    visibility = [],
+    deps = [":zstd-sys-2"],
+)
+
+http_archive(
+    name = "zstd-sys-2.1.1+zstd.1.5.7.crate",
+    sha256 = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078",
+    strip_prefix = "zstd-sys-2.1.1+zstd.1.5.7",
+    urls = ["https://static.crates.io/crates/zstd-sys/2.1.1+zstd.1.5.7/download"],
+    visibility = [],
+)
+
+tidepool_cargo_rust_library(
+    name = "zstd-sys-2",
+    srcs = [":zstd-sys-2.1.1+zstd.1.5.7.crate"],
+    crate = "zstd_sys",
+    crate_root = "zstd-sys-2.1.1+zstd.1.5.7.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_MANIFEST_DIR": "zstd-sys-2.1.1+zstd.1.5.7.crate",
+        "OUT_DIR": "$(location :zstd-sys-2-build-script-run[out_dir])",
+    },
+    features = ["std"],
+    rustc_flags = ["@$(location :zstd-sys-2-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+tidepool_cargo_rust_binary(
+    name = "zstd-sys-2-build-script-build",
+    srcs = [":zstd-sys-2.1.1+zstd.1.5.7.crate"],
+    crate = "build_script_build",
+    crate_root = "zstd-sys-2.1.1+zstd.1.5.7.crate/build.rs",
+    edition = "2018",
+    env = {
+        "CARGO_MANIFEST_DIR": "zstd-sys-2.1.1+zstd.1.5.7.crate",
+    },
+    features = ["std"],
+    visibility = [],
+    deps = [
+        ":cc-1",
+        ":pkg-config-0.3",
+    ],
+)
+
+tidepool_buildscript_run(
+    name = "zstd-sys-2-build-script-run",
+    package_name = "zstd-sys",
+    buildscript_rule = ":zstd-sys-2-build-script-build",
+    env = {
+        "CARGO_MANIFEST_LINKS": "zstd",
+    },
+    features = ["std"],
+    rustc_link_lib = True,
+    rustc_link_search = True,
+    version = "2.1.1+zstd.1.5.7",
 )
 
 filegroup(
