@@ -56,6 +56,7 @@ mod request_wait;
 #[cfg(test)]
 mod scope_runtime_tests;
 mod scopes;
+mod source_effect;
 mod status_rendering;
 #[cfg(test)]
 mod terminal_transfer_tests;
@@ -5531,6 +5532,16 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Source {
+                continuation,
+                request,
+            } => self.prepare_source_effect(
+                context,
+                effect_owner.issued_snapshot().cloned(),
+                control,
+                continuation,
+                request,
+            ),
             ResidentActorBoundary::Form {
                 continuation,
                 operation,

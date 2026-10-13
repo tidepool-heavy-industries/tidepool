@@ -3044,6 +3044,10 @@ pub(crate) enum ResidentActorBoundary {
         request: crate::ContextReq,
         table: DataConTable,
     },
+    Source {
+        continuation: ResidentHole,
+        request: crate::generated::source::SourceReq,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -3247,6 +3251,13 @@ impl ResidentActorBoundary {
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,
+            Self::Source {
+                request:
+                    crate::generated::source::SourceReq::SourceReadModule(_)
+                    | crate::generated::source::SourceReq::SourceStatusWith,
+                ..
+            } => WorkbenchOperationDisposition::Read,
+            Self::Source { .. } => WorkbenchOperationDisposition::Staged,
             Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
                 WorkbenchOperationDisposition::Read
             }
@@ -3265,6 +3276,7 @@ impl ResidentActorBoundary {
             Self::Jev { .. } => "jev",
             Self::Model { .. } => "model call",
             Self::Context { .. } => "context transformation",
+            Self::Source { request, .. } => source_operation(request),
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::Form { .. } => "human form",
@@ -3434,6 +3446,7 @@ resident_request_roster! {
     Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
     Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
     Context(crate::ContextReq) => None,
+    Source(crate::generated::source::SourceReq) => None,
     Actor(crate::generated::actor::ActorReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Actor)),
     ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
     AgentControl(crate::generated::agent_control::AgentControlReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentControl)),
@@ -3448,6 +3461,15 @@ resident_request_roster! {
     Reflect(crate::generated::reflect::ReflectReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Reflect)),
     Replies(RepliesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Replies)),
     Watches(WatchesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Watches)),
+}
+
+fn source_operation(request: &crate::generated::source::SourceReq) -> &'static str {
+    use crate::generated::source::SourceReq;
+    match request {
+        SourceReq::SourceReadModule(_) => "readSourceModule",
+        SourceReq::SourceReloadWith(_) => "reloadSource",
+        SourceReq::SourceStatusWith => "sourceStatus",
+    }
 }
 
 impl ResidentRequest {
@@ -3482,6 +3504,7 @@ impl ResidentRequest {
         try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
         try_member!(Self::Context, crate::ContextReq);
+        try_member!(Self::Source, crate::generated::source::SourceReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::AskUser, crate::generated::ask_user::AskUserReq);
@@ -3544,6 +3567,7 @@ impl ResidentRequest {
             Self::Model(_) => "model call",
             Self::ResourceScopes(_) => "withScope",
             Self::Context(_) => "context transformation",
+            Self::Source(request) => source_operation(request),
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::AskUser(_) => "human form",
@@ -8738,6 +8762,10 @@ where
                         continuation: hole,
                         request,
                         table: session.data_con_table().clone(),
+                    }),
+                    ResidentRequest::Source(request) => Ok(ResidentActorBoundary::Source {
+                        continuation: hole,
+                        request,
                     }),
                     ResidentRequest::Context(request) => Ok(ResidentActorBoundary::Context {
                         continuation: hole,
