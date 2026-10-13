@@ -959,7 +959,7 @@ fn complete(
                     .with_execution_id(identity.operation.clone());
                 let mut invocation = crate::ActorWorkbenchInvocation::issued(
                     request,
-                    resident.current.installed_policy.clone(),
+                    resident.current.installed_policy.clone().map(crate::resident_workbench::ActorRequestSnapshot::Bootstrap),
                     None,
                 );
                 invocation.initial_context = true;

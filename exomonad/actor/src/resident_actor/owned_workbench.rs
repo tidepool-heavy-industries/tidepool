@@ -296,7 +296,7 @@ impl WorkbenchPublicOwner {
             (crate::ActorPersistencePolicy::Ephemeral, None) => {},
             (crate::ActorPersistencePolicy::Durable, Some(native)) => {
                 let expected = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path, context.actor.incarnation.0));
-                if expected.as_ref().map(|owner| owner.actor_owner()) != Some(native.durable_owner().actor_owner())
+                if expected.as_ref().map(|owner| owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL)) != Some(native.durable_owner().for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL))
                     || native.session() != context.placement.session
                     || native.scope() != scope.scope()
                     || !native.is_current()
@@ -338,7 +338,7 @@ impl WorkbenchPublicOwner {
     pub(crate) fn actor(&self) -> ActorRef {
         self.actor
     }
-    pub(super) fn placement(&self) -> crate::ActorPlacement {
+    pub(crate) fn placement(&self) -> crate::ActorPlacement {
         self.placement
     }
 }

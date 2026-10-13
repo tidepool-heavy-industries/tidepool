@@ -1558,13 +1558,13 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
         self.access.with_machine(context, move |session, context, _| {
             let mut next_context = context.clone();
             let scope = if expected.is_some() {
-                let retained = session.mint_isolated_scope_with_lease()?;
+                let retained = session.mint_isolated_scope_with_lease().map_err(ResidentError::Session)?;
                 next_context.placement.lexical_scope = retained.scope();
                 // A replacement notebook inherits no notebook facades, bindings or imports.
                 next_context.source_imports = crate::ActorSourceImports::default();
                 retained
             } else {
-                session.adopt_initial_notebook_scope(context.placement.lexical_scope)?
+                session.adopt_initial_notebook_scope(context.placement.lexical_scope).map_err(ResidentError::Session)?
             };
             let commit = match descriptor.persistence_policy() {
                 crate::ActorPersistencePolicy::Ephemeral => PreparedGenerationCommit::Ephemeral(
@@ -1609,7 +1609,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
             };
             if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
             let PreparedActorGeneration { mut context, scope, commit } = prepared;
-            context.source_layer = installation.source().include_paths().to_vec();
+            context.source_layer = installation.source().include_paths().to_vec().into();
             let mut visible = None;
             match commit {
                 PreparedGenerationCommit::Ephemeral(id) => {
@@ -5587,19 +5587,7 @@ where
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                             let entry =
                                 session.prepare_startup_entry(prepared.entry.compiled().code())?;
-                            let pending = match purpose {
-                                ToolInstallationPurpose::InitialTools => public_original
-                                    .as_ref()
-                                    .map(|selection| {
-                                        session.stage_published_source_originals_in(
-                                            public_scope,
-                                            Arc::clone(selection),
-                                        )
-                                    })
-                                    .transpose()?,
-                                ToolInstallationPurpose::CandidateTools
-                                | ToolInstallationPurpose::SpawnApplication => None,
-                            };
+                            let pending = None;
                             (
                                 session.run_startup_entry(entry, settlement),
                                 prepared.entry.compiled().warnings.warnings.clone(),

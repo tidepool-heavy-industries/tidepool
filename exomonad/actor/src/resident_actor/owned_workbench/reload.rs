@@ -80,7 +80,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                     Err(warning) => Ok(SrReloadOutcome::ReloadPublishedWithWarnings(previous,candidate_revision,staged.changed_modules().to_vec(),vec![warning])),
                 }
             },
-            ActorGenerationCommit::Refused(detail) if self.control.as_ref().is_some_and(|control|control.cancellation_requested()) => Ok(SrReloadOutcome::ReloadCancelled(previous)),
+            ActorGenerationCommit::Refused(_detail) if self.control.as_ref().is_some_and(|control|control.cancellation_requested()) => Ok(SrReloadOutcome::ReloadCancelled(previous)),
             ActorGenerationCommit::Refused(detail) => Err(SourceError::SourceUnavailable(detail)),
             ActorGenerationCommit::Unconfirmed(detail) => Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(candidate_revision,detail)),
         }
@@ -89,7 +89,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
 
 impl<H,O> ResidentKernelBehavior<H,O>
 where H: DispatchEffect<O> + Send + 'static,O: OutputSink + Sync + 'static {
-    pub(super) fn coherent_reload_operation(&self,generation:Arc<ActorGeneration>,control:Option<Arc<crate::WorkbenchExecutionControl>>,checked:Vec<String>) -> Result<CoherentReloadOperation<H,O>,SourceError> {
+    pub(crate) fn coherent_reload_operation(&self,generation:Arc<ActorGeneration>,control:Option<Arc<crate::WorkbenchExecutionControl>>,checked:Vec<String>) -> Result<CoherentReloadOperation<H,O>,SourceError> {
         let active = self.installed_tools.current_generation().ok_or_else(|| SourceError::SourceUnavailable("actor generation admission is unavailable".into()))?;
         if !Arc::ptr_eq(&active,&generation) { return Err(SourceError::SourceUnavailable("issued generation is no longer current; an already accepted computation remains pinned".into())); }
         let tools = generation.installation.tools().ok_or_else(|| SourceError::SourceUnavailable("actor has no source-defined tool installation".into()))?;

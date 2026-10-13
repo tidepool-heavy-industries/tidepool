@@ -4858,6 +4858,7 @@ where
         // Issued requests may retain their installation past actor retirement.
         // Their RootCustody keeps the compiled handler live until the last
         // request releases its lease.
+        self.actor_program_snapshot = None;
         self.installed_tools.clear();
     }
 
@@ -8012,8 +8013,6 @@ where
                 ),
             )?;
         }
-        let prompts = self.descriptor.compose_prompts(context.actor,&compiled_tools.declarations,&self.runtime_observation)
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let declarations = compiled_tools.declarations.clone();
         let prepared_tools =
             crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));
@@ -8024,6 +8023,8 @@ where
                 self.installed_tools.clone(),
             ));
 
+        let prompts = self.descriptor.compose_prompts(context.actor,policy.tools(),&self.runtime_observation)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let (checkpoint, checkpoint_attachment) = self
             .admitted_checkpoint
             .take()
