@@ -11,6 +11,7 @@ description = "Runtime support for Tidepool applications"
 readme = "../../README.md"
 
 [dependencies]
+sha2 = "0.10"
 anyhow.workspace = true
 rusqlite.workspace = true
 imbl.workspace = true
@@ -44,7 +45,6 @@ rpds = "=1.2.1"
 [dev-dependencies]
 proptest.workspace = true
 tidepool-test-data.workspace = true
-sha2 = "0.10"
 tidepool-testing.workspace = true
 frunk.workspace = true
 tidepool-bridge.workspace = true

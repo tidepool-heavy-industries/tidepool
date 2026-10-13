@@ -775,6 +775,7 @@ impl RecoveryGraphCandidate {
             allocation_ceiling: ceiling,
             blocks,
             public_changes: graph.public_changes.clone(),
+            generation_change: None,
         };
         Ok(StagedRecoveryManifest {
             graph,
