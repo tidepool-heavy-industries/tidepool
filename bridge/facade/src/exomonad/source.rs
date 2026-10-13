@@ -2174,6 +2174,88 @@ mod tests {
             reload.prepared_toolset_layer().unwrap().semantic_digest(),
             preflight.semantic_digest()
         );
+
+        let cold = ExomonadSourceReload::new_owned(
+            reload.frozen.clone(),
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let source_reference = &current.generation_evidence().unwrap().reference;
+        assert_ne!(
+            cold.entry_storage.directory(),
+            cold.fresh_entry_storage.directory()
+        );
+        assert_eq!(
+            current.prepared_entries().unwrap().directory(),
+            cold.entry_storage.directory()
+        );
+        let run_original = fresh_preparation(&cold);
+        let acquisitions = [
+            (
+                exomonad_actor::ToolsetAcquisition::FreshRunOriginal {
+                    recipe: current_key.clone(),
+                    original: run_original,
+                },
+                cold.fresh_entry_storage.directory(),
+            ),
+            (
+                exomonad_actor::ToolsetAcquisition::ExistingRunOriginal {
+                    recipe: current_key.clone(),
+                    original: run_original,
+                },
+                cold.fresh_entry_storage.directory(),
+            ),
+            (
+                exomonad_actor::ToolsetAcquisition::DeploymentOriginal {
+                    recipe: original_key.clone(),
+                    original: original_selection,
+                },
+                cold.entry_storage.directory(),
+            ),
+        ];
+        for (acquisition, expected_directory) in acquisitions {
+            let restored = cold
+                .restore_graph_with_acquisition(source_reference, &acquisition)
+                .unwrap();
+            assert_eq!(restored.identities(), current.identities());
+            assert_eq!(restored.include_paths(), current.include_paths());
+            assert_eq!(
+                &restored.generation_evidence().unwrap().reference,
+                source_reference
+            );
+            let Some(exomonad_actor::SourceEntryStorage::CompletedOriginal {
+                directory,
+                selections,
+            }) = restored.prepared_entries()
+            else {
+                panic!("retained acquisition must restore completed storage");
+            };
+            assert_eq!(directory, expected_directory);
+            let (recipe, original) = acquisition.completed_entry_selection().unwrap();
+            assert_eq!(selections, &BTreeMap::from([(recipe.to_owned(), original)]));
+        }
+        assert!(matches!(
+            cold.restore_graph_with_acquisition(
+                source_reference,
+                &exomonad_actor::ToolsetAcquisition::UnretainedCompilation {
+                    recipe: current_key.clone()
+                }
+            ),
+            Err(exomonad_actor::SourceInspectionError::Unreadable(_))
+        ));
+        assert!(matches!(
+            cold.restore_graph_with_acquisition(
+                source_reference,
+                &exomonad_actor::ToolsetAcquisition::FreshRunOriginal {
+                    recipe: "invalid".into(),
+                    original: run_original
+                }
+            ),
+            Err(exomonad_actor::SourceInspectionError::Unreadable(_))
+        ));
     }
 
     #[test]

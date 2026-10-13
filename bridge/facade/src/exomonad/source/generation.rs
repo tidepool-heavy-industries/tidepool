@@ -447,23 +447,25 @@ impl ExomonadSourceReload {
     ) -> std::result::Result<CheckpointSourceLayer, SourceInspectionError> {
         let restore = || -> Result<CheckpointSourceLayer> {
             let source = self.restore_graph(reference)?;
-            if matches!(
-                acquisition,
-                exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. }
-            ) {
-                return Ok(source);
-            }
-            let (recipe, original) = acquisition
-                .completed_entry_selection()
-                .ok_or("source recovery requires a retained installer acquisition")?;
+            let (storage, recipe, original) = match acquisition {
+                exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. } => {
+                    return Ok(source);
+                }
+                exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } => {
+                    (&self.entry_storage, recipe, *original)
+                }
+                exomonad_actor::ToolsetAcquisition::FreshRunOriginal { recipe, original }
+                | exomonad_actor::ToolsetAcquisition::ExistingRunOriginal { recipe, original } => {
+                    (&self.fresh_entry_storage, recipe, *original)
+                }
+                exomonad_actor::ToolsetAcquisition::UnretainedCompilation { .. } => {
+                    return Err("source recovery requires a retained installer acquisition".into());
+                }
+            };
             if recipe.len() != 64 || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err("source recovery carries an invalid installer recipe selection".into());
             }
-            let directory = source
-                .prepared_entries()
-                .expect("restored source has entry storage")
-                .directory()
-                .to_owned();
+            let directory = storage.directory().to_owned();
             self.reissue_graph_with_entries(
                 &source,
                 exomonad_actor::SourceEntryStorage::CompletedOriginal {
