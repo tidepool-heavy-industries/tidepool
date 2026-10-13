@@ -52,6 +52,12 @@ Optional notebook effects derive from installed services at admission. For an
 unbound-conversation case, install a reader that returns the typed unbound result
 through the existing conversation seam so the root admits `Reflect`.
 
+Notebook inspection feedback may be a binding handle. Behavioral assertions
+must follow the existing output or inspection owner to the evaluated value;
+immediate feedback text is not itself proof of the result. `display` publishes
+through the ordinary output coordinator. Hosted tests follow its receipt into
+the Store, and component campaigns use their existing actor-output driver.
+
 Recipe activation messages present the typed request; they are separate from
 the fresh context seed supplied during provider attachment. Assert payload
 fields through the checked actor's `sessionInput`. Assert seeded provider context

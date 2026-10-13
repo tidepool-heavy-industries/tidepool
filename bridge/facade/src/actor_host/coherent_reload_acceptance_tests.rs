@@ -297,11 +297,7 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 late["status"], "committed",
                 "issued A must remain usable: {late}"
             );
-            assert_eq!(
-                late["items"].as_array().unwrap().last().unwrap()["output"],
-                "True",
-                "{late}"
-            );
+            assert_true_page(host, &late);
             assert_eq!(
                 selected_root_generation(host).await,
                 durable_b,
