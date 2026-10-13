@@ -218,7 +218,7 @@ async fn issued_source_identity_matches(
         .snapshot_for_request()
         .expect("issued source generation");
     let source = format!(
-        "Right selectedSource <- sourceStatus\ndisplay (revisionIdentity (statusActive selectedSource) == {expected:?})"
+        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == {expected:?})"
     );
     let result = committed(issued.as_ref(), &source).await;
     result["items"][1]["output"] == "True"
@@ -228,7 +228,7 @@ async fn issued_source_identity_matches(
 async fn bind_current_source_identity(policy: &dyn exomonad_actor::ResidentToolEndpoint) {
     let result = committed(
         policy,
-        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ndisplay True",
+        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ninspectFull True",
     )
     .await;
     assert_eq!(
@@ -244,7 +244,7 @@ async fn current_source_matches_bound_identity(
 ) -> bool {
     let result = committed(
         policy,
-        "Right selectedSource <- sourceStatus\ndisplay (publishedSourceBefore == revisionIdentity (statusActive selectedSource))",
+        "Right selectedSource <- sourceStatus\ninspectFull (publishedSourceBefore == revisionIdentity (statusActive selectedSource))",
     )
     .await;
     result["items"].as_array().unwrap().last().unwrap()["output"] == "True"
