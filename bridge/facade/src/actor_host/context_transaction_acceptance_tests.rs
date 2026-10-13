@@ -834,8 +834,14 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         .session_id
         .thread()
         .contains(&format!(":{}:", child_path.0)));
-    assert_eq!(activated.request.session_id.affinity(), parent_session.thread());
-    assert_ne!(activated.request.session_id.thread(), parent_session.thread());
+    assert_eq!(
+        activated.request.session_id.affinity(),
+        parent_session.thread()
+    );
+    assert_ne!(
+        activated.request.session_id.thread(),
+        parent_session.thread()
+    );
     assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
     assert!(!has_user_text(&activated.request, "parent-original"));
     let child_session = activated.request.session_id.clone();
@@ -935,7 +941,7 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
             assert_eq!(after.model.as_deref(), Some("test-model"));
             root_committed = true;
             round.finish();
-        } else if child_sessions.insert(round.request.session_id.clone()) {
+        } else if child_sessions.insert(round.request.session_id.thread().to_owned()) {
             assert_eq!(round.request.session_id.affinity(), root_session.thread());
             assert_ne!(round.request.session_id.thread(), root_session.thread());
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
@@ -1022,7 +1028,7 @@ async fn resident_sync_notes_commit_atomically_without_changing_captured_childre
             assert!(has_user_text(&round.request, "parent-original"));
             root_committed = true;
             round.finish();
-        } else if child_sessions.insert(round.request.session_id.clone()) {
+        } else if child_sessions.insert(round.request.session_id.thread().to_owned()) {
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
             assert_eq!(round.request.model, "child-preparation-model");
             assert!(!has_user_text(&round.request, "parent-curated"));

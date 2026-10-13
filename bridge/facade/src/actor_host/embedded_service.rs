@@ -1425,9 +1425,11 @@ mod shutdown_tests {
                 harness::engine::ResponsesTransport::response_contract(&client).unwrap(),
                 (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
             );
-            // The deliberately missing file prevents model traffic while the real
-            // Engine path proves public Standard normalization and durable rejection.
-            let tools = vec![serde_json::json!({"type": "tool_search"})];
+            // Credential refusal prevents model traffic while the real Engine
+            // path proves async host tool normalization and durable rejection.
+            let tools = vec![serde_json::json!({
+                "type": "custom", "name": "haskell", "format": {"type": "text"}, "async": true,
+            })];
             let store = Arc::new(harness::store::Store::memory().unwrap());
             let engine = harness::engine::Engine::<ChatGptPlanAuth, _>::with_transport(
                 client,

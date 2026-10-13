@@ -2599,6 +2599,7 @@ mod tests {
             instructions: String::new(),
             tools: Default::default(),
             tools_allowed: None,
+            prompt_cache_comparison: None,
             model: "test-model".into(),
             pinned_effort: harness::model::Effort::Low,
             session_id: "test-run:/root:1".into(),

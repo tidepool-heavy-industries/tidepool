@@ -543,6 +543,7 @@ mod tests {
                         instructions: String::new(),
                         tools: snapshot.manifest.tools().clone(),
                         tools_allowed: None,
+                        prompt_cache_comparison: None,
                         model: "test-model".into(),
                         pinned_effort: harness::model::Effort::Low,
                         session_id: "builtin-contract".into(),
