@@ -1366,6 +1366,10 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
+    let preamble = insert_preamble_imports(
+        &preamble,
+        "qualified Data.Type.Equality as TidepoolWorkbenchEquality",
+    );
     let preamble = insert_preamble_imports(&preamble, "{{CELL_IMPORTS}}")
         .replace("import {{CELL_IMPORTS}}", "{{CELL_IMPORTS}}")
         .replacen(
@@ -1386,7 +1390,7 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
            => TidepoolCellPure (Eff effects value)\n\
          class TidepoolCellExpression value where {{ \
            __tidepoolCellExpression :: value -> Eff {effect_stack} () }}\n\
-         instance {{-# OVERLAPPING #-}} (effects ~ {effect_stack}) => TidepoolCellExpression (Eff effects value) where {{ \
+         instance {{-# OVERLAPPING #-}} (effects TidepoolWorkbenchEquality.~ {effect_stack}) => TidepoolCellExpression (Eff effects value) where {{ \
            __tidepoolCellExpression action = action >> pure () }}\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\

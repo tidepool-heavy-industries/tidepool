@@ -9044,6 +9044,68 @@ mod tests {
     }
 
     #[test]
+    fn generated_cell_scaffold_scopes_equality_with_a_custom_prelude() {
+        let extract = required_cell_test_worker();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let preamble = format!(
+            "{{-# OPTIONS_GHC -Werror=type-equality-out-of-scope #-}}\n{}",
+            effects.preamble(),
+        );
+        let template =
+            super::super::workbench::resident_cell_check_template(&preamble, effects.row(), "");
+        let include: Vec<_> = effects
+            .include_paths()
+            .iter()
+            .map(|path| path.as_path())
+            .collect();
+        let check = |template: &str, cell: &str| {
+            tidepool_testing::with_settlement(|settlement| {
+                check_cell(
+                    CellCheckRequest {
+                        exact_context: None,
+                        session_id: None,
+                        cell_text: cell,
+                        template,
+                        include: &include,
+                        session_root: root.path(),
+                        inject_modules: &[],
+                        compile_generation: 0,
+                        compile_view_evidence: "",
+                    },
+                    settlement,
+                )
+            })
+        };
+        // Prove the selected warning is enabled against the same generated scaffold.
+        let unscoped = template.replace("TidepoolWorkbenchEquality.~", "~");
+        let error = check(&unscoped, "1 :: Int\n")
+            .expect_err("a custom Prelude cannot supply the unqualified equality operator");
+        let CompileError::Diagnostics(diagnostics) = &error.error else {
+            panic!("expected an out-of-scope equality diagnostic: {error:?}");
+        };
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == crate::diag::DiagnosticSeverity::Error
+                    && diagnostic.message.contains("operator is out of scope")
+                    && diagnostic.message.contains("equality constraint")
+            }),
+            "{error:?}"
+        );
+        for cell in ["1 :: Int\n", "pure (1 :: Int)\n"] {
+            let checked = check(&template, cell)
+                .expect("generated scaffold scopes equality without relying on the custom Prelude");
+            assert!(
+                checked.warnings.is_empty(),
+                "warnings: {:?}",
+                checked.warnings
+            );
+        }
+    }
+
+    #[test]
     fn whole_cell_check_reports_missing_record_fields_without_rejecting_declaration() {
         let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
