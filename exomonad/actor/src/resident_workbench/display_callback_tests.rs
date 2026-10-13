@@ -254,6 +254,10 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
         assert!(page.expansions.is_empty());
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
         fixture.execution.scope.take();
+        fixture.runner.access.with_machine(fixture.public_context.clone(), |session, context, _| {
+            let _ = session.begin_ephemeral_private_execution(context.placement.lexical_scope).map_err(ResidentError::Session)?;
+            Ok(())
+        }).await.unwrap();
         let error = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap_err();
         assert!(matches!(error, ResidentActorWorkbenchError::Resident(ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope))) if scope == scope_a), "{error}");
     }).await;
