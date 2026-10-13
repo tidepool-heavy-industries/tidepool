@@ -563,8 +563,6 @@ pub trait StagedActorSourceReload: Send + Sync {
     fn configuration_digest(&self) -> [u8; 32] {
         self.evidence().configuration_digest
     }
-    /// Repair derived filesystem projections after authoritative publication.
-    fn finalize_projection(&self) -> Result<(), String>;
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to

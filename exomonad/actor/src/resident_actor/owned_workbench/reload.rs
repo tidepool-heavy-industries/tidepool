@@ -178,19 +178,11 @@ where
                         generation.installation.clone(),
                     );
                 }
-                match staged.finalize_projection() {
-                    Ok(()) => Ok(SrReloadOutcome::ReloadPublished(
-                        previous,
-                        candidate_revision,
-                        staged.changed_modules().to_vec(),
-                    )),
-                    Err(warning) => Ok(SrReloadOutcome::ReloadPublishedWithWarnings(
-                        previous,
-                        candidate_revision,
-                        staged.changed_modules().to_vec(),
-                        vec![warning],
-                    )),
-                }
+                Ok(SrReloadOutcome::ReloadPublished(
+                    previous,
+                    candidate_revision,
+                    staged.changed_modules().to_vec(),
+                ))
             }
             ActorGenerationCommit::Refused(_detail)
                 if self
