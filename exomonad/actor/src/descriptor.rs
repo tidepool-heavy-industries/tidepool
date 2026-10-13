@@ -13,6 +13,25 @@ pub enum ActorPersistencePolicy {
     Durable,
 }
 
+type PromptComposition = dyn Fn(
+    ActorRef,
+    &ActorCapabilities,
+    &[exomonad_tool::HostedTool],
+    &crate::ActorRuntimeObservationHandle,
+) -> Result<tidepool_runtime::session::ComposedPromptSnapshot, String> + Send + Sync;
+
+#[derive(Clone)]
+struct PromptComposer(std::sync::Arc<PromptComposition>);
+impl std::fmt::Debug for PromptComposer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromptComposer")
+    }
+}
+impl PartialEq for PromptComposer {
+    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.0, &other.0) }
+}
+impl Eq for PromptComposer {}
+
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
@@ -30,6 +49,8 @@ pub struct ActorDescriptor {
     fork_effort: Option<crate::ForkEffort>,
     model: Option<crate::Model>,
     instructions: Option<String>,
+    composed_prompts: Option<tidepool_runtime::session::ComposedPromptSnapshot>,
+    prompt_composer: Option<PromptComposer>,
     fork_budget: Option<(i64, i64)>,
     checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     checkpoint_token: Option<String>,
@@ -59,10 +80,40 @@ impl ActorDescriptor {
             fork_effort: None,
             model: None,
             instructions: None,
+            composed_prompts: None,
+            prompt_composer: None,
             fork_budget: None,
             checkpoint_boundary: None,
             checkpoint_token: None,
             source_layer: std::sync::Arc::from([]),
+        }
+    }
+
+    #[must_use]
+    pub fn with_composed_prompts(mut self, prompts: tidepool_runtime::session::ComposedPromptSnapshot) -> Self {
+        self.composed_prompts = Some(prompts);
+        self
+    }
+
+    #[must_use]
+    pub fn composed_prompts(&self) -> Option<&tidepool_runtime::session::ComposedPromptSnapshot> {
+        self.composed_prompts.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_prompt_composer(mut self, compose: impl Fn(
+        ActorRef, &ActorCapabilities, &[exomonad_tool::HostedTool], &crate::ActorRuntimeObservationHandle,
+    ) -> Result<tidepool_runtime::session::ComposedPromptSnapshot, String> + Send + Sync + 'static) -> Self {
+        self.prompt_composer = Some(PromptComposer(std::sync::Arc::new(compose)));
+        self
+    }
+
+    pub fn compose_prompts(&self, actor: ActorRef, tools: &[exomonad_tool::HostedTool],
+        observation: &crate::ActorRuntimeObservationHandle,
+    ) -> Result<Option<tidepool_runtime::session::ComposedPromptSnapshot>, String> {
+        match &self.prompt_composer {
+            Some(compose) => (compose.0)(actor, &self.capabilities, tools, observation).map(Some),
+            None => Ok(self.composed_prompts.clone()),
         }
     }
 
