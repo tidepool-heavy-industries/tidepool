@@ -2692,6 +2692,21 @@ mod tests {
 
     /// A two-module workspace: `Project.Work` is the configured module and it
     /// reads `Project.Types`, so `Types` has a reverse dependency to rebuild.
+    fn init_git_repo(path: &Path) {
+        let git = exomonad_worktree::GitCli::new();
+        git.init_repository(path, &["-q"]).unwrap();
+        git.try_run(path, &["config", "user.name", "Reload test"])
+            .unwrap();
+        git.try_run(
+            path,
+            &["config", "user.email", "reload-test@example.invalid"],
+        )
+        .unwrap();
+        git.try_run(path, &["add", "--all"]).unwrap();
+        git.try_run(path, &["commit", "-q", "-m", "initial"])
+            .unwrap();
+    }
+
     fn cooperating_pair() -> (tempfile::TempDir, tempfile::TempDir, ExomonadSourceReload) {
         let project = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
@@ -3049,6 +3064,9 @@ mod tests {
             .clone()
             .stage_reload(PrincipalId::SYSTEM, b.source(), &[])
             .unwrap();
+        // A failed preparation closes its admission owner. The next proposal
+        // receives a fresh lifecycle while the shared native cache survives.
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         let deleted = owner
             .scope(workbench.prepare_source_toolset_with_validation(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -3062,7 +3080,8 @@ mod tests {
         assert!(deleted.cleanup.observation().is_confirmed());
         assert!(
             deleted.action.is_ok(),
-            "deleting an unused module is a valid complete source revision"
+            "deleting an unused module is a valid complete source revision: {:?}",
+            deleted.action
         );
         assert!(reload.read_from(b.source(), "Project.New").is_ok());
     }
