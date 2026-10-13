@@ -498,14 +498,15 @@ where
                 .transferred(context.clone())
                 .map_err(|error| reject(&error.to_string()))?;
             if let Some(snapshot) = &execution.snapshot {
-                let layers = self
-                    .environment
-                    .source_layers
-                    .as_ref()
-                    .ok_or_else(|| reject("transferred source callback has no source owner"))?;
-                layers
-                    .validate_source_authority(snapshot.installation().source())
-                    .map_err(|error| reject(&error))?;
+                match &self.environment.source_layers {
+                    Some(layers) => layers
+                        .validate_source_authority(snapshot.installation().source())
+                        .map_err(|error| reject(&error))?,
+                    None if snapshot.installation().source().is_owned() => {
+                        return Err(reject("transferred source callback has no source owner"));
+                    }
+                    None => {}
+                }
             }
             dynamic_sources.push(crate::request::sources::SourceBinding {
                 target: source.target,

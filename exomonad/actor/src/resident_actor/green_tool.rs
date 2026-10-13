@@ -228,7 +228,17 @@ where
                 let (boundary, _) = cursor
                     .execution
                     .native(&self.environment, context)
-                    .prepare_display(boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE, None, None, crate::request::sources::CallbackExecution { context: context.clone(), snapshot: owner.issued_snapshot().cloned(), scope: owner.callback_scope() })
+                    .prepare_display(
+                        boundary,
+                        DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                        None,
+                        None,
+                        crate::request::sources::CallbackExecution {
+                            context: context.clone(),
+                            snapshot: owner.issued_snapshot().cloned(),
+                            scope: owner.callback_scope(),
+                        },
+                    )
                     .await?;
                 match self
                     .prepare_invocation_wait(kernel, context, &owner, boundary)

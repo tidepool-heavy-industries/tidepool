@@ -45,7 +45,7 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
     with_test_compiler_owner(expansion_fences_immediate_handler_with_compiler_owner()).await;
 }
 
-async fn expansion_fences_immediate_handler_with_compiler_owner() {
+async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixture {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec());
@@ -62,7 +62,7 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
         Some(lib),
     );
-    let context = crate::ActorSessionContext {
+    let mut context = crate::ActorSessionContext {
         actor: crate::ActorRef::first(crate::ActorId(1)),
         placement: crate::ActorPlacement {
             session: session_id,
@@ -75,6 +75,17 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
         haskell_effects_alias: surface.row().into(),
         source_layer: Vec::new().into(),
     };
+    let public_context = context.clone();
+    let admission = private.then(|| {
+        Arc::new(
+            session
+                .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                .unwrap(),
+        )
+    });
+    if let Some(admission) = &admission {
+        context.placement.lexical_scope = admission.private_scope();
+    }
     session
         .set_actor_execution(
             context.run_context(),
@@ -96,9 +107,7 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
             TurnRequest {
                 exact_context: None,
                 session_id: Some(session_id),
-                turn_text: &tidepool_testing::fixture_source(
-                    "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
-                ),
+                turn_text: &cell,
                 templates: &templates,
                 include: &include,
                 session_root: view.session_root(),
@@ -141,7 +150,54 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
             .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
-    let callback = Arc::new(callback);
+    let scope = admission
+        .as_ref()
+        .map(|admission| admission.retained_lexical_scope());
+    CallbackFixture {
+        _root: root,
+        runner,
+        calls,
+        output,
+        public_context,
+        admission,
+        callback: Arc::new(callback),
+        execution: crate::request::sources::CallbackExecution {
+            context,
+            snapshot: None,
+            scope,
+        },
+    }
+}
+
+struct CallbackFixture {
+    _root: tempfile::TempDir,
+    runner: ResidentActorRunner<ImmediatePrintProbe, CapturedOutput>,
+    calls: Arc<AtomicUsize>,
+    output: CapturedOutput,
+    public_context: crate::ActorSessionContext,
+    admission: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
+    callback: Arc<RootCustody>,
+    execution: crate::request::sources::CallbackExecution,
+}
+
+async fn expansion_fences_immediate_handler_with_compiler_owner() {
+    let fixture = prepare_callback_fixture(
+        tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
+        ),
+        false,
+    )
+    .await;
+    let CallbackFixture {
+        runner,
+        calls,
+        output,
+        callback,
+        execution,
+        ..
+    } = fixture;
+    let context = execution.context;
+    let identity = (1_i64, 1_i64, 1_i64);
     let error = runner
         .expand_display(context.clone(), Arc::clone(&callback), identity, 1, 8192)
         .await
@@ -176,4 +232,30 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
         if output == ["unauthorized callback output"]));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(output.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn retained_display_runs_after_private_admission_settles_and_current_scope_changes() {
+    with_test_compiler_owner(async {
+        let mut fixture = prepare_callback_fixture(tidepool_testing::fixture_source("exomonad/actor/src/resident_workbench/display_callback_retained.hs"), true).await;
+        let scope_a = fixture.execution.context.placement.lexical_scope;
+        drop(fixture.admission.take());
+        let scope_b = fixture.runner.access.with_machine(fixture.public_context.clone(), move |session, _, _| {
+            let scope_b = session.mint_isolated_scope();
+            // A later checkout drains completed admission leases. The callback's
+            // owner-derived lease must preserve its exact original scope.
+            let _ = session.begin_ephemeral_private_execution(scope_b).map_err(ResidentError::Session)?;
+            assert!(session.scope_tree().is_live(scope_a));
+            Ok(scope_b)
+        }).await.unwrap();
+        assert_ne!(scope_a, scope_b);
+        let (page, _) = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap();
+        assert_eq!(page.text, "detail A");
+        assert_eq!(page.identity, (1, 1, 1));
+        assert!(page.expansions.is_empty());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        fixture.execution.scope.take();
+        let error = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap_err();
+        assert!(matches!(error, ResidentActorWorkbenchError::Resident(ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope))) if scope == scope_a), "{error}");
+    }).await;
 }
