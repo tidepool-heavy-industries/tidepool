@@ -22,12 +22,15 @@ import Control.Monad.Freer (Eff, interpret, run)
 import Control.Monad.Freer.State (State, modify, runState)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import qualified Data.Text as Text
+import Tidepool.Inspection
+import Tidepool.Records (WriteOutcome(..))
 import GHC.Generics (Generic)
 import Tidepool.Aeson
 import Tidepool.Agent.Contract
 import Tidepool.Model
 import Tidepool.Internal.ModelControl qualified as Control
-import Tidepool.Effects.Core (ModelCall (..))
+import Tidepool.Effects.Core (ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
 
 data Tools mode = Tools { echo :: mode :- Call Text Text } deriving Generic
 data Reply = Reply { count :: Int, optional :: Maybe Text }
@@ -59,7 +62,7 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [jevPreparedTests, personaSeedTests, personaAttentionTests, personaNotebookTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, personaSeedTests, personaAttentionTests, personaNotebookTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 scenario :: IO ()
 scenario = do
@@ -84,3 +87,16 @@ scenario = do
     [("type", String "object"), ("properties", object [("count", jsonSchema (Proxy @Int)), ("optional", jsonSchema (Proxy @(Maybe Text)))]), ("required", Array [String "count"]), ("additionalProperties", Bool False)])
     (error "record optional field omits null or becomes required")
   putStrLn "model DSL: callbacks, caller effects, retained hook, typed result, nullable schemas passed"
+
+sourceInspection :: IO ()
+sourceInspection = do
+  let active = SourceRevision "captured-revision" 7 [SourceModule "Persona.Spec" "source-digest"]
+      disk = SourceRevision "pending-revision" 0 []
+      (rendered, _) = displayWith 4096 (Right (SourceStatus active disk) :: Either Text SourceStatus)
+  mapM_ (\piece -> unless (piece `Text.isInfixOf` rendered) (error "source status omitted inspection facts"))
+    ["captured-revision", "pending-revision", "Persona.Spec", "source-digest", "generation = 7", "pendingEdit = True"]
+  let outcomes = [Written "memory.md" 2, WriteBlocked "memory.md" ["check failed"], WriteConflict "memory.md" (Just "expected-digest") Nothing]
+  mapM_ (\outcome -> unless ("memory.md" `Text.isInfixOf` fst (displayWith 4096 outcome)) (error "write outcome is opaque")) outcomes
+  let page = pageWithContinuation 80 (TextLeaf (Text.replicate 200 "λ")) Nothing :: DisplayPage '[]
+  unless (pageHasMore page && "[truncated;" `Text.isInfixOf` text page && Text.length (text page) <= 80)
+    (error "retained page omitted bounded truncation notice")

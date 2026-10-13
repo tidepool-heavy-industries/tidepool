@@ -12,6 +12,8 @@
 module Tidepool.Inspection
   ( Display (..),
     rawText,
+    sourceLines,
+    SourceWindow (..),
     display,
     expand,
     DisplayHandle,
@@ -47,12 +49,14 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
+import Tidepool.Records (WriteOutcome(..))
+import Tidepool.Source (SourceWindow (..), sourceLines)
 import Tidepool.Inspection.Display
 import Tidepool.View.Types (View(..), viewTree)
 import Tidepool.View.Wire (encodeView)
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -64,7 +68,9 @@ expansions :: DisplayHandle value -> [(ExpansionKey, Text)]
 expansions (DisplayHandle _ keys) = keys
 
 instance Display (DisplayHandle value) where
-  displayTree _ = opaqueHandle "display"
+  displayTree handle = Constructor "DisplayHandle"
+    [("expansions", displayTree [(expansionKeyNumber key, label) | (key, label) <- expansions handle]),
+     ("next", TextLeaf (if null (expansions handle) then "Complete; no expansion keys remain." else "expand handle (fst (head (expansions handle))). Bind handle from display value.")) ]
 
 -- | One explicit structured output. The host retains the callback in the
 -- actor's ordinary resource scope; the returned handle does not contain it.
@@ -74,7 +80,7 @@ display value = do
   let budget = displayBudget allowance
   case displayView value of
     Inspection tree -> do
-      let state = newDisplayState budget tree
+      let state = newDisplayStateWithNotice budget tree
       identity <- publishDisplay (0, 0, 0) state
       pure (DisplayHandle identity (displayStateKeys state))
     view -> do
@@ -100,11 +106,32 @@ publishDisplay identity state =
     ((\(_ :: Int) -> do
       (issued, selected, allowance) <- send DisplayExpansionInputWith
       let granted = displayBudget allowance
-      case expandDisplayState granted (expansionKeyFromNumber selected) state of
+      case expandDisplayStateWithNotice granted (expansionKeyFromNumber selected) state of
         Nothing -> error "display expansion key is unavailable"
         Just detail -> do
           _ <- publishDisplay issued detail
           pure ()) :: Int -> Eff effects ()))
+
+instance Display WriteOutcome where
+  displayTree (Written f c) = displayRecord 0 "Written" [("file", displayTree f), ("checks", displayTree c)]
+  displayTree (WriteBlocked f xs) = displayRecord 0 "WriteBlocked" [("file", displayTree f), ("failed", displayTree xs)]
+  displayTree (WriteConflict f e a) = displayRecord 0 "WriteConflict" [("file", displayTree f), ("expected", displayTree e), ("actual", displayTree a)]
+
+instance Display SourceModule where
+  displayTree value = Constructor "SourceModule"
+    [("name", displayTree value.sourceModuleName), ("digest", displayTree value.sourceModuleDigest)]
+
+instance Display SourceRevision where
+  displayTree value = Constructor "SourceRevision"
+    [("identity", displayTree value.revisionIdentity),
+     ("generation", displayTree value.revisionGeneration),
+     ("modules", displayTree value.revisionModules)]
+
+instance Display SourceStatus where
+  displayTree value = Constructor "SourceStatus"
+    [("active", displayTree value.statusActive),
+     ("disk", displayTree value.statusDisk),
+     ("pendingEdit", displayTree (value.statusActive.revisionIdentity /= value.statusDisk.revisionIdentity))]
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =
@@ -314,7 +341,7 @@ instance Display a => PageDisplay effects (ProgressState a) where
 
 pageWithContinuation :: Int -> DisplayTree -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
 pageWithContinuation budget tree continuation =
-  let (rendered, remaining, unavailable) = renderTree budget tree
+  let (rendered, remaining, unavailable) = renderTreeWithNotice budget tree
       next = case remaining of
         Just suffix -> pure (pageWithContinuation 8192 suffix continuation)
         Nothing -> maybe (pure emptyPage) id continuation

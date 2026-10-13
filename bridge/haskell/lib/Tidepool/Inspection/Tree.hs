@@ -5,6 +5,7 @@
 module Tidepool.Inspection.Tree
   ( DisplayTree (..)
   , renderTree
+  , renderTreeWithNotice
   , DisplayState
   , ExpansionKey
   , expansionKeyNumber
@@ -13,7 +14,9 @@ module Tidepool.Inspection.Tree
   , displayStateKeys
   , displayStateUnavailable
   , newDisplayState
+  , newDisplayStateWithNotice
   , expandDisplayState
+  , expandDisplayStateWithNotice
   , treeParts
   , literalText
   , literalString
@@ -209,6 +212,42 @@ expandDisplayState budget selected (DisplayState _ branches next previouslyUnava
           let (value, children, nextKey, unavailable) = preview (max 0 budget) 0 next label tree
           in Just (DisplayState value (reverse prefix ++ children ++ rest) nextKey (previouslyUnavailable || unavailable))
       | otherwise = choose ((key, label, tree) : prefix) rest
+
+-- | Presentation of a page keeps its notice outside the exact retained suffix.
+renderTreeWithNotice :: Int -> DisplayTree -> (Text, Maybe DisplayTree, Bool)
+renderTreeWithNotice budget tree =
+  let (value, remaining, unavailable) = renderTree (max 0 (budget - T.length marker)) tree
+      omitted = maybe False (const True) remaining || unavailable
+      marker = boundedNotice budget "[truncated; bind page, then run page.more]"
+      shownMarker = if unavailable then boundedNotice (T.length marker + 1) "[truncated; some detail unavailable]" else marker
+  in (value <> if omitted then shownMarker else "", remaining, unavailable)
+
+-- | Explicit publication reserves a visible notice, while raw state remains
+-- suitable for consumers that concatenate exact suffixes.
+newDisplayStateWithNotice :: Int -> DisplayTree -> DisplayState
+newDisplayStateWithNotice budget = noticeState budget . newDisplayState (contentBudget budget)
+
+expandDisplayStateWithNotice :: Int -> ExpansionKey -> DisplayState -> Maybe DisplayState
+expandDisplayStateWithNotice budget key = fmap (noticeState budget) . expandDisplayState (contentBudget budget) key
+
+contentBudget :: Int -> Int
+contentBudget budget = max 0 (budget - T.length (noticeText budget))
+
+noticeText :: Int -> Text
+noticeText budget = boundedNotice budget "[truncated; expand handle key for retained detail]"
+
+-- Keep at least one character of progress when an allowance is positive.
+-- Small allowances use an unmistakable compact marker instead of cutting advice.
+boundedNotice :: Int -> Text -> Text
+boundedNotice budget message
+  | budget > T.length message = message
+  | budget > 3 = "[…]"
+  | budget > 1 = "…"
+  | otherwise = ""
+
+noticeState :: Int -> DisplayState -> DisplayState
+noticeState budget (DisplayState value branches next unavailable) =
+  DisplayState (value <> if null branches && not unavailable then "" else if unavailable then boundedNotice (T.length (noticeText budget) + 1) "[truncated; some detail unavailable]" else noticeText budget) branches next unavailable
 
 -- The per-field allowance prevents a large first field from hiding a sibling.
 -- The depth and item caps stop before inspecting collapsed values. Sequence

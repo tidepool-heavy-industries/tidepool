@@ -6,6 +6,8 @@
 
 module Main where
 
+import Test.Tasty.QuickCheck (testProperty, NonNegative(..))
+import Tidepool.Source
 import FormViewTest (formViewTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
@@ -22,7 +24,10 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "display-tree"
-  [ formViewTests
+  [ testProperty "source windows agree with independent String line addresses" sourceWindowProperty
+  , testCase "sourceWindowsRetainRevisionAndLineAddresses" sourceWindowsRetainRevisionAndLineAddresses
+  , testCase "noticedDisplaysStayBoundedAndRetainDetail" noticedDisplaysStayBoundedAndRetainDetail
+  , formViewTests
   , testCase "punctuationAndChildrenRespectBudget" punctuationAndChildrenRespectBudget
   , testCase "pagesCoverTheExactTree" pagesCoverTheExactTree
   , testCase "infiniteLeavesAreProductive" infiniteLeavesAreProductive
@@ -409,3 +414,43 @@ unavailableDetailDoesNotReplaceSupportedText = do
       Just detail -> assertEqual "unavailable detail survives later sibling expansion" True (displayStateUnavailable detail)
       Nothing -> fail "supported tree suffix was lost"
     _ -> fail "lazy exact-boundary suffix was not retained"
+
+sourceWindowsRetainRevisionAndLineAddresses :: IO ()
+sourceWindowsRetainRevisionAndLineAddresses = do
+  let captured = ("original-revision", "α\n\nλ\n終\n")
+  assertEqual "numbered windows retain identity and empty lines"
+    (SourceWindow "original-revision" [(2,""),(3,"λ")]) (sourceLines 2 2 captured)
+  assertEqual "successive windows cover the same captured revision"
+    [(1,"α"),(2,""),(3,"λ"),(4,"終")]
+    (concatMap (sourceWindowLines . (\start -> sourceLines start 2 captured)) [1,3])
+  assertEqual "past-end is empty" [] (sourceWindowLines (sourceLines 10 2 captured))
+  assertEqual "nonpositive count is empty" [] (sourceWindowLines (sourceLines 1 (-1) captured))
+  assertEqual "start clamps to one" [(1,"α")] (sourceWindowLines (sourceLines 0 1 captured))
+
+noticedDisplaysStayBoundedAndRetainDetail :: IO ()
+noticedDisplaysStayBoundedAndRetainDetail = do
+  let original = Text.replicate 200 "λ"
+      initial = newDisplayStateWithNotice 80 (TextLeaf original)
+  assertTrue "explicit truncation marker" ("[truncated;" `Text.isInfixOf` displayStateText initial)
+  assertTrue "marker counts within allowance" (Text.length (displayStateText initial) <= 80)
+  case displayStateKeys initial of
+    [(key,_)] -> case expandDisplayStateWithNotice 1024 key initial of
+      Just detail -> assertEqual "retained Unicode suffix is exact" original
+        (Text.takeWhile (/= '[') (displayStateText initial) <> displayStateText detail)
+      Nothing -> error "missing expansion"
+    _ -> error "missing retained suffix"
+  let unsupported = newDisplayStateWithNotice 128 (Concat [LegacyLeaf (\_ -> ("old", True)), TextLeaf "visible"])
+  assertTrue "unavailable detail is explicit" ("unavailable" `Text.isInfixOf` displayStateText unsupported)
+  assertTrue "supported detail survives unavailable marker" ("oldvisible" `Text.isPrefixOf` displayStateText unsupported)
+  mapM_ (\budget -> assertTrue "all budgets stay bounded"
+    (all (\tree -> Text.length (displayStateText (newDisplayStateWithNotice budget tree)) <= max 0 budget &&
+                   let (value,_,_) = renderTreeWithNotice budget tree in Text.length value <= max 0 budget)
+      [TextLeaf original, LegacyLeaf (\_ -> ("old", True)), Constructor "Pair" [("long", TextLeaf original)]])) [-1..100]
+
+sourceWindowProperty :: String -> NonNegative Int -> NonNegative Int -> Bool
+sourceWindowProperty source (NonNegative startInput) (NonNegative countInput) =
+  let start = 1 + startInput `mod` 30
+      count = countInput `mod` 30
+      expected = take count (drop (start - 1) (zip [1..] (lines source)))
+      SourceWindow revision actual = sourceLines start count ("original", Text.pack source)
+  in revision == "original" && [(number, Text.unpack body) | (number, body) <- actual] == expected
