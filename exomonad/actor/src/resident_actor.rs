@@ -7896,6 +7896,11 @@ where
             .startup_generation(context.clone(), self.descriptor.clone(), predecessor)
             .await?;
         let Some(head) = head else {
+            if predecessor.is_some() && self.environment.source_layers.is_some() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "source-backed recovery has no durable notebook generation; legacy source-backed runs require an explicit migration".into(),
+                ));
+            }
             self.initial_configuration = InitialActorConfiguration::Fresh;
             return Ok(());
         };
