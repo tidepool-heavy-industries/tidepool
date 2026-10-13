@@ -54,6 +54,8 @@ PERSONA_STARTUP_TESTS = [
     "actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment",
     "actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control",
     "actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization",
+    "actor_host::coherent_reload_acceptance_tests::coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work",
+    "actor_host::embedded_recovery_tests::production_coherent_reload_recovers_published_configuration_without_recapturing_draft",
 ]
 HARNESS_PERFORMANCE_TESTS = [
     "actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_usecase_phases",
