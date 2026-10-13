@@ -131,6 +131,21 @@ pub(super) struct ResidentState {
 }
 
 impl ResidentState {
+    fn admits_public_owner(&self, owner: &WorkbenchPublicOwner, provider: bool) -> bool {
+        // Issued owners retain their notebook generation. Attachment authority
+        // spans generations of the same actor incarnation and resource owner.
+        let placement = owner.placement();
+        owner.actor() == self.current.context.actor
+            && placement.session == self.current.context.placement.session
+            && placement.resource_scope == self.current.context.placement.resource_scope
+            && (!provider
+                || (self.successor.is_none()
+                    && self
+                        .current
+                        .startup
+                        .is_none_or(|startup| startup == RootStartupState::Activated)))
+    }
+
     pub(super) fn has_pending(&self) -> bool {
         self.pending.is_some()
             || !self.queued.is_empty()
@@ -1099,9 +1114,9 @@ fn complete(
                     resident.current.public_owner = ActorPublicOwnerPlane::DurableCommitted(owner);
                     Ok(PublicManifestCommit::Durable)
                 }
-                DurablePublicOwnerPublication::CommittedContinuing { .. } => Err(
-                    "incarnation transfer received a continuing publication result".into(),
-                ),
+                DurablePublicOwnerPublication::CommittedContinuing { .. } => {
+                    Err("incarnation transfer received a continuing publication result".into())
+                }
                 DurablePublicOwnerPublication::Refused { error } => {
                     Ok(PublicManifestCommit::Refused { error })
                 }
@@ -1206,16 +1221,12 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                 let owner = expected.or_else(|| current.public_owner.ready().cloned());
                 if closed
                     || owner.as_ref().is_none_or(|owner| {
-                        let placement = owner.placement();
-                        owner.actor() != current.context.actor
-                            || placement.session != current.context.placement.session
-                            || placement.resource_scope != current.context.placement.resource_scope
+                        !state
+                            .resident
+                            .as_ref()
+                            .unwrap()
+                            .admits_public_owner(owner, provider)
                     })
-                    || (provider
-                        && (state.resident.as_ref().unwrap().successor.is_some()
-                            || current
-                                .startup
-                                .is_some_and(|startup| startup != RootStartupState::Activated)))
                 {
                     let _ = reply.send(Err(
                         "public owner does not match its live exact admission".into()

@@ -195,6 +195,95 @@ impl NativeFixture {
         .expect("actual native grant owns journal pending stage")
     }
 
+    async fn publish_next_native_generation(&self) {
+        use crate::resident_workbench::ActorGeneration;
+        use tidepool_runtime::session::{
+            ComposedPromptSnapshot, DurableGenerationReferences, DurablePublicOwnerPublication,
+            GenerationArtifactReference, PublicationDecision,
+        };
+        let snapshot = self.admission.lifecycle.resident_snapshot().unwrap();
+        let mut context = snapshot.context;
+        let machines = self.forest.environment.runner.machines_for_test().clone();
+        let (mut resident, receipt) = machines
+            .checkout_run(context.placement.session)
+            .unwrap()
+            .into_parts();
+        let canonical = self.admission.owner.durable().unwrap().clone();
+        let previous = resident.active_notebook_generation(&canonical).unwrap();
+        let scope = if previous.is_some() {
+            resident.mint_isolated_scope_with_lease().unwrap()
+        } else {
+            resident
+                .adopt_initial_notebook_scope(context.placement.lexical_scope)
+                .unwrap()
+        };
+        context.placement.lexical_scope = scope.scope();
+        let prompts = ComposedPromptSnapshot::capture("native provider generation".into());
+        // Retained data exercise native publication without issuing compiler/spec authority.
+        let references = DurableGenerationReferences {
+            source: GenerationArtifactReference::capture(vec![1]),
+            installation: GenerationArtifactReference::capture(vec![2]),
+            prompts: prompts.clone(),
+        };
+        let prepared = resident
+            .prepare_notebook_generation(scope.scope(), &canonical, previous, references)
+            .unwrap();
+        let selected = prepared.selection();
+        let owner = WorkbenchPublicOwner::prepare_generation(
+            &context,
+            &snapshot.descriptor,
+            &scope,
+            Some(prepared.owner()),
+        )
+        .unwrap();
+        let mut generation = None;
+        let published = resident
+            .commit_notebook_generation(prepared, &PublicationDecision::new(), |readiness| {
+                generation = Some(Arc::new(ActorGeneration {
+                    id: selected.generation(),
+                    installation: crate::InstalledToolLease::new(
+                        context.actor,
+                        crate::CheckpointSourceLayer::default(),
+                        None,
+                    ),
+                    prompts,
+                    context,
+                    public_owner: owner.bind(Some(readiness)),
+                    scope,
+                    configuration_digest: [0; 32],
+                    durable: Some(selected),
+                }));
+            })
+            .unwrap();
+        assert!(matches!(
+            published,
+            DurablePublicOwnerPublication::Committed { .. }
+        ));
+        let holes = resident
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        machines.settle_suspended(receipt, resident, holes);
+        self.admission
+            .lifecycle
+            .generation_published(generation.unwrap());
+        // The following RPC runs after the publication notification in this mailbox.
+        let current = self
+            .admission
+            .lifecycle
+            .public_owner(None, true)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&current, &self.admission.owner));
+        self.admission
+            .native_readiness()
+            .unwrap()
+            .check_ready_async()
+            .await
+            .unwrap();
+    }
+
     async fn pending(&self) {
         let lifecycle = &self.admission.lifecycle;
         let mut observations = lifecycle.observations_for_test();
@@ -209,6 +298,118 @@ impl NativeFixture {
         .await
         .expect("provider command reserves before native grant");
     }
+}
+
+#[tokio::test]
+async fn retained_provider_observes_and_acknowledges_initial_context_after_generation_replacement()
+{
+    let fixture = NativeFixture::start_with_journal(true).await;
+    fixture.publish_next_native_generation().await;
+    fixture.publish_next_native_generation().await;
+    let current = fixture.admission.lifecycle.resident_snapshot().unwrap();
+    assert_ne!(
+        current.context.placement.lexical_scope,
+        fixture.admission.placement().lexical_scope
+    );
+    fixture
+        .forest
+        .validate_provider_attachment(&fixture.admission)
+        .await
+        .unwrap();
+    fixture
+        .forest
+        .initial_context_wire_observation_for_provider(&fixture.admission)
+        .await
+        .unwrap();
+    let published = fixture
+        .forest
+        .acknowledge_initial_context_publication_for_provider(
+            &fixture.admission,
+            fixture.operation.as_ref().unwrap(),
+            fixture.publication.clone().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.state, crate::InitialContextState::Published);
+    assert_eq!(published.publication, fixture.publication);
+    assert_eq!(
+        fixture
+            .journal
+            .as_ref()
+            .unwrap()
+            .initial_context(fixture.actor.identity())
+            .await
+            .unwrap(),
+        Some(published)
+    );
+    fixture
+        .forest
+        .initial_context_wire_observation_for_provider(&fixture.admission)
+        .await
+        .unwrap();
+    fixture
+        .admission
+        .native_readiness()
+        .unwrap()
+        .check_ready_async()
+        .await
+        .unwrap();
+    fixture.forest.shutdown().await;
+}
+
+#[tokio::test]
+async fn provider_initial_refuses_another_actual_actor_owner_without_journal_mutation() {
+    let fixture = NativeFixture::start_with_journal(true).await;
+    let other = fixture
+        .forest
+        .new_workbench("other provider".into(), crate::ActorCapabilities::default())
+        .await
+        .unwrap();
+    let other = fixture
+        .forest
+        .authorize_provider_attachment(other.identity())
+        .await
+        .unwrap();
+    let before = fixture
+        .journal
+        .as_ref()
+        .unwrap()
+        .initial_context(fixture.actor.identity())
+        .await
+        .unwrap();
+    assert!(fixture
+        .admission
+        .lifecycle
+        .public_owner(Some(other.owner.clone()), true)
+        .await
+        .is_err());
+    assert!(fixture
+        .admission
+        .lifecycle
+        .provider_initial_observation(other.owner.clone())
+        .await
+        .is_err());
+    assert!(fixture
+        .admission
+        .lifecycle
+        .provider_initial_acknowledge(
+            other.owner.clone(),
+            fixture.operation.clone().unwrap(),
+            fixture.publication.clone().unwrap(),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        fixture
+            .journal
+            .as_ref()
+            .unwrap()
+            .initial_context(fixture.actor.identity())
+            .await
+            .unwrap(),
+        before
+    );
+    fixture.forest.shutdown().await;
 }
 
 #[tokio::test]

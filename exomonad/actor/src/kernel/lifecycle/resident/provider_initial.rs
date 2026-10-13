@@ -79,16 +79,7 @@ pub(super) fn begin(
     let refuse = |detail: &str, request: Request| {
         let _ = request.reply.send(Err(detail.into()));
     };
-    if state.refusal().is_some()
-        || resident.successor.is_some()
-        || current
-            .startup
-            .is_some_and(|startup| startup != RootStartupState::Activated)
-        || current
-            .public_owner
-            .ready()
-            .is_none_or(|owner| !Arc::ptr_eq(owner, &request.expected))
-    {
+    if state.refusal().is_some() || !resident.admits_public_owner(&request.expected, true) {
         refuse(
             "provider initial context differs from its live exact admission",
             request,
