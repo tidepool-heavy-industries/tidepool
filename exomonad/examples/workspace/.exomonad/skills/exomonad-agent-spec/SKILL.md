@@ -80,7 +80,7 @@ of acceptance or completion. Use a tool's typed seam for result presentation.
 ## Reload
 
 Edit ordinary `.hs` definitions and workspace prompts, then call the native
-`reload` tool; Haskell `reloadSource` uses the same owner. Saving alone does not
+`reload` tool; Haskell `reloadSource []` uses the same owner. Saving alone does not
 activate a draft. Source, compatible tool handlers and workspace prompts publish
 as one generation. Supply `also_check` when additional modules need validation.
 Changed configuration creates a fresh notebook; unchanged configuration preserves

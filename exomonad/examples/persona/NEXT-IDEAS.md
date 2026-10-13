@@ -83,7 +83,7 @@ history and restoration. The root model and effort remain human-selected.
 The seed can edit ordinary workspace files, including authored Haskell, prompts
 and memory, and inspect active source separately from drafts. Explicit `reload`
 publishes source, compatible handlers and workspace prompts together; Haskell
-`reloadSource` uses the same owner. Changed configuration resets the notebook;
+`reloadSource []` uses the same owner. Changed configuration resets the notebook;
 unchanged configuration preserves bindings. Durable definitions belong in `.hs`
 files. Memory remains outside the reload key and needs explicit context refresh.
 Already-issued work and existing children retain their captured generation.

@@ -17,7 +17,7 @@ rather than explaining it away as an intentional state-only view.
 `Files.readFile ".exomonad/Persona/Spec.hs"` reads its editable draft.
 `readSourceModule "Persona.Spec"` inspects the issued generation’s captured bytes
 and revision, which may differ from the current active head;
-`sourceStatus` distinguishes pending drafts. These observations answer different
+`sourceStatus` compares current drafts with the issued generation. These observations answer different
 questions even when the bytes agree.
 
 Import `Persona.Memory` qualified as `Memory` for `Memory.recall Memory.Human`,
@@ -43,7 +43,10 @@ reference material describes a vocabulary, not a grant.
 | Write memory or a note | Durable content changes; current arrival context remains as it was |
 | `Persona.Context.refresh` | Reads the current memory files and replaces the published authored context block synchronously; missing or unpublished targets refuse |
 | Edit ordinary `.hs` files or workspace prompts | Drafts change; active configuration stays unchanged until reload |
-| Native `reload`; Haskell `reloadSource` | Publishes one coherent source, compatible tool and workspace-prompt generation; changed configuration resets the notebook, unchanged configuration preserves it |
+| Native `reload`; Haskell `reloadSource []` | Publishes one coherent source, compatible tool and workspace-prompt generation; changed configuration resets the notebook, unchanged configuration preserves it |
+
+`reloadSource` takes only the list of additional modules to validate. Reload
+does not commit files to Git; commit authored changes separately when wanted.
 
 Keep reusable definitions in `.hs` files: notebook names are discarded by changed
 reload. Conversation, resources and the published memory block persist. Reload

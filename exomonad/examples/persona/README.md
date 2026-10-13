@@ -59,9 +59,9 @@ The renderer is a small Haskell function the companion can edit and reload.
 There is no memory graph, selection planner or attention actor to maintain.
 
 Self-editing uses ordinary file writes followed by native `reload`; Haskell
-`reloadSource` invokes the same operation. `readSourceModule` returns the issued
+`reloadSource []` invokes the same operation. `readSourceModule` returns the issued
 generation’s captured bytes and revision, which may differ from the current
-active head; `sourceStatus` distinguishes drafts. Source,
+active head; `sourceStatus` compares drafts with that issued generation. Source,
 compatible tool handlers and workspace prompts activate together. Changed
 configuration starts a fresh notebook; unchanged configuration preserves it.
 Keep durable definitions in `.hs` files. Conversation, owned resources and memory

@@ -345,8 +345,10 @@ bindings; `-` reads the cell from standard input and `--actors` prints the actor
 graph. See [the operator interface](operator-http.md).
 
 **Change code without restarting.** Edit ordinary `.hs` definitions and workspace
-prompt files, then call the native `reload` tool. Haskell `reloadSource` invokes
-the same operation. It prepares source, compatible AgentSpec handlers and
+prompt files, then call the native `reload` tool. Haskell `reloadSource []` invokes
+the same operation; its only argument is a list of additional modules to validate.
+Reload never commits files implicitly; Git commits are a separate choice.
+It prepares source, compatible AgentSpec handlers and
 workspace prompts together. Changed configuration replaces notebook bindings
 with a fresh notebook; unchanged configuration preserves them. Keep definitions
 you want to retain in `.hs` files. Conversation, owned resources and the published

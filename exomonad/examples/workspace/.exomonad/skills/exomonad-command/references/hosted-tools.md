@@ -21,7 +21,7 @@ ordinary suspended computation when later actions depend on its result.
 
 Schemas and dispatch derive from the same Haskell record. The declared surface
 is fixed for an actor incarnation. Edit source and call `reload` (or Haskell
-`reloadSource`) to publish compatible implementations together with workspace
+`reloadSource []`) to publish compatible implementations together with workspace
 prompts. A changed generation resets notebook bindings; unchanged reload preserves
 them. Changed tool names, descriptions, argument types or order refuse publication
 and require a new incarnation. Existing work and children retain their issued

@@ -195,7 +195,7 @@ exercise a failure path, and bring the result back to the design discussion.
 Distinguish proposed behavior, successful compilation and actual execution.
 
 Edit reusable definitions in ordinary `.hs` files and workspace instructions in
-prompt files, then call the native `reload` tool. Haskell `reloadSource` uses
+prompt files, then call the native `reload` tool. Haskell `reloadSource []` uses
 that same owner. Reload publishes one coherent selection of source, compatible
 tool implementations and workspace prompts. A changed selection starts a fresh
 notebook; an unchanged selection preserves its bindings. Keep durable definitions

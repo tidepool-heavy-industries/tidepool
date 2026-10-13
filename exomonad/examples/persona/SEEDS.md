@@ -26,9 +26,10 @@ Files resolve from the ordinary workspace root. `.exomonad/Persona/*.hs` and
 under `.exomonad/state`, excluded from source capture and drift.
 
 Read a draft with ordinary file access; inspect the issued generation’s captured
-code through `readSourceModule` and draft drift through `sourceStatus`. The issued
+code through `readSourceModule`; `sourceStatus` compares drafts with that issued
+generation. The issued
 generation may differ from the current active head. Write a revision, then call native `reload`
-or Haskell `reloadSource`. Source, compatible tools and workspace prompts publish
+or Haskell `reloadSource []`. Source, compatible tools and workspace prompts publish
 as one generation. Changed configuration starts a fresh notebook; unchanged
 configuration preserves bindings. Keep durable definitions in `.hs` files.
 Reload preserves conversation, resources and memory context, and does not refresh
