@@ -758,8 +758,52 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        let (recipe, resolved) =
-            self.installer_recipe(&source, granted_effects, supported_effects)?;
+        self.prepare_source_toolset_selected(
+            workload,
+            source,
+            granted_effects,
+            supported_effects,
+            registry,
+            None,
+        )
+        .await
+    }
+
+    pub async fn prepare_source_toolset_with_validation(
+        &self,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        source: crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+        registry: Arc<tidepool_runtime::session::ImageRegistry>,
+        validation: &SourceImports,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        self.prepare_source_toolset_selected(
+            workload,
+            source,
+            granted_effects,
+            supported_effects,
+            registry,
+            Some(validation),
+        )
+        .await
+    }
+
+    async fn prepare_source_toolset_selected(
+        &self,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        source: crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+        registry: Arc<tidepool_runtime::session::ImageRegistry>,
+        validation: Option<&SourceImports>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let (recipe, resolved) = self.installer_recipe_selected(
+            &source,
+            granted_effects,
+            supported_effects,
+            validation,
+        )?;
         let effects = recipe.effects.clone();
         if let Some(ready) = &self.prepared_toolset {
             let exact_selection = match ready.selection() {
@@ -831,6 +875,22 @@ impl ActorWorkbenchSource {
         ),
         ResidentActorWorkbenchError,
     > {
+        self.installer_recipe_selected(source, granted_effects, supported_effects, None)
+    }
+
+    fn installer_recipe_selected(
+        &self,
+        source: &crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+        validation: Option<&SourceImports>,
+    ) -> Result<
+        (
+            crate::agent_spec::preparation::InstallerRecipe,
+            crate::agent_spec::ResolvedSpec,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         let mut effects = Vec::new();
         for key in granted_effects {
             if supported_effects.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
@@ -839,16 +899,23 @@ impl ActorWorkbenchSource {
                 effects.push(*key);
             }
         }
-        let mut roots = self.toolset_support.to_vec();
-        roots.extend(source.include_paths().iter().cloned());
+        let roots = if source.generation_evidence().is_some() {
+            source.include_paths().to_vec()
+        } else {
+            let mut roots = self.toolset_support.to_vec();
+            roots.extend(source.include_paths().iter().cloned());
+            roots
+        };
         let roots = roots
             .into_iter()
             .map(std::fs::canonicalize)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let resolved = crate::agent_spec::resolve(roots.clone(), self.spec.as_deref());
-        let builtin = if let Some(policy) =
-            builtin_toolset_policy(resolved.rule, &effects, supported_effects)
+        let builtin = if let Some(policy) = validation
+            .is_none()
+            .then(|| builtin_toolset_policy(resolved.rule, &effects, supported_effects))
+            .flatten()
         {
             // Observe the current deployment selection before reusing issuer-owned
             // readiness. This reads metadata without decoding its native images.
@@ -906,7 +973,11 @@ impl ActorWorkbenchSource {
                 .toolset_support_manifests
                 .get()
                 .expect("support acquired");
-            let ordered = support.iter().chain(manifests).cloned().collect::<Vec<_>>();
+            let ordered = if source.generation_evidence().is_some() {
+                manifests.to_vec()
+            } else {
+                support.iter().chain(manifests).cloned().collect::<Vec<_>>()
+            };
             tidepool_toolchain::cache::source_manifests_identity(
                 b"exomonad-agent-spec-ordered-source-closure-v1",
                 &ordered,
@@ -926,6 +997,9 @@ impl ActorWorkbenchSource {
         let mut imports = SourceImports::default();
         if let Some((module, _)) = entry.rsplit_once('.') {
             imports.extend_text(&format!("qualified {module}"));
+        }
+        if let Some(validation) = validation {
+            imports.extend(validation);
         }
         imports.extend_text("qualified Tidepool.Agent.Contract");
         imports.extend_text("qualified Tidepool.Effects.Core");
@@ -5146,6 +5220,17 @@ where
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         granted_effects: Vec<crate::ActorEffectKey>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        self.prepare_toolset_selected(context, workload, granted_effects, None)
+            .await
+    }
+
+    async fn prepare_toolset_selected(
+        &self,
+        context: crate::ActorSessionContext,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        validation: Option<&SourceImports>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
         let source_support = self.access.source.installed_effect_support().to_vec();
         let observer = self.access.handler_effect_support.clone();
         let admitted_support = self
@@ -5176,12 +5261,13 @@ where
         let selected = self
             .access
             .source
-            .prepare_source_toolset(
+            .prepare_source_toolset_selected(
                 workload,
                 toolset_source.clone(),
                 &granted_effects,
                 &admitted_support,
                 Arc::clone(&registry),
+                validation,
             )
             .await;
         match selected {
@@ -5191,12 +5277,13 @@ where
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 self.access
                     .source
-                    .prepare_source_toolset(
+                    .prepare_source_toolset_selected(
                         workload,
                         fresh,
                         &granted_effects,
                         &admitted_support,
                         registry,
+                        validation,
                     )
                     .await
             }
@@ -5220,6 +5307,7 @@ where
             install,
             granted_effects,
             ToolInstallationPurpose::InitialTools,
+            None,
         )
     }
 
@@ -5229,6 +5317,7 @@ where
         context: crate::ActorSessionContext,
         install: u64,
         granted_effects: Vec<exomonad_tool::ActorEffectKey>,
+        validation: SourceImports,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
@@ -5238,6 +5327,7 @@ where
             install,
             granted_effects,
             ToolInstallationPurpose::CandidateTools,
+            Some(validation),
         )
     }
 
@@ -5247,6 +5337,7 @@ where
         install: u64,
         granted_effects: Vec<exomonad_tool::ActorEffectKey>,
         purpose: ToolInstallationPurpose,
+        validation: Option<SourceImports>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
@@ -5255,10 +5346,11 @@ where
         Box::pin(
             async move {
                 let ready = self
-                    .prepare_toolset_only(
+                    .prepare_toolset_selected(
                         context.clone(),
                         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                         granted_effects.clone(),
+                        validation.as_ref(),
                     )
                     .await?;
                 self.install_tools_action(
@@ -17832,7 +17924,12 @@ pub(crate) mod request_tests {
                 .unwrap();
             let candidate = Arc::new(
                 workbench
-                    .prepare_candidate_tools(context.clone(), 3 + index as u64, vec![])
+                    .prepare_candidate_tools(
+                        context.clone(),
+                        3 + index as u64,
+                        vec![],
+                        SourceImports::new(),
+                    )
                     .await
                     .unwrap(),
             );
