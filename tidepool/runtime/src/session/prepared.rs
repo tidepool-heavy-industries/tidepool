@@ -11960,6 +11960,8 @@ pub(super) mod tests {
         wire.constructors.push(wrapper);
         let family = wire.constructors[0].identity.family.clone();
         let wrapper_family = wire.constructors[2].identity.family.clone();
+        let mut int_prim = testing::identity("GHC.Prim", "Int#");
+        int_prim.namespace = "type".into();
         wire.types = prepared_data::type_graph(
             vec![
                 TypeNode::Root {
@@ -11988,7 +11990,7 @@ pub(super) mod tests {
                     identity: wire.constructors[1].identity.clone(),
                 },
                 TypeNode::Declaration {
-                    identity: testing::type_identity(testing::identity("GHC.Prim", "Int#")),
+                    identity: testing::type_identity(int_prim),
                     parameters: vec![],
                     form: DeclarationForm::Scalar(RuntimeRep::Int(64)),
                     restriction: SyntaxRestriction::None,
