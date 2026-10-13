@@ -62,7 +62,6 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         let mut machine = ResidentSession::unbootstrapped(
             host_handlers(
                 run_root.path(),
-                None,
                 journal,
                 RepoEventHandler::with_source(
                     Box::new(InertObservationSource),

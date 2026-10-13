@@ -12,7 +12,6 @@ pub mod kv;
 pub mod llm;
 pub mod meta;
 pub mod model;
-pub mod source;
 pub mod time;
 pub mod worktree;
 
@@ -29,7 +28,6 @@ pub use kv::*;
 pub use llm::*;
 pub use meta::*;
 pub use model::*;
-pub use source::*;
 pub use time::*;
 pub use worktree::*;
 

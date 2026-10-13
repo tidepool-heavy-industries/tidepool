@@ -1886,12 +1886,8 @@ mod tests {
         let inert =
             RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
         let active = RepoEventHandler::with_source(Box::new(Active), EventConfig::default());
-        let inert_stack =
-            frunk::hlist![crate::handlers::source::SourceHandler::unavailable(), inert];
-        let active_stack = frunk::hlist![
-            crate::handlers::source::SourceHandler::unavailable(),
-            active
-        ];
+        let inert_stack = frunk::hlist![inert];
+        let active_stack = frunk::hlist![active];
         assert!(inert_stack.installed_effect_support().is_empty());
         assert_eq!(
             active_stack.installed_effect_support(),

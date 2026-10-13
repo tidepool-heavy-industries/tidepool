@@ -232,21 +232,18 @@ type ExomonadApplicationStack = HCons<
 >;
 
 type ExomonadHandlerStack = HCons<
-    tidepool_handlers::SourceHandler,
+    tidepool_handlers::JournalHandler,
     HCons<
-        tidepool_handlers::JournalHandler,
+        RepoEventHandler,
         HCons<
-            RepoEventHandler,
+            ActorBoundWorktreeHandler,
             HCons<
-                ActorBoundWorktreeHandler,
+                ActorWorktreeRegistryHandler,
                 HCons<
-                    ActorWorktreeRegistryHandler,
+                    ActorWorktreeAllocationHandler,
                     HCons<
-                        ActorWorktreeAllocationHandler,
-                        HCons<
-                            ActorWorktreeIntegrationHandler,
-                            HCons<ActorWorktreeHandler, ExomonadApplicationStack>,
-                        >,
+                        ActorWorktreeIntegrationHandler,
+                        HCons<ActorWorktreeHandler, ExomonadApplicationStack>,
                     >,
                 >,
             >,
@@ -257,13 +254,11 @@ type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
 
 fn host_handlers(
     workspace_root: &Path,
-    source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     journal: tidepool_handlers::JournalHandler,
     events: RepoEventHandler,
     worktrees: ActorWorktreeHandler,
 ) -> ExomonadHandlerStack {
     hlist![
-        source_handler(source),
         journal,
         events,
         ActorBoundWorktreeHandler::new(worktrees.clone()),
@@ -3394,15 +3389,6 @@ pub(crate) fn source_service(
     )))
 }
 
-fn source_handler(
-    service: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
-) -> tidepool_handlers::SourceHandler {
-    match service {
-        Some(service) => tidepool_handlers::SourceHandler::new(service.clone()),
-        None => tidepool_handlers::SourceHandler::unavailable(),
-    }
-}
-
 /// The candidate source layer a driver compile reads, when it is not the one
 /// the run has published.
 struct CandidateSources<'a> {
@@ -3723,7 +3709,6 @@ fn compile_root(
     // `bridge/handlers/src/handlers/event.rs`).
     let child_workspace_inputs = config.workspace_inputs.clone();
     let child_include = include.clone();
-    let child_source_service = source.cloned();
     let child_journal = journal.clone();
     let child_worktree_handler = worktree_handler.clone();
     let child_run_root = run_root.to_path_buf();
@@ -3777,7 +3762,6 @@ fn compile_root(
         let mut machine = ResidentSession::unbootstrapped(
             host_handlers(
                 &child_workspace_root,
-                child_source_service.as_ref(),
                 child_journal.clone(),
                 child_event_handler,
                 child_worktree_handler,
@@ -3796,13 +3780,7 @@ fn compile_root(
         Ok(Box::new(machine))
     });
     let mut machine = ResidentSession::unbootstrapped(
-        host_handlers(
-            &config.workspace,
-            source,
-            journal,
-            event_handler,
-            worktree_handler,
-        ),
+        host_handlers(&config.workspace, journal, event_handler, worktree_handler),
         CapturedOutput::new(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
@@ -3995,7 +3973,6 @@ pub(crate) async fn prepare_workspace_toolsets(
     );
     let handlers = host_handlers(
         runtime_directory.path(),
-        Some(&source),
         tidepool_handlers::JournalHandler::new(tidepool_handlers::SegmentPath::create_exclusive(
             runtime_directory.path().join("journal.jsonl"),
         )?)?,
