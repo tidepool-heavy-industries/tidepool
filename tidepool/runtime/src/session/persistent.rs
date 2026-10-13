@@ -6047,7 +6047,7 @@ mod checkpoint_scope_tests {
         ));
         let mut visible = false;
         let result = session
-            .commit_notebook_generation(prepared, &decision, |readiness| {
+            .commit_notebook_generation_continuing(prepared, &decision, |readiness| {
                 visible = true;
                 assert_eq!(readiness.durable_owner(), &owner_b);
                 assert!(readiness.is_current());
@@ -6057,23 +6057,43 @@ mod checkpoint_scope_tests {
         assert!(visible);
         assert!(matches!(
             result,
+            DurablePublicOwnerPublication::CommittedContinuing {
+                cancellation_pending: false,
+                ..
+            }
+        ));
+        assert_eq!(decision.phase(), crate::session::PublicationPhase::Running);
+        assert!(ready_a.is_ready());
+        session.validate_lexical_scope_lease(a, &lease_a).unwrap();
+        assert!(session.begin_durable_private_execution(&owner, a).is_ok());
+        assert!(session.lib().current_exact_context_in(b).is_none());
+
+        let head_b = store
+            .active_notebook_generation(RecoveryDomainId::Root, &owner)
+            .unwrap()
+            .unwrap();
+        let c = session.mint_isolated_scope();
+        let prepared_c = session
+            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3))
+            .unwrap();
+        let owner_c = prepared_c.owner().clone();
+        assert!(matches!(
+            session
+                .commit_notebook_generation(prepared_c, &decision, |_| {})
+                .unwrap(),
             DurablePublicOwnerPublication::Committed(_)
         ));
         assert_eq!(
             decision.phase(),
             crate::session::PublicationPhase::Published
         );
-        assert!(ready_a.is_ready());
-        session.validate_lexical_scope_lease(a, &lease_a).unwrap();
-        assert!(session.begin_durable_private_execution(&owner, a).is_ok());
-        assert!(session.lib().current_exact_context_in(b).is_none());
         assert_eq!(
             store
                 .active_notebook_generation(RecoveryDomainId::Root, &owner)
                 .unwrap()
                 .unwrap()
                 .owner,
-            owner_b
+            owner_c
         );
         assert!(store
             .read_public_owner(RecoveryDomainId::Root, &owner)
