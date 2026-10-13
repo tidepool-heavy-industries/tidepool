@@ -94,6 +94,18 @@ pub struct ConstructorIdentity {
     pub family: TypeIdentity,
 }
 
+/// Shared nominal identity grammar for outer carriers. The caller owns the
+/// text budget and validation of the resulting carrier's semantic contract.
+pub fn encode_type_identity_value(identity: &TypeIdentity) -> ciborium::value::Value {
+    symbol::encode_type(identity)
+}
+pub fn decode_type_identity_value(
+    value: &ciborium::value::Value,
+    text: impl FnMut(&ciborium::value::Value, &str) -> Result<String, ParseError>,
+) -> Result<TypeIdentity, ParseError> {
+    symbol::decode_type(value, text)
+}
+
 /// Canonical definite-length CBOR used by the compiler's constructor-ID issuer.
 /// This encodes complete authority; Rust does not issue numeric constructor IDs.
 pub fn canonical_constructor_identity_bytes(identity: &ConstructorIdentity) -> Vec<u8> {
