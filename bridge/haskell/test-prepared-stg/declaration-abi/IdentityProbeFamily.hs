@@ -8,7 +8,7 @@ import IdentityReexport (Text)
 import Control.Monad.Freer (Eff)
 
 data Signal a = Signal
-data ImportedControls = ImportedControls Text Direct.Text (Eff '[Signal] Text)
+data ImportedControls = ImportedControls Text Direct.Text (Eff '[Signal] Text) Ordering
 
 
 data Public = Pub0 Int | Pub1 Int

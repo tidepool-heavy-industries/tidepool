@@ -176,11 +176,27 @@ declarationAbiIdentityRegression = bracket scratch removePathForcibly $ \directo
               Just (tc,_) -> resolveTypeIdentity fresh tc
               Nothing -> error "imported control lacks a nominal head") (dataConOrigArgTys con))
           _ -> fail "identity variant lost its imported Text/effect control"
-        assert (length imported == 3 && imported !! 0 == imported !! 1)
+        assert (length imported == 4 && imported !! 0 == imported !! 1)
           "Text reexport changed its exact defining identity"
         assert (symbolModule (typeSymbol (imported !! 0)) == "Data.Text.Internal"
             && symbolModule (typeSymbol (imported !! 2)) == "Control.Monad.Freer.Internal")
           "imported Text/effect identity borrowed the probe's owner"
+        let orderingIdentity = imported !! 3
+            orderingTyCon = case
+              [tc | con <- constructors,
+                occNameString (nameOccName (dataConName con)) == "ImportedControls",
+                field <- drop 3 (dataConOrigArgTys con),
+                Just (tc,_) <- [splitTyConApp_maybe (scaledThing field)]] of
+              [tc] -> tc
+              _ -> error "imported Ordering control lacks a unique nominal head"
+        orderingConstructors <- require (traverse (issueConstructor fresh) (tyConDataCons orderingTyCon))
+        orderingRows <- either (fail . show) pure (metadataForConstructors orderingConstructors)
+        assert (symbolOccurrence (typeSymbol orderingIdentity) == "Ordering"
+            && case typeVersion orderingIdentity of GhcAbi _ _ -> True; _ -> False)
+          "actual demanded Ordering did not retain its package declaration ABI"
+        assert (length orderingRows == 3
+            && all ((== orderingIdentity) . constructorType . dcmIdentity) orderingRows)
+          "actual Ordering constructors did not preserve their issued family in metadata"
         let types = Map.fromList [(symbolOccurrence (typeSymbol identity),identity) | identity <- freshTypes]
             cons = Map.fromList [(symbolOccurrence (constructorSymbol (issuedConstructorIdentity con)),
               (issuedConstructorIdentity con,issuedConstructorHostId con)) | con <- freshCons]
