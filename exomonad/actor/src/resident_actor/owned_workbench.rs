@@ -1879,7 +1879,9 @@ where
                                 ),
                             };
                             let pending = ParkedWorkbenchEffect {
-                                wait: OwnedWorkbenchWait::Prepared(operation),
+                                wait: OwnedWorkbenchWait::Prepared(
+                                    commands::CommandResolution::ordinary(operation),
+                                ),
                                 display,
                                 ..pending
                             };
@@ -1935,7 +1937,9 @@ where
                         ));
                         let pending = ParkedWorkbenchEffect {
                             display: pending.display,
-                            wait: OwnedWorkbenchWait::Prepared(operation),
+                            wait: OwnedWorkbenchWait::Prepared(
+                                commands::CommandResolution::ordinary(operation),
+                            ),
                             ordinal: pending.ordinal,
                             effect: pending.effect,
                             started: pending.started,
@@ -2852,7 +2856,7 @@ where
         OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::Display { .. } => {
             unreachable!("child launch requires fenced actor application")
         }
-        OwnedWorkbenchWait::Prepared(operation) => operation.await,
+        OwnedWorkbenchWait::Prepared(operation) => return operation.await,
         OwnedWorkbenchWait::RetainCommandBinding {
             continuation,
             operation,
@@ -2974,15 +2978,7 @@ where
             return result;
         }
     };
-    commands::CommandResolution {
-        disposition: match &result {
-            Ok(_) => WorkbenchOperationDisposition::Committed,
-            Err(error) => disposition_for_non_command_failure(error),
-        },
-        outcome: result,
-        started_job: None,
-        retained_job_binding: None,
-    }
+    commands::CommandResolution::from_outcome(result)
 }
 
 pub(super) async fn await_external<H, O>(

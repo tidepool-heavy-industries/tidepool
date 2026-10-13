@@ -220,7 +220,8 @@ where
                         &crate::CallAncestry::begin(context.actor),
                         boundary,
                     )
-                    .await;
+                    .await
+                    .outcome;
             }
             boundary => {
                 let boundary = prepare_execution_effect(context, &owner, boundary);
@@ -283,7 +284,8 @@ where
                                 &crate::CallAncestry::begin(context.actor),
                                 boundary,
                             )
-                            .await;
+                            .await
+                            .outcome;
                     }
                 }
             }

@@ -3108,12 +3108,7 @@ enum OwnedWorkbenchWait {
         operation: Option<WorkbenchOperationId>,
     },
     Launch(Box<child_launch::PreparedChildLaunch>),
-    Prepared(
-        futures_util::future::BoxFuture<
-            'static,
-            Result<ResidentOutcome, ResidentActorWorkbenchError>,
-        >,
-    ),
+    Prepared(futures_util::future::BoxFuture<'static, commands::CommandResolution>),
     RetainCommandBinding {
         continuation: ResidentHole,
         operation: futures_util::future::BoxFuture<
@@ -5524,10 +5519,7 @@ where
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<
-            futures_util::future::BoxFuture<
-                'static,
-                Result<ResidentOutcome, ResidentActorWorkbenchError>,
-            >,
+            futures_util::future::BoxFuture<'static, commands::CommandResolution>,
             ResidentActorBoundary,
         >,
     > {
@@ -5551,13 +5543,16 @@ where
             ResidentActorBoundary::Source {
                 continuation,
                 request,
-            } => self.prepare_source_effect(
-                context,
-                effect_owner.issued_snapshot().cloned(),
-                control,
-                continuation,
-                request,
-            ),
+            } => {
+                let operation = self.prepare_source_effect(
+                    context,
+                    effect_owner.issued_snapshot().cloned(),
+                    control,
+                    continuation,
+                    request,
+                );
+                return Box::pin(std::future::ready(Ok(operation)));
+            }
             ResidentActorBoundary::Form {
                 continuation,
                 operation,
@@ -5666,7 +5661,7 @@ where
                             .resume_spec_replacement(context, continuation, result)
                             .await
                     });
-                    Ok(operation)
+                    Ok(commands::CommandResolution::ordinary(operation))
                 });
             }
 
@@ -5727,7 +5722,7 @@ where
                             .resume_value(context, continuation, result)
                             .await
                     });
-                    Ok(operation)
+                    Ok(commands::CommandResolution::ordinary(operation))
                 })
             }
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
@@ -6101,7 +6096,9 @@ where
             }),
             other => return Box::pin(std::future::ready(Err(other))),
         };
-        Box::pin(std::future::ready(Ok(operation)))
+        Box::pin(std::future::ready(Ok(
+            commands::CommandResolution::ordinary(operation),
+        )))
     }
 
     async fn expand_display(
@@ -6152,8 +6149,21 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.resolve_effect_resolution(kernel, context, effect_owner, ancestry, boundary)
+            .await
+            .outcome
+    }
+
+    async fn resolve_effect_resolution(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
+        ancestry: &crate::CallAncestry,
+        boundary: ResidentActorBoundary,
+    ) -> commands::CommandResolution {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
-        let (boundary, display) = self
+        let prepared = self
             .prepare_display_boundary(
                 context,
                 boundary,
@@ -6161,8 +6171,11 @@ where
                 None,
                 None,
             )
-            .await?;
-        let _ = display;
+            .await;
+        let (boundary, _) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return commands::CommandResolution::from_outcome(Err(error)),
+        };
         let boundary = match self
             .prepare_independent_effect(kernel, context, &effect_owner, boundary)
             .await
@@ -6170,8 +6183,10 @@ where
             Ok(operation) => return operation.await,
             Err(boundary) => boundary,
         };
-        self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
-            .await
+        commands::CommandResolution::from_outcome(
+            self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
+                .await,
+        )
     }
 
     fn prepare_actor_effect<'a>(
@@ -9459,7 +9474,7 @@ where
                                         unit.recovered_bindings,
                                     )?;
                                 }
-                                let (resolved, command_disposition) = match boundary {
+                                let (resolved, effect_disposition) = match boundary {
                                     ResidentActorBoundary::Command {
                                         continuation,
                                         request,
@@ -9506,7 +9521,7 @@ where
                                                 boundary,
                                             )
                                             .await;
-                                        (outcome, None)
+                                        (outcome.outcome, Some(outcome.disposition))
                                     }
                                 };
                                 current.outcome = Some(match resolved {
@@ -9522,7 +9537,7 @@ where
                                             effect_started.elapsed(),
                                             scoped_operation_disposition(
                                                 success_disposition,
-                                                command_disposition.unwrap_or(
+                                                effect_disposition.unwrap_or(
                                                     WorkbenchOperationDisposition::Committed,
                                                 ),
                                             ),
@@ -9541,7 +9556,7 @@ where
                                             effect_started.elapsed(),
                                             scoped_operation_disposition(
                                                 success_disposition,
-                                                command_disposition.unwrap_or_else(|| {
+                                                effect_disposition.unwrap_or_else(|| {
                                                     disposition_for_non_command_failure(&error)
                                                 }),
                                             ),

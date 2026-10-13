@@ -3362,7 +3362,7 @@ impl ResidentActorBoundary {
                     | crate::generated::source::SourceReq::SourceStatusWith,
                 ..
             } => WorkbenchOperationDisposition::Read,
-            Self::Source { .. } => WorkbenchOperationDisposition::Staged,
+            Self::Source { .. } => WorkbenchOperationDisposition::Committed,
             Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
                 WorkbenchOperationDisposition::Read
             }

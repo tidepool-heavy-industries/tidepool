@@ -421,9 +421,15 @@ where
         owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+    ) -> commands::CommandResolution {
         self.invocation
-            .drive(behavior.resolve_effect(kernel, &self.context, owner, ancestry, boundary))
+            .drive(behavior.resolve_effect_resolution(
+                kernel,
+                &self.context,
+                owner,
+                ancestry,
+                boundary,
+            ))
             .await
     }
 }
