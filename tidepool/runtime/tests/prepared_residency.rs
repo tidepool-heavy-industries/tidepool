@@ -963,6 +963,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         .root_head
         .as_mut()
         .unwrap()
+        .symbol
         .unit
         .push_str("-foreign");
     assert!(

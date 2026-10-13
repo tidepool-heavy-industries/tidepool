@@ -478,7 +478,29 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tidepool_repr::datacon::DataCon;
+    use tidepool_repr::execution_schema::{
+        ConstructorIdentity, SymbolIdentity, TypeIdentity, TypeVersion,
+    };
     use tidepool_repr::types::DataConId;
+
+    fn test_constructor_identity(module: &str, name: &str, family: &str) -> ConstructorIdentity {
+        let symbol = SymbolIdentity {
+            unit: "fixture".into(),
+            module: module.into(),
+            namespace: "constructor".into(),
+            occurrence: name.into(),
+            record_parent: None,
+        };
+        let family = TypeIdentity {
+            symbol: SymbolIdentity {
+                namespace: "type".into(),
+                occurrence: family.into(),
+                ..symbol.clone()
+            },
+            version: TypeVersion::GhcAbi([0; 16]),
+        };
+        ConstructorIdentity { symbol, family }
+    }
 
     fn test_table() -> DataConTable {
         let mut t = DataConTable::new();
@@ -503,13 +525,24 @@ mod tests {
         ];
         for (id, name, arity) in cons {
             t.insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: name.to_owned(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity(
+                    "Fixture",
+                    name,
+                    match name {
+                        "Nothing" | "Just" => "Maybe",
+                        "True" | "False" => "Bool",
+                        "I#" => "Int",
+                        "C#" => "Char",
+                        ":" | "[]" => "[]",
+                        "Text" => "Text",
+                        "(,)" => "(,)",
+                        "(,,)" => "(,,)",
+                        "ByteArray" => "ByteArray#",
+                        "W#" => "Word",
+                        "IS" | "IP" | "IN" => "Integer",
+                        other => other,
+                    },
+                ),
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,
@@ -792,13 +825,7 @@ mod tests {
         let hit_id = DataConId(100);
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Tidepool.Records".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Hit".into(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity("Tidepool.Records", "Hit", "Record"),
                 id: hit_id,
                 name: "Hit".into(),
                 tag: 1,
@@ -844,13 +871,7 @@ mod tests {
         let outer_id = DataConId(102);
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Loc".into(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity("Fixture", "Loc", "Loc"),
                 id: inner_id,
                 name: "Loc".into(),
                 tag: 1,
@@ -862,13 +883,7 @@ mod tests {
             .expect("valid fixture metadata");
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Node".into(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity("Fixture", "Node", "Node"),
                 id: outer_id,
                 name: "Node".into(),
                 tag: 1,
@@ -899,13 +914,7 @@ mod tests {
         let con_id = DataConId(103);
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "FileApplied".into(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity("Fixture", "FileApplied", "File"),
                 id: con_id,
                 name: "FileApplied".into(),
                 tag: 1,
@@ -936,13 +945,7 @@ mod tests {
         let con_id = DataConId(104);
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Weird".into(),
-                    record_parent: None,
-                },
+                identity: test_constructor_identity("Fixture", "Weird", "Weird"),
                 id: con_id,
                 name: "Weird".into(),
                 tag: 1,

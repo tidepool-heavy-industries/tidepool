@@ -79,7 +79,7 @@ pub struct BoundBinder {
     /// Exact nominal root of the persisted binding type, when its outer type
     /// is a type constructor. This is compiler-issued structural evidence,
     /// never parsed from `type_display` or inferred from nested type heads.
-    pub root_head: Option<NominalHead>,
+    pub root_head: Option<tidepool_repr::execution_schema::TypeIdentity>,
     /// The authenticated shipped type surface this binder belongs to, when it
     /// is one of the closed set the resident host can construct.
     pub host_authority: Option<HostBindingAuthority>,
@@ -1830,9 +1830,7 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
         binder
             .root_head
             .as_ref()
-            .map(|head| {
-                CborValue::Array(vec![text(&head.unit), text(&head.module), text(&head.name)])
-            })
+            .map(tidepool_repr::execution_schema::encode_type_identity_value)
             .unwrap_or(CborValue::Null),
         binder
             .host_authority
@@ -4858,14 +4856,21 @@ pub(super) fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileE
     let type_display = cbor_expect_text(&arr[4], "BoundBinder typeDisplay")?.to_string();
     let root_head = match &arr[5] {
         CborValue::Null => None,
-        head => {
-            let head = cbor_expect_array_len(head, 3, "BoundBinder nominal root")?;
-            Some(NominalHead {
-                unit: cbor_expect_text(&head[0], "BoundBinder root unit")?.to_owned(),
-                module: cbor_expect_text(&head[1], "BoundBinder root module")?.to_owned(),
-                name: cbor_expect_text(&head[2], "BoundBinder root name")?.to_owned(),
+        head => Some(
+            tidepool_repr::execution_schema::decode_type_identity_value(head, |value, label| {
+                match value {
+                    CborValue::Text(text) => Ok(text.clone()),
+                    _ => Err(tidepool_repr::execution_schema::ParseError::Malformed(
+                        format!("{label} must be text"),
+                    )),
+                }
             })
-        }
+            .map_err(|error| {
+                CompileError::ExtractFailed(format!(
+                    "TurnOut CBOR: BoundBinder nominal root: {error}"
+                ))
+            })?,
+        ),
     };
     let host_authority = match &arr[6] {
         CborValue::Null => None,
@@ -10014,6 +10019,38 @@ mod tests {
     }
 
     #[test]
+    fn bound_binder_type_identity_roundtrip_and_legacy_refusal() {
+        use tidepool_repr::execution_schema::{testing, TypeVersion};
+        for version in [TypeVersion::WiredIn, TypeVersion::GhcAbi([17; 16])] {
+            let mut root = testing::type_identity(testing::identity("Data.Text.Internal", "Text"));
+            root.version = version;
+            let binder = BoundBinder {
+                name: "text".into(),
+                var_id: 42,
+                module: "Tidepool.Session.Val.G3".into(),
+                tier: ValueTier::ForceData,
+                type_display: "Text".into(),
+                root_head: Some(root.clone()),
+                host_authority: Some(HostBindingAuthority::Text),
+            };
+            let mut encoded = encode_bound_binder_authority(&binder);
+            assert_eq!(decode_bound_binder(&encoded).unwrap().root_head, Some(root));
+            let CborValue::Array(fields) = &mut encoded else {
+                unreachable!()
+            };
+            fields[5] = CborValue::Array(vec![
+                CborValue::Text("main".into()),
+                CborValue::Text("Data.Text.Internal".into()),
+                CborValue::Text("Text".into()),
+            ]);
+            assert!(
+                decode_bound_binder(&encoded).is_err(),
+                "legacy spelling-only roots carry no type version"
+            );
+        }
+    }
+
+    #[test]
     fn decode_turn_out_bind_variant() {
         let v = CborValue::Array(vec![
             CborValue::Text("Bind".into()),
@@ -10026,11 +10063,11 @@ mod tests {
                     CborValue::Text("Tidepool.Session.Val.G3".into()),
                     CborValue::Text("ForceData".into()),
                     CborValue::Text("Int".into()),
-                    CborValue::Array(vec![
-                        CborValue::Text("main".into()),
-                        CborValue::Text("GHC.Types".into()),
-                        CborValue::Text("Int".into()),
-                    ]),
+                    tidepool_repr::execution_schema::encode_type_identity_value(
+                        &tidepool_repr::execution_schema::testing::type_identity(
+                            tidepool_repr::execution_schema::testing::identity("GHC.Types", "Int"),
+                        ),
+                    ),
                     CborValue::Null,
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
@@ -10065,9 +10102,9 @@ mod tests {
                 assert_eq!(bound[0].host_authority, None);
                 assert_eq!(
                     bound[0].root_head.as_ref().map(|head| (
-                        head.unit.as_str(),
-                        head.module.as_str(),
-                        head.name.as_str(),
+                        head.symbol.unit.as_str(),
+                        head.symbol.module.as_str(),
+                        head.symbol.occurrence.as_str(),
                     )),
                     Some(("main", "GHC.Types", "Int")),
                 );

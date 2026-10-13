@@ -20,6 +20,7 @@ use tidepool_codegen::prepared_program::{
 };
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity,
+    TypeIdentity,
 };
 
 use super::admission::CheckedTurnCompletion;
@@ -38,7 +39,7 @@ use tidepool_repr::{
 
 use crate::render::EvalResult;
 use crate::timing;
-use crate::{NominalHead, RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
 enum ResidentResumeInput {
     Response(Response),
@@ -759,7 +760,7 @@ impl HostRepresentation {
 struct HostCarrierShape {
     tier: ValueTier,
     type_display: String,
-    root: NominalHead,
+    root: TypeIdentity,
 }
 
 enum HostCarrierOrigin {
@@ -1029,26 +1030,22 @@ fn host_mount_failure(detail: impl Into<String>) -> ResidentError {
 
 fn exact_host_constructor(
     code: &TurnCode<'_>,
-    root: &NominalHead,
+    root: &TypeIdentity,
     occurrence: &str,
     fields: &[RuntimeRep],
 ) -> Result<DataConId, ResidentError> {
     let mut rows = code.prepared().constructors().iter().filter(|row| {
-        row.family.unit == root.unit
-            && row.family.module == root.module
-            && row.family.namespace == "type"
-            && row.family.occurrence == root.name
-            && row.family.record_parent.is_none()
-            && row.identity.unit == root.unit
-            && row.identity.module == root.module
-            && row.identity.namespace == "constructor"
-            && row.identity.occurrence == occurrence
-            && row.identity.record_parent.is_none()
+        row.identity.family == *root
+            && row.identity.symbol.unit == root.symbol.unit
+            && row.identity.symbol.module == root.symbol.module
+            && row.identity.symbol.namespace == "constructor"
+            && row.identity.symbol.occurrence == occurrence
+            && row.identity.symbol.record_parent.is_none()
     });
     let row = rows.next().ok_or_else(|| {
         host_mount_failure(format!(
             "host mount lacks exact constructor {}:{}:{occurrence}",
-            root.unit, root.module
+            root.symbol.unit, root.symbol.module
         ))
     })?;
     if rows.any(|other| other != row)
@@ -1074,25 +1071,21 @@ fn exact_host_constructor(
 // A second same-spelling Text owner makes this bundle ambiguous and is refused.
 fn authenticated_text_constructor(code: &TurnCode<'_>) -> Result<DataConId, ResidentError> {
     let mut roots = code.prepared().constructors().iter().filter(|row| {
-        !row.family.unit.is_empty()
-            && row.family.module == "Data.Text.Internal"
-            && row.family.namespace == "type"
-            && row.family.occurrence == "Text"
-            && row.family.record_parent.is_none()
+        !row.identity.family.symbol.unit.is_empty()
+            && row.identity.family.symbol.module == "Data.Text.Internal"
+            && row.identity.family.symbol.namespace == "type"
+            && row.identity.family.symbol.occurrence == "Text"
+            && row.identity.family.symbol.record_parent.is_none()
     });
     let row = roots
         .next()
         .ok_or_else(|| host_mount_failure("host mount has no authenticated Text representation"))?;
-    if roots.any(|other| other.family != row.family) {
+    if roots.any(|other| other.identity.family != row.identity.family) {
         return Err(host_mount_failure("host mount has conflicting Text owners"));
     }
     exact_host_constructor(
         code,
-        &NominalHead {
-            unit: row.family.unit.clone(),
-            module: row.family.module.clone(),
-            name: row.family.occurrence.clone(),
-        },
+        &row.identity.family,
         "Text",
         &[
             RuntimeRep::UnliftedRef,
@@ -1106,13 +1099,18 @@ fn host_representation(
     binder: &BoundBinder,
     code: &TurnCode<'_>,
     expected: HostBindingType,
-) -> Result<(NominalHead, HostRepresentation), ResidentError> {
+) -> Result<(TypeIdentity, HostRepresentation), ResidentError> {
     require_host_binding_authority(binder, expected)?;
     let root = binder
         .root_head
         .as_ref()
         .ok_or_else(|| host_mount_failure("compiled host binder lacks its nominal root"))?;
-    if root.unit.is_empty() || root.module != expected.module || root.name != expected.name {
+    if root.symbol.unit.is_empty()
+        || root.symbol.module != expected.module
+        || root.symbol.occurrence != expected.name
+        || root.symbol.namespace != "type"
+        || root.symbol.record_parent.is_some()
+    {
         return Err(host_mount_failure(
             "compiled host binder differs from its authenticated nominal root",
         ));
@@ -1151,13 +1149,7 @@ fn host_representation(
                 if constructors
                     .iter()
                     .find(|row| row.host_id == id)
-                    .is_none_or(|row| {
-                        row.family.unit != root.unit
-                            || row.family.module != root.module
-                            || row.family.namespace != "type"
-                            || row.family.occurrence != root.name
-                            || row.family.record_parent.is_some()
-                    })
+                    .is_none_or(|row| row.identity.family != *root)
                 {
                     return Err(host_mount_failure(
                         "host JSON layout disagrees with its original nominal root",
@@ -9328,8 +9320,7 @@ mod authored_publication_tests {
             );
             family.namespace = "type".into();
             wire.constructors.push(ConstructorDecl {
-                identity,
-                family,
+                identity: testing::constructor_identity(identity, family),
                 host_id: DataConId(900 + index as u64),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: if index == 1 { 2 } else { 1 },
@@ -9393,15 +9384,15 @@ mod authored_publication_tests {
                 .insert_checked(tidepool_repr::DataCon {
                     identity: constructor.identity.clone(),
                     id: constructor.host_id,
-                    name: constructor.identity.occurrence.clone(),
+                    name: constructor.identity.symbol.occurrence.clone(),
                     tag: constructor.tag,
                     rep_arity: constructor.field_reps.len() as u32,
                     field_bangs: vec![],
                     qualified_name: Some(format!(
                         "{}.{}",
-                        constructor.identity.module, constructor.identity.occurrence
+                        constructor.identity.symbol.module, constructor.identity.symbol.occurrence
                     )),
-                    type_name: constructor.family.occurrence.clone(),
+                    type_name: constructor.identity.family.symbol.occurrence.clone(),
                 })
                 .expect("valid fixture metadata");
         }
@@ -11110,7 +11101,7 @@ mod authored_publication_tests {
         let sibling_before = session
             .public_visibility_snapshot_in(sibling_scope)
             .unwrap();
-        let execution = session.begin_private_execution(public).unwrap();
+        let _execution = session.begin_private_execution(public).unwrap();
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
 
@@ -11183,7 +11174,7 @@ mod authored_publication_tests {
 )]
 mod host_binding_authority_tests {
     use super::*;
-    use crate::NominalHead;
+    use tidepool_repr::execution_schema::testing;
 
     #[test]
     fn same_name_from_an_untrusted_unit_cannot_mount_as_json() {
@@ -11193,11 +11184,13 @@ mod host_binding_authority_tests {
             module: "Tidepool.Session.Val.G1".into(),
             tier: ValueTier::ForceData,
             type_display: "Tidepool.Aeson.Value.Value".into(),
-            root_head: Some(NominalHead {
+            root_head: Some(testing::type_identity(SymbolIdentity {
                 unit: "shadowed-value-0.1".into(),
                 module: "Tidepool.Aeson.Value".into(),
-                name: "Value".into(),
-            }),
+                namespace: "type".into(),
+                occurrence: "Value".into(),
+                record_parent: None,
+            })),
             // The extractor refuses to mint JsonValue for the wrong unit.
             host_authority: None,
         };

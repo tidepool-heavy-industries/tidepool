@@ -145,8 +145,8 @@ pub(super) fn assert_typed_receive_json(
         .constructors()
         .iter()
         .position(|constructor| {
-            constructor.identity.module == "Tidepool.Effects.Core"
-                && constructor.identity.occurrence == "ActorReceiveWith"
+            constructor.identity.symbol.module == "Tidepool.Effects.Core"
+                && constructor.identity.symbol.occurrence == "ActorReceiveWith"
         })
         .expect("compiler retained the genuine receive constructor");
     assert!(prepared
@@ -2828,7 +2828,7 @@ fn genuine_typeable_metadata_is_complete_and_row_removal_refuses_turn_admission(
     let typeable = prepared
         .constructors()
         .iter()
-        .find(|row| row.identity.occurrence == "TrNameS")
+        .find(|row| row.identity.symbol.occurrence == "TrNameS")
         .expect("genuine fixture must retain its Typeable settlement constructor");
     assert_eq!(
         table.get(typeable.host_id).unwrap().identity,

@@ -7533,17 +7533,32 @@ impl PersistentSession {
 mod constructor_admission_tests {
     use super::*;
     use proptest::prelude::*;
-    use tidepool_repr::{execution_schema::SymbolIdentity, DataConId};
+    use tidepool_repr::execution_schema::{
+        ConstructorIdentity, SymbolIdentity, TypeIdentity, TypeVersion,
+    };
+    use tidepool_repr::DataConId;
 
     fn constructor(id: u64, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
             id: DataConId(id),
-            identity: SymbolIdentity {
-                unit: "main".into(),
-                module: "Project.Work".into(),
-                namespace: "constructor".into(),
-                occurrence: occurrence.into(),
-                record_parent: None,
+            identity: ConstructorIdentity {
+                symbol: SymbolIdentity {
+                    unit: "main".into(),
+                    module: "Project.Work".into(),
+                    namespace: "constructor".into(),
+                    occurrence: occurrence.into(),
+                    record_parent: None,
+                },
+                family: TypeIdentity {
+                    symbol: SymbolIdentity {
+                        unit: "main".into(),
+                        module: "Project.Work".into(),
+                        namespace: "type".into(),
+                        occurrence: "Work".into(),
+                        record_parent: None,
+                    },
+                    version: TypeVersion::GhcAbi([1; 16]),
+                },
             },
             name: occurrence.into(),
             tag: 1,

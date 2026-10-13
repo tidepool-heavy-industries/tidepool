@@ -523,7 +523,7 @@ mod tests {
         changed
             .extend_checked(artifacts.table.iter().cloned().map(|mut row| {
                 if row.id == declared.host_id {
-                    row.identity.unit.push_str("-foreign");
+                    row.identity.symbol.unit.push_str("-foreign");
                 }
                 row
             }))
