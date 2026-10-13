@@ -209,7 +209,9 @@ fn ignore_workspace(workspace: &Path) {
     commit(workspace, "keep the authored package out of the repository");
 }
 
-/// Compare the source layer's current revision with its exact reload receipt.
+/// Issue a fresh request from the live actor endpoint and compare its selected
+/// source revision with the exact reload receipt. A previously issued endpoint
+/// remains pinned to its earlier generation.
 async fn issued_source_identity_matches(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     expected: &str,
@@ -218,7 +220,7 @@ async fn issued_source_identity_matches(
         .snapshot_for_request()
         .expect("issued source generation");
     let source = format!(
-        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusDisk selectedSource) == {expected:?})"
+        "import qualified Data.Text as T\nRight selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == T.pack {expected:?})"
     );
     let result = committed(issued.as_ref(), &source).await;
     result["items"][1]["output"] == "True"
