@@ -1,15 +1,17 @@
 use tidepool_repr::Generation;
 
-/// A confirmed range belongs to the SessionLib that owns it. Moving the
-/// library moves the range; copying a declaration log does not copy authority.
+/// A confirmed range belongs to the SessionLib that owns both disjoint Lib
+/// and Val namespaces. Moving the library moves the range; copying a context
+/// does not copy authority. Its lower bound excludes a prior incarnation's tail.
 pub(super) struct GenerationRangeLease {
+    floor: Generation,
     ceiling: Generation,
 }
 
 static_assertions::assert_not_impl_any!(GenerationRangeLease: Clone, Copy);
 
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
-#[error("declaration generation exhausted at {consumed}; requested {requested} identities")]
+#[error("session generation exhausted at {consumed}; requested {requested} identities")]
 pub struct GenerationExhausted {
     pub consumed: Generation,
     pub requested: u64,
@@ -38,12 +40,13 @@ pub(super) fn refill_ceiling(ceiling: Generation, end: Generation) -> Generation
 }
 
 impl GenerationRangeLease {
-    pub(super) fn confirmed(ceiling: Generation) -> Self {
-        Self { ceiling }
+    pub(super) fn confirmed(floor: Generation, ceiling: Generation) -> Self {
+        assert!(floor <= ceiling);
+        Self { floor, ceiling }
     }
 
-    pub(super) fn covers(&self, end: Generation) -> bool {
-        end <= self.ceiling
+    pub(super) fn covers(&self, consumed: Generation, end: Generation) -> bool {
+        consumed >= self.floor && end >= consumed && end <= self.ceiling
     }
 }
 

@@ -12642,7 +12642,7 @@ where
     let binder = if let Some(carrier) = carrier {
         let session_root = carrier_mount_session_root(session, scope)?;
         let generation = session.val_gen().next();
-        session.reserve_value_generations_through(generation);
+        session.set_val_gen(generation);
         tidepool_testing::with_settlement(|settlement| {
             session.mount_carrier_in(
                 &session_root,
@@ -12711,7 +12711,7 @@ where
     if let Some(carrier) = carrier {
         let session_root = carrier_mount_session_root(session, scope)?;
         let generation = session.val_gen().next();
-        session.reserve_value_generations_through(generation);
+        session.set_val_gen(generation);
         tidepool_testing::with_settlement(|settlement| {
             session.mount_carrier_in(
                 &session_root,
@@ -13885,7 +13885,7 @@ pub(crate) mod request_tests {
 
         let view = actor_compile_view(&session, &context, &source).expect("compile view");
         let generation = view.next_value_generation();
-        session.reserve_value_generations_through(generation);
+        session.set_val_gen(generation);
         let retained = session.prepared_retained();
 
         let (binder, compiled) = compile_host_binding_off_checkout(
@@ -13936,7 +13936,7 @@ pub(crate) mod request_tests {
 
         let view = actor_compile_view(&session, &context, &source).expect("compile view");
         let generation = view.next_value_generation();
-        session.reserve_value_generations_through(generation);
+        session.set_val_gen(generation);
         let retained = session.prepared_retained();
 
         let (binder, compiled) = compile_host_binding_off_checkout(
@@ -13983,7 +13983,7 @@ pub(crate) mod request_tests {
         // A fresh snapshot recompiles and installs cleanly.
         let retry_view = actor_compile_view(&session, &context, &source).expect("retry view");
         let retry_generation = retry_view.next_value_generation();
-        session.reserve_value_generations_through(retry_generation);
+        session.set_val_gen(retry_generation);
         let retry_retained = session.prepared_retained();
         let (retry_binder, retry_compiled) = compile_host_binding_off_checkout(
             &retry_view,

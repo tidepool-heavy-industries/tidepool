@@ -272,8 +272,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        let generation = self.val_gen().next();
-        self.set_val_gen(generation);
+        let (generation, _) = self.reserve_value_generations(1)?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -2288,6 +2287,7 @@ impl PersistentSession {
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         let store = self.held_admission_store()?;
+        super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();
         let durable_owner = self
             .lib()
@@ -2489,6 +2489,7 @@ impl PersistentSession {
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         let store = self.held_admission_store()?;
+        super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
@@ -2603,16 +2604,9 @@ impl PersistentSession {
             None => Some(1),
         }
         .ok_or(SessionError::StaleStagedDeclaration)?;
-        let last_value_generation = Generation(
-            self.val_gen()
-                .0
-                .checked_add(native_count)
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-        );
-        last_value_generation
-            .0
-            .checked_add(1)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let last_value_generation =
+            super::generation_lease::requested_end(self.val_gen(), native_count)?;
+        super::generation_lease::requested_end(last_value_generation, 1)?;
         let count_u64 =
             u64::try_from(declaration_count).map_err(|_| SessionError::StaleStagedDeclaration)?;
         self.lib()
@@ -2650,7 +2644,9 @@ impl PersistentSession {
                 reserved_generations.push(self.lib_mut().log.reserve());
             }
         }
-        let initial_value_generation = view.next_value_generation();
+        let (initial_value_generation, _) = self.reserve_value_generations(native_count)?;
+        let view =
+            view.with_request_inventory(view.injected_values().to_vec(), initial_value_generation);
         let planned = plan.map(|plan| {
             use super::planned_cell::{
                 RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot,
@@ -2832,13 +2828,6 @@ impl PersistentSession {
             include_paths,
             digest,
         });
-        let admission = store
-            .as_ref()
-            .map(|store| store.begin_native_transition())
-            .transpose()
-            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-        self.set_val_gen(last_value_generation);
-        super::complete_native_transition(admission)?;
         Ok(prepared)
     }
 
@@ -3058,6 +3047,7 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.compile_view_in(execution.private_scope())
             .map(SessionCompileView::with_scoped_injection)
             .ok_or(SessionError::DeadScope(execution.private_scope()))

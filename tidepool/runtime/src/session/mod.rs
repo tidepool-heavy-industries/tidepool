@@ -909,8 +909,8 @@ fn certified_recovery_export(
     }
 }
 
-/// A resident session's declaration library. Owns the ordered decl log, the
-/// monotonic generation, and the on-disk include tree.
+/// A resident session's declaration library. Owns the ordered declaration log,
+/// both module-generation counters, their reservation fence, and the include tree.
 pub struct SessionLib {
     id: SessionId,
     /// Local cache identity; replacing a library cannot reuse its old view.
@@ -920,6 +920,10 @@ pub struct SessionLib {
     /// highest precedence so they shadow any same-named module.
     root: PathBuf,
     log: DeclLog,
+    /// Consumed Val identities share this library's durable reservation fence,
+    /// independently of its declaration log and lexical projection.
+    value_generation: Generation,
+    allocation_floor: Generation,
     generation_lease: Option<generation_lease::GenerationRangeLease>,
     local_generation_issued: bool,
     env: ModuleEnv,
@@ -1190,16 +1194,10 @@ impl SessionLib {
         // Nothing but `ResidentSession::mount_carrier_in`'s hand-written
         // stub writes a `.hs` source under `Tidepool/Session/Val` (an
         // ordinary compiled bind is injected from its `.hi`, never a source
-        // file at this path). A fresh incarnation always starts with
-        // `stub_generations` empty and `val_gen` back at zero, so any file
-        // already there belongs to a dead incarnation and its generation
-        // number can be REISSUED for a real, `.hi`-backed bind -- which
-        // would then coexist with the stale stub source on the include
-        // path, an ambiguous or wrongly-resolved module for GHC's
-        // downsweep. Sweeping every stub source on open (rather than
-        // tracking which files are stale) is what guarantees none of them
-        // can be found by a later turn, matching a resumed session's reset
-        // bookkeeping exactly.
+        // file at this path). Hand-written stubs belong to the old heap and
+        // must not remain on GHC's include path after restart. Original `.hi`
+        // files stay immutable; the recovery allocation fence burns their
+        // issued identities before either namespace can mint another module.
         if let Some(val_dir) = SessionModule::val(Generation(0))
             .relative_hs_path()
             .rsplit_once('/')
@@ -1223,6 +1221,8 @@ impl SessionLib {
             compile_view_identity: uuid::Uuid::new_v4(),
             root,
             log: DeclLog::new(),
+            value_generation: Generation(0),
+            allocation_floor: Generation(0),
             generation_lease: None,
             local_generation_issued: false,
             env,
@@ -1502,12 +1502,12 @@ impl SessionLib {
         if count == 0 {
             return Ok(Vec::new());
         }
-        self.held_recovery_store()?;
         let requested = u64::try_from(count).map_err(|_| GenerationExhausted {
             consumed: self.log.generation(),
             requested: u64::MAX,
         })?;
-        let end = generation_lease::requested_end(self.log.generation(), requested)?;
+        let consumed = self.log.generation();
+        let end = generation_lease::requested_end(consumed, requested)?;
         let state = self
             .durable_graph
             .as_ref()
@@ -1515,10 +1515,6 @@ impl SessionLib {
                 path: self.root.clone(),
                 detail: "run recovery domain is not attached".into(),
             })?;
-        if let Err(error) = state.store.ensure_ready() {
-            self.generation_lease = None;
-            return Err(SessionError::RecoveryStore(Box::new(error)));
-        }
         let prepared =
             self.log
                 .prepare_reservations(count)
@@ -1526,10 +1522,57 @@ impl SessionLib {
                     path: state.path.clone(),
                     detail: "could not prepare declaration reservation slots".into(),
                 })?;
+        self.reserve_generation_range(consumed, end, |lib| lib.log.commit_reservations(prepared))
+    }
+
+    /// Burn a complete value request before exposing its compiler authority.
+    /// This does not add declarations or change a lexical context.
+    fn reserve_value_generations(
+        &mut self,
+        count: u64,
+    ) -> Result<(Generation, Generation), SessionError> {
+        let consumed = self.value_generation;
+        let first = generation_lease::requested_end(consumed, 1)?;
+        let end = generation_lease::requested_end(consumed, count)?;
+        generation_lease::requested_end(end, 1)?;
+        if count > 0 {
+            self.reserve_generation_range(consumed, end, |lib| {
+                lib.value_generation = end;
+            })?;
+        }
+        Ok((first, end))
+    }
+
+    /// One owner confirms ranges for both namespaces. A later refill cannot
+    /// authorize a counter below the incarnation's burned lower bound.
+    fn reserve_generation_range<T>(
+        &mut self,
+        consumed: Generation,
+        end: Generation,
+        consume: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, SessionError> {
+        if let Err(error) = self.held_recovery_store() {
+            self.generation_lease = None;
+            return Err(error);
+        }
+        if consumed < self.allocation_floor || end <= consumed {
+            return Err(SessionError::RecoveryManifest {
+                path: self.root.clone(),
+                detail: "unowned allocation tail must be burned before issuance".into(),
+            });
+        }
+        let Some(state) = self.durable_graph.as_ref() else {
+            self.local_generation_issued = true;
+            return Ok(consume(self));
+        };
+        if let Err(error) = state.store.ensure_ready() {
+            self.generation_lease = None;
+            return Err(SessionError::RecoveryStore(Box::new(error)));
+        }
         if self
             .generation_lease
             .as_ref()
-            .is_some_and(|lease| lease.covers(end))
+            .is_some_and(|lease| lease.covers(consumed, end))
         {
             let admission = match state.store.begin_native_transition() {
                 Ok(admission) => admission,
@@ -1539,12 +1582,15 @@ impl SessionLib {
                 }
             };
             self.local_generation_issued = true;
-            let reserved = self.log.commit_reservations(prepared);
-            complete_native_transition(Some(admission))?;
-            return Ok(reserved);
+            let result = consume(self);
+            if let Err(error) = complete_native_transition(Some(admission)) {
+                self.generation_lease = None;
+                return Err(error);
+            }
+            return Ok(result);
         }
         let ceiling = state.allocation_ceiling;
-        if self.log.generation() > ceiling {
+        if consumed > ceiling {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
                 detail: "consumed generation exceeds durable allocation ceiling".into(),
@@ -1570,11 +1616,17 @@ impl SessionLib {
                 return Err(SessionError::RecoveryStore(Box::new(error)));
             }
         };
-        self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(ceiling));
+        self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(
+            self.allocation_floor,
+            ceiling,
+        ));
         self.local_generation_issued = true;
-        let reserved = self.log.commit_reservations(prepared);
-        complete_native_transition(Some(admission))?;
-        Ok(reserved)
+        let result = consume(self);
+        if let Err(error) = complete_native_transition(Some(admission)) {
+            self.generation_lease = None;
+            return Err(error);
+        }
+        Ok(result)
     }
 
     fn extend_generation_ceiling(
@@ -1615,7 +1667,7 @@ impl SessionLib {
         }
     }
 
-    /// Install inherited identity floors before this incarnation exposes a
+    /// Burn both inherited namespace floors before this incarnation exposes a
     /// local identity. A child receives a durable floor, never a parent's lease.
     pub fn initialize_captured_declaration_high_water(
         &mut self,
@@ -1643,11 +1695,15 @@ impl SessionLib {
         if high_water <= state.allocation_ceiling {
             self.generation_lease = None;
             self.log.burn_to(state.allocation_ceiling);
+            self.value_generation = self.value_generation.max(state.allocation_ceiling);
+            self.allocation_floor = state.allocation_ceiling;
             return Ok(());
         }
         let ceiling = self.extend_generation_ceiling(high_water)?;
         self.generation_lease = None;
         self.log.burn_to(ceiling);
+        self.value_generation = self.value_generation.max(ceiling);
+        self.allocation_floor = ceiling;
         Ok(())
     }
 

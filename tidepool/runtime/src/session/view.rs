@@ -514,10 +514,9 @@ impl SessionCompileView {
     /// actor binding or releasing its own values cannot invalidate this turn.
     /// A newly injected module the turn did not import is likewise harmless.
     ///
-    /// `next_value_generation` is excluded: a caller that reserved its own
-    /// generation before releasing its checkout (`ResidentSession::
-    /// reserve_value_generations_through`) expects that counter to have
-    /// moved on by the time it re-derives a view to install against.
+    /// `next_value_generation` is excluded: compiler admission reserves the
+    /// original identities before releasing its checkout, so the counter has
+    /// moved on when execution re-derives its current lexical view.
     #[must_use]
     pub fn is_current_for(&self, compiled_against: &Self) -> bool {
         self.session == compiled_against.session

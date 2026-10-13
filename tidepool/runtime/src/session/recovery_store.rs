@@ -16,7 +16,10 @@ use tidepool_repr::{Generation, SessionId};
 
 use super::RecoveryPublicOwner;
 
-const FORMAT: u64 = 2;
+// Format 3 fences issued Lib and Val identities before compiler authority can
+// escape. Format 2 persisted only declaration allocation, so its ceiling cannot
+// prove that retained value interfaces are safe to recover without reuse.
+const FORMAT: u64 = 3;
 const ENCODING: &str = "tidepool-run-v2/hamt-v3/5/0/3/sha256/cidv1/dag-cbor/blake2b256";
 
 /// The root machine survives host reincarnation. Independent machines retain
@@ -1425,6 +1428,32 @@ mod tests {
                 fault != StoreFault::BeforeCommit
             );
         }
+    }
+
+    #[test]
+    fn declaration_only_format_two_is_refused_without_changing_database_or_wal() {
+        let (_directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let path = store.path().to_path_buf();
+        // Keep the WAL alive while observing refusal through the real opener.
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute("UPDATE store_meta SET format=2", [])
+            .unwrap();
+        drop(store);
+        let wal = path.with_extension("sqlite-wal");
+        let before_database = std::fs::read(&path).unwrap();
+        let before_wal = std::fs::read(&wal).unwrap();
+        assert!(matches!(
+            RunRecoveryStore::open(&path),
+            Err(StoreError {
+                kind: StoreErrorKind::UnsupportedFormat { found: 2 },
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before_database);
+        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+        drop(external);
     }
 
     #[test]

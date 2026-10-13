@@ -87,6 +87,17 @@ rerunning private execution. Binding-only capture issues no join reservation.
 Recovery declarations remain an append-only causal DAG:
 parents and implementation references identify previously issued declarations.
 
+SessionLib owns one durable reservation fence for disjoint Lib and Val module
+namespaces. Numeric generations may overlap across namespaces; an issued identity
+never repeats within either namespace. Cold attachment and captured initialization
+burn both counters through the persisted ceiling before local issuance, and a
+confirmed lease excludes the prior incarnation's tail. Value requests reserve
+their complete range before exposing compiler authority, independently of heap
+binding publication or selected compiler contexts. Original interfaces remain
+immutable even after heap loss or a killed producer. Recovery store format 3
+establishes this shared fence; declaration-only format 2 is refused without
+migration because its ceiling cannot certify issued value identities.
+
 Notebook generations qualify public recovery ownership independently of actor
 incarnation and declaration allocation. Reload inserts a fresh public owner and
 atomically selects its complete source, installation and prompt references through

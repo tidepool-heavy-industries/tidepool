@@ -86,9 +86,9 @@ fn refill_covers_shortage_large_request_and_final_partial_range() {
 
 #[test]
 fn confirmed_tail_at_max_is_consumable_then_typed_exhaustion() {
-    let lease = GenerationRangeLease::confirmed(Generation(u64::MAX));
+    let lease = GenerationRangeLease::confirmed(Generation(0), Generation(u64::MAX));
     let end = requested_end(Generation(u64::MAX - 1), 1).unwrap();
-    assert!(lease.covers(end));
+    assert!(lease.covers(Generation(u64::MAX - 1), end));
     assert_eq!(
         requested_end(end, 1),
         Err(GenerationExhausted {
@@ -171,6 +171,320 @@ fn session_restart_burns_unused_tail_and_child_inherits_ceiling_without_lease() 
         restarted.reserve_declaration_generation_durable().unwrap(),
         Generation(65)
     );
+}
+
+#[test]
+fn statement_only_value_reservations_burn_the_cold_tail_without_publication() {
+    let mut run = TestRun::new();
+    let mut session = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    assert_eq!(
+        session.reserve_value_generations(2).unwrap(),
+        (Generation(1), Generation(2))
+    );
+    let lib = session.lib();
+    assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+    assert!(!lib.log.is_reserved(Generation(1)));
+    assert!(!run.store.has_public_owners(RecoveryDomainId::Root).unwrap());
+    let ceiling = store_state(lib).allocation_ceiling;
+    assert_eq!(ceiling, Generation(64));
+    // Neither compiler completion nor a selected context is necessary to burn
+    // issued identities. A killed producer cannot return this range.
+    drop(session);
+    run.reopen();
+    let mut restored = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    assert_eq!(restored.val_gen(), ceiling);
+    assert_eq!(restored.lib().generation(), ceiling);
+    assert_eq!(
+        restored.reserve_value_generations(1).unwrap(),
+        (Generation(65), Generation(65))
+    );
+}
+
+#[test]
+fn disjoint_namespace_counters_share_refills_without_changing_lexical_tips() {
+    let mut run = TestRun::new();
+    let mut lib = run.root();
+    assert_eq!(
+        lib.reserve_declaration_generation_durable().unwrap(),
+        Generation(1)
+    );
+    let work = run.store.work().unwrap();
+    assert_eq!(
+        lib.reserve_value_generations(63).unwrap(),
+        (Generation(1), Generation(63))
+    );
+    assert_eq!(run.store.work().unwrap(), work);
+    assert_eq!(
+        lib.reserve_declaration_generations_durable(64)
+            .unwrap()
+            .last(),
+        Some(&Generation(65))
+    );
+    let work = run.store.work().unwrap();
+    assert_eq!(
+        lib.reserve_value_generations(2).unwrap(),
+        (Generation(64), Generation(65))
+    );
+    assert_eq!(run.store.work().unwrap(), work);
+    assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+    let ceiling = store_state(&lib).allocation_ceiling;
+    assert_eq!(ceiling, Generation(128));
+    drop(lib);
+    run.reopen();
+    let mut restored = run.root();
+    assert_eq!(
+        restored.reserve_value_generations(1).unwrap().0,
+        Generation(129)
+    );
+    assert_eq!(
+        restored.reserve_declaration_generation_durable().unwrap(),
+        Generation(129)
+    );
+}
+
+#[test]
+fn fresh_child_burns_both_captured_floors_before_its_first_value() {
+    let run = TestRun::new();
+    let mut parent = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    parent.reserve_value_generations(2).unwrap();
+    assert!(parent.bindings().is_empty());
+    let inherited_value = parent.val_gen();
+    let inherited_ceiling = parent.lib().durable_allocation_ceiling().unwrap();
+    let mut child = crate::session::PersistentSession::new(Some(run.child()), 1024);
+    child.set_val_gen(inherited_value);
+    child
+        .lib_mut()
+        .initialize_captured_declaration_high_water(inherited_ceiling)
+        .unwrap();
+    assert_eq!(child.val_gen(), inherited_ceiling);
+    assert_eq!(
+        child
+            .compile_view_in(ScopeId::ROOT)
+            .unwrap()
+            .next_value_generation(),
+        Generation(65)
+    );
+    assert_eq!(
+        child.reserve_value_generations(1).unwrap().0,
+        Generation(65)
+    );
+    assert_eq!(
+        parent.reserve_value_generations(1).unwrap().0,
+        Generation(3)
+    );
+}
+
+#[test]
+fn declaration_refill_cannot_authorize_a_value_below_the_burned_floor() {
+    let mut run = TestRun::new();
+    let mut lib = run.root();
+    lib.reserve_value_generations(1).unwrap();
+    drop(lib);
+    run.reopen();
+    let mut restored = run.root();
+    restored.reserve_declaration_generation_durable().unwrap();
+    let lease = restored.generation_lease.as_ref().unwrap();
+    assert!(!lease.covers(Generation(63), Generation(64)));
+    assert!(lease.covers(Generation(64), Generation(65)));
+    // Even a stale counter cannot turn the later declaration lease into
+    // permission to consume the prior incarnation's tail.
+    restored.value_generation = Generation(63);
+    let before = store_state(&restored);
+    assert!(restored.reserve_value_generations(1).is_err());
+    assert_eq!(restored.value_generation, Generation(63));
+    assert_eq!(store_state(&restored), before);
+}
+
+#[test]
+fn shared_ceiling_max_refuses_value_overflow_before_views_or_writes() {
+    let mut run = TestRun::new();
+    let mut session = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    session
+        .lib_mut()
+        .initialize_captured_declaration_high_water(Generation(u64::MAX - 2))
+        .unwrap();
+    assert_eq!(
+        session.reserve_value_generations(1).unwrap().0,
+        Generation(u64::MAX - 1)
+    );
+    let before = store_state(session.lib());
+    let work = run.store.work().unwrap();
+    assert_eq!(before.allocation_ceiling, Generation(u64::MAX));
+    assert!(matches!(
+        session.reserve_value_generations(1),
+        Err(crate::session::SessionError::GenerationExhausted(_))
+    ));
+    assert_eq!(store_state(session.lib()), before);
+    assert_eq!(run.store.work().unwrap(), work);
+    drop(session);
+    run.reopen();
+    let mut restored = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    let scopes = restored.scope_tree().len();
+    let work = run.store.work().unwrap();
+    assert!(restored.compile_view_in(ScopeId::ROOT).is_none());
+    assert!(matches!(
+        restored.begin_private_execution(ScopeId::ROOT),
+        Err(crate::session::SessionError::GenerationExhausted(_))
+    ));
+    assert_eq!(restored.scope_tree().len(), scopes);
+    assert_eq!(run.store.work().unwrap(), work);
+}
+
+#[test]
+fn value_refill_uncertainty_revokes_the_shared_lease_for_both_namespaces() {
+    let mut run = TestRun::new();
+    let mut lib = run.root();
+    lib.reserve_value_generations(64).unwrap();
+    run.store.inject_fault(StoreFault::CommitError);
+    assert!(lib.reserve_value_generations(1).is_err());
+    assert!(lib.generation_lease.is_none());
+    assert_eq!(lib.value_generation, Generation(64));
+    assert!(lib.reserve_declaration_generation_durable().is_err());
+    assert!(lib.reserve_value_generations(1).is_err());
+    let old_store = run.store.clone();
+    drop(lib);
+    run.reopen();
+    assert!(old_store.ensure_ready().is_err());
+    let mut restored = run.root();
+    assert_eq!(restored.value_generation, Generation(128));
+    assert_eq!(
+        restored.reserve_value_generations(1).unwrap().0,
+        Generation(129)
+    );
+}
+
+#[test]
+fn recovery_attachment_refuses_an_already_issued_ephemeral_value() {
+    let run = TestRun::new();
+    let artifact_root = run.directory.path().join("root-artifacts");
+    let lib = SessionLib::open(
+        crate::session::registry::fresh_session_id(),
+        &artifact_root,
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    let mut session = crate::session::PersistentSession::new(Some(lib), 1024);
+    session.reserve_value_generations(1).unwrap();
+    let result = tidepool_testing::with_settlement(|settlement| {
+        session.lib_mut().attach_owned_recovery_domain(
+            run.store.clone(),
+            RecoveryDomainId::Root,
+            artifact_root,
+            run.authority.clone(),
+            settlement,
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(crate::session::SessionError::RecoveryManifest { .. })
+    ));
+    assert!(run
+        .store
+        .read_domain(RecoveryDomainId::Root)
+        .unwrap()
+        .is_none());
+    assert_eq!(session.val_gen(), Generation(1));
+}
+
+#[test]
+fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_staging() {
+    use crate::session::turn::{compile_cell_program_admitted, TemplateSelector};
+    use crate::session::workbench::{resident_cell_check_template, resident_workbench_templates};
+    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+
+    tidepool_testing::eval_harness::require_extract();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let mut run = TestRun::new();
+    let lib = run
+        .root()
+        .with_validation_include(effects.include_paths().to_vec());
+    let mut session = crate::session::PersistentSession::new(Some(lib), 1024 * 1024);
+    session
+        .lib_mut()
+        .initialize_captured_declaration_high_water(Generation(500))
+        .unwrap();
+    let execution = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
+    let view = session.compile_view_for_execution(&execution).unwrap();
+    let imports = view.turn_imports(&crate::session::SourceImports::new());
+    let specification = Arc::new(CheckedCellSpecification {
+        admission_digest: [0; 32],
+        cell_source: include_str!("../fixtures/shared_allocation_cell.hs").into(),
+        template_source: resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+        turn_templates: resident_workbench_templates(effects.preamble(), effects.row(), &imports)
+            .iter()
+            .map(|template| {
+                let kind = match template.kind {
+                    TemplateSelector::Decl => "decl",
+                    TemplateSelector::Bind => "bind",
+                    TemplateSelector::BindDiscard => "binddiscard",
+                    TemplateSelector::Expr => "expr",
+                };
+                (kind.into(), template.source.clone())
+            })
+            .collect(),
+        injected_modules: view.injected_module_names(),
+        reserved_declaration_modules: Vec::new(),
+    });
+    let include = view.include_paths(effects.include_paths());
+    let plan = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
+    })
+    .unwrap();
+    let admission = session
+        .admit_planned_cell_for_execution(
+            execution.clone(),
+            plan,
+            specification.clone(),
+            specification.specification_digest(),
+            [1; 32],
+            include,
+            None,
+        )
+        .unwrap();
+    assert_eq!(admission.initial_value_generation(), Generation(501));
+    assert_eq!(
+        admission.view().next_value_generation(),
+        admission.initial_value_generation()
+    );
+    let planned_values = admission
+        .plan_reservation()
+        .unwrap()
+        .items()
+        .iter()
+        .filter_map(|item| item.value_generation())
+        .collect::<Vec<_>>();
+    assert_eq!(planned_values, [Generation(501)]);
+    let (_, program) = tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted(admission.clone(), settlement)
+    })
+    .unwrap();
+    let certificate = program
+        .items()
+        .iter()
+        .filter_map(|item| item.native())
+        .find_map(|native| native.value_interface_certificate())
+        .unwrap();
+    let module = certificate.owner();
+    assert_eq!(module, tidepool_repr::SessionModule::val(Generation(501)));
+    let path = session.lib().include_dir().join(module.relative_hi_path());
+    let bytes = certificate.bytes_owned().to_vec();
+    let staged = session.stage_checked_value_interface(certificate).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    // A process kill bypasses the staged file's destructor. Retain that exact
+    // original interface while leaving the cell unpublished and heap empty.
+    std::mem::forget(staged);
+    assert!(session.bindings().is_empty());
+    assert_eq!(session.lib().scope_tip(ScopeId::ROOT), Generation(0));
+    let ceiling = session.lib().durable_allocation_ceiling().unwrap();
+    drop(program);
+    drop(admission);
+    drop(execution);
+    drop(session);
+    run.reopen();
+    let mut restored = crate::session::PersistentSession::new(Some(run.root()), 1024);
+    assert_eq!(restored.val_gen(), ceiling);
+    assert!(restored.reserve_value_generations(1).unwrap().0 > ceiling);
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
 }
 
 #[test]
@@ -777,6 +1091,67 @@ enum HistoryOperation {
     Fork,
     Import(u16),
     ReservationFault(u8),
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 24, ..Default::default() })]
+    #[test]
+    fn mixed_namespace_histories_never_reissue_and_share_bounded_refills(
+        history in proptest::collection::vec((0u8..3, 0u16..160), 1..48),
+    ) {
+        let mut run = TestRun::new();
+        let mut lib = run.root();
+        let mut consumed = [0u64; 2];
+        let mut issued = [std::collections::BTreeSet::new(), std::collections::BTreeSet::new()];
+        let mut ceiling = 0u64;
+        let mut lease = false;
+        for (namespace, amount) in history {
+            if namespace == 2 {
+                drop(lib);
+                run.reopen();
+                lib = run.root();
+                consumed = [ceiling; 2];
+                lease = false;
+                proptest::prop_assert_eq!(lib.generation().0, ceiling);
+                proptest::prop_assert_eq!(lib.value_generation.0, ceiling);
+                continue;
+            }
+            let index = usize::from(namespace);
+            let before = store_state(&lib);
+            let work = run.store.work().unwrap();
+            let end = consumed[index] + u64::from(amount);
+            if index == 0 {
+                let ids = lib.reserve_declaration_generations_durable(usize::from(amount)).unwrap();
+                for (offset, id) in ids.iter().enumerate() {
+                    proptest::prop_assert_eq!(id.0, consumed[index] + offset as u64 + 1);
+                    proptest::prop_assert!(issued[index].insert(id.0));
+                }
+            } else {
+                let (first, last) = lib.reserve_value_generations(u64::from(amount)).unwrap();
+                proptest::prop_assert_eq!(first.0, consumed[index] + 1);
+                proptest::prop_assert_eq!(last.0, end);
+                for value in (consumed[index] + 1)..=end {
+                    proptest::prop_assert!(issued[index].insert(value));
+                }
+            }
+            if amount > 0 && (!lease || end > ceiling) {
+                // Independent model of the shared durable upper bound. The
+                // two consumed counters and issued identity sets stay separate.
+                ceiling = (ceiling + 64).max(end);
+                lease = true;
+                proptest::prop_assert_eq!(run.store.work().unwrap().transactions, work.transactions + 1);
+                proptest::prop_assert_eq!(run.store.work().unwrap().block_writes, work.block_writes);
+            } else {
+                proptest::prop_assert_eq!(store_state(&lib), before);
+                proptest::prop_assert_eq!(run.store.work().unwrap(), work);
+            }
+            consumed[index] = end;
+            proptest::prop_assert_eq!(lib.generation().0, consumed[0]);
+            proptest::prop_assert_eq!(lib.value_generation.0, consumed[1]);
+            proptest::prop_assert_eq!(store_state(&lib).allocation_ceiling.0, ceiling);
+            proptest::prop_assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        }
+    }
 }
 
 fn history_operation() -> impl proptest::strategy::Strategy<Value = HistoryOperation> {

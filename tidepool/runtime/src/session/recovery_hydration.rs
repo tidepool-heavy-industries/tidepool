@@ -325,9 +325,13 @@ impl SessionLib {
             path: path.clone(),
             detail,
         };
-        if self.log.generation() != Generation(0) || self.durable_graph.is_some() {
+        if self.log.generation() != Generation(0)
+            || self.value_generation != Generation(0)
+            || self.local_generation_issued
+            || self.durable_graph.is_some()
+        {
             return Err(invalid(
-                "recovery must attach before declaration identities are admitted".into(),
+                "recovery must attach before declaration or value identities are admitted".into(),
             ));
         }
         if let RecoveryDomainId::Session(id) = domain {
@@ -393,6 +397,8 @@ impl SessionLib {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         self.log = recovered_log;
+        self.value_generation = domain_state.allocation_ceiling;
+        self.allocation_floor = domain_state.allocation_ceiling;
         self.generation_lease = None;
         self.local_generation_issued = false;
         self.durable_graph = Some(DurableDeclarationGraph {

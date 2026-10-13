@@ -262,6 +262,8 @@ pub struct PersistentSession {
     /// Monotonic value-binding generation. Each materialized bind mints a fresh
     /// `Val.G<g>` so its `stableVarId` is collision-free and a rebind shadows
     /// without clobbering the prior root.
+    /// Sessions without a library keep a local counter; library-backed sessions
+    /// use SessionLib's counter and reservation owner exclusively.
     val_gen: Generation,
     /// The scope forest — one per session, shared by BOTH
     /// stores. The binding store hangs [`BindingTable`] frames off these ids and
@@ -352,13 +354,14 @@ impl PersistentSession {
     /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
     /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
-    pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
+    pub fn new(mut lib: Option<SessionLib>, nursery_size: usize) -> Self {
         // Recovery retains original type interfaces even when their heap
         // values are lost. Their module identities cannot be issued again.
-        let val_gen = lib
-            .as_ref()
-            .map(|lib| lib.log.retained_value_generation_high_water())
-            .unwrap_or(Generation(0));
+        if let Some(lib) = &mut lib {
+            lib.value_generation = lib
+                .value_generation
+                .max(lib.log.retained_value_generation_high_water());
+        }
         PersistentSession {
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             catalog_selection: Default::default(),
@@ -375,7 +378,7 @@ impl PersistentSession {
             #[cfg(test)]
             compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
             binding_index: BindingIndex::new(),
-            val_gen,
+            val_gen: Generation(0),
             scopes: ScopeTree::new(),
             public_visibility_epochs: HashMap::new(),
             effect_policy: EffectRunPolicy::HandleOrSuspend,
@@ -1130,7 +1133,9 @@ impl PersistentSession {
     }
     /// The current value-binding generation.
     pub fn val_gen(&self) -> Generation {
-        self.val_gen
+        self.lib
+            .as_ref()
+            .map_or(self.val_gen, |lib| lib.value_generation)
     }
     /// Advance the value-module generation high-water mark.
     pub fn set_val_gen(&mut self, g: Generation) {
@@ -1140,9 +1145,29 @@ impl PersistentSession {
         // counter on the late gen-6 materialization, and the next mint would
         // re-issue 7, colliding with the live Val.G7. Generations are only
         // ever bumped, never reused (`Generation::next`'s contract) — this
-        // enforces it at the one write site.
-        if g.0 > self.val_gen.0 {
-            self.val_gen = g;
+        // preserves it when inherited or already-issued identities settle.
+        let consumed = match &mut self.lib {
+            Some(lib) => &mut lib.value_generation,
+            None => &mut self.val_gen,
+        };
+        if g > *consumed {
+            *consumed = g;
+        }
+    }
+
+    pub(super) fn reserve_value_generations(
+        &mut self,
+        count: u64,
+    ) -> Result<(Generation, Generation), SessionError> {
+        match &mut self.lib {
+            Some(lib) => lib.reserve_value_generations(count),
+            None => {
+                let first = super::generation_lease::requested_end(self.val_gen, 1)?;
+                let end = super::generation_lease::requested_end(self.val_gen, count)?;
+                super::generation_lease::requested_end(end, 1)?;
+                self.val_gen = end;
+                Ok((first, end))
+            }
         }
     }
     pub fn effect_policy(&self) -> EffectRunPolicy {
@@ -1530,8 +1555,8 @@ impl PersistentSession {
 
     /// Snapshot the exact source-side environment visible from `scope` so a
     /// caller can release its machine borrow before invoking GHC. Returns
-    /// `None` for a dead scope or a session without a declaration/include
-    /// persistent binding store.
+    /// `None` for a dead scope, a session without a declaration/include
+    /// persistent binding store, or an exhausted value namespace.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
         let cached = self.scoped_compile_view_in(scope)?;
         let injected_values = self
@@ -1542,7 +1567,7 @@ impl PersistentSession {
         Some(
             cached
                 .view
-                .with_request_inventory(injected_values, self.val_gen.next()),
+                .with_request_inventory(injected_values, self.val_gen().next()),
         )
     }
 
@@ -1555,6 +1580,7 @@ impl PersistentSession {
             return None;
         }
         let lib = self.lib.as_ref()?;
+        super::generation_lease::requested_end(self.val_gen(), 1).ok()?;
         let key = self
             .bindings
             .scope_witness(&self.scopes, scope)
@@ -1634,7 +1660,7 @@ impl PersistentSession {
             session: lib.session_id(),
             lexical_scope: scope,
             injected_values: Vec::new(),
-            next_value_generation: self.val_gen.next(),
+            next_value_generation: self.val_gen().next(),
             request_context: None,
             projection: Arc::new(super::view::CompileViewProjection {
                 root: PathBuf::from(lib.include_dir()),

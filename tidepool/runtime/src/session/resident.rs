@@ -4156,15 +4156,13 @@ where
         self.state.lib_include_dir().map(Path::to_path_buf)
     }
 
-    /// The current value-binding generation. The caller mints the NEXT one
-    /// (`val_gen().next()`) BEFORE compiling a bind turn — the extract stamps that
-    /// generation into `Val.G<g>`, and [`Self::run_bind`]/[`Self::resume`]
-    /// (via a [`ResidentHole::Binding`]) materialize at the same `g`.
+    /// The consumed value generation. Compiler admissions reserve complete
+    /// identity ranges before compilation; settlement retains those identities.
     pub fn val_gen(&self) -> Generation {
         self.state.val_gen()
     }
 
-    /// The existing declaration allocator's high-water mark, captured while
+    /// The owning library's shared allocation ceiling, captured while
     /// the parent owner is checked out. It grants no lexical scope.
     pub fn declaration_generation_high_water(&self) -> Result<Option<Generation>, SessionError> {
         self.state
@@ -4173,7 +4171,7 @@ where
             .transpose()
     }
 
-    /// Initialize a fresh declaration allocator before retained compilation.
+    /// Burn both namespace floors before retained compilation or local issuance.
     /// The library owner persists the fence without changing any scope tip.
     pub fn initialize_captured_declaration_high_water(
         &mut self,
@@ -4188,7 +4186,8 @@ where
     }
 
     /// Raise the value allocator past retained native value identities.
-    /// Declaration identities have their own allocator and captured fence.
+    /// This advances an inherited or already-issued identity, without minting
+    /// authority. Both namespaces share the library's durable reservation fence.
     pub fn set_val_gen(&mut self, generation: Generation) {
         self.state.set_val_gen(generation);
     }
@@ -4349,12 +4348,6 @@ where
             .retain(|id, _| self.state.bindings().get(*id).is_some());
         self.hidden_host_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
-    }
-
-    /// Reserve identities for compiled cell values before releasing exclusive
-    /// session access. Aborted cells leave gaps; reserved identities are never reused.
-    pub fn reserve_value_generations_through(&mut self, generation: Generation) {
-        self.state.set_val_gen(generation);
     }
 
     /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
@@ -6631,8 +6624,7 @@ where
             .state
             .compile_view_digest_in(mounted.scope)
             .ok_or(SessionError::DeadScope(mounted.scope))?;
-        let generation = self.state.val_gen().next();
-        self.state.set_val_gen(generation);
+        let (generation, _) = self.state.reserve_value_generations(1)?;
         let owner_epoch = self.state.admission_owner().epoch();
         let mut hash = blake3::Hasher::new();
         hash.update(b"TidepoolActivationPreview1");
