@@ -100,13 +100,16 @@ mod tests {
     fn insert(table: &mut DataConTable, id: u64, qualified_name: &str) {
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: qualified_name.rsplit_once('.').unwrap().0.into(),
-                    namespace: "constructor".into(),
-                    occurrence: "ActorCompletedStatus".into(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: qualified_name.rsplit_once('.').unwrap().0.into(),
+                        namespace: "constructor".into(),
+                        occurrence: "ActorCompletedStatus".into(),
+                        record_parent: None,
+                    },
+                    "ActorTerminalStatus",
+                ),
                 id: DataConId(id),
                 name: "ActorCompletedStatus".into(),
                 tag: 1,
@@ -157,13 +160,16 @@ mod tests {
         ] {
             table
                 .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: "Tidepool.Effects.Core".into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.to_owned(),
+                            record_parent: None,
+                        },
+                        "ActorTerminalStatus",
+                    ),
                     id: DataConId(id),
                     name: name.into(),
                     tag: (id - 99) as u32,
@@ -222,13 +228,16 @@ mod tests {
         let mut table = DataConTable::new();
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Tidepool.Effects.Core".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "ActorFailedStatus".into(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Tidepool.Effects.Core".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "ActorFailedStatus".into(),
+                        record_parent: None,
+                    },
+                    "ActorTerminalStatus",
+                ),
                 id: DataConId(103),
                 name: "ActorFailedStatus".into(),
                 tag: 2,

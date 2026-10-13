@@ -55,7 +55,7 @@ fn probe(label: &str, text: &str, gen: u64) {
         .filter_map(|declaration| {
             let qualified = format!(
                 "{}.{}",
-                declaration.identity.module, declaration.identity.occurrence
+                declaration.identity.symbol.module, declaration.identity.symbol.occurrence
             );
             let core_id = compiled.table().get_by_qualified_name(&qualified)?;
             shared += 1;

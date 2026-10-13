@@ -652,34 +652,43 @@ mod tests {
 
     fn reservation_answer_table() -> DataConTable {
         let mut table = DataConTable::new();
-        for (id, qualified_name, rep_arity) in [
-            (1, "Data.Either.Right", 1),
-            (2, "Data.Either.Left", 1),
-            (3, "GHC.Types.I#", 1),
-            (4, "GHC.Types.W#", 1),
+        for (id, qualified_name, family, rep_arity) in [
+            (1, "Data.Either.Right", "Either", 1),
+            (2, "Data.Either.Left", "Either", 1),
+            (3, "GHC.Types.I#", "Int#", 1),
+            (4, "GHC.Types.W#", "Word#", 1),
             (
                 5,
                 "Tidepool.Agent.Reply.Internal.RequestReservationRejected",
+                "RequestError",
                 1,
             ),
-            (6, "Tidepool.Agent.Reply.Internal.ReplyStale", 0),
+            (
+                6,
+                "Tidepool.Agent.Reply.Internal.ReplyStale",
+                "ReplyError",
+                0,
+            ),
         ] {
             table
                 .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: qualified_name.rsplit('.').next().unwrap().to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: qualified_name.rsplit_once('.').unwrap().0.into(),
+                            namespace: "constructor".into(),
+                            occurrence: qualified_name.rsplit('.').next().unwrap().to_owned(),
+                            record_parent: None,
+                        },
+                        family,
+                    ),
                     id: DataConId(id),
                     name: qualified_name.rsplit('.').next().unwrap().into(),
                     tag: 1,
                     rep_arity,
                     field_bangs: Vec::new(),
                     qualified_name: Some(qualified_name.into()),
-                    type_name: String::new(),
+                    type_name: family.into(),
                 })
                 .expect("valid fixture metadata");
         }

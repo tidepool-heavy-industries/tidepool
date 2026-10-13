@@ -1603,13 +1603,12 @@ mod tests {
             } else {
                 "Fixture"
             };
-            let mut identity = testing::identity(module, name);
-            identity.namespace = "constructor".into();
+            let mut symbol = testing::identity(module, name);
+            symbol.namespace = "constructor".into();
             let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
             family.namespace = "type".into();
             wire.constructors.push(ConstructorDecl {
-                identity,
-                family,
+                identity: testing::constructor_identity(symbol, family),
                 host_id: tidepool_repr::DataConId(900 + index as u64),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: if index == 1 { 2 } else { 1 },
@@ -1658,15 +1657,15 @@ mod tests {
                 .insert_checked(tidepool_repr::DataCon {
                     identity: constructor.identity.clone(),
                     id: constructor.host_id,
-                    name: constructor.identity.occurrence.clone(),
+                    name: constructor.identity.symbol.occurrence.clone(),
                     tag: constructor.tag,
                     rep_arity: constructor.field_reps.len() as u32,
                     field_bangs: vec![],
                     qualified_name: Some(format!(
                         "{}.{}",
-                        constructor.identity.module, constructor.identity.occurrence
+                        constructor.identity.symbol.module, constructor.identity.symbol.occurrence
                     )),
-                    type_name: constructor.family.occurrence.clone(),
+                    type_name: constructor.identity.family.symbol.occurrence.clone(),
                 })
                 .expect("valid fixture metadata");
         }

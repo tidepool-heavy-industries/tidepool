@@ -15050,13 +15050,16 @@ pub(crate) mod request_tests {
                 let module = definition.haskell_module.unwrap_or("Tidepool.Effects.Core");
                 table
                     .insert_checked(DataCon {
-                        identity: tidepool_repr::execution_schema::SymbolIdentity {
-                            unit: "fixture".into(),
-                            module: module.into(),
-                            namespace: "constructor".into(),
-                            occurrence: name.into(),
-                            record_parent: None,
-                        },
+                        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                            tidepool_repr::execution_schema::SymbolIdentity {
+                                unit: "fixture".into(),
+                                module: module.into(),
+                                namespace: "constructor".into(),
+                                occurrence: name.into(),
+                                record_parent: None,
+                            },
+                            definition.name,
+                        ),
                         id: DataConId(next_id),
                         name: name.into(),
                         tag: index as u32 + 1,
@@ -15098,20 +15101,23 @@ pub(crate) mod request_tests {
         ] {
             table
                 .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: "Tidepool.Actors.Internal.Agent".into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.to_owned(),
+                            record_parent: None,
+                        },
+                        "AgentForgetOutcome",
+                    ),
                     id: DataConId(id),
                     name: name.into(),
                     tag: 1,
                     rep_arity: arity,
                     field_bangs: Vec::new(),
                     qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                    type_name: String::new(),
+                    type_name: "AgentForgetOutcome".into(),
                 })
                 .expect("valid fixture metadata");
         }
@@ -15208,22 +15214,30 @@ pub(crate) mod request_tests {
             (131, "UsageComplete", 0),
             (132, "ProviderUsageSummary", 8),
         ] {
+            let family = match name {
+                "UsageThread" => "ProviderUsageScope",
+                "UsageComplete" => "ProviderUsageCompleteness",
+                _ => "ProviderUsageSummary",
+            };
             table
                 .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: "Tidepool.Actors.Observe".into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.to_owned(),
+                            record_parent: None,
+                        },
+                        family,
+                    ),
                     id: DataConId(id),
                     name: name.into(),
                     tag: 1,
                     rep_arity: arity,
                     field_bangs: Vec::new(),
                     qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                    type_name: String::new(),
+                    type_name: family.into(),
                 })
                 .expect("valid fixture metadata");
         }
@@ -15387,13 +15401,16 @@ pub(crate) mod request_tests {
         let submit = DataConId(100);
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Tidepool.Agent.Reply.Internal".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "SubmitRequestWith".into(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Tidepool.Agent.Reply.Internal".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "SubmitRequestWith".into(),
+                        record_parent: None,
+                    },
+                    "Replies",
+                ),
                 id: submit,
                 name: "SubmitRequestWith".into(),
                 tag: 1,
@@ -19565,13 +19582,12 @@ pub(crate) mod request_tests {
             } else {
                 "Fixture"
             };
-            let mut identity = testing::identity(module, name);
-            identity.namespace = "constructor".into();
+            let mut symbol = testing::identity(module, name);
+            symbol.namespace = "constructor".into();
             let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
             family.namespace = "type".into();
             wire.constructors.push(ConstructorDecl {
-                identity,
-                family,
+                identity: testing::constructor_identity(symbol, family),
                 host_id: tidepool_repr::DataConId(900 + index as u64),
                 result_rep: RuntimeRep::LiftedRef,
                 tag: if index == 1 { 2 } else { 1 },
@@ -19620,15 +19636,15 @@ pub(crate) mod request_tests {
                 .insert_checked(tidepool_repr::DataCon {
                     identity: constructor.identity.clone(),
                     id: constructor.host_id,
-                    name: constructor.identity.occurrence.clone(),
+                    name: constructor.identity.symbol.occurrence.clone(),
                     tag: constructor.tag,
                     rep_arity: constructor.field_reps.len() as u32,
                     field_bangs: vec![],
                     qualified_name: Some(format!(
                         "{}.{}",
-                        constructor.identity.module, constructor.identity.occurrence
+                        constructor.identity.symbol.module, constructor.identity.symbol.occurrence
                     )),
-                    type_name: constructor.family.occurrence.clone(),
+                    type_name: constructor.identity.family.symbol.occurrence.clone(),
                 })
                 .expect("valid fixture metadata");
         }

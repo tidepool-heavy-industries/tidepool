@@ -63,30 +63,33 @@ mod tests {
     #[test]
     fn unconfigured_model_returns_typed_unavailable_for_every_verb() {
         let mut table = DataConTable::new();
-        for (index, (qualified, arity)) in [
-            ("Data.Either.Left", 1),
-            ("Tidepool.Effects.ModelUnavailable", 1),
-            ("Data.Text.Text", 3),
+        for (index, (qualified, family, arity)) in [
+            ("Data.Either.Left", "Either", 1),
+            ("Tidepool.Effects.ModelUnavailable", "ModelBoundaryError", 1),
+            ("Data.Text.Text", "Text", 3),
         ]
         .into_iter()
         .enumerate()
         {
             table
                 .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: qualified.rsplit('.').next().unwrap().to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: qualified.rsplit_once('.').unwrap().0.into(),
+                            namespace: "constructor".into(),
+                            occurrence: qualified.rsplit('.').next().unwrap().to_owned(),
+                            record_parent: None,
+                        },
+                        family,
+                    ),
                     id: DataConId(index as u64),
                     name: qualified.rsplit('.').next().unwrap().into(),
                     tag: 1,
                     rep_arity: arity,
                     field_bangs: Vec::new(),
                     qualified_name: Some(qualified.into()),
-                    type_name: "test response".into(),
+                    type_name: family.into(),
                 })
                 .expect("valid fixture metadata");
         }
