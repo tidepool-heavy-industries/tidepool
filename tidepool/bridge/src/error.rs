@@ -39,7 +39,7 @@ pub enum BridgeError {
         arity: usize,
         /// Module-qualified identity (falling back to unqualified name) of
         /// every constructor that matched both the name and the arity.
-        candidates: Vec<tidepool_repr::execution_schema::SymbolIdentity>,
+        candidates: Vec<tidepool_repr::execution_schema::ConstructorIdentity>,
     },
     /// Lookup by module-qualified name failed. Emitted by derived
     /// `FromHaskell`/`ToHaskell` impls when a variant carries a
