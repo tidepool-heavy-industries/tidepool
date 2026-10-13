@@ -28,9 +28,11 @@ under `.exomonad/state`, excluded from source capture and drift.
 Read a draft with ordinary file access; compare active code through
 `readSourceModule` and `sourceStatus`. Write a revision, then explicitly validate
 and publish through `reloadSource`, `reload_helpers` or `reload_agent_spec`.
-Failed validation retains active source. Already captured values retain their
-definitions; a changed tool surface requires a new actor incarnation. Minor
-source edits need no separate edit API or coordinator handoff.
+Failed validation retains active source. Already-issued calls retain captured
+source and compiled values retain their definitions. A changed tool surface
+requires a new actor incarnation. Ordinary helper functions remain Haskell
+definitions; adding one does not register a native tool. Minor source edits need no separate edit API or coordinator
+handoff.
 
 See the [quickstart lifecycle map](.exomonad/prompts/api-guide.md#lifecycle-map)
 and the exact lookup locators there for deeper notebook, actor and Jev contracts.

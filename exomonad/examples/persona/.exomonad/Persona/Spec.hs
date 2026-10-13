@@ -34,7 +34,7 @@ data PersonaTools mode = PersonaTools
 agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools
-  { haskell = haskellTool "Author tools, actors, context transformations, perspective forks, web exploration and interactive forms in Haskell. Bind full evidence before displaying selections. Persistent memory lives under .exomonad/state; running source is read through readSourceModule." }
+  { haskell = haskellTool "Use the persistent Haskell notebook to read and edit workspace files, recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections." }
   , initialContext = Just Orientation.startup }
 
 data HelperTools mode = HelperTools

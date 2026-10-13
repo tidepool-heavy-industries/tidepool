@@ -42,13 +42,16 @@ reference material describes a vocabulary, not a grant.
 | Write memory or a note | Durable content changes; current arrival context remains as it was |
 | `Persona.Context.refresh` | Reads the current memory files and replaces the published authored context block synchronously; missing or unpublished targets refuse |
 | Edit `.exomonad/Persona/*.hs` | Ordinary source draft changes; active code remains unchanged |
-| `reloadSource [] Nothing` | Typechecks and publishes workspace source for future cells; failed validation retains active source |
-| `reload_helpers` | Checks and publishes actor-local SessionHelpers for future cells |
+| `reloadSource [] Nothing` | Typechecks and publishes workspace source for future model requests and new admissions; failed validation retains active source |
+| `reload_helpers` | Checks and publishes actor-local SessionHelpers for future model requests and new admissions |
 | `reload_agent_spec` | Rebuilds the typed tool record; a changed tool surface requires a new actor incarnation |
 | Edit prompt files | Drafts change; frozen system/developer instructions stay fixed for this run |
 
-Existing captured values retain their definitions after reload. Inspect source
-status and reload receipts before relying on a change. Minor source changes can
+Already-issued calls retain their captured source; existing compiled values retain
+their original definitions. Adding an ordinary Haskell helper function does not
+register a new native tool. The installed native tool surface remains fixed for
+an actor incarnation; `reload_agent_spec` applies a rebuilt tool record within
+that boundary. Inspect source status and reload receipts before relying on a change. Minor source changes can
 use ordinary file writes followed by explicit validation/reload; no separate edit
 API or coordinator handoff is required. The source owner and runtime still enforce
 publication and authority.
