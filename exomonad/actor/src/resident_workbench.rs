@@ -19845,8 +19845,36 @@ pub(crate) mod request_tests {
                 let call = selected
                     .admit(exomonad_tool::ToolArguments::Raw("input".into()))
                     .unwrap();
+                let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([17; 16]);
+                let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+                    actor_id: context.actor.id.0,
+                    incarnation: context.actor.incarnation.0,
+                    execution_id: execution.clone(),
+                };
+                let mut unbound = WorkbenchRequest::for_tool("probe".into(), serde_json::json!("input"))
+                    .with_execution_id(execution.clone())
+                    .with_checkpoint_boundary(boundary.clone());
+                unbound.input = Some(serde_json::json!({"mount": "retained input"}));
+                unbound.verbose = Some(true);
+                let invocation = crate::ActorWorkbenchInvocation::installed(
+                    call,
+                    crate::kernel::WorkbenchInvocationMetadata::capture(&unbound),
+                    None,
+                    None,
+                );
+                assert_eq!(invocation.request().input, unbound.input);
+                assert_eq!(invocation.request().verbose, Some(true));
+                assert_eq!(invocation.request().tool_call().unwrap().name, "probe");
+                assert_eq!(invocation.request().execution_id(), Some(&execution));
+                assert_eq!(invocation.request().checkpoint_boundary(), Some(&boundary));
+                let (request, operation, _, _) = invocation.into_parts();
+                let crate::kernel::WorkbenchToolOperation::Installed(call) = operation else {
+                    panic!("issued endpoint lost its installed operation")
+                };
+                assert_eq!(request.tool_call().unwrap().arguments, serde_json::json!("input"));
+                assert_eq!(call.selected().lease().actor(), context.actor);
                 let step = workbench
-                    .begin_selected_tool(context.clone(), Arc::new(call))
+                    .begin_selected_tool(context.clone(), call)
                     .await
                     .unwrap();
                 let step = match step {

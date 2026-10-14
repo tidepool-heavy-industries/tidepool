@@ -53,7 +53,7 @@ impl KernelBehavior for ReplyDriver {
         _: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> WorkbenchDispatch<Self> {
         let actor = context.identity();
-        if invocation.request.cell_source() == Some("sibling") {
+        if invocation.request().cell_source() == Some("sibling") {
             let sibling = self.sibling.take().expect("one parked sibling");
             let entered = self.sibling_entered.clone();
             return WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {

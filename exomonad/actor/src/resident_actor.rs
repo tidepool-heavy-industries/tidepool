@@ -3032,8 +3032,7 @@ struct WorkbenchEffectState {
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
     context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-    installed_tools: Option<crate::InstalledToolLease>,
-    selected_tool: Option<Arc<crate::resident_workbench::AdmittedToolCall>>,
+    operation: crate::kernel::WorkbenchToolOperation,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
     invocation_work: Arc<InvocationWork>,
@@ -3477,8 +3476,7 @@ struct WorkbenchAdmission {
     initial_context: bool,
     context: ActorSessionContext,
     request: WorkbenchRequest,
-    installed_tools: Option<crate::InstalledToolLease>,
-    selected_tool: Option<Arc<crate::resident_workbench::AdmittedToolCall>>,
+    operation: crate::kernel::WorkbenchToolOperation,
     admitted_source: crate::CheckpointSourceLayer,
     compilation_authority: Option<Arc<WorkbenchCompilationAuthority>>,
     public_owner: Arc<WorkbenchPublicOwner>,
@@ -3758,7 +3756,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         O: OutputSink + Sync + 'static,
     {
         let mut context = self.context(actor);
-        let (mut request, execution) = ensure_workbench_execution_id(invocation.request);
+        let initial_context_invocation = invocation.initial_context;
+        let (request, operation, capture, context_binding) = invocation.into_parts();
+        let (mut request, execution) = ensure_workbench_execution_id(request);
         if request.checkpoint_boundary().is_none() {
             request = request.with_checkpoint_boundary(
                 tidepool_runtime::session::ContextCheckpointBoundary::Execution {
@@ -3768,12 +3768,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-        let issued = invocation
-            .selected_tool
-            .as_ref()
-            .map(|call| call.selected().snapshot().clone())
-            .or(invocation.installed_tools)
-            .or_else(|| self.installed_tools.snapshot());
+        let operation = match operation {
+            crate::kernel::WorkbenchToolOperation::Unbound(None) => {
+                crate::kernel::WorkbenchToolOperation::Unbound(self.installed_tools.snapshot())
+            }
+            operation => operation,
+        };
+        let issued = operation.snapshot().cloned();
         let issued_generation = issued
             .as_ref()
             .and_then(|snapshot| snapshot.generation())
@@ -3793,7 +3794,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         if let Some(generation) = &issued_generation {
             context = generation.context.clone();
         }
-        if invocation.initial_context {
+        if initial_context_invocation {
             let initial_context = installed_tools
                 .as_ref()
                 .and_then(crate::InstalledToolLease::tools)
@@ -3806,7 +3807,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 })?;
             context.haskell_effects_alias = initial_context.execution_effects.clone();
         }
-        let current_builtin = invocation.selected_tool.is_none()
+        let current_builtin = operation.selected().is_none()
             && request.tool_call().is_some_and(|call| {
                 matches!(
                     call.name.as_str(),
@@ -3831,49 +3832,44 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let invocation_key = control
             .as_ref()
             .and_then(|control| control.invocation.clone());
-        let selected_tool = match invocation.selected_tool {
-            Some(call) => Some(Arc::new(call)),
-            None if !current_builtin => match request.tool_call() {
-                Some(call) => {
-                    let selected = issued
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.select(&call.name))
-                        .ok_or_else(|| KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor,
-                            detail: "unknown installed endpoint".into(),
-                            diagnostic: None,
+        let operation = match operation {
+            crate::kernel::WorkbenchToolOperation::Unbound(installation) if !current_builtin => {
+                match request.tool_call() {
+                    Some(call) => {
+                        let selected = installation
+                            .as_ref()
+                            .and_then(|lease| lease.select(&call.name))
+                            .ok_or_else(|| KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
+                                actor,
+                                detail: "unknown installed endpoint".into(),
+                                diagnostic: None,
+                            })?;
+                        let arguments = if let Some(text) = call.arguments.as_str() {
+                            exomonad_tool::ToolArguments::Raw(text.into())
+                        } else {
+                            exomonad_tool::ToolArguments::Structured(call.arguments.clone())
+                        };
+                        let admitted = selected.admit(arguments).map_err(|error| {
+                            KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
+                                actor,
+                                detail: error.to_string(),
+                                diagnostic: None,
+                            }
                         })?;
-                    let arguments = if let Some(text) = call.arguments.as_str() {
-                        exomonad_tool::ToolArguments::Raw(text.into())
-                    } else {
-                        exomonad_tool::ToolArguments::Structured(call.arguments.clone())
-                    };
-                    let admitted = selected.admit(arguments).map_err(|error| {
-                        KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor,
-                            detail: error.to_string(),
-                            diagnostic: None,
-                        }
-                    })?;
-                    Some(Arc::new(admitted))
+                        request = crate::kernel::WorkbenchInvocationMetadata::capture(&request)
+                            .apply(admitted.request());
+                        crate::kernel::WorkbenchToolOperation::Installed(Arc::new(admitted))
+                    }
+                    None => crate::kernel::WorkbenchToolOperation::Unbound(installation),
                 }
-                None => None,
-            },
-            None => None,
+            }
+            operation => operation,
         };
-        if let Some(call) = &selected_tool {
-            let mut checked_request = call.request();
-            checked_request.input = request.input.clone();
-            checked_request.verbose = request.verbose;
-            if let Some(execution) = request.execution_id() {
-                checked_request = checked_request.with_execution_id(execution.clone());
-            }
-            if let Some(boundary) = request.checkpoint_boundary() {
-                checked_request = checked_request.with_checkpoint_boundary(boundary.clone());
-            }
-            request = checked_request;
+        let installed_tools = operation.installation();
+        let selected_tool = operation.selected();
+        if let Some(call) = selected_tool {
             let endpoint = call.selected().endpoint();
             if endpoint.plan().effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
@@ -3890,7 +3886,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             }
             context.haskell_effects_alias = endpoint.execution_effects().clone();
         }
-        if invocation.context_binding.is_some() {
+        if context_binding.is_some() {
             admit_context_authority(
                 actor,
                 selected_tool
@@ -3949,7 +3945,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             let (selected, authority) = WorkbenchCompilationAuthority::admit(
                 context,
                 admitted_source.clone(),
-                installed_tools.clone(),
+                installed_tools.cloned(),
                 self.environment.source_layers.as_ref(),
             )?;
             context = selected;
@@ -3980,7 +3976,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     diagnostic: None,
                 })?
         };
-        if let Some(binding) = &invocation.context_binding {
+        if let Some(binding) = &context_binding {
             let control = control
                 .as_ref()
                 .expect("context admission checked exact invocation");
@@ -4003,17 +3999,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
             issued_snapshot: issued,
-            initial_context: invocation.initial_context,
+            initial_context: initial_context_invocation,
             context,
             public_owner,
             request,
-            installed_tools,
-            selected_tool,
+            operation,
             admitted_source,
             compilation_authority,
             current_builtin,
-            capture: invocation.hosted_checkpoint_capture,
-            context_binding: invocation.context_binding,
+            capture,
+            context_binding,
             control,
             invocation: invocation_key,
         }))
@@ -10025,9 +10020,9 @@ where
             } = execution_state;
             let context = effects.context.clone();
             let context = &context;
-            let installed_tools = effects.installed_tools.clone();
+            let installed_tools = effects.operation.installation().cloned();
             let execution = request.execution_id().cloned();
-            let builtin_call = if effects.selected_tool.is_none() {
+            let builtin_call = if effects.operation.selected().is_none() {
                 request.tool_call()
             } else {
                 None
@@ -10039,7 +10034,7 @@ where
                 .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
-                cursor.resident_tool = effects.selected_tool.as_ref().is_some_and(|call| {
+                cursor.resident_tool = effects.operation.selected().is_some_and(|call| {
                     if !matches!(call.selected().endpoint().plan().execution(), exomonad_tool::EndpointExecution::ResidentAsync(_) | exomonad_tool::EndpointExecution::ResidentSync(_)) { return false; }
                     let tools = call.selected().lease().tools().expect("selected installation retained");
                     tracing::info!(actor = %context.actor, tool = %call.selected().endpoint().plan().name(), spec = %tools.provenance(), "hosted tool call served by an installed spec");
@@ -10346,8 +10341,8 @@ where
                             } else if cursor.resident_tool {
                                 owned_workbench::WorkbenchUnitStartRequest::Tool {
                                     call: effects
-                                        .selected_tool
-                                        .as_ref()
+                                        .operation
+                                        .selected()
                                         .expect("admitted resident endpoint call")
                                         .clone(),
                                 }
@@ -10511,8 +10506,8 @@ where
                                 .map(
                                     |_| tidepool_runtime::session::workbench::WorkbenchToolCall {
                                         name: effects
-                                            .selected_tool
-                                            .as_ref()
+                                            .operation
+                                            .selected()
                                             .map_or(crate::HASKELL_TOOL, |call| {
                                                 call.selected().endpoint().plan().name()
                                             })
@@ -12304,8 +12299,7 @@ where
                 initial_context,
                 context,
                 request,
-                installed_tools,
-                selected_tool,
+                operation,
                 admitted_source,
                 compilation_authority,
                 public_owner: _public_owner,
@@ -12397,8 +12391,7 @@ where
                     control,
                     model: None,
                     context_binding,
-                    installed_tools,
-                    selected_tool,
+                    operation,
                     admitted_source,
                     reservation_owner,
                     invocation_work,

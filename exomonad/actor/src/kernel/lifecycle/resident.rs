@@ -1051,6 +1051,7 @@ fn complete(
                         .clone()
                         .map(crate::resident_workbench::ActorRequestSnapshot::Bootstrap),
                     None,
+                    None,
                 );
                 invocation.initial_context = true;
                 let control = crate::WorkbenchExecutionControl::untracked();

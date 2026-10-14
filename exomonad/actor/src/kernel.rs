@@ -308,30 +308,92 @@ impl std::error::Error for KernelWorkbenchFailure {}
 pub type KernelInvocationReply = Result<serde_json::Value, KernelInvocationFailure>;
 pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailure>;
 
+/// The operation retains its single installation owner. Unbound frontends select
+/// at mailbox admission; provider calls freeze their selected endpoint before it.
+pub(crate) enum WorkbenchToolOperation {
+    Unbound(Option<crate::resident_workbench::ActorRequestSnapshot>),
+    Installed(std::sync::Arc<crate::resident_workbench::AdmittedToolCall>),
+}
+
+impl WorkbenchToolOperation {
+    pub(crate) fn installation(&self) -> Option<&crate::InstalledToolLease> {
+        match self {
+            Self::Unbound(installation) => installation
+                .as_ref()
+                .map(|snapshot| snapshot.installation()),
+            Self::Installed(call) => Some(call.selected().lease()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
+        match self {
+            Self::Unbound(snapshot) => snapshot.as_ref(),
+            Self::Installed(call) => Some(call.selected().snapshot()),
+        }
+    }
+
+    pub(crate) fn selected(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::resident_workbench::AdmittedToolCall>> {
+        match self {
+            Self::Unbound(_) => None,
+            Self::Installed(call) => Some(call),
+        }
+    }
+}
+
+/// Common invocation data, independent of endpoint selection and semantic input.
+#[derive(Default)]
+pub(crate) struct WorkbenchInvocationMetadata {
+    input: Option<serde_json::Value>,
+    verbose: Option<bool>,
+    execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
+    checkpoint: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+}
+
+impl WorkbenchInvocationMetadata {
+    pub(crate) fn capture(request: &WorkbenchRequest) -> Self {
+        Self {
+            input: request.input.clone(),
+            verbose: request.verbose,
+            execution: request.execution_id().cloned(),
+            checkpoint: request.checkpoint_boundary().cloned(),
+        }
+    }
+
+    pub(crate) fn apply(self, mut request: WorkbenchRequest) -> WorkbenchRequest {
+        request.input = self.input;
+        request.verbose = self.verbose;
+        if let Some(execution) = self.execution {
+            request = request.with_execution_id(execution);
+        }
+        if let Some(checkpoint) = self.checkpoint {
+            request = request.with_checkpoint_boundary(checkpoint);
+        }
+        request
+    }
+}
+
 /// Actor-owned authority beside the transport-neutral workbench request.
-/// The runtime request and its exact execution journal never contain a handler.
+/// Semantic input is constructed here and cannot be independently replaced.
+/// Transport identity and checkpoint metadata never contain a handler.
 pub struct ActorWorkbenchInvocation {
     pub(crate) initial_context: bool,
     pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
-    pub request: WorkbenchRequest,
-    pub(crate) installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    request: WorkbenchRequest,
+    operation: WorkbenchToolOperation,
     pub(crate) hosted_checkpoint_capture:
         Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     pub(crate) context_binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
-    pub(crate) selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
 }
 
 impl ActorWorkbenchInvocation {
     pub fn unbound(request: WorkbenchRequest) -> Self {
-        Self {
-            initial_context: false,
-            display_expansion: None,
-            request,
-            installed_tools: None,
-            hosted_checkpoint_capture: None,
-            context_binding: None,
-            selected_tool: None,
-        }
+        Self::issued(request, None, None, None)
+    }
+
+    pub fn request(&self) -> &WorkbenchRequest {
+        &self.request
     }
 
     /// Execute an existing display callback through the actor's serialized mailbox.
@@ -344,28 +406,66 @@ impl ActorWorkbenchInvocation {
 
     pub(crate) fn issued(
         request: WorkbenchRequest,
-        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
+        installation: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+        context_binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
     ) -> Self {
         Self {
             initial_context: false,
             display_expansion: None,
             request,
-            installed_tools,
+            operation: WorkbenchToolOperation::Unbound(installation),
             hosted_checkpoint_capture,
-            context_binding: None,
-            selected_tool: None,
+            context_binding,
         }
     }
 
-    pub(crate) fn with_context(
-        mut self,
-        binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
+    pub(crate) fn installed(
+        call: crate::resident_workbench::AdmittedToolCall,
+        metadata: WorkbenchInvocationMetadata,
+        hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+        context_binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
     ) -> Self {
-        self.context_binding = binding;
-        self.selected_tool = selected_tool;
+        Self {
+            initial_context: false,
+            display_expansion: None,
+            request: metadata.apply(call.request()),
+            operation: WorkbenchToolOperation::Installed(std::sync::Arc::new(call)),
+            hosted_checkpoint_capture,
+            context_binding,
+        }
+    }
+
+    pub(crate) fn with_execution_id(
+        mut self,
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+    ) -> Self {
+        self.request = self.request.with_execution_id(execution);
         self
+    }
+
+    pub(crate) fn with_checkpoint_boundary(
+        mut self,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Self {
+        self.request = self.request.with_checkpoint_boundary(boundary);
+        self
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        WorkbenchRequest,
+        WorkbenchToolOperation,
+        Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+        Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
+    ) {
+        (
+            self.request,
+            self.operation,
+            self.hosted_checkpoint_capture,
+            self.context_binding,
+        )
     }
 }
 

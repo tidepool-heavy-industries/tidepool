@@ -244,10 +244,11 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             let validated = (|| {
                 let arguments = arguments?;
                 if is_builtin(&invocation.name) {
-                    return Ok((
+                    return Ok(crate::ActorWorkbenchInvocation::issued(
                         builtin_request(&invocation.name, arguments)?,
-                        None,
                         installed_tools.ok(),
+                        capture,
+                        context,
                     ));
                 }
                 let lease = installed_tools?;
@@ -258,9 +259,9 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ))
                 })?;
                 let admitted = selected.admit(arguments)?;
-                Ok((admitted.request(), Some(admitted), Some(lease)))
+                Ok(crate::ActorWorkbenchInvocation::installed(admitted, Default::default(), capture, context))
             })();
-            let (request, selected, installed_tools) = match validated {
+            let prepared = match validated {
                 Ok(validated) => validated,
                 Err(error) => {
                     client.reject_workbench_call(&issued, &error);
@@ -268,14 +269,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                 }
             };
             client
-                .dispatch_prepared_workbench(
-                    request,
-                    issued,
-                    installed_tools,
-                    capture,
-                    context,
-                    selected,
-                )
+                .dispatch_prepared_workbench(prepared, issued)
                 .await
                 .map(ResidentToolResponse::Workbench)
         })

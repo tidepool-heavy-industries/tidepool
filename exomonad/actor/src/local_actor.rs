@@ -1475,7 +1475,7 @@ async fn handle_parked_message<B: KernelBehavior>(
             let ready = state.deferred_mailbox.iter().position(|message| {
                 can_apply_independent_settlement(state, message)
                     || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
-                        if can_admit_deferred_workbench(state, &invocation.request))
+                        if can_admit_deferred_workbench(state, invocation.request()))
             });
             if let Some(index) = ready {
                 let message = state.take_deferred(index).expect("selected deferred work");
@@ -1567,7 +1567,7 @@ async fn handle_parked_message<B: KernelBehavior>(
             invocation,
             control,
             reply,
-        } if can_admit_workbench_request(state, &invocation.request) => {
+        } if can_admit_workbench_request(state, invocation.request()) => {
             start_workbench(myself, state, invocation, control, reply);
 
             Ok(())
@@ -1608,7 +1608,7 @@ fn admit_idle_message<B: KernelBehavior>(
         message @ KernelMessage::Workbench { .. }
             if !state.deferred_mailbox.is_empty()
                 && matches!(&message, KernelMessage::Workbench { invocation, .. }
-                    if state.behavior.serializes_workbench_publication(&invocation.request)) =>
+                    if state.behavior.serializes_workbench_publication(invocation.request())) =>
         {
             state.defer_back(message);
             schedule_deferred_mailbox(myself, state)?;
@@ -2375,7 +2375,7 @@ fn start_workbench<B: KernelBehavior>(
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
 ) {
     assert!(
-        state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, &invocation.request),
+        state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, invocation.request()),
         "workbench admission requires an independent owned-task lane"
     );
     let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
@@ -2394,7 +2394,7 @@ fn start_workbench<B: KernelBehavior>(
         return;
     };
     state.next_task_generation = generation;
-    let execution = invocation.request.execution_id().cloned();
+    let execution = invocation.request().execution_id().cloned();
     let step = crate::WorkbenchStepKey::new(state.context.identity, generation, execution.clone());
     let concurrent = !state.pending_tasks.is_empty();
     let mut pending = PendingActorTask::Workbench(PendingWorkbench {
@@ -2406,7 +2406,7 @@ fn start_workbench<B: KernelBehavior>(
         serial: false,
         publication: state
             .behavior
-            .serializes_workbench_publication(&invocation.request),
+            .serializes_workbench_publication(invocation.request()),
         hosted_cell: Arc::clone(state.lifecycle.hosted_cell()),
     });
     let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2499,7 +2499,7 @@ fn can_admit_independent_workbench<B: KernelBehavior>(state: &LocalActorState<B>
                 deferred_control(message),
                 Some(DeferredControl::HostedSettlement)
             ) || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
-                    if state.behavior.serializes_workbench_publication(&invocation.request))
+                    if state.behavior.serializes_workbench_publication(invocation.request()))
         })
 }
 
@@ -3231,7 +3231,7 @@ where
         state.deferred_mailbox.iter().any(|message| {
             can_apply_independent_settlement(state, message)
                 || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
-                    if can_admit_deferred_workbench(state, &invocation.request))
+                    if can_admit_deferred_workbench(state, invocation.request()))
         })
     };
     if state.replacement.is_none()
@@ -4741,7 +4741,7 @@ mod tests {
                 };
             }
             let calls = Arc::clone(&self.calls);
-            let gate = if self.serializes_workbench_publication(&invocation.request) {
+            let gate = if self.serializes_workbench_publication(invocation.request()) {
                 self.administrative_workbench_gate.clone()
             } else {
                 self.workbench_gate.clone()
@@ -4752,7 +4752,7 @@ mod tests {
             let successor_gate = if self
                 .owned_successor_source
                 .as_deref()
-                .is_none_or(|source| invocation.request.cell_source() == Some(source))
+                .is_none_or(|source| invocation.request().cell_source() == Some(source))
             {
                 self.owned_successor_gate.clone()
             } else {

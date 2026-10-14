@@ -72,12 +72,12 @@ pub(crate) fn assert_pinned_preflight(
                 serde_json::json!({"topic": "pinned"}),
             ))
             .expect("generation probe arguments");
-        let invocation = crate::ActorWorkbenchInvocation::issued(
-            admitted.request(),
-            Some(ActorRequestSnapshot::Generation(replacement.clone())),
+        let invocation = crate::ActorWorkbenchInvocation::installed(
+            admitted,
+            crate::kernel::WorkbenchInvocationMetadata::default(),
             None,
-        )
-        .with_context(None, Some(admitted));
+            None,
+        );
         let preflight = behavior
             .preflight_workbench(expected.context.actor, invocation, None)
             .unwrap_or_else(|failure| panic!("pinned endpoint admission failed: {failure:?}"));
@@ -104,8 +104,8 @@ pub(crate) fn assert_pinned_preflight(
         assert!(Arc::ptr_eq(&admission.public_owner, &expected.public_owner));
         assert!(Arc::ptr_eq(
             &admission
-                .selected_tool
-                .as_ref()
+                .operation
+                .selected()
                 .unwrap()
                 .selected()
                 .lease()
@@ -116,8 +116,8 @@ pub(crate) fn assert_pinned_preflight(
         ));
         assert!(Arc::ptr_eq(
             &admission
-                .installed_tools
-                .as_ref()
+                .operation
+                .installation()
                 .unwrap()
                 .tools()
                 .unwrap()

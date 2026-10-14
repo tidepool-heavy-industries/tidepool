@@ -1434,11 +1434,12 @@ impl ResidentToolClient {
         request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        self.dispatch_workbench_issued_with_context(request, invocation, None, None, None, None)
-            .await
-            .and_then(|response| {
-                serde_json::to_value(response).map_err(ResidentToolError::Encoding)
-            })
+        self.dispatch_prepared_workbench(
+            crate::ActorWorkbenchInvocation::unbound(request),
+            self.issue_workbench_call(invocation),
+        )
+        .await
+        .and_then(|response| serde_json::to_value(response).map_err(ResidentToolError::Encoding))
     }
 
     pub(crate) fn issue_workbench_call(
@@ -1475,39 +1476,11 @@ impl ResidentToolClient {
         self.actor.hosted_cell().complete(&issued.control);
     }
 
-    pub(crate) async fn dispatch_workbench_issued_with_context(
-        &self,
-        request: WorkbenchRequest,
-        invocation: Option<ToolInvocationContext>,
-        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
-        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
-        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
-    ) -> Result<WorkbenchResponse, ResidentToolError> {
-        let issued = self.issue_workbench_call(invocation);
-        self.dispatch_prepared_workbench(
-            request,
-            issued,
-            installed_tools,
-            hosted_checkpoint_capture,
-            context_binding,
-            selected_tool,
-        )
-        .await
-    }
-
     pub(crate) async fn dispatch_prepared_workbench(
         &self,
-        mut request: WorkbenchRequest,
+        mut invocation: crate::ActorWorkbenchInvocation,
         issued: IssuedWorkbenchCall,
-        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
-        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
-        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
-        if let Some(call) = &selected_tool {
-            request = call.request();
-        }
         if let Some(operation) = issued
             .control
             .invocation
@@ -1534,17 +1507,19 @@ impl ResidentToolClient {
         }
         if let Some(operation) = &issued.control.invocation {
             if let Some(original) = operation.invocation().model_operation() {
-                request = request.with_checkpoint_boundary(
+                invocation = invocation.with_checkpoint_boundary(
                     tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
                 );
             }
             let execution = issued.control.execution_id(self.actor.identity());
-            request = request.with_execution_id(execution.clone());
+            invocation = invocation.with_execution_id(execution.clone());
             tracing::info!(actor = %self.actor.identity(), execution = %execution,
                 call_id = %operation.0.call_id,
                 context_call_id = operation.0.model_operation().map(|original| original.call_id.as_str()).unwrap_or(""),
-                turn_id = %operation.0.request_id(), items = request.items.len(), "workbench cell dispatched to its actor");
-        } else if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
+                turn_id = %operation.0.request_id(), items = invocation.request().items.len(), "workbench cell dispatched to its actor");
+        } else if invocation.hosted_checkpoint_capture.is_some()
+            || invocation.context_binding.is_some()
+        {
             let error = ResidentToolError::Unavailable(
                 "hosted authority requires an exact provider invocation".into(),
             );
@@ -1552,37 +1527,24 @@ impl ResidentToolClient {
             return Err(error);
         }
         self.dispatch_registered_workbench(
-            request,
+            invocation,
             issued.control.clone(),
             issued.publication.as_ref(),
-            installed_tools,
-            hosted_checkpoint_capture,
-            context_binding,
-            selected_tool,
         )
         .await
     }
 
     async fn dispatch_registered_workbench(
         &self,
-        request: WorkbenchRequest,
+        invocation: crate::ActorWorkbenchInvocation,
         control: Arc<WorkbenchExecutionControl>,
         publication: Option<&HostedCellPublication>,
-        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
-        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
-        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self
             .actor
             .admit_mailbox(crate::KernelMessage::Workbench {
-                invocation: crate::ActorWorkbenchInvocation::issued(
-                    request,
-                    installed_tools,
-                    hosted_checkpoint_capture,
-                )
-                .with_context(context_binding, selected_tool),
+                invocation,
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })
