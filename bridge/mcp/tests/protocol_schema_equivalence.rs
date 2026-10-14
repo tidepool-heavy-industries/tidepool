@@ -97,6 +97,14 @@ fn journal_decl_matches_the_schema_exactly() {
     );
 }
 
+#[test]
+fn web_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::web_decl(),
+        &tidepool_protocol::effects::web::web(),
+    );
+}
+
 /// Written to run BEFORE the flip, against the still-hand-written
 /// `worktree_effect_def!` macro — see the module doc. Worktree is the first
 /// migrated effect with a non-empty `type_defs` (thirteen declarations, seven
