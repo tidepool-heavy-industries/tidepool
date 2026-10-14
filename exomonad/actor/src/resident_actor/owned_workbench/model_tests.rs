@@ -119,6 +119,7 @@ fn execution_with_id(
                 model: Some(model),
                 context_binding: None,
                 installed_tools: None,
+                selected_tool: None,
                 admitted_source: Default::default(),
                 reservation_owner,
                 invocation_work,
