@@ -1,6 +1,7 @@
-use super::command_jobs_tests::{backend_request, committed};
+use super::command_jobs_tests::{backend_request_while_live, committed};
 use super::command_test_support::TestCommands;
-use super::test_campaign::TestCampaign;
+use super::test_campaign::{TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
+use std::sync::Arc;
 
 fn example_stage(name: &str) -> String {
     let example = tidepool_testing::fixture_source(
@@ -18,9 +19,13 @@ fn example_stage(name: &str) -> String {
 }
 
 async fn workspace_campaign() -> TestCampaign {
-    TestCampaign::start_with_config(
+    let reader: exomonad_actor::ConversationReader = Arc::new(|_actor, _count| {
+        Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+    });
+    TestCampaign::start_with_conversation(
         |admission| admission,
         super::jev_tests::pinned_jev_workspace,
+        Some(reader),
     )
     .await
 }
@@ -30,54 +35,46 @@ async fn completion_case(
     exit_code: i64,
     output_unavailable: bool,
 ) -> String {
-    let imports = committed(campaign, &example_stage("imports")).await;
-    assert_eq!(imports["status"], "committed", "{imports}");
-    let started = committed(campaign, &example_stage("start")).await;
-    assert_eq!(started["status"], "committed", "{started}");
-
+    committed(campaign, &example_stage("imports")).await;
+    let policy = campaign.root_installation.policy.clone();
+    let mut awaiting = tokio::spawn(async move {
+        super::tests::dispatch_haskell_script(policy.as_ref(), &example_stage("await")).await
+    });
     let backend = TestCommands::new();
     backend.set_exit_code(exit_code);
     if output_unavailable {
         backend.set_output_unavailable();
     }
-    backend_request(campaign).await.supply(Ok(backend.clone()));
+    backend_request_while_live(campaign, &mut awaiting, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+        .await
+        .supply(Ok(backend.clone()));
     backend.finish();
+    let awaited = awaiting.await.unwrap();
+    assert_eq!(awaited["status"], "committed", "{awaited}");
 
-    // This later cell waits for the existing job without reading its output.
-    // The watcher then returns the compact view and the original full capture.
-    let status = committed(
+    let projection = committed(
         campaign,
-        "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 30000)) 0) job",
+        &format!("display (tshow ({}))", example_stage("compact-query")),
     )
     .await;
+    let projection_text = super::test_campaign::committed_display_text(&projection);
     assert!(
-        status
-            .to_string()
-            .contains(&format!("CommandExited {exit_code}")),
-        "{status}"
-    );
-    // Attaching after terminal settlement exercises retained Cmd.completion:
-    // the source queues its exact receipt before actor startup returns.
-    let attached = committed(campaign, &example_stage("watch")).await;
-    assert_eq!(attached["status"], "committed", "{attached}");
-    let projection = committed(campaign, &example_stage("compact-query")).await;
-    assert!(
-        projection.to_string().contains("CompletionProjection"),
+        projection_text.contains("CompletionProjection"),
         "{projection}"
     );
-    let evidence = committed(campaign, &example_stage("full-evidence")).await;
-    assert!(
-        evidence.to_string().contains("CompletionEvidence"),
-        "{evidence}"
-    );
+    let evidence = committed(
+        campaign,
+        &format!("display (tshow ({}))", example_stage("full-evidence")),
+    )
+    .await;
+    let evidence_text = super::test_campaign::committed_display_text(&evidence);
+    assert!(evidence_text.contains("CompletionEvidence"), "{evidence}");
     assert_eq!(
         backend.executions(),
         1,
         "the original job must be the only execution"
     );
-    let finished = committed(campaign, &example_stage("cleanup")).await;
-    assert_eq!(finished["status"], "committed", "{finished}");
-    format!("{} {} {}", projection, evidence, finished)
+    format!("{projection_text} {evidence_text}")
 }
 
 #[tokio::test]
@@ -94,10 +91,7 @@ async fn background_command_example_retains_success_failure_and_unavailable_capt
                 let success = completion_case(campaign, 0, false).await;
                 assert!(success.contains("CommandExited 0"), "{success}");
                 assert!(success.contains("CaptureComplete"), "{success}");
-                assert!(
-                    success.contains(r#"CaptureComplete \"result\""#),
-                    "{success}"
-                );
+                assert!(success.contains(r#"CaptureComplete "result""#), "{success}");
 
                 let failure = completion_case(campaign, 7, false).await;
                 assert!(failure.contains("CommandExited 7"), "{failure}");
