@@ -4817,7 +4817,7 @@ scopedReadExactScope :: CompilerScope -> FilePath -> IO (Either String ExactScop
 scopedReadExactScope = ownedScopedReadExactScope
 
 scopedRunGhc :: CompilerScope -> Ghc result -> IO result
-scopedRunGhc = ownedScopedRunGhc
+scopedRunGhc scope = ownedScopedRunGhc scope
 
 scopedParserFlags :: CompilerScope -> DynFlags
 scopedParserFlags = ownedScopedParserFlags
