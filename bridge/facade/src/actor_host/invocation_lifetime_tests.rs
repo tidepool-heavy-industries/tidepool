@@ -75,7 +75,7 @@ async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() 
 #[tokio::test]
 async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
     let campaign = start_with_after_tool_worker().await;
-    campaign
+    let (releases, backend) = campaign
         .run_scenario_expecting_cleanup_failure(|campaign| {
             Box::pin(async move {
                 campaign.forest.track_resource_release();
@@ -83,12 +83,21 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                 // The command backend controls hook completion independently of timing.
                 let policy = root.clone();
                 let called = tokio::spawn(async move {
-                    dispatch_structured_tool(
-                        policy.as_ref(),
-                        "lifetime_probe",
-                        serde_json::json!({"topic": "lifecycle"}),
-                    )
-                    .await
+                    let (invocation, completion) = original_tool_call(exomonad_tool::OriginalOperation {
+                        origin: exomonad_tool::ConversationOrigin::External {
+                            thread_id: "after-tool-retained-cleanup".into(),
+                        },
+                        request_id: "retained-probe".into(),
+                        call_id: "retained-probe".into(),
+                    });
+                    let result = policy.dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                        context: Some(invocation),
+                        name: "lifetime_probe".into(),
+                        arguments: exomonad_tool::ToolArguments::Structured(
+                            serde_json::json!({"topic": "lifecycle"}),
+                        ),
+                    }).await.expect("retained cleanup preserves tool success");
+                    (result, completion)
                 });
                 let child = campaign
                     .next_deployment(
@@ -139,7 +148,7 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                 );
                 const RETAINED: &str = "scripted provider installation remains published";
                 assert!(release.answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into())));
-                let response = tokio::time::timeout(Duration::from_secs(30), called)
+                let (response, completion) = tokio::time::timeout(Duration::from_secs(30), called)
                     .await
                     .expect("retained host cleanup must settle the tool response")
                     .unwrap();
@@ -207,16 +216,28 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                         }
                     }
                 });
-                campaign.observe_shutdown().await.expect_err("retained external owner keeps cleanup unconfirmed");
-                releases.abort();
-                assert!(releases.await.unwrap_err().is_cancelled());
-                assert!(!campaign.actor.terminal().cleanup().unwrap().is_confirmed());
+                let completion = root.complete_boxed(completion).await
+                    .expect_err("retained external owner keeps invocation cleanup unconfirmed");
+                assert!(matches!(completion, exomonad_actor::ResidentToolError::Unavailable(_)));
+                (releases, backend)
             })
         }, |failure| {
             assert_eq!(failure.hosted, super::test_campaign::CampaignHostedJoin::Joined);
             assert!(matches!(&failure.root, super::test_campaign::CampaignRootRetirement::Settled(shutdown) if !shutdown.cleanup.is_confirmed()));
         })
         .await;
+    releases.abort();
+    if let Err(error) = releases.await {
+        assert!(
+            error.is_cancelled(),
+            "cleanup responder must not panic: {error}"
+        );
+    }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "retirement must never replay hook effects"
+    );
 }
 
 async fn start_with_after_tool_worker() -> TestCampaign {
@@ -252,7 +273,7 @@ async fn start_with_after_tool_worker() -> TestCampaign {
 #[tokio::test]
 async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
     let campaign = start_with_after_tool_worker().await;
-    campaign
+    let (called, backend, child) = campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
@@ -318,30 +339,27 @@ async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
                     !called.is_finished(),
                     "pending hook cannot deliver final output"
                 );
-                campaign
-                    .observe_shutdown()
-                    .await
-                    .expect("runtime shutdown drains hook work");
-                let response = called.await.expect("dispatch task joins without a panic");
-                if let Ok(response) = response {
-                    assert!(
-                        !response.to_string().contains("slot-finished"),
-                        "{response}"
-                    );
-                }
-                assert_eq!(
-                    backend.executions(),
-                    1,
-                    "shutdown must never replay hook effects"
-                );
-                assert_eq!(
-                    backend.control_count(),
-                    1,
-                    "unfinished hook command is cancelled by shutdown"
-                );
-                assert!(child.actor.terminal().get().is_some());
-                assert!(child.actor.terminal().cleanup().unwrap().is_confirmed());
+                (called, backend, child)
             })
         })
         .await;
+    let response = called.await.expect("dispatch task joins without a panic");
+    if let Ok(response) = response {
+        assert!(
+            !response.to_string().contains("slot-finished"),
+            "{response}"
+        );
+    }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "shutdown must never replay hook effects"
+    );
+    assert_eq!(
+        backend.control_count(),
+        1,
+        "unfinished hook command is cancelled by shutdown"
+    );
+    assert!(child.actor.terminal().get().is_some());
+    assert!(child.actor.terminal().cleanup().unwrap().is_confirmed());
 }
