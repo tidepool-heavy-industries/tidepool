@@ -28,7 +28,7 @@ pub enum ToolImplementation {
 
 /// One model-visible tool declaration, independent of who serves it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolDeclaration {
     pub name: String,
     pub description: String,
@@ -42,6 +42,186 @@ pub struct ToolDeclaration {
     pub implementation: ToolImplementation,
     #[serde(default)]
     pub effect_keys: Vec<ToolEffectKey>,
+}
+
+/// Executable endpoint operations admitted from the external declaration.
+/// Scheduling and implementation cannot be changed independently after admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointExecution {
+    ResidentAsync(ResidentInput),
+    ResidentSync(ResidentInput),
+    HaskellAsync,
+    HaskellSync,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentInput {
+    Raw,
+    Call,
+    Notify,
+}
+
+/// An executable endpoint. External implementation, kind and scheduling fields
+/// are consumed at admission; provider declarations are derived projections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EndpointPlan {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    output_schema: Option<serde_json::Value>,
+    effect_keys: Box<[ToolEffectKey]>,
+    execution: EndpointExecution,
+}
+
+impl EndpointPlan {
+    pub fn admit(declaration: ToolDeclaration) -> Result<Self, ToolDeclarationError> {
+        let input = match declaration.kind {
+            ToolKind::Raw => ResidentInput::Raw,
+            ToolKind::Call => ResidentInput::Call,
+            ToolKind::Notify => ResidentInput::Notify,
+            ToolKind::Update | ToolKind::Finish => {
+                return Err(ToolDeclarationError::UnsupportedEndpoint {
+                    name: declaration.name,
+                })
+            }
+        };
+        let execution = match (declaration.implementation, declaration.schedule, input) {
+            (ToolImplementation::ResidentHandler, ToolScheduling::Async, input) => {
+                EndpointExecution::ResidentAsync(input)
+            }
+            (ToolImplementation::ResidentHandler, ToolScheduling::BeforeNextInference, input) => {
+                EndpointExecution::ResidentSync(input)
+            }
+            (ToolImplementation::HaskellCell, ToolScheduling::Async, ResidentInput::Raw) => {
+                EndpointExecution::HaskellAsync
+            }
+            (
+                ToolImplementation::HaskellCell,
+                ToolScheduling::BeforeNextInference,
+                ResidentInput::Raw,
+            ) => EndpointExecution::HaskellSync,
+            (ToolImplementation::HaskellCell, _, _) => {
+                return Err(ToolDeclarationError::UnsupportedEndpoint {
+                    name: declaration.name,
+                })
+            }
+        };
+        if declaration.schedule == ToolScheduling::Async
+            && declaration
+                .effect_keys
+                .contains(&ToolEffectKey::ContextReadWrite)
+        {
+            return Err(ToolDeclarationError::UnsupportedEndpoint {
+                name: declaration.name,
+            });
+        }
+        if input != ResidentInput::Raw
+            && declaration
+                .input_schema
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                != Some("object")
+        {
+            return Err(ToolDeclarationError::FunctionInputMustBeObject {
+                name: declaration.name,
+            });
+        }
+        Ok(Self {
+            name: declaration.name,
+            description: declaration.description,
+            input_schema: declaration.input_schema,
+            output_schema: declaration.output_schema,
+            effect_keys: declaration.effect_keys.into(),
+            execution,
+        })
+    }
+
+    pub fn surface(&self) -> HostedTool {
+        let implementation = match self.execution {
+            EndpointExecution::ResidentAsync(_) | EndpointExecution::ResidentSync(_) => {
+                ToolImplementation::ResidentHandler
+            }
+            EndpointExecution::HaskellAsync | EndpointExecution::HaskellSync => {
+                ToolImplementation::HaskellCell
+            }
+        };
+        let kind = match self.execution {
+            EndpointExecution::ResidentAsync(ResidentInput::Call)
+            | EndpointExecution::ResidentSync(ResidentInput::Call) => ToolKind::Call,
+            EndpointExecution::ResidentAsync(ResidentInput::Notify)
+            | EndpointExecution::ResidentSync(ResidentInput::Notify) => ToolKind::Notify,
+            _ => ToolKind::Raw,
+        };
+        if kind == ToolKind::Raw {
+            HostedTool::Custom(CustomToolDeclaration {
+                name: self.name.clone(),
+                description: self.description.clone(),
+                implementation,
+                schedule: self.scheduling(),
+                effect_keys: self.effect_keys.to_vec(),
+            })
+        } else {
+            HostedTool::Function(ToolDeclaration {
+                name: self.name.clone(),
+                description: self.description.clone(),
+                input_schema: self.input_schema.clone(),
+                output_schema: self.output_schema.clone(),
+                kind,
+                implementation,
+                schedule: self.scheduling(),
+                effect_keys: self.effect_keys.to_vec(),
+            })
+        }
+    }
+    pub fn execution(&self) -> EndpointExecution {
+        self.execution
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn effect_keys(&self) -> &[ToolEffectKey] {
+        &self.effect_keys
+    }
+    pub fn scheduling(&self) -> ToolScheduling {
+        match self.execution {
+            EndpointExecution::ResidentAsync(_) | EndpointExecution::HaskellAsync => {
+                ToolScheduling::Async
+            }
+            EndpointExecution::ResidentSync(_) | EndpointExecution::HaskellSync => {
+                ToolScheduling::BeforeNextInference
+            }
+        }
+    }
+    pub fn admit_arguments(
+        &self,
+        arguments: ToolArguments,
+    ) -> Result<EndpointArguments, ToolDeclarationError> {
+        match (self.execution, arguments) {
+            (
+                EndpointExecution::HaskellAsync | EndpointExecution::HaskellSync,
+                ToolArguments::Raw(source),
+            ) => Ok(EndpointArguments::Haskell(source)),
+            (
+                EndpointExecution::ResidentAsync(ResidentInput::Raw)
+                | EndpointExecution::ResidentSync(ResidentInput::Raw),
+                ToolArguments::Raw(text),
+            ) => Ok(EndpointArguments::Resident(serde_json::Value::String(text))),
+            (
+                EndpointExecution::ResidentAsync(ResidentInput::Call | ResidentInput::Notify)
+                | EndpointExecution::ResidentSync(ResidentInput::Call | ResidentInput::Notify),
+                ToolArguments::Structured(value @ serde_json::Value::Object(_)),
+            ) => Ok(EndpointArguments::Resident(value)),
+            _ => Err(ToolDeclarationError::InvalidArguments {
+                name: self.name().into(),
+            }),
+        }
+    }
+}
+
+/// Arguments checked by the selected plan, ready for its interpreter.
+pub enum EndpointArguments {
+    Resident(serde_json::Value),
+    Haskell(String),
 }
 
 /// One raw-text tool whose concrete host transport supplies no argument
@@ -72,12 +252,20 @@ pub enum HostedTool {
 /// invocation contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolDeclarationError {
+    UnsupportedEndpoint { name: String },
+    InvalidArguments { name: String },
     FunctionInputMustBeObject { name: String },
 }
 
 impl std::fmt::Display for ToolDeclarationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedEndpoint { name } => {
+                write!(formatter, "unsupported endpoint {name:?}")
+            }
+            Self::InvalidArguments { name } => {
+                write!(formatter, "invalid argument kind for {name:?}")
+            }
             Self::FunctionInputMustBeObject { name } => write!(
                 formatter,
                 "function tool {name:?} must declare an object input schema"
@@ -355,6 +543,99 @@ mod tests {
             input_schema,
             output_schema: None,
             kind,
+        }
+    }
+
+    #[test]
+    fn endpoint_algebra_has_exactly_eight_supported_operations() {
+        let valid = [
+            (
+                ToolKind::Raw,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::Async,
+            ),
+            (
+                ToolKind::Call,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::Async,
+            ),
+            (
+                ToolKind::Notify,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::Async,
+            ),
+            (
+                ToolKind::Raw,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::BeforeNextInference,
+            ),
+            (
+                ToolKind::Call,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::BeforeNextInference,
+            ),
+            (
+                ToolKind::Notify,
+                ToolImplementation::ResidentHandler,
+                ToolScheduling::BeforeNextInference,
+            ),
+            (
+                ToolKind::Raw,
+                ToolImplementation::HaskellCell,
+                ToolScheduling::Async,
+            ),
+            (
+                ToolKind::Raw,
+                ToolImplementation::HaskellCell,
+                ToolScheduling::BeforeNextInference,
+            ),
+        ];
+        for kind in [
+            ToolKind::Raw,
+            ToolKind::Call,
+            ToolKind::Notify,
+            ToolKind::Update,
+            ToolKind::Finish,
+        ] {
+            for implementation in [
+                ToolImplementation::ResidentHandler,
+                ToolImplementation::HaskellCell,
+            ] {
+                for schedule in [ToolScheduling::Async, ToolScheduling::BeforeNextInference] {
+                    let mut raw = declaration(kind, serde_json::json!({"type":"object"}));
+                    raw.implementation = implementation;
+                    raw.schedule = schedule;
+                    assert_eq!(
+                        EndpointPlan::admit(raw).is_ok(),
+                        valid.contains(&(kind, implementation, schedule))
+                    );
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn admitted_endpoint_arguments_follow_the_operation(
+            raw_input in proptest::bool::ANY,
+            native in proptest::bool::ANY,
+            sync in proptest::bool::ANY,
+            notify in proptest::bool::ANY,
+            text in ".{0,64}",
+        ) {
+            let kind = if raw_input || native { ToolKind::Raw } else if notify { ToolKind::Notify } else { ToolKind::Call };
+            let mut wire = declaration(kind, serde_json::json!({"type":"object"}));
+            wire.implementation = if native { ToolImplementation::HaskellCell } else { ToolImplementation::ResidentHandler };
+            wire.schedule = if sync { ToolScheduling::BeforeNextInference } else { ToolScheduling::Async };
+            let plan = EndpointPlan::admit(wire).unwrap();
+            let text_input = ToolArguments::Raw(text.clone());
+            let object_input = ToolArguments::Structured(serde_json::json!({"value": text}));
+            let expects_text = raw_input || native;
+            proptest::prop_assert_eq!(plan.admit_arguments(text_input).is_ok(), expects_text);
+            proptest::prop_assert_eq!(plan.admit_arguments(object_input).is_ok(), !expects_text);
+            proptest::prop_assert!(plan.admit_arguments(ToolArguments::Structured(serde_json::Value::Null)).is_err());
+            proptest::prop_assert_eq!(plan.scheduling() == ToolScheduling::BeforeNextInference, sync);
+            proptest::prop_assert_eq!(matches!(plan.execution(), EndpointExecution::HaskellAsync | EndpointExecution::HaskellSync), native);
         }
     }
 

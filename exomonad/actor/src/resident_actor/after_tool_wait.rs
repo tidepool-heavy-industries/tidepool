@@ -161,6 +161,15 @@ where
             "after-tool lease belongs to another actor incarnation".into(),
         ))
     } else {
+        let mut context = context;
+        context.haskell_effects_alias = frame
+            .handler
+            .tools()
+            .after_tool
+            .as_ref()
+            .expect("captured admitted after-tool entry")
+            .execution_effects
+            .clone();
         workbench
             .begin_after_tool(
                 context,

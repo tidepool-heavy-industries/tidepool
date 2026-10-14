@@ -48,6 +48,99 @@ pub(crate) fn decode_installation(
     })
 }
 
+/// Installation-owned executable entry and its exact compiler row.
+#[derive(Debug, Clone)]
+pub(crate) struct AdmittedEndpoint {
+    pub(crate) plan: exomonad_tool::EndpointPlan,
+    pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AfterToolEntry {
+    pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
+}
+
+pub(crate) struct AdmittedInstallation {
+    pub(crate) endpoints: Vec<AdmittedEndpoint>,
+    pub(crate) after_tool: Option<AfterToolEntry>,
+}
+
+pub(crate) fn admit_installation(
+    installation: SpecInstallation,
+    admitted_base: &[ActorEffectKey],
+    installed_support: &[ToolEffectKey],
+    dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
+) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
+    let SpecInstallation {
+        tools,
+        slots,
+        slot_effect_keys,
+    } = installation;
+    let error = |error: String| crate::ResidentActorWorkbenchError::ActorProtocol(error);
+    validate_installation(
+        &tools,
+        &slots,
+        &slot_effect_keys,
+        admitted_base,
+        installed_support,
+    )
+    .map_err(|failure| error(failure.to_string()))?;
+    let mut names = HashSet::from([
+        crate::status_tool::STATUS_TOOL.to_string(),
+        crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
+        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL.to_string(),
+    ]);
+    let endpoints = tools
+        .into_iter()
+        .map(|tool| {
+            if tool.name.is_empty()
+                || tool.name.len() > 64
+                || !tool
+                    .name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !names.insert(tool.name.clone())
+            {
+                return Err(error(format!(
+                    "invalid, duplicate or reserved tool name {:?}",
+                    tool.name
+                )));
+            }
+            let plan = exomonad_tool::EndpointPlan::admit(tool)
+                .map_err(|failure| error(failure.to_string()))?;
+            let execution_effects = match plan.execution() {
+                exomonad_tool::EndpointExecution::ResidentAsync(_)
+                | exomonad_tool::EndpointExecution::ResidentSync(_) => dispatcher_effects.clone(),
+                exomonad_tool::EndpointExecution::HaskellAsync
+                | exomonad_tool::EndpointExecution::HaskellSync => {
+                    tidepool_runtime::session::HaskellTypeSource::new(
+                        format!(
+                            "'[{}]",
+                            plan.effect_keys()
+                                .iter()
+                                .map(|key| key.haskell_name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        dispatcher_effects.required_imports().clone(),
+                    )
+                }
+            };
+            Ok(AdmittedEndpoint {
+                plan,
+                execution_effects,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let after_tool = (!slots.is_empty()).then(|| AfterToolEntry {
+        execution_effects: dispatcher_effects.clone(),
+    });
+    Ok(AdmittedInstallation {
+        endpoints,
+        after_tool,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolContractError {
     #[error("duplicate installed tool {0:?}")]
@@ -202,6 +295,86 @@ mod tests {
     ) -> Result<(), ToolContractError> {
         validate_installation(&[tool], &[], &BTreeMap::new(), granted, support)
     }
+    #[test]
+    fn installation_issues_only_supported_plans_and_an_optional_typed_slot() {
+        let jev = ActorEffectKey::Jev;
+        let support = [jev.into(), ToolEffectKey::ContextReadWrite];
+        let dispatcher = tidepool_runtime::session::HaskellTypeSource::from("InstallerRow");
+        let make = |tool, slots, slot_effect_keys| SpecInstallation {
+            tools: vec![tool],
+            slots,
+            slot_effect_keys,
+        };
+        let valid = native(ToolScheduling::Async, vec![jev.into()]);
+        let installed = admit_installation(
+            make(valid.clone(), vec![], BTreeMap::new()),
+            &[jev],
+            &support,
+            &dispatcher,
+        )
+        .unwrap();
+        assert_eq!(installed.endpoints.len(), 1);
+        assert!(installed.after_tool.is_none());
+        assert_eq!(
+            installed.endpoints[0].execution_effects.expression(),
+            "'[Jev]"
+        );
+        let installed = admit_installation(
+            make(
+                valid.clone(),
+                vec!["afterTool".into()],
+                BTreeMap::from([("afterTool".into(), vec![jev.into()])]),
+            ),
+            &[jev],
+            &support,
+            &dispatcher,
+        )
+        .unwrap();
+        assert_eq!(installed.after_tool.unwrap().execution_effects, dispatcher);
+        for invalid in [
+            ToolDeclaration {
+                kind: ToolKind::Call,
+                ..valid.clone()
+            },
+            ToolDeclaration {
+                effect_keys: vec![ToolEffectKey::ContextReadWrite],
+                ..valid.clone()
+            },
+            ToolDeclaration {
+                name: crate::status_tool::STATUS_TOOL.into(),
+                ..valid.clone()
+            },
+            ToolDeclaration {
+                name: "bad-name".into(),
+                ..valid.clone()
+            },
+            ToolDeclaration {
+                implementation: ToolImplementation::ResidentHandler,
+                effect_keys: vec![],
+                ..valid.clone()
+            },
+        ] {
+            assert!(admit_installation(
+                make(invalid, vec![], BTreeMap::new()),
+                &[jev],
+                &support,
+                &dispatcher
+            )
+            .is_err());
+        }
+        assert!(admit_installation(
+            make(
+                valid,
+                vec![],
+                BTreeMap::from([("afterTool".into(), vec![jev.into()])])
+            ),
+            &[jev],
+            &support,
+            &dispatcher
+        )
+        .is_err());
+    }
+
     #[test]
     fn installer_metadata_rejects_malformed_slots_and_unknown_effect_keys() {
         assert!(decode_installation(serde_json::json!({"tools":[],"slots":"afterTool"})).is_err());

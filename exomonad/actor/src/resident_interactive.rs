@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use exomonad_tool::{HostedTool, ToolArguments, ToolImplementation, ToolInvocation};
+use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 use tidepool_runtime::session::WorkbenchRequest;
 
 use crate::prompt_catalog::PromptId;
@@ -83,79 +83,24 @@ impl ResidentInteractivePolicy {
     }
 }
 
-pub(crate) fn project_tools(
-    declarations: Vec<exomonad_tool::ToolDeclaration>,
-) -> Result<Vec<HostedTool>, ResidentToolError> {
-    use exomonad_tool::ToolKind;
-    let mut names = std::collections::HashSet::from([
-        crate::status_tool::STATUS_TOOL.to_string(),
-        crate::reload_tool::RELOAD_TOOL.to_string(),
-    ]);
-    declarations
-        .into_iter()
-        .map(|declaration| {
-            if declaration.name.is_empty()
-                || declaration.name.len() > 64
-                || !declaration
-                    .name
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                || !names.insert(declaration.name.clone())
-            {
-                return Err(ResidentToolError::InvalidInvocation(format!(
-                    "invalid, duplicate or reserved tool name {:?}",
-                    declaration.name
-                )));
-            }
-            match declaration.kind {
-                ToolKind::Raw | ToolKind::Call | ToolKind::Notify => {
-                    HostedTool::try_from(declaration).map_err(ResidentToolError::from)
-                }
-                _ => Err(ResidentToolError::InvalidInvocation(format!(
-                    "tool {:?} is not an interactive call with supported input",
-                    declaration.name
-                ))),
-            }
-        })
-        .collect()
-}
-
-fn request_for_tool(
-    declaration: &HostedTool,
+fn builtin_request(
+    name: &str,
     arguments: ToolArguments,
 ) -> Result<WorkbenchRequest, ResidentToolError> {
-    match declaration.implementation() {
-        ToolImplementation::ResidentHandler => {
-            let arguments = match arguments {
-                ToolArguments::Raw(text) => serde_json::Value::String(text),
-                ToolArguments::Structured(value) => value,
-            };
-            Ok(WorkbenchRequest::for_tool(
-                declaration.name().into(),
-                arguments,
-            ))
-        }
-        ToolImplementation::HaskellCell => {
-            let ToolArguments::Raw(source) = arguments else {
-                return Err(ResidentToolError::InvalidInvocation(
-                    "native Haskell cell requires raw source input".into(),
-                ));
-            };
-            Ok(WorkbenchRequest::from_cell_input(&source))
-        }
-    }
+    let ToolArguments::Structured(value @ serde_json::Value::Object(_)) = arguments else {
+        return Err(ResidentToolError::InvalidInvocation(format!(
+            "invalid argument kind for {name:?}"
+        )));
+    };
+    Ok(WorkbenchRequest::for_tool(name.into(), value))
 }
 
-// Builtins are served by their owning actor routes and are absent from the
-// compiled AgentSpec. Only exact owned declarations use that admission path.
-fn selected_contract(declaration: &HostedTool) -> Option<HostedTool> {
-    if declaration == &crate::status_tool::declaration()
-        || declaration == &crate::reload_tool::declaration()
-    {
-        None
-    } else {
-        Some(declaration.clone())
-    }
+fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        crate::status_tool::STATUS_TOOL
+            | crate::reload_tool::RELOAD_TOOL
+    )
 }
 
 fn haskell_tool_instructions() -> &'static str {
@@ -291,30 +236,33 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
-        let installed_tools = self.issued_tools.clone();
+        let installed_tools = self
+            .issued_tools
+            .clone()
+            .or_else(|| self.installed_tools.snapshot());
         Box::pin(async move {
             let issued = client.issue_workbench_call(invocation.context.clone());
             let validated = (|| {
                 let arguments = arguments?;
-                let declaration = tools
-                    .iter()
-                    .find(|tool| tool.name() == invocation.name)
-                    .ok_or_else(|| {
-                        ResidentToolError::InvalidInvocation(format!(
-                            "unknown actor tool {:?}",
-                            invocation.name
-                        ))
-                    })?;
-                if !declaration.accepts(&arguments) {
+                if !tools.iter().any(|tool| tool.name() == invocation.name) {
                     return Err(ResidentToolError::InvalidInvocation(format!(
-                        "invalid argument kind for {:?}",
+                        "unknown actor tool {:?}",
                         invocation.name
                     )));
                 }
-                Ok((
-                    request_for_tool(declaration, arguments)?,
-                    selected_contract(declaration),
-                ))
+                if is_builtin(&invocation.name) {
+                    return Ok((builtin_request(&invocation.name, arguments)?, None));
+                }
+                let selected = installed_tools
+                    .as_ref()
+                    .and_then(|lease| lease.select(&invocation.name))
+                    .ok_or_else(|| {
+                        ResidentToolError::Unavailable(
+                            "actor has no installed endpoint snapshot".into(),
+                        )
+                    })?;
+                let admitted = selected.admit(arguments)?;
+                Ok((admitted.request(), Some(admitted)))
             })();
             let (request, selected) = match validated {
                 Ok(validated) => validated,
@@ -357,85 +305,22 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 mod tests {
     use super::*;
 
-    fn raw(name: &str) -> exomonad_tool::ToolDeclaration {
-        exomonad_tool::ToolDeclaration {
-            schedule: Default::default(),
-            implementation: Default::default(),
-            effect_keys: Vec::new(),
-            name: name.into(),
-            description: "literal input".into(),
-            input_schema: serde_json::json!({"type":"string"}),
-            output_schema: None,
-            kind: exomonad_tool::ToolKind::Raw,
-        }
-    }
-
     #[test]
-    fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in ["", "status", "reload", "bad.name", "λ", &"a".repeat(65)] {
-            assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
-        }
-        assert!(project_tools(vec![raw("lookup")]).is_ok());
-        assert!(project_tools(vec![raw("bash"), raw("bash")]).is_err());
-        let mut structured = raw("structured");
-        structured.kind = exomonad_tool::ToolKind::Call;
-        assert!(project_tools(vec![structured.clone()]).is_err());
-        structured.input_schema = serde_json::json!({"type": "null"});
-        assert!(matches!(
-            project_tools(vec![structured.clone()]),
-            Err(ResidentToolError::Declaration(
-                exomonad_tool::ToolDeclarationError::FunctionInputMustBeObject { name }
-            )) if name == "structured"
-        ));
-        structured.input_schema = serde_json::json!({"type":"object","properties":{}});
-        let projected = project_tools(vec![raw("bash"), structured]).unwrap();
-        assert!(matches!(projected[0], HostedTool::Custom(_)));
-        assert!(matches!(projected[1], HostedTool::Function(_)));
-        for kind in [
-            exomonad_tool::ToolKind::Update,
-            exomonad_tool::ToolKind::Finish,
-        ] {
-            let mut unsupported = raw("stateful");
-            unsupported.kind = kind;
-            assert!(project_tools(vec![unsupported]).is_err());
-        }
-    }
-
-    #[test]
-    fn builtin_dispatch_uses_owned_admission_without_a_spec_leaf() {
+    fn builtins_have_an_explicit_route_separate_from_installed_endpoints() {
         for builtin in [
             crate::status_tool::declaration(),
             crate::reload_tool::declaration(),
         ] {
-            let request =
-                request_for_tool(&builtin, ToolArguments::Structured(serde_json::json!({})))
-                    .unwrap();
+            assert!(is_builtin(builtin.name()));
+            let request = builtin_request(
+                builtin.name(),
+                ToolArguments::Structured(serde_json::json!({})),
+            )
+            .unwrap();
             assert_eq!(request.tool_call().unwrap().name, builtin.name());
-            assert!(selected_contract(&builtin).is_none());
-            let mut altered = builtin.clone();
-            let HostedTool::Function(tool) = &mut altered else {
-                unreachable!()
-            };
-            tool.schedule = exomonad_tool::ToolScheduling::BeforeNextInference;
-            assert!(selected_contract(&altered).is_some());
+            assert!(builtin_request(builtin.name(), ToolArguments::Raw("source".into())).is_err());
         }
-        let authored = HostedTool::try_from(raw("authored")).unwrap();
-        assert_eq!(selected_contract(&authored), Some(authored.clone()));
-    }
-
-    #[test]
-    fn native_dispatch_is_selected_by_implementation_not_name() {
-        let mut source = raw("arbitrary_name");
-        source.implementation = ToolImplementation::HaskellCell;
-        let native = HostedTool::try_from(source).unwrap();
-        let request = request_for_tool(&native, ToolArguments::Raw("pure ()".into())).unwrap();
-        assert_eq!(request.cell_source(), Some("pure ()"));
-        assert!(request.tool_call().is_none());
-        let handler = HostedTool::try_from(raw("haskell")).unwrap();
-        let request = request_for_tool(&handler, ToolArguments::Raw("literal".into())).unwrap();
-        assert_eq!(request.tool_call().unwrap().name, "haskell");
-        assert!(request.cell_source().is_none());
-        assert!(project_tools(vec![raw("haskell")]).is_ok());
+        assert!(!is_builtin("haskell"));
     }
 
     #[test]

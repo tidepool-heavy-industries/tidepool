@@ -121,6 +121,11 @@ installedToolContracts = do
     (map dtdSchedule declared == [Asynchronous, BeforeNextInference, BeforeNextInference, BeforeNextInference, Asynchronous, BeforeNextInference])
   require "native notebook scheduling preserves the same selected row"
     (map dtdEffectKeys (drop 4 declared) == [Just [], Just []])
+  let runIndex index = run $ runState [] $ reinterpret context $ dispatchAt compiled index (toJSON ("executor" :: Text))
+  require "installed ordinal dispatch matches declared order"
+    (and [runIndex index == runTool (dtdName declaration) | (index, declaration) <- zip [0..] declared])
+  require "invalid installed ordinal refuses without running a handler"
+    (case runIndex (-1) of (Left (UnknownTool _), []) -> True; _ -> False)
   contextCompiled <- either (error . show) pure (compileInstalledTools contextNotebookTools)
   require "context-editing notebooks declare their additional effect explicitly"
     (map (\entry -> (dtdSchedule entry, dtdEffectKeys entry)) (declarations contextCompiled)
@@ -283,6 +288,15 @@ presentationTests =
       compileProfile "GenericPresentedModel" Accepted
   ]
 
+endpointIndexTests :: [TestTree]
+endpointIndexTests =
+  [ testCase (name ++ " rejects at the endpoint index") $ compileProfile name (Rejected ["Couldn't match", "CallKind", "NotifyKind"])
+  | name <- ["NotifyAsCall", "CallAsNotify", "SyncNotifyAsCall", "SyncCallAsNotify", "CoercedNotifyAsCall"]
+  ] ++
+  [ testCase "finish cannot impersonate a unit call" $ compileProfile "FinishAsCall" (Rejected ["Couldn't match", "FinishTool", "Tool"])
+  , testCase "unit calls and notifications retain distinct implementations" $ compileProfile "UnitEndpoints" Accepted
+  ]
+
 tests :: TestTree
 tests = testGroup "tool profile contract" $
   [ testCase "receipt projections distinguish terminal failure from observation rejection" receiptFailureProjection
@@ -306,7 +320,7 @@ tests = testGroup "tool profile contract" $
       compileProfile "ConcreteNativeProfile" (Rejected ["Commands"])
   , testCase "model hook cannot borrow caller sync context authority" $
       compileProfile "ModelContext" (Rejected ["cannot be used by an asynchronous tool"])
-  ] ++ presentationTests ++ quantitiesTests
+  ] ++ presentationTests ++ endpointIndexTests ++ quantitiesTests
 
 main :: IO ()
 main = runTests tests

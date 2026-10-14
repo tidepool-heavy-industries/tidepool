@@ -36,6 +36,14 @@ machine checkout. Keep nested effect and display advances inside that boundary.
 Buffer ready completions until scheduler selection; cancellation drops both queued futures
 and buffered completion custody under the same owner.
 
+`InstalledToolLease::select` issues an exact installation/endpoint ordinal.
+Argument admission travels with that selection; dispatch enters the retained
+handler by ordinal, without declaration equality or a second name lookup.
+Reload replaces the active lease while issued selections retain their original
+source and implementation. Builtin controls use their owning actor routes and
+reserve their names at authored endpoint admission. After-tool execution retains
+an optional admitted slot from the same installation.
+
 Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;
 authored type text does not issue imports or additional effect authority.

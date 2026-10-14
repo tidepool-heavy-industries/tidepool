@@ -14,6 +14,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 -- | Mode-interpreted agent tool records compiled into declarations and
 -- dynamic dispatch.
@@ -45,7 +46,7 @@ module Tidepool.Agent.Contract
   , (:-)
 
     -- * Tool values
-  , Tool (..)
+  , Tool
   , tool
   , RawTool
   , rawTool
@@ -183,17 +184,17 @@ data AsActorT (m :: Type -> Type) state exit
 -- | Interpret one endpoint under a record mode. The closed fallthrough gives
 -- an author-facing error at an unsupported field.
 type family mode :- endpoint where
-  AsServerT (Eff base) :- Sync (Call input output) = Presented (SyncTool base input output)
-  AsServerT (Eff base) :- Sync (Notify input) = Presented (SyncTool base input ())
+  AsServerT (Eff base) :- Sync (Call input output) = Presented (SyncTool 'CallKind base input output)
+  AsServerT (Eff base) :- Sync (Notify input) = Presented (SyncTool 'NotifyKind base input ())
   AsServerT (Eff base) :- Sync (RawCall output) = Presented (SyncRawTool base output)
   AsServerT (Eff base) :- HaskellCell effects = HaskellTool 'Asynchronous effects base
   AsServerT (Eff base) :- Sync (HaskellCell effects) = HaskellTool 'BeforeNextInference effects base
   AsServerT m :- RawCall output = Presented (RawTool m output)
   AsActorT m state exit :- RawCall output = RawTool m output
-  AsServerT m :- Call input output = Presented (Tool m input output)
-  AsServerT m :- Notify input = Presented (Tool m input ())
-  AsActorT m state exit :- Call input output = Tool m input output
-  AsActorT m state exit :- Notify input = Tool m input ()
+  AsServerT m :- Call input output = Presented (Tool 'CallKind m input output)
+  AsServerT m :- Notify input = Presented (Tool 'NotifyKind m input ())
+  AsActorT m state exit :- Call input output = Tool 'CallKind m input output
+  AsActorT m state exit :- Notify input = Tool 'NotifyKind m input ()
   AsActorT m state exit :- Update input output = UpdateTool m state input output
   AsActorT m state exit :- Finish input output = FinishTool m exit input output
   mode :- endpoint =
@@ -222,16 +223,19 @@ data ToolKind
   | FinishKind
   deriving (Eq, Show)
 
-data Tool m input (output :: Type) = Tool
-  { toolKind :: ToolKind
-  , description :: Text
-  , handler :: input -> m output
-  }
+-- The endpoint index preserves intent even when a Call returns unit.
+-- Only the smart constructors can issue implementations of these indices.
+type role Tool nominal representational representational nominal
+data Tool (kind :: ToolKind) m input (output :: Type) = Tool Text (input -> m output)
 
--- | Build a request\/response 'Tool'. An alias for 'Tool' — kept distinct
--- from 'notify' so authored code reads its intent at the call site.
-tool :: Text -> (input -> m output) -> Tool m input output
-tool description run = Tool CallKind description run
+class KnownEndpointKind (kind :: ToolKind) where
+  endpointKind :: Proxy kind -> ToolKind
+instance KnownEndpointKind 'CallKind where endpointKind _ = CallKind
+instance KnownEndpointKind 'NotifyKind where endpointKind _ = NotifyKind
+
+-- | Build a request/response implementation.
+tool :: Text -> (input -> m output) -> Tool 'CallKind m input output
+tool = Tool
 
 -- | Literal input is passed as data to an already compiled handler.
 data RawTool m (output :: Type) = RawTool
@@ -252,16 +256,16 @@ class PresentableTool handler where
   -- fields require this value; programmatic actor fields retain the handler.
   presentWith :: (ToolOutput handler -> Text) -> handler -> Presented handler
 
-instance PresentableTool (Tool m input output) where
-  type ToolOutput (Tool m input output) = output
+instance PresentableTool (Tool kind m input output) where
+  type ToolOutput (Tool kind m input output) = output
   presentWith presenter value = Presented value presenter
 
 instance PresentableTool (RawTool m output) where
   type ToolOutput (RawTool m output) = output
   presentWith presenter value = Presented value presenter
 
-instance PresentableTool (SyncTool base input output) where
-  type ToolOutput (SyncTool base input output) = output
+instance PresentableTool (SyncTool kind base input output) where
+  type ToolOutput (SyncTool kind base input output) = output
   presentWith presenter value = Presented value presenter
 
 instance PresentableTool (SyncRawTool base output) where
@@ -277,22 +281,24 @@ presentDisplay :: Display output => output -> Text
 presentDisplay = renderToolOutput
 
 -- | A precompiled handler in the canonical synchronous row.
-data SyncTool base input output = SyncTool ToolKind Text (input -> Eff (SyncEffects base) output)
+type role SyncTool nominal nominal representational nominal
+data SyncTool (kind :: ToolKind) base input output = SyncTool Text (input -> Eff (SyncEffects base) output)
 
 data SyncRawTool base output = SyncRawTool Text (Text -> Eff (SyncEffects base) output)
 
-syncTool :: Text -> (input -> Eff (SyncEffects base) output) -> SyncTool base input output
-syncTool description run = SyncTool CallKind description run
+syncTool :: Text -> (input -> Eff (SyncEffects base) output) -> SyncTool 'CallKind base input output
+syncTool = SyncTool
 
-syncNotify :: Text -> (input -> Eff (SyncEffects base) ()) -> SyncTool base input ()
-syncNotify description run = SyncTool NotifyKind description run
+syncNotify :: Text -> (input -> Eff (SyncEffects base) ()) -> SyncTool 'NotifyKind base input ()
+syncNotify = SyncTool
 
 syncRawTool :: Text -> (Text -> Eff (SyncEffects base) output) -> SyncRawTool base output
 syncRawTool description run = SyncRawTool description run
 
 -- The constructor retains a checked profile, not an executable handler.
+type role HaskellTool nominal nominal nominal
 data HaskellTool (schedule :: ToolSchedule) (effects :: [Type -> Type]) (base :: [Type -> Type]) =
-  HaskellTool Text ToolSchedule [Text]
+  HaskellTool Text
 
 haskellTool
   :: forall schedule effects base.
@@ -300,7 +306,7 @@ haskellTool
      , Subset effects (SupportedEffects schedule base), ValidToolProfile schedule effects
      )
   => Text -> HaskellTool schedule effects base
-haskellTool description = HaskellTool description (toolSchedule (Proxy @schedule)) (toolEffectNames (Proxy @effects))
+haskellTool = HaskellTool
 
 haskellCellDescription :: Text
 haskellCellDescription =
@@ -323,7 +329,7 @@ asyncHaskellTools
   :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
   => AsyncHaskellTools effects (AsServerT (Eff effects))
 asyncHaskellTools = AsyncHaskellTools
-  { haskell = HaskellTool asyncHaskellDescription Asynchronous (toolEffectNames (Proxy @effects))
+  { haskell = HaskellTool asyncHaskellDescription
   }
 
 -- | Both notebooks use the same effects and resident scope. The synchronous
@@ -337,14 +343,13 @@ haskellTools
   :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
   => HaskellTools effects (AsServerT (Eff effects))
 haskellTools = HaskellTools
-  { haskell = HaskellTool asyncHaskellDescription Asynchronous (toolEffectNames (Proxy @effects))
-  , haskellSync = HaskellTool syncHaskellDescription BeforeNextInference
-      (toolEffectNames (Proxy @effects))
+  { haskell = HaskellTool asyncHaskellDescription
+  , haskellSync = HaskellTool syncHaskellDescription
   }
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
-notify :: Text -> (input -> m ()) -> Tool m input ()
-notify description run = Tool NotifyKind description run
+notify :: Text -> (input -> m ()) -> Tool 'NotifyKind m input ()
+notify = Tool
 
 data UpdateTool m state input output = UpdateTool
   { updateDescription :: Text
@@ -397,6 +402,7 @@ data ToolDeclaration = ToolDeclaration
 data CompiledTools m = CompiledTools
   { declarations :: [ToolDeclaration]
   , dispatch :: ToolName -> StructuralValue -> m (Either ToolDispatchError ToolDispatchSuccess)
+  , dispatchAt :: Int -> StructuralValue -> m (Either ToolDispatchError ToolDispatchSuccess)
   , synopsis :: Text
   }
 
@@ -554,10 +560,10 @@ instance
 -- | Hosted handler leaves require selected presentation; unit-output tools use
 -- the same instance as request/response tools.
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor source, LiftTool policy source m) =>
-  GCompileTools policy (M1 S s (K1 R (Presented (Tool source input output)))) m ToolDispatchSuccess
+  (KnownEndpointKind kind, Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor source, LiftTool policy source m) =>
+  GCompileTools policy (M1 S s (K1 R (Presented (Tool kind source input output)))) m ToolDispatchSuccess
   where
-  gCompileEntries policy (M1 (K1 (Presented (Tool kind desc h) present))) =
+  gCompileEntries policy (M1 (K1 (Presented (Tool desc h) present))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -565,7 +571,7 @@ instance
         , entryDescription = desc
         , entryInputSchema = jsonSchema (Proxy :: Proxy input)
         , entryOutputSchema = jsonSchema (Proxy :: Proxy output)
-        , entryKind = kind
+        , entryKind = endpointKind (Proxy @kind)
         , entrySchedule = Asynchronous
         , entryBody = HandlerBody $ \sv -> case fromJSON sv of
             Success input' -> Right (liftTool policy (presentResult <$> h input'))
@@ -600,11 +606,11 @@ instance
       presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output) =>
-  GCompileTools (Installed base) (M1 S s (K1 R (Presented (SyncTool base input output)))) (Eff (SyncEffects base)) ToolDispatchSuccess
+  (KnownEndpointKind kind, Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output) =>
+  GCompileTools (Installed base) (M1 S s (K1 R (Presented (SyncTool kind base input output)))) (Eff (SyncEffects base)) ToolDispatchSuccess
   where
-  gCompileEntries _ (M1 (K1 (Presented (SyncTool kind desc run) present))) =
-    [ (actorEntry fieldName kind desc (jsonSchema (Proxy @output)) (fmap presentResult . run))
+  gCompileEntries _ (M1 (K1 (Presented (SyncTool desc run) present))) =
+    [ (actorEntry fieldName (endpointKind (Proxy @kind)) desc (jsonSchema (Proxy @output)) (fmap presentResult . run))
         { entrySchedule = BeforeNextInference }
     ]
     where
@@ -623,10 +629,10 @@ instance
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
       presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
-instance (Selector s, ToolSource policy m ~ Eff base) =>
+instance (Selector s, ToolSource policy m ~ Eff base, KnownToolSchedule schedule, KnownToolEffects effects) =>
   GCompileTools policy (M1 S s (K1 R (HaskellTool schedule effects base))) m result
   where
-  gCompileEntries _ (M1 (K1 (HaskellTool desc schedule keys))) =
+  gCompileEntries _ (M1 (K1 (HaskellTool desc))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -635,8 +641,8 @@ instance (Selector s, ToolSource policy m ~ Eff base) =>
         , entryInputSchema = jsonSchema (Proxy @Text)
         , entryOutputSchema = jsonSchema (Proxy @Text)
         , entryKind = RawKind
-        , entrySchedule = schedule
-        , entryBody = HaskellBody keys
+        , entrySchedule = toolSchedule (Proxy @schedule)
+        , entryBody = HaskellBody (toolEffectNames (Proxy @effects))
         }
     ]
     where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
@@ -657,14 +663,14 @@ data ActorToolStep state exit
   | ActorToolFinish StructuralValue exit
 
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
+  (KnownEndpointKind kind, Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
   GCompileTools InRow
-    (M1 S s (K1 R (Tool m input output)))
+    (M1 S s (K1 R (Tool kind m input output)))
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries _ (M1 (K1 (Tool kind desc h))) =
-    [ actorEntry fieldName kind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
+  gCompileEntries _ (M1 (K1 (Tool desc h))) =
+    [ actorEntry fieldName (endpointKind (Proxy @kind)) desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         ActorToolStay . toJSON <$> h input
     ]
     where
@@ -806,6 +812,7 @@ compileTools v =
 data CompiledEntrySet m result = CompiledEntrySet
   { entryDeclarations :: [ToolDeclaration]
   , entryDispatch :: ToolName -> StructuralValue -> m (Either ToolDispatchError result)
+  , entryDispatchAt :: Int -> StructuralValue -> m (Either ToolDispatchError result)
   , entrySynopsis :: Text
   }
 
@@ -819,10 +826,15 @@ compileEntrySet raw =
         Left err -> Left err
         Right () ->
           let table = Map.fromList [(entryWireName e, entryBody e) | e <- named]
+              runBody n body sv = case body of
+                HandlerBody run -> either (pure . Left) (fmap Right) (run sv)
+                HaskellBody _ -> pure (Left (NativeToolInvocation n))
               dispatchFn n sv = case Map.lookup n table of
-                Just (HandlerBody run) -> either (pure . Left) (fmap Right) (run sv)
-                Just (HaskellBody _) -> pure (Left (NativeToolInvocation n))
+                Just body -> runBody n body sv
                 Nothing -> pure (Left (UnknownTool n))
+              dispatchAtFn index sv = case drop index named of
+                e : _ | index >= 0 -> runBody (entryWireName e) (entryBody e) sv
+                _ -> pure (Left (UnknownTool "invalid installed endpoint index"))
            in Right
                 CompiledEntrySet
                   { entryDeclarations = [ToolDeclaration
@@ -831,6 +843,7 @@ compileEntrySet raw =
                       (case entryBody e of HandlerBody _ -> Nothing; HaskellBody keys -> Just keys)
                     | e <- named]
                   , entryDispatch = dispatchFn
+                  , entryDispatchAt = dispatchAtFn
                   , entrySynopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
                   }
 
@@ -839,6 +852,7 @@ toCompiledTools compiled =
   CompiledTools
     { declarations = entryDeclarations compiled
     , dispatch = entryDispatch compiled
+    , dispatchAt = entryDispatchAt compiled
     , synopsis = entrySynopsis compiled
     }
 
@@ -1088,8 +1102,8 @@ initialContextEntry = 2
 -- Declarations and the retained dispatcher are two products of that one
 -- compile, so a schema can never advertise a handler built from another
 -- revision, and a slot can never be a revision ahead of the tools beside it.
--- The runtime selects what to run by entry index — 'toolCallEntry' for a tool
--- call, 'afterToolEntry' for the after-tool slot.
+-- Entries 0, 1 and 2 retain the named-call, after-tool and initial-context
+-- protocols. Installed endpoints enter at their certified ordinal plus 3.
 installSpec
   :: forall effects tools. (HasInstalledAgentApi tools effects, KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec tools effects -> Eff (AgentTools ': SyncEffects effects) ()
@@ -1115,7 +1129,11 @@ installSpec spec = case compileInstalledTools (specTools spec) of
       entry index
         | index == afterToolEntry = runAfterTool (afterTool spec)
         | index == initialContextEntry = runInitialContext (initialContext spec)
-        | otherwise = runToolCall compiled
+        | index == toolCallEntry = runToolCall compiled
+        | otherwise = do
+            (_, arguments) <- send AgentToolsInputWith
+            result <- raise (dispatchAt compiled (index - 3) arguments)
+            pure (encodeValue (toolDispatchReply result))
 
       runInitialContext
         :: Maybe (StartupInput -> Eff effects ContextSeed)

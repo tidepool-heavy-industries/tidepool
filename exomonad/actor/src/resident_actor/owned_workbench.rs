@@ -416,8 +416,7 @@ pub(super) enum WorkbenchUnitStartRequest {
         input: serde_json::Value,
     },
     Tool {
-        dispatch: Arc<RootCustody>,
-        name: String,
+        selected: crate::resident_workbench::InstalledToolSelection,
         arguments: serde_json::Value,
     },
     Prepared {
@@ -443,12 +442,11 @@ where
                     .await
             }
             WorkbenchUnitStartRequest::Tool {
-                dispatch,
-                name,
+                selected,
                 arguments,
             } => {
                 workbench
-                    .begin_tool(context, dispatch, name, arguments)
+                    .begin_selected_tool(context, selected, arguments)
                     .await
             }
             WorkbenchUnitStartRequest::Prepared { block, item } => {

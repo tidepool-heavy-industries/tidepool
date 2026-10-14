@@ -7,7 +7,7 @@ import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
 
 -- A concrete field must not bypass the hosted presentation boundary.
-data Tools mode = Tools { probe :: Tool (Eff '[]) Text Text } deriving (Generic)
+data Tools mode = Tools { probe :: Tool 'CallKind (Eff '[]) Text Text } deriving (Generic)
 
 tools :: Tools (AsServerT (Eff '[]))
 tools = Tools (tool "Echo" pure)

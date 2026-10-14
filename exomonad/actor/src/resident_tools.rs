@@ -1482,7 +1482,7 @@ impl ResidentToolClient {
         installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<HostedTool>,
+        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
         let issued = self.issue_workbench_call(invocation);
         self.dispatch_prepared_workbench(
@@ -1503,8 +1503,11 @@ impl ResidentToolClient {
         installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<HostedTool>,
+        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
+        if let Some(call) = &selected_tool {
+            request = call.request();
+        }
         if let Some(operation) = issued
             .control
             .invocation
@@ -1568,7 +1571,7 @@ impl ResidentToolClient {
         installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
-        selected_tool: Option<HostedTool>,
+        selected_tool: Option<crate::resident_workbench::AdmittedToolCall>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self

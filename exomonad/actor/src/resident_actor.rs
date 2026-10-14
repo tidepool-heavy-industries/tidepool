@@ -3032,6 +3032,7 @@ struct WorkbenchEffectState {
     model: Option<Arc<dyn crate::CellModelBinding>>,
     context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
     installed_tools: Option<crate::InstalledToolLease>,
+    selected_tool: Option<crate::resident_workbench::InstalledToolSelection>,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
     invocation_work: Arc<InvocationWork>,
@@ -3482,6 +3483,7 @@ struct WorkbenchAdmission {
     context: ActorSessionContext,
     request: WorkbenchRequest,
     installed_tools: Option<crate::InstalledToolLease>,
+    selected_tool: Option<crate::resident_workbench::InstalledToolSelection>,
     admitted_source: crate::CheckpointSourceLayer,
     compilation_authority: Option<Arc<WorkbenchCompilationAuthority>>,
     public_owner: Arc<WorkbenchPublicOwner>,
@@ -3499,7 +3501,7 @@ enum WorkbenchPreflight {
 
 fn admit_context_authority(
     actor: ActorRef,
-    selected: Option<&exomonad_tool::HostedTool>,
+    selected: Option<&exomonad_tool::EndpointPlan>,
     invocation: Option<&exomonad_tool::ToolInvocationContext>,
 ) -> Result<(), KernelInvocationFailure> {
     if selected.is_none_or(|tool| {
@@ -3771,7 +3773,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-        let issued = invocation
+    let issued = invocation
             .installed_tools
             .or_else(|| self.installed_tools.snapshot());
         let issued_generation = issued
@@ -3790,7 +3792,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(lease) => Some(lease.clone()),
             None => None,
         };
-        if let Some(generation) = &issued_generation {
+    if let Some(generation) = &issued_generation {
             context = generation.context.clone();
         }
         if invocation.initial_context {
@@ -3811,7 +3813,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 })?;
             context.haskell_effects_alias = tools.dispatcher_effects.clone();
         }
-        let current_builtin = request.tool_call().is_some_and(|call| {
+        let current_builtin = invocation.selected_tool.is_none() && request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
                 crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
@@ -3835,96 +3837,64 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let invocation_key = control
             .as_ref()
             .and_then(|control| control.invocation.clone());
-        let selected_tool = invocation.selected_tool.or_else(|| {
-            request.tool_call().and_then(|call| {
-                installed_tools
-                    .as_ref()
-                    .and_then(|lease| lease.tools())
-                    .and_then(|tools| {
-                        tools
-                            .declarations
-                            .iter()
-                            .find(|tool| tool.name() == call.name)
-                    })
-                    .cloned()
-            })
-        });
-        if let Some(selected) = &selected_tool {
-            let builtin = if current_builtin {
+        let direct_tool_call = invocation.selected_tool.is_none();
+        let selected_tool = invocation
+            .selected_tool
+            .map(|call| call.selected)
+            .or_else(|| {
+                if current_builtin {
+                    return None;
+                }
                 request
                     .tool_call()
-                    .and_then(|call| match call.name.as_str() {
-                        crate::status_tool::STATUS_TOOL => Some(crate::status_tool::declaration()),
-                        crate::reload_tool::RELOAD_TOOL => Some(crate::reload_tool::declaration()),
-                        _ => None,
-                    })
-            } else {
-                None
-            };
-            let retained = builtin.as_ref().or_else(|| {
-                installed_tools
-                    .as_ref()
-                    .and_then(|lease| lease.tools())
-                    .and_then(|tools| {
-                        tools
-                            .declarations
-                            .iter()
-                            .find(|tool| tool.name() == selected.name())
-                    })
+                    .and_then(|call| issued.as_ref()?.select(&call.name))
             });
-            if retained != Some(selected)
-                || request
-                    .tool_call()
-                    .is_some_and(|call| call.name != selected.name())
-            {
-                return Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor,
-                    detail: "selected notebook contract differs from the issued installation"
-                        .into(),
-                    diagnostic: None,
-                });
+        if !current_builtin && request.tool_call().is_some() && selected_tool.is_none() {
+            return Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor,
+                detail: "unknown installed endpoint".into(),
+                diagnostic: None,
+            });
+        }
+        if let Some(selected) = &selected_tool {
+            let endpoint = selected.endpoint();
+            if let Some(call) = request.tool_call().filter(|_| direct_tool_call) {
+                let arguments = if let Some(text) = call.arguments.as_str() {
+                    exomonad_tool::ToolArguments::Raw(text.into())
+                } else {
+                    exomonad_tool::ToolArguments::Structured(call.arguments.clone())
+                };
+                endpoint.plan.admit_arguments(arguments).map_err(|error| {
+                    KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
+                        actor,
+                        detail: error.to_string(),
+                        diagnostic: None,
+                    }
+                })?;
             }
-            let keys = selected.effect_keys();
-            if keys.iter().any(|key| match key {
+            if endpoint.plan.effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
                     !self.descriptor.capabilities().effect_keys().contains(key)
                 }
-                exomonad_tool::ToolEffectKey::ContextReadWrite => {
-                    selected.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
-                }
+                exomonad_tool::ToolEffectKey::ContextReadWrite => false,
             }) {
                 return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor,
-                    detail: "selected notebook effects exceed its scheduling or actor authority"
-                        .into(),
+                    detail: "selected notebook effects exceed actor authority".into(),
                     diagnostic: None,
                 });
             }
-            if !current_builtin {
-                context.haskell_effects_alias = match selected.implementation() {
-                    exomonad_tool::ToolImplementation::HaskellCell => format!(
-                        "'[{}]",
-                        keys.iter()
-                            .map(|key| key.haskell_name())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    )
-                    .into(),
-                    exomonad_tool::ToolImplementation::ResidentHandler => installed_tools
-                        .as_ref()
-                        .and_then(|lease| lease.tools())
-                        .expect("selected retained handler checked")
-                        .dispatcher_effects
-                        .clone(),
-                };
-            }
+            context.haskell_effects_alias = endpoint.execution_effects.clone();
         }
         if invocation.context_binding.is_some() {
             admit_context_authority(
                 actor,
-                selected_tool.as_ref(),
+                selected_tool
+                    .as_ref()
+                    .map(|selected| &selected.endpoint().plan),
                 invocation_key.as_ref().map(|key| key.invocation()),
             )?;
         }
@@ -4037,6 +4007,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             public_owner,
             request,
             installed_tools,
+            selected_tool,
             admitted_source,
             compilation_authority,
             current_builtin,
@@ -4587,7 +4558,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 format!(
                     "\n  spec: {} slots=[{}]",
                     tools.provenance(),
-                    tools.slots.join(", ")
+                    if tools.after_tool.is_some() {
+                        crate::after_tool::AFTER_TOOL_SLOT
+                    } else {
+                        ""
+                    }
                 )
             }
             (
@@ -4598,7 +4573,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ) => format!(
                 "\n  spec: {} slots=[{}]; source unavailable",
                 tools.provenance(),
-                tools.slots.join(", ")
+                if tools.after_tool.is_some() {
+                    crate::after_tool::AFTER_TOOL_SLOT
+                } else {
+                    ""
+                }
             ),
             (_, crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(None)) => {
                 "\n  spec: none installed; source unavailable".to_string()
@@ -8307,7 +8286,7 @@ where
                 ),
             )?;
         }
-        let declarations = compiled_tools.declarations.clone();
+        let declarations = compiled_tools.surface();
         let prepared_tools =
             crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));
         let policy: Arc<dyn ResidentToolEndpoint> =
@@ -9921,13 +9900,17 @@ where
     ) -> String {
         use crate::after_tool::{Annotation, Disposition, Invocation};
 
-        if !tools
-            .slots
-            .iter()
-            .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
-        {
+        if tools.after_tool.is_none() {
             return output;
         }
+        let mut slot_context = context.clone();
+        slot_context.haskell_effects_alias = tools
+            .after_tool
+            .as_ref()
+            .expect("admitted slot")
+            .execution_effects
+            .clone();
+        let context = &slot_context;
         // A slot's own effects and tool use never trigger a slot.
         if execution_state.after_tool_active {
             return output;
@@ -10202,12 +10185,15 @@ where
             let context = &context;
             let installed_tools = effects.installed_tools.clone();
             let execution = request.execution_id().cloned();
-            let status_call = request
-                .tool_call()
+            let builtin_call = if effects.selected_tool.is_none() {
+                request.tool_call()
+            } else {
+                None
+            };
+            let status_call = builtin_call
                 .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
                 .cloned();
-            let reload_spec_call = request
-                .tool_call()
+            let reload_spec_call = builtin_call
                 .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
@@ -10219,50 +10205,14 @@ where
                             .expect("startup admission retains installed dispatcher")
                             .dispatch,
                     ))
-                } else if let Some(call) = request.tool_call().filter(|call| {
-                    call.name != crate::status_tool::STATUS_TOOL
-                        && call.name != crate::reload_tool::RELOAD_TOOL
-                }) {
-                    let tools = installed_tools
-                        .as_ref()
-                        .and_then(crate::InstalledToolLease::tools)
-                        .filter(|tools| {
-                            tools.declarations.iter().any(|tool| {
-                                tool.name() == call.name
-                                    && match tool {
-                                        exomonad_tool::HostedTool::Custom(_) => {
-                                            call.arguments.is_string()
-                                        }
-                                        exomonad_tool::HostedTool::Function(_) => {
-                                            call.arguments.is_object()
-                                        }
-                                    }
-                            })
-                        })
-                        .ok_or_else(|| {
-                            workbench_failure(
-                                &[],
-                                0,
-                                1,
-                                ResidentActorWorkbenchError::ActorProtocol(
-                                    "unknown tool or invalid argument kind".into(),
-                                ),
-                            )
-                        })?;
-                    // Dispatch clones the retained record, so the identity of THAT
-                    // record is known at the moment of the call and costs nothing to
-                    // carry. It says which installed record served the call, and the
-                    // revision that record was built from — not that everything
-                    // reachable through the call belongs to one revision.
-                    tracing::info!(
-                        actor = %context.actor,
-                        tool = %call.name,
-                        spec = %tools.provenance(),
-                        "hosted tool call served by an installed spec"
-                    );
-                    Some(Arc::clone(&tools.dispatch))
                 } else {
-                    None
+                    effects.selected_tool.as_ref().filter(|selected| matches!(
+                    selected.endpoint().plan.execution(), exomonad_tool::EndpointExecution::ResidentAsync(_) | exomonad_tool::EndpointExecution::ResidentSync(_)
+                )).map(|selected| {
+                    let tools = selected.lease().tools().expect("selected installation retained");
+                    tracing::info!(actor = %context.actor, tool = %selected.endpoint().plan.name(), spec = %tools.provenance(), "hosted tool call served by an installed spec");
+                    Arc::clone(&tools.dispatch)
+                })
                 };
                 cursor.dispatch_initialized = true;
             }
@@ -10553,19 +10503,22 @@ where
                                     total: request.items.len(),
                                 },
                             );
-                            let request_start = if effects.initial_context {
+                        let request_start = if effects.initial_context {
                                 owned_workbench::WorkbenchUnitStartRequest::InitialContext {
                                     dispatch: Arc::clone(
                                         cursor.tool_dispatch.as_ref().expect("startup dispatcher"),
                                     ),
                                     input: request.input.clone().expect("startup input"),
                                 }
-                            } else if let (Some(call), Some(dispatch)) =
+                            } else if let (Some(call), Some(_dispatch)) =
                                 (request.tool_call(), &cursor.tool_dispatch)
                             {
                                 owned_workbench::WorkbenchUnitStartRequest::Tool {
-                                    dispatch: Arc::clone(dispatch),
-                                    name: call.name.clone(),
+                                    selected: effects
+                                        .selected_tool
+                                        .as_ref()
+                                        .expect("selected resident endpoint")
+                                        .clone(),
                                     arguments: call.arguments.clone(),
                                 }
                             } else {
@@ -10761,13 +10714,7 @@ where
                             if let Some(handler) = installed_tools
                                 .as_ref()
                                 .and_then(crate::InstalledToolLease::handler)
-                                .filter(|handler| {
-                                    handler
-                                        .tools()
-                                        .slots
-                                        .iter()
-                                        .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
-                                })
+                                .filter(|handler| handler.tools().after_tool.is_some())
                             {
                                 if effects.park_effects {
                                     let frame = after_tool_wait::capture(
@@ -12239,7 +12186,7 @@ where
                     });
                 }
             };
-            if !awaiting.declarations.iter().any(|tool| {
+            if !awaiting.surface().iter().any(|tool| {
                 tool.name == invocation.name && tool.accepts_arguments(&invocation.arguments)
             }) {
                 self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
@@ -12529,6 +12476,7 @@ where
                 context,
                 request,
                 installed_tools,
+                selected_tool,
                 admitted_source,
                 compilation_authority,
                 public_owner: _public_owner,
@@ -12621,6 +12569,7 @@ where
                     model: None,
                     context_binding,
                     installed_tools,
+                    selected_tool,
                     admitted_source,
                     reservation_owner,
                     invocation_work,
@@ -15584,11 +15533,14 @@ mod tests {
     #[test]
     fn native_context_authority_requires_explicit_effect_and_exact_sync_invocation() {
         use exomonad_tool::{
-            CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
-            ToolInvocationContext, ToolScheduling,
+            EndpointPlan, ToolDeclaration, ToolEffectKey, ToolImplementation,
+            ToolInvocationContext, ToolKind, ToolScheduling,
         };
         let actor = crate::ActorRef::first(crate::ActorId(8));
-        let mut declaration = CustomToolDeclaration {
+        let mut declaration = ToolDeclaration {
+            input_schema: serde_json::json!({"type":"string"}),
+            output_schema: None,
+            kind: ToolKind::Raw,
             name: "ordinary-notebook".into(),
             description: "Selected notebook".into(),
             schedule: ToolScheduling::BeforeNextInference,
@@ -15609,7 +15561,7 @@ mod tests {
             None,
             None,
         );
-        let rejected = |tool: Option<&HostedTool>, invocation: Option<&ToolInvocationContext>| {
+        let rejected = |tool: Option<&EndpointPlan>, invocation: Option<&ToolInvocationContext>| {
             assert!(matches!(
                 super::admit_context_authority(actor, tool, invocation),
                 Err(crate::KernelInvocationFailure::Rejected { actor: rejected, .. })
@@ -15617,17 +15569,20 @@ mod tests {
             ));
         };
         rejected(None, Some(&exact));
-        rejected(Some(&HostedTool::Custom(declaration.clone())), Some(&exact));
+        rejected(
+            Some(&EndpointPlan::admit(declaration.clone()).unwrap()),
+            Some(&exact),
+        );
         declaration
             .effect_keys
             .push(ToolEffectKey::ContextReadWrite);
         declaration.name = "explicit-curation".into();
-        let curation = HostedTool::Custom(declaration.clone());
+        let curation = EndpointPlan::admit(declaration.clone()).unwrap();
         assert!(super::admit_context_authority(actor, Some(&curation), Some(&exact)).is_ok());
         rejected(Some(&curation), None);
         rejected(Some(&curation), Some(&direct));
         declaration.schedule = ToolScheduling::Async;
-        rejected(Some(&HostedTool::Custom(declaration)), Some(&exact));
+        assert!(EndpointPlan::admit(declaration).is_err());
     }
 
     #[test]
