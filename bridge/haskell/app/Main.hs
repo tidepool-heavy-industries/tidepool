@@ -61,7 +61,7 @@ import Tidepool.CompilerRequest
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
   , pprPackageImports, CheckedEnvironmentResult(..)
-  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements, retainProgramSourceImports
+  , preparedFreshDependencies, preparedExactCompilation, retainProgramSourceImports
   , CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
@@ -70,7 +70,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext
+  , PreparedProductContext
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
@@ -112,14 +112,13 @@ import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerR
 import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
-  ( ExactCompilation(..), ExactScope , scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem
   , originalGroupFromProjected
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..)
-  , revalidateExactScope, scopeInterfaces, extendExactScopeGeneration, extendCheckedValueScope
-  , scopeAvailableOriginalProducts
+  , revalidateExactScope, extendExactScopeGeneration, extendCheckedValueScope
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -225,7 +224,6 @@ dispatch timing bound =
             InspectionOperation -> runInspectionMode bound file
             TurnOperation -> runTurnMode bound file
             SourceOperation -> timePhase timing "total" (processFile bound timing file)
-            DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
@@ -411,7 +409,6 @@ processFile bound timing path = do
     let prepared = preparedCompilationResult completion
         result = pprPipelineResult prepared
     let binds = prBinds result
-        hscEnv = prHscEnv result
         -- Inferred type of the eval's top expression (the @__user@ binding),
         -- threaded into meta.cbor for the Rust side. Nothing for non-eval
         -- extractions (no @__user@). See GhcPipeline.capturedUserType.
@@ -783,7 +780,6 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
     let prepared = preparedCompilationResult completion
         result = pprPipelineResult prepared
         binds       = prBinds result
-        hscEnv      = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
@@ -817,8 +813,8 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
         Just observation -> do
           generation <- requireArg "--bind-gen" (requestBindGen args)
           root <- requireArg "--session-root" (requestSessionRoot args)
-          bound <- writeSessionBindings generation root sessionBindings
-          return (TBind [T.pack observation] variant bound asksSites wrapped)
+          bindings <- writeSessionBindings generation root sessionBindings
+          return (TBind [T.pack observation] variant bindings asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
     let owner = moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv result)))
@@ -1043,7 +1039,6 @@ runCellProgramMode bound cellPath exact planned = do
     pure []
   reportDiagsWithWarnings attempted
   where
-    args = boundWorkerRequest bound
     compileSegment parserFlags timing admission template outDir batches state (segmentIndex, segment) = do
       let offset = programItemOffset state
           prefix = selectedProgramValues (programValues state)

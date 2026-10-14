@@ -326,7 +326,7 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
           { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
     let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
         externalOriginalBinders = Set.fromList
-          ([binder | product <- exactProducts, group <- originalGroups product
+          ([binder | exactProduct <- exactProducts, group <- originalGroups exactProduct
             , binder <- originalBinders group]
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
             , binder <- candidateGroupBinders group])
@@ -338,10 +338,10 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
     originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
     originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
     let products = preparedProductInventory productContext
-        roots = Set.fromList (map (projectionEntry . contextFor) targets
+        outputRoots = Set.fromList (map (projectionEntry . contextFor) targets
           ++ projectionAuxiliaryRoots firstContext)
         originalBindings = case intent of
-          NativeOriginals -> currentOriginalBindingsExcept inventory roots
+          NativeOriginals -> currentOriginalBindingsExcept inventory outputRoots
           PortableExecutable -> Map.empty
         withOriginals context = context {projectionCurrentOriginals = originalBindings}
         admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
