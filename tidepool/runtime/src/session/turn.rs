@@ -2650,12 +2650,27 @@ pub fn compile_activation_renderer(
     budget: u64,
     includes: &[PathBuf],
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
+) -> Result<
+    super::resident::PreparedRenderer<super::SharedActivationRenderer>,
+    ActivationRendererFailure,
+> {
     use tidepool_toolchain::activation_preview::ActivationPreviewSpecification;
+    crate::CompilerTransactionOrigin::current().ok_or(CompileError::CompilerPublication(
+        crate::CompilerTransactionPublicationError::MissingOwner,
+    ))?;
     let Some(context) = admission.original_display_context().cloned() else {
-        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
+        return super::resident::PreparedRenderer::new(
+            super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable,
+        )
+        .map_err(|error| CompileError::from(error).into());
     };
-    let temp = compiler_scratch_directory()?;
+    let temp = Arc::new(compiler_scratch_directory()?);
+    if !tidepool_extract_cmd::retain_compiler_input_directory(temp.clone()) {
+        return Err(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::MissingOwner,
+        )
+        .into());
+    }
     let input_path = temp.path().join("ActivationPreviewTemplate.hs");
     std::fs::write(&input_path, template_source)?;
     let mut cmd = extract_cmd()?;
@@ -2703,7 +2718,10 @@ pub fn compile_activation_renderer(
         .activation_preview_unavailable(temp.path())
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?
     {
-        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
+        return super::resident::PreparedRenderer::new(
+            super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable,
+        )
+        .map_err(|error| CompileError::from(error).into());
     }
     let result = decode_turn_output_dir(temp.path(), &offer, None)
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
@@ -2752,7 +2770,7 @@ pub fn compile_activation_renderer(
         proof,
         native,
     });
-    Ok(match disposition {
+    super::resident::PreparedRenderer::new(match disposition {
         tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
             super::SharedActivationRenderer::Renderable(renderer)
         }
@@ -2760,6 +2778,7 @@ pub fn compile_activation_renderer(
             super::SharedActivationRenderer::Opaque(renderer)
         }
     })
+    .map_err(|error| CompileError::from(error).into())
 }
 
 /// Prepare every authored item before the caller can execute the
@@ -2953,6 +2972,7 @@ fn compile_cell_program_admitted_work_controls(
 /// Compiler facts and physical output owners prepared under the caller's ticket.
 /// No endpoint or compiler lease survives in this host admission owner.
 pub struct PreparedRuntimeCell {
+    origin: crate::CompilerTransactionOrigin,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
     offer: ModuleCandidateOffer,
@@ -2976,7 +2996,7 @@ pub fn prepare_cell_program_admitted(
 /// Consume prepared outputs after the affine compiler owner has settled END.
 /// Unconfirmed close preserves exact input owners in the existing close evidence.
 pub fn finish_cell_program_admitted(
-    outcome: crate::CompilerTransactionOutcome<Result<PreparedRuntimeCell, CellCheckFailure>>,
+    outcome: crate::CompilerTransactionSettled<Result<PreparedRuntimeCell, CellCheckFailure>>,
     cancellation: &crate::HostAdmissionCancellation,
 ) -> Result<
     (
@@ -2985,10 +3005,21 @@ pub fn finish_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
+    let belongs_to_owner = outcome
+        .action()
+        .as_ref()
+        .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
+    let outcome = outcome.into_outcome();
     let prepared = outcome.action?;
     if let crate::CompilerTransactionClose::Unconfirmed(evidence) = outcome.close {
         tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = "unconfirmed", "cell program publication refused");
         return Err(CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into());
+    }
+    if !belongs_to_owner {
+        return Err(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::DifferentOwner,
+        )
+        .into());
     }
     prepared.seal(cancellation)
 }
@@ -3035,7 +3066,7 @@ fn compile_cell_program_admitted_inner(
     let cancellation = crate::CompilerTransactionCancellation::new();
     let host = cancellation.host_admission_cancellation();
     let settlement = std::cell::RefCell::new(settlement);
-    let outcome = crate::with_compiler_transaction_cancellable(
+    let outcome = crate::settle_compiler_transaction_cancellable(
         cancellation,
         |close| settlement.borrow_mut()(close),
         || {
@@ -3049,12 +3080,12 @@ fn compile_cell_program_admitted_inner(
     );
     #[cfg(test)]
     let evidence = outcome
-        .action
+        .action()
         .as_ref()
         .ok()
         .map(|prepared| (prepared.root.clone(), prepared.stderr.clone()));
     #[cfg(test)]
-    if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, &outcome.action) {
+    if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, outcome.action()) {
         audit_compiler_issued_item_receipts(&prepared.offer, prepared.root.path(), test_name);
     }
     let result = finish_cell_program_admitted(outcome, &host);
@@ -3101,6 +3132,9 @@ fn prepare_cell_program_admitted_inner(
     #[cfg(test)] audit: CellProgramAudit<'_>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
     let setup_span =
         tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
     if !admission.has_execution_purpose() {
@@ -3233,6 +3267,7 @@ fn prepare_cell_program_admitted_inner(
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);
     Ok(PreparedRuntimeCell {
+        origin,
         checked,
         program,
         offer,
@@ -7150,13 +7185,13 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let host = cancellation.host_admission_cancellation();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::with_compiler_transaction_cancellable(
+        let outcome = crate::settle_compiler_transaction_cancellable(
             cancellation.clone(),
             |_| {},
             || prepare_cell_program_admitted(admission, &mut |_| {}),
         );
-        assert!(outcome.action.is_ok());
-        assert_eq!(outcome.close, crate::CompilerTransactionClose::Clean);
+        assert!(outcome.action().is_ok());
+        assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1, "one physical whole-cell request");
         cancellation.cancel();
@@ -7189,7 +7224,7 @@ mod tests {
         let host = cancellation.host_admission_cancellation();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::with_compiler_transaction_cancellable(
+        let outcome = crate::settle_compiler_transaction_cancellable(
             cancellation.clone(),
             |close| *observed.borrow_mut() = Some(close),
             || {
@@ -7203,10 +7238,10 @@ mod tests {
             },
         );
         assert!(matches!(
-            outcome.close,
+            outcome.close(),
             crate::CompilerTransactionClose::Unconfirmed(_)
         ));
-        let prepared = outcome.action.as_ref().unwrap();
+        let prepared = outcome.action().as_ref().unwrap();
         let root = prepared.root.path().to_owned();
         let weak = Arc::downgrade(&prepared.root);
         assert!(root.join("cell.cbor").exists());
@@ -7236,6 +7271,63 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn cell_preparation_cannot_borrow_fresh_unstarted_transaction_closure() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "let capturedNumber = (42 :: Int)",
+            &[],
+            None,
+        )
+        .unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let observed = std::cell::RefCell::new(None);
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let original = crate::with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |close| *observed.borrow_mut() = Some(close),
+            || {
+                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
+                assert!(prepared.is_ok());
+                cancellation.cancel();
+                prepared
+            },
+        );
+        assert!(matches!(
+            original.close,
+            crate::CompilerTransactionClose::Unconfirmed(_)
+        ));
+        let prepared = original.action.as_ref().unwrap();
+        let weak = Arc::downgrade(&prepared.root);
+        let root = prepared.root.path().to_owned();
+        let fresh = crate::CompilerTransactionCancellation::new();
+        let host = fresh.host_admission_cancellation();
+        let reassociated =
+            crate::settle_compiler_transaction_cancellable(fresh, |_| {}, || original.action);
+        assert_eq!(
+            *reassociated.close(),
+            crate::CompilerTransactionClose::NotStarted
+        );
+        let failure = finish_cell_program_admitted(reassociated, &host).unwrap_err();
+        assert!(matches!(
+            failure.error,
+            CompileError::CompilerPublication(
+                crate::CompilerTransactionPublicationError::DifferentOwner,
+            )
+        ));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
+        assert!(weak.upgrade().is_some());
+        assert!(root.join("cell.cbor").exists());
+        drop(original.close);
+        drop(observed);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles() {
         let mut fixture = CheckedHomeFixture::new();
         let admission = CheckedHomeFixture::admit_in(
@@ -7251,13 +7343,13 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let host = cancellation.host_admission_cancellation();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::with_compiler_transaction_cancellable(
+        let outcome = crate::settle_compiler_transaction_cancellable(
             cancellation,
             |_| {},
             || prepare_cell_program_admitted(admission, &mut |_| {}),
         );
-        assert!(outcome.action.is_ok());
-        assert_eq!(outcome.close, crate::CompilerTransactionClose::Clean);
+        assert!(outcome.action().is_ok());
+        assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(
             after - before,

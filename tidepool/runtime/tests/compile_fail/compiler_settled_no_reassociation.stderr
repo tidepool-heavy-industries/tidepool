@@ -1,0 +1,2 @@
+error[E0616]: field `outcome` of struct `CompilerTransactionSettled` is private
+ --> tests/compile_fail/compiler_settled_no_reassociation.rs:7:13

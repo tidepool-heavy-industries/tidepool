@@ -143,14 +143,72 @@ pub struct CompilerEndpoint {
     transport: Transport,
 }
 
-/// A completed action and its independent compiler lifecycle observation.
-/// Cleanup uncertainty never replaces the action or authorizes its replay.
+/// An action and its independent compiler lifecycle observation for reporting.
+/// Joined invocations may finish before their outer compiler owner closes.
+/// Changing this reporting data cannot issue a settled publication product.
 #[must_use]
 #[derive(Debug)]
 pub struct CompilerTransactionOutcome<T> {
     pub action: T,
     pub close: CompilerTransactionClose,
 }
+
+/// The action returned by one outer compiler owner after that owner settled.
+/// Only the compiler transaction runner issues this affine product. Its close
+/// may be unconfirmed; publication consumers must still refuse that observation.
+/// Extracting a reporting outcome discards the publication authority.
+#[must_use]
+#[derive(Debug)]
+pub struct CompilerTransactionSettled<T> {
+    outcome: CompilerTransactionOutcome<T>,
+    origin: CompilerTransactionOrigin,
+}
+
+impl<T> CompilerTransactionSettled<T> {
+    pub fn action(&self) -> &T {
+        &self.outcome.action
+    }
+
+    pub fn close(&self) -> &CompilerTransactionClose {
+        &self.outcome.close
+    }
+
+    pub fn belongs_to(&self, origin: &CompilerTransactionOrigin) -> bool {
+        Arc::ptr_eq(&self.origin.0, &origin.0)
+    }
+
+    pub fn into_outcome(self) -> CompilerTransactionOutcome<T> {
+        self.outcome
+    }
+}
+
+/// Exact identity of the compiler scope that prepared a product. This handle
+/// retains no compiler transport and cannot authorize publication on its own.
+#[derive(Clone, Debug)]
+pub struct CompilerTransactionOrigin(Arc<()>);
+
+impl CompilerTransactionOrigin {
+    pub fn current() -> Option<Self> {
+        TRANSACTION_SCOPE.with(|scope| scope.borrow().as_ref().map(|scope| scope.origin.clone()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilerTransactionPublicationError {
+    MissingOwner,
+    DifferentOwner,
+}
+
+impl std::fmt::Display for CompilerTransactionPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingOwner => "compiler preparation requires its owning transaction",
+            Self::DifferentOwner => "compiler product belongs to another transaction",
+        })
+    }
+}
+
+impl std::error::Error for CompilerTransactionPublicationError {}
 
 #[must_use]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1607,10 +1665,12 @@ impl ScopedCompiler {
 }
 
 struct TransactionScope {
+    origin: CompilerTransactionOrigin,
     workload: CompileWorkload,
     compiler: ScopedCompiler,
     cancellation: Option<CompilerTransactionCancellation>,
     admission_close: Vec<CompilerTransactionCloseEvidence>,
+    reported_close: Vec<CompilerTransactionClose>,
     input_custody: CompilerInputCustody,
 }
 
@@ -1902,6 +1962,22 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
         }
     };
     let mut close = retain_earlier_close(close, scope.admission_close);
+    for observed in scope.reported_close {
+        match observed {
+            CompilerTransactionClose::Unconfirmed(mut evidence) => {
+                if let CompilerTransactionClose::Unconfirmed(previous) = close {
+                    evidence.earlier.push(previous);
+                }
+                close = CompilerTransactionClose::Unconfirmed(evidence);
+            }
+            CompilerTransactionClose::Clean
+                if matches!(close, CompilerTransactionClose::NotStarted) =>
+            {
+                close = CompilerTransactionClose::Clean;
+            }
+            _ => {}
+        }
+    }
     if let CompilerTransactionClose::Unconfirmed(evidence) = &mut close {
         evidence.input_custody.extend(scope.input_custody);
     }
@@ -1936,6 +2012,7 @@ pub fn with_compiler_transaction<T>(
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
     with_compiler_transaction_inner(CompileWorkload::Foreground, None, close_sink, action)
+        .into_outcome()
 }
 
 /// As [`with_compiler_transaction`], with an external cancellation edge that
@@ -1951,6 +2028,7 @@ pub fn with_compiler_transaction_cancellable<T>(
         close_sink,
         action,
     )
+    .into_outcome()
 }
 
 /// Declare the workload before execution admits the pinned daemon transaction.
@@ -1962,7 +2040,7 @@ pub fn with_compiler_transaction_for_workload<T>(
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(workload, None, close_sink, action)
+    with_compiler_transaction_inner(workload, None, close_sink, action).into_outcome()
 }
 
 pub fn with_compiler_transaction_cancellable_for_workload<T>(
@@ -1971,7 +2049,44 @@ pub fn with_compiler_transaction_cancellable_for_workload<T>(
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(workload, Some(cancellation), close_sink, action)
+    with_compiler_transaction_inner(workload, Some(cancellation), close_sink, action).into_outcome()
+}
+
+/// Run preparation and issue its exact settled product after END. Reporting
+/// observations passed by nested work can only strengthen uncertainty; they
+/// cannot replace the action or remove an earlier unconfirmed close.
+/// The close sink receives the same aggregate during normal return or unwind.
+pub fn settle_compiler_transaction_cancellable_for_workload<T>(
+    workload: CompileWorkload,
+    cancellation: CompilerTransactionCancellation,
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce(&mut dyn FnMut(CompilerTransactionClose)) -> T,
+) -> CompilerTransactionSettled<T> {
+    with_compiler_transaction_inner(workload, Some(cancellation), close_sink, || {
+        action(&mut |close| {
+            TRANSACTION_SCOPE.with(|scope| {
+                scope
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("reporting inside the owning compiler transaction")
+                    .reported_close
+                    .push(close);
+            });
+        })
+    })
+}
+
+pub fn settle_compiler_transaction_cancellable<T>(
+    cancellation: CompilerTransactionCancellation,
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce() -> T,
+) -> CompilerTransactionSettled<T> {
+    settle_compiler_transaction_cancellable_for_workload(
+        CompileWorkload::Foreground,
+        cancellation,
+        close_sink,
+        |_| action(),
+    )
 }
 
 #[tracing::instrument(
@@ -1986,17 +2101,20 @@ fn with_compiler_transaction_inner<T>(
     cancellation: Option<CompilerTransactionCancellation>,
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
-) -> CompilerTransactionOutcome<T> {
+) -> CompilerTransactionSettled<T> {
+    let origin = CompilerTransactionOrigin(Arc::new(()));
     TRANSACTION_SCOPE.with(|scope| {
         assert!(
             scope.borrow().is_none(),
             "compiler transaction scopes cannot nest"
         );
         *scope.borrow_mut() = Some(TransactionScope {
+            origin: origin.clone(),
             workload,
             compiler: ScopedCompiler::Unbound,
             cancellation,
             admission_close: Vec::new(),
+            reported_close: Vec::new(),
             input_custody: CompilerInputCustody::default(),
         });
     });
@@ -2005,7 +2123,10 @@ fn with_compiler_transaction_inner<T>(
     };
     let action = action();
     let close = guard.finish();
-    CompilerTransactionOutcome { action, close }
+    CompilerTransactionSettled {
+        origin,
+        outcome: CompilerTransactionOutcome { action, close },
+    }
 }
 
 impl CompilerTransaction {
@@ -2671,6 +2792,124 @@ mod tests {
             .expect("close must reap")
             .success());
         assert!(cancellation.state.lock().unwrap().target.is_none());
+    }
+
+    #[test]
+    fn settled_products_keep_exact_owner_when_actions_move_between_scopes() {
+        assert!(CompilerTransactionOrigin::current().is_none());
+        let original = settle_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || CompilerTransactionOrigin::current().expect("preparing scope"),
+        );
+        assert!(original.belongs_to(original.action()));
+        assert!(CompilerTransactionOrigin::current().is_none());
+        let reassociated = settle_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || original.into_outcome().action,
+        );
+        assert_eq!(*reassociated.close(), CompilerTransactionClose::NotStarted);
+        assert!(!reassociated.belongs_to(reassociated.action()));
+        assert!(CompilerTransactionOrigin::current().is_none());
+    }
+
+    #[test]
+    fn settled_publication_product_preserves_nested_uncertainty_histories() {
+        use proptest::prelude::*;
+        use proptest::test_runner::TestRunner;
+        let config = property_config(
+            128,
+            concat!(
+                module_path!(),
+                "::settled_publication_product_preserves_nested_uncertainty_histories"
+            ),
+        );
+        #[derive(Clone, Debug)]
+        enum Observation {
+            NotStarted,
+            Clean,
+            Cancelled,
+            FailedRequest,
+        }
+        let observation = prop_oneof![
+            Just(Observation::NotStarted),
+            Just(Observation::Clean),
+            Just(Observation::Cancelled),
+            Just(Observation::FailedRequest),
+        ];
+        TestRunner::new(config)
+            .run(&prop::collection::vec(observation, 0..32), |history| {
+                let observed = std::cell::RefCell::new(None);
+                let file = compiler_input_file(b"original physical input");
+                let weak = Arc::downgrade(&file);
+                let settled = settle_compiler_transaction_cancellable_for_workload(
+                    CompileWorkload::Foreground,
+                    CompilerTransactionCancellation::new(),
+                    |close| *observed.borrow_mut() = Some(close),
+                    |report| {
+                        assert!(retain_compiler_input_file(file));
+                        for step in &history {
+                            report(match step {
+                                Observation::NotStarted => CompilerTransactionClose::NotStarted,
+                                Observation::Clean => CompilerTransactionClose::Clean,
+                                Observation::Cancelled | Observation::FailedRequest => {
+                                    CompilerTransactionClose::Unconfirmed(
+                                        CompilerTransactionCloseEvidence::new(
+                                            if matches!(step, Observation::Cancelled) {
+                                                CompilerTransactionCloseReason::Cancelled
+                                            } else {
+                                                CompilerTransactionCloseReason::FailedRequest
+                                            },
+                                            CompilerTransactionRetirement::DaemonUnobserved {
+                                                disconnect: None,
+                                            },
+                                        ),
+                                    )
+                                }
+                            });
+                        }
+                        Ok::<_, &'static str>(42)
+                    },
+                );
+                prop_assert_eq!(settled.action(), &Ok(42));
+                prop_assert_eq!(observed.borrow().as_ref(), Some(settled.close()));
+                let uncertain = history
+                    .iter()
+                    .filter(|step| {
+                        matches!(step, Observation::Cancelled | Observation::FailedRequest)
+                    })
+                    .count();
+                fn count(evidence: &CompilerTransactionCloseEvidence) -> usize {
+                    1 + evidence.earlier.iter().map(count).sum::<usize>()
+                }
+                match settled.close() {
+                    CompilerTransactionClose::Unconfirmed(evidence) => {
+                        prop_assert_eq!(count(evidence), uncertain);
+                        prop_assert!(weak.upgrade().is_some());
+                    }
+                    CompilerTransactionClose::Clean => {
+                        prop_assert_eq!(uncertain, 0);
+                        prop_assert!(history
+                            .iter()
+                            .any(|step| matches!(step, Observation::Clean)));
+                        prop_assert!(weak.upgrade().is_none());
+                    }
+                    CompilerTransactionClose::NotStarted => {
+                        prop_assert_eq!(uncertain, 0);
+                        prop_assert!(!history
+                            .iter()
+                            .any(|step| matches!(step, Observation::Clean)));
+                        prop_assert!(weak.upgrade().is_none());
+                    }
+                }
+                drop(settled);
+                prop_assert_eq!(weak.upgrade().is_some(), uncertain > 0);
+                drop(observed);
+                prop_assert!(weak.upgrade().is_none());
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn observed_scope<T>(action: impl FnOnce() -> T) -> CompilerTransactionOutcome<T> {

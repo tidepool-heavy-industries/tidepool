@@ -38,13 +38,15 @@ mod request;
 mod resources;
 pub use endpoint::{
     compiler_host_checkpoint, retain_compiler_input_directory, retain_compiler_input_file,
+    settle_compiler_transaction_cancellable, settle_compiler_transaction_cancellable_for_workload,
     with_compiler_transaction, with_compiler_transaction_cancellable,
     with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
     CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
-    CompilerTransactionOutcome, CompilerTransactionRetirement, CompilerWorkerRetirement,
+    CompilerTransactionOrigin, CompilerTransactionOutcome, CompilerTransactionPublicationError,
+    CompilerTransactionRetirement, CompilerTransactionSettled, CompilerWorkerRetirement,
     DirectCompilerRetirement, HostAdmissionCancellation,
 };
 use exec_check::is_readable_executable_file;

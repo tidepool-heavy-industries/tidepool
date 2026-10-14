@@ -175,7 +175,6 @@ impl CompilerWorkClose {
 #[derive(Clone, Debug)]
 pub(crate) struct CompilerWorkReceipt {
     close: Arc<Mutex<CompilerWorkClose>>,
-    attempts: Arc<Mutex<Vec<tidepool_runtime::CompilerTransactionClose>>>,
     cancellation: Option<tidepool_runtime::CompilerTransactionCancellation>,
     purpose: CompilerWorkPurpose,
 }
@@ -190,7 +189,6 @@ impl CompilerWorkReceipt {
     pub(crate) fn pending() -> Self {
         Self {
             close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
-            attempts: Arc::new(Mutex::new(Vec::new())),
             cancellation: Some(tidepool_runtime::CompilerTransactionCancellation::new()),
             purpose: CompilerWorkPurpose::Active,
         }
@@ -203,7 +201,6 @@ impl CompilerWorkReceipt {
     pub(crate) fn observation_only(&self) -> Self {
         Self {
             close: Arc::clone(&self.close),
-            attempts: Arc::clone(&self.attempts),
             cancellation: None,
             purpose: self.purpose,
         }
@@ -256,13 +253,13 @@ impl CompilerWorkTicket {
         self,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> T {
-        self.run_with_close(action).action
+        self.run_with_close(action).into_outcome().action
     }
 
     pub(crate) fn run_with_close<T>(
         self,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
-    ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
+    ) -> tidepool_runtime::CompilerTransactionSettled<T> {
         self.run_for_workload_with_close(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             action,
@@ -276,61 +273,34 @@ impl CompilerWorkTicket {
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> T {
-        self.run_for_workload_with_close(workload, action).action
+        self.run_for_workload_with_close(workload, action)
+            .into_outcome()
+            .action
     }
 
     fn run_for_workload_with_close<T>(
         self,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
-    ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
+    ) -> tidepool_runtime::CompilerTransactionSettled<T> {
         let cancellation = self.cancellation();
-        let attempts = Arc::clone(&self.receipt.attempts);
-        let receipt = self.receipt.clone();
-        let mut outcome =
-            tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
-                workload,
-                cancellation,
-                move |close| {
-                    self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })
-                },
-                || action(&mut |close| attempts.lock().push(close)),
-            );
-        if let CompilerWorkClose::Settled(close) = receipt.observation() {
-            outcome.close = close;
-        }
-        outcome
+        tidepool_runtime::settle_compiler_transaction_cancellable_for_workload(
+            workload,
+            cancellation,
+            move |close| self.consume_close(close),
+            action,
+        )
     }
 
-    pub(crate) fn consume<T>(
-        mut self,
-        outcome: tidepool_runtime::CompilerTransactionOutcome<T>,
-    ) -> T {
-        let mut close = outcome.close;
-        for observed in self.receipt.attempts.lock().drain(..) {
-            match observed {
-                tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) => {
-                    if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close
-                    {
-                        evidence.earlier.push(previous);
-                    }
-                    close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
-                }
-                tidepool_runtime::CompilerTransactionClose::Clean
-                    if matches!(
-                        close,
-                        tidepool_runtime::CompilerTransactionClose::NotStarted
-                    ) =>
-                {
-                    close = tidepool_runtime::CompilerTransactionClose::Clean;
-                }
-                _ => {}
-            }
-        }
+    pub(crate) fn consume<T>(self, outcome: tidepool_runtime::CompilerTransactionOutcome<T>) -> T {
+        self.consume_close(outcome.close);
+        outcome.action
+    }
+
+    pub(crate) fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
         *self.receipt.close.lock() = CompilerWorkClose::Settled(close);
         self.settled = true;
         self.owner.close_settled();
-        outcome.action
     }
 }
 
@@ -360,7 +330,11 @@ impl ActorCompilerCloseOwner {
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> Result<tidepool_runtime::CompilerTransactionOutcome<T>, crate::ResidentActorWorkbenchError>
     {
-        Ok(self.owner.register_work()?.run_with_close(action))
+        Ok(self
+            .owner
+            .register_work()?
+            .run_with_close(action)
+            .into_outcome())
     }
 }
 
@@ -1224,9 +1198,9 @@ mod tests {
         let ticket = admitted_compiler(&owner);
         let host = ticket.cancellation().host_admission_cancellation();
         let outcome = ticket.run_with_close(|_| 17);
-        assert_eq!(outcome.action, 17);
+        assert_eq!(*outcome.action(), 17);
         assert_eq!(
-            outcome.close,
+            *outcome.close(),
             tidepool_runtime::CompilerTransactionClose::NotStarted
         );
         host.checkpoint().unwrap();
@@ -1393,7 +1367,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            outcome.action.unwrap_err().source.kind(),
+            outcome.action.as_ref().unwrap_err().source.kind(),
             std::io::ErrorKind::Interrupted
         );
         assert!(matches!(

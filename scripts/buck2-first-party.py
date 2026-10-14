@@ -947,6 +947,10 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        "compiler_cell_requires_settled": (),
+        "compiler_renderer_requires_settled": (),
+        "compiler_settled_consumed_once": (),
+        "compiler_settled_no_reassociation": (),
         "machine_lease_double_borrow": (),
         "root_borrow_release": ("tidepool-codegen",),
         "root_borrow_collection": ("tidepool-codegen",),

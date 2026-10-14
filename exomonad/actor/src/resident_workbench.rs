@@ -6745,8 +6745,8 @@ where
                     let producer_observer = renderer_observer.clone();
                     let compiled =
                         crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                            producer.begin_native();
                             let result = compiler_work.run_with_close(|settlement| {
+                                producer.begin_native().map_err(CompileError::from)?;
                                 #[cfg(test)]
                                 if let Some(observer) = &producer_observer {
                                     observer(ActivationPublicationObservation::RendererProducer)
@@ -6764,6 +6764,9 @@ where
                             // Empty is published, even if the async waiter vanished.
                             let settled = producer.settle_native(result).map_err(|failure| match failure {
                                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => error,
+                                tidepool_runtime::session::RendererProductionFailure::Publication(error) => {
+                                    CompileError::from(error).into()
+                                }
                                 tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed(close) => {
                                     CompileError::ExtractFailed(format!("activation renderer compiler close is unconfirmed: {close:?}")).into()
                                 }

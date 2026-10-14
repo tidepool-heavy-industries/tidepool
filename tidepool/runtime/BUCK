@@ -1038,6 +1038,50 @@ tidepool_rust_test_cases(
 )
 
 rust_compile_fail(
+    name = "compile_fail_compiler_cell_requires_settled",
+    source = "tests/compile_fail/compiler_cell_requires_settled.rs",
+    control = "tests/compile_pass/compiler_cell_requires_settled.rs",
+    expected = "tests/compile_fail/compiler_cell_requires_settled.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_compiler_renderer_requires_settled",
+    source = "tests/compile_fail/compiler_renderer_requires_settled.rs",
+    control = "tests/compile_pass/compiler_renderer_requires_settled.rs",
+    expected = "tests/compile_fail/compiler_renderer_requires_settled.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_compiler_settled_consumed_once",
+    source = "tests/compile_fail/compiler_settled_consumed_once.rs",
+    control = "tests/compile_pass/compiler_settled_consumed_once.rs",
+    expected = "tests/compile_fail/compiler_settled_consumed_once.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_compiler_settled_no_reassociation",
+    source = "tests/compile_fail/compiler_settled_no_reassociation.rs",
+    control = "tests/compile_pass/compiler_settled_no_reassociation.rs",
+    expected = "tests/compile_fail/compiler_settled_no_reassociation.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_machine_lease_double_borrow",
     source = "tests/compile_fail/machine_lease_double_borrow.rs",
     control = "tests/compile_pass/machine_lease_double_borrow.rs",

@@ -74,6 +74,9 @@ pub enum CompileError {
             >,
         >,
     ),
+    /// A prepared runtime product cannot borrow another transaction's closure.
+    #[error(transparent)]
+    CompilerPublication(#[from] tidepool_extract_cmd::CompilerTransactionPublicationError),
     /// Completed host preparation is unusable until its compiler END is
     /// confirmed. Exact input directories remain with this close evidence.
     #[error("completed compiler preparation close is unconfirmed")]

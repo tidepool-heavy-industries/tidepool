@@ -4807,12 +4807,32 @@ fn compile_activation_preview(
         .expect("admitted renderer slot")
     {
         RendererAccess::Ready(renderer) => renderer,
-        RendererAccess::Produce(producer) => {
-            producer.publish(tidepool_testing::with_settlement(|settlement| {
-                turn::compile_activation_renderer(
-                    &admission, template, budget, includes, settlement,
-                )
-            })?)
+        RendererAccess::Produce(mut producer) => {
+            let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                |settlement| {
+                    producer.begin_native().map_err(CompileError::from)?;
+                    turn::compile_activation_renderer(
+                        &admission, template, budget, includes, settlement,
+                    )
+                },
+            );
+            producer
+                .settle_native(outcome)
+                .map_err(|failure| match failure {
+                    RendererProductionFailure::Compile(error) => error,
+                    RendererProductionFailure::Publication(error) => {
+                        CompileError::from(error).into()
+                    }
+                    RendererProductionFailure::CloseUnconfirmed(close) => {
+                        CompileError::ExtractFailed(format!(
+                            "renderer close is unconfirmed: {close:?}"
+                        ))
+                        .into()
+                    }
+                })?
         }
         RendererAccess::Wait(_) => {
             panic!("synchronous semantic fixture has no concurrent producer")

@@ -21,8 +21,10 @@ pub use tidepool_codegen::machine::CancelHandle;
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_effect::EffectError;
 pub use tidepool_extract_cmd::{
+    settle_compiler_transaction_cancellable, settle_compiler_transaction_cancellable_for_workload,
     with_compiler_transaction, with_compiler_transaction_cancellable,
-    CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionOutcome,
+    CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionOrigin,
+    CompilerTransactionOutcome, CompilerTransactionPublicationError, CompilerTransactionSettled,
     HostAdmissionCancellation,
 };
 use tidepool_repr::serial::MetaWarnings;

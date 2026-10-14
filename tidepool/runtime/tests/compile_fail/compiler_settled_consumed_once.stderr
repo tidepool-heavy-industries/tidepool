@@ -1,0 +1,2 @@
+error[E0382]: use of moved value: `outcome`
+ --> tests/compile_fail/compiler_settled_consumed_once.rs:5:19

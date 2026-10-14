@@ -82,6 +82,9 @@ certified implementation, instance, and family closure.
 Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
 issued by the execution or preparation owner. The ticket opens and settles the
 entire native scope; callers must not create an unrelated cancellation token.
+The ticket returns the opaque settled compiler product for native publication;
+close observations remain reporting data. The compiler owner aggregates nested
+uncertainty before issuance, and prepared output retains its exact scope origin.
 Shared preparation owns its producer independently: waiters retain close
 observations without acquiring permission to interrupt that producer. Loading a
 completed original also authenticates inside that scope and records a close;

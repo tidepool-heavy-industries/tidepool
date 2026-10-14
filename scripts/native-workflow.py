@@ -214,6 +214,10 @@ def main(argv=None):
     if options.command == "verify":
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update((
+            "//tidepool/runtime:compile_fail_compiler_cell_requires_settled",
+            "//tidepool/runtime:compile_fail_compiler_renderer_requires_settled",
+            "//tidepool/runtime:compile_fail_compiler_settled_consumed_once",
+            "//tidepool/runtime:compile_fail_compiler_settled_no_reassociation",
             "//tidepool/runtime:compile_fail_machine_lease_double_borrow",
             "//tidepool/runtime:compile_fail_prepared_install_consumes_pending",
             "//tidepool/runtime:compile_fail_prepared_install_crossed_image",

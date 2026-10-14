@@ -119,6 +119,9 @@ pub struct FailureEnvelope {
 pub enum CompileFailureCause {
     Io,
     CompilerEndpoint,
+    CompilerPublication {
+        failure: CompilerTransactionPublicationFailure,
+    },
     CompilerCloseUnconfirmed,
     ExtractorContract,
     InputRejected,
@@ -143,6 +146,13 @@ pub enum CompileFailureCause {
     ModulePackage {
         failure: ModulePackageFailure,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompilerTransactionPublicationFailure {
+    MissingOwner,
+    DifferentOwner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -465,6 +475,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // Spawn/IO failure reaching the extractor.
         CompileError::Io(_)
         | CompileError::CompilerEndpoint(_)
+        | CompileError::CompilerPublication(_)
         | CompileError::CompilerCloseUnconfirmed(_)
         | CompileError::CompilerPreparationCloseUnconfirmed(_)
         | CompileError::EntryPreparationUnfinished { .. }
@@ -505,6 +516,16 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
         CompileError::CompilerEndpoint(_) => CompileFailureCause::CompilerEndpoint,
+        CompileError::CompilerPublication(error) => CompileFailureCause::CompilerPublication {
+            failure: match error {
+                tidepool_extract_cmd::CompilerTransactionPublicationError::MissingOwner => {
+                    CompilerTransactionPublicationFailure::MissingOwner
+                }
+                tidepool_extract_cmd::CompilerTransactionPublicationError::DifferentOwner => {
+                    CompilerTransactionPublicationFailure::DifferentOwner
+                }
+            },
+        },
         CompileError::CompilerCloseUnconfirmed(_)
         | CompileError::CompilerPreparationCloseUnconfirmed(_) => {
             CompileFailureCause::CompilerCloseUnconfirmed
@@ -560,6 +581,31 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn compiler_publication_refusals_preserve_typed_diagnostic_causes() {
+        for (error, expected) in [
+            (
+                tidepool_extract_cmd::CompilerTransactionPublicationError::MissingOwner,
+                CompilerTransactionPublicationFailure::MissingOwner,
+            ),
+            (
+                tidepool_extract_cmd::CompilerTransactionPublicationError::DifferentOwner,
+                CompilerTransactionPublicationFailure::DifferentOwner,
+            ),
+        ] {
+            let failure = classify_compile(&CompileError::from(error));
+            assert_eq!(failure.class, FailureClass::Infra);
+            assert_eq!(failure.phase, Phase::Compile);
+            let expected = CompileFailureCause::CompilerPublication { failure: expected };
+            assert_eq!(failure.cause, Some(expected.clone()));
+            let json = serde_json::to_vec(&expected).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<CompileFailureCause>(&json).unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn invocation_projection_preserves_submission_and_uncertain_completed_action() {

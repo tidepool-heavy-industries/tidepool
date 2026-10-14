@@ -49,7 +49,12 @@ response, cancelled waiter or missing scope does not establish input release.
 Standalone input-owning invocations consume the exact bound endpoint into an
 explicit transaction. Their caller supplies an affine close sink whose recipient
 survives operation unwind; normal return preserves the action and independent
-close. Joining an existing scope keeps final settlement with its outer owner,
+close. Publication consumes an opaque `CompilerTransactionSettled` issued by
+that outer owner; reporting outcomes and cloned close observations carry no
+publication authority. Prepared runtime products retain their exact scope
+origin and publication refuses a settled product from another scope, including
+a fresh transaction that never started native work. Nested observations are aggregated before issuance and
+cannot clear earlier uncertainty. Joining an existing scope keeps final settlement with its outer owner,
 and does not invoke the supplied local sink. Typed transport failure retains
 non-submission and retry facts; uncertain cleanup retains the original action
 and input custody and never authorizes replay.

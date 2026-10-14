@@ -1510,7 +1510,7 @@ impl<T> RendererSlot<T> {
                 *state = RendererSlotState::Compiling;
                 RendererAccess::Produce(RendererProduction {
                     slot: Some(self.clone()),
-                    native_started: false,
+                    native: RendererNativeState::Idle,
                 })
             }
         }
@@ -1524,38 +1524,92 @@ pub enum RendererAccess<T> {
     CloseUnconfirmed,
 }
 
+/// Native renderer output still bound to its preparing compiler owner.
+/// Only runtime compilation constructs this value; it has no public constructor.
+pub struct PreparedRenderer<T> {
+    value: T,
+    origin: crate::CompilerTransactionOrigin,
+}
+
+impl<T> PreparedRenderer<T> {
+    pub(super) fn new(value: T) -> Result<Self, crate::CompilerTransactionPublicationError> {
+        let origin = crate::CompilerTransactionOrigin::current()
+            .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?;
+        Ok(Self { value, origin })
+    }
+}
+
 pub enum RendererProductionFailure<E> {
     Compile(E),
     CloseUnconfirmed(crate::CompilerTransactionClose),
+    Publication(crate::CompilerTransactionPublicationError),
 }
 
 /// Move this affine lease into the compiler's blocking owner. Publish or drop
 /// it only after that owner's native transaction has closed.
 pub struct RendererProduction<T> {
     slot: Option<Arc<RendererSlot<T>>>,
-    native_started: bool,
+    native: RendererNativeState,
+}
+
+enum RendererNativeState {
+    Idle,
+    Started(crate::CompilerTransactionOrigin),
+    CloseUnconfirmed,
 }
 
 impl<T> RendererProduction<T> {
-    pub fn begin_native(&mut self) {
-        self.native_started = true;
+    pub fn begin_native(&mut self) -> Result<(), crate::CompilerTransactionPublicationError> {
+        if matches!(self.native, RendererNativeState::Idle) {
+            self.native = RendererNativeState::Started(
+                crate::CompilerTransactionOrigin::current()
+                    .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?,
+            );
+        }
+        Ok(())
     }
 
     pub fn settle_native<E>(
         mut self,
-        outcome: crate::CompilerTransactionOutcome<Result<T, E>>,
+        outcome: crate::CompilerTransactionSettled<Result<PreparedRenderer<T>, E>>,
     ) -> Result<Arc<T>, RendererProductionFailure<E>> {
+        let RendererNativeState::Started(origin) = &self.native else {
+            self.native = RendererNativeState::CloseUnconfirmed;
+            return Err(RendererProductionFailure::Publication(
+                crate::CompilerTransactionPublicationError::MissingOwner,
+            ));
+        };
+        if !outcome.belongs_to(origin) {
+            self.native = RendererNativeState::CloseUnconfirmed;
+            return Err(RendererProductionFailure::Publication(
+                crate::CompilerTransactionPublicationError::DifferentOwner,
+            ));
+        }
+        let belongs_to_owner = outcome
+            .action()
+            .as_ref()
+            .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
+        let outcome = outcome.into_outcome();
         match outcome.close {
             crate::CompilerTransactionClose::Clean
-            | crate::CompilerTransactionClose::NotStarted => {
-                self.native_started = false;
-                outcome
-                    .action
-                    .map(|value| self.publish(value))
-                    .map_err(RendererProductionFailure::Compile)
-            }
+            | crate::CompilerTransactionClose::NotStarted => match outcome.action {
+                Ok(prepared) if belongs_to_owner => {
+                    self.native = RendererNativeState::Idle;
+                    Ok(self.publish(prepared.value))
+                }
+                Ok(_) => {
+                    self.native = RendererNativeState::CloseUnconfirmed;
+                    Err(RendererProductionFailure::Publication(
+                        crate::CompilerTransactionPublicationError::DifferentOwner,
+                    ))
+                }
+                Err(error) => {
+                    self.native = RendererNativeState::Idle;
+                    Err(RendererProductionFailure::Compile(error))
+                }
+            },
             close @ crate::CompilerTransactionClose::Unconfirmed(_) => {
-                self.native_started = true;
+                self.native = RendererNativeState::CloseUnconfirmed;
                 Err(RendererProductionFailure::CloseUnconfirmed(close))
             }
         }
@@ -1573,10 +1627,11 @@ impl<T> RendererProduction<T> {
 impl<T> Drop for RendererProduction<T> {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
-            *slot.state.lock() = if self.native_started {
-                RendererSlotState::CloseUnconfirmed
-            } else {
-                RendererSlotState::Empty
+            *slot.state.lock() = match self.native {
+                RendererNativeState::Idle => RendererSlotState::Empty,
+                RendererNativeState::Started(_) | RendererNativeState::CloseUnconfirmed => {
+                    RendererSlotState::CloseUnconfirmed
+                }
             };
             slot.changed.send_replace(());
         }
@@ -11482,21 +11537,33 @@ mod renderer_slot_tests {
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("remaining observer")
         };
-        first.begin_native();
         assert!(matches!(
-            first.settle_native(crate::CompilerTransactionOutcome {
-                action: Err::<usize, _>("failed specialization"),
-                close: crate::CompilerTransactionClose::Clean,
-            }),
+            first.settle_native(crate::settle_compiler_transaction_cancellable(
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                || {
+                    first.begin_native().unwrap();
+                    Err::<PreparedRenderer<usize>, _>("failed specialization")
+                },
+            )),
             Err(RendererProductionFailure::Compile("failed specialization"))
         ));
-        let RendererAccess::Produce(second) = waiter.wait().await else {
+        let RendererAccess::Produce(mut second) = waiter.wait().await else {
             panic!("retry producer")
         };
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("second observer")
         };
-        let published = second.publish(42);
+        let published = second
+            .settle_native(crate::settle_compiler_transaction_cancellable(
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                || {
+                    second.begin_native().unwrap();
+                    Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
+                },
+            ))
+            .unwrap_or_else(|_| panic!("matching compiler owner must publish"));
         let RendererAccess::Ready(observed) = waiter.wait().await else {
             panic!("sealed result")
         };
@@ -11520,18 +11587,24 @@ mod renderer_slot_tests {
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("waiter")
         };
-        producer.begin_native();
-        let outcome = crate::CompilerTransactionOutcome {
-            action: Err::<usize, _>("native failure"),
-            close: crate::CompilerTransactionClose::Unconfirmed(
-                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
-                    tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
-                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
-                        disconnect: None,
-                    },
-                ),
-            ),
-        };
+        let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            |_| {},
+            |report| {
+                producer.begin_native().unwrap();
+                report(crate::CompilerTransactionClose::Unconfirmed(
+                    tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                        tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                            disconnect: None,
+                        },
+                    ),
+                ));
+                Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
+            },
+        );
+        assert_eq!(outcome.action().as_ref().unwrap().value, 42);
         assert!(matches!(
             producer.settle_native(outcome),
             Err(RendererProductionFailure::CloseUnconfirmed(_))
@@ -11544,6 +11617,71 @@ mod renderer_slot_tests {
     }
 
     #[tokio::test]
+    async fn renderer_reassociated_preparation_refuses_and_wakes_waiters() {
+        for (primary_failure, begin_fresh) in [(false, false), (true, false), (false, true)] {
+            let slot = RendererSlot::<usize>::new();
+            let RendererAccess::Produce(mut producer) = slot.acquire() else {
+                panic!("producer")
+            };
+            let RendererAccess::Wait(waiter) = slot.acquire() else {
+                panic!("waiter")
+            };
+            let original = crate::settle_compiler_transaction_cancellable_for_workload(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                |report| {
+                    if !begin_fresh {
+                        producer.begin_native().unwrap();
+                    }
+                    report(crate::CompilerTransactionClose::Unconfirmed(
+                        tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                            tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                            tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                                disconnect: None,
+                            },
+                        ),
+                    ));
+                    if primary_failure {
+                        Err("original native failure")
+                    } else {
+                        Ok(PreparedRenderer::new(42).unwrap())
+                    }
+                },
+            );
+            assert!(matches!(
+                original.close(),
+                crate::CompilerTransactionClose::Unconfirmed(_)
+            ));
+            let reassociated = crate::settle_compiler_transaction_cancellable(
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                || {
+                    if begin_fresh {
+                        producer.begin_native().unwrap();
+                    }
+                    original.into_outcome().action
+                },
+            );
+            assert_eq!(
+                *reassociated.close(),
+                crate::CompilerTransactionClose::NotStarted
+            );
+            assert!(matches!(
+                producer.settle_native(reassociated),
+                Err(RendererProductionFailure::Publication(
+                    crate::CompilerTransactionPublicationError::DifferentOwner
+                ))
+            ));
+            assert!(matches!(
+                waiter.wait().await,
+                RendererAccess::CloseUnconfirmed
+            ));
+            assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+        }
+    }
+
+    #[tokio::test]
     async fn renderer_native_panic_cannot_publish_retry() {
         let slot = RendererSlot::<usize>::new();
         let RendererAccess::Produce(mut producer) = slot.acquire() else {
@@ -11552,8 +11690,17 @@ mod renderer_slot_tests {
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("waiter")
         };
-        producer.begin_native();
-        drop(producer);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::settle_compiler_transaction_cancellable(
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                move || {
+                    producer.begin_native().unwrap();
+                    panic!("native producer unwind");
+                },
+            )
+        }));
+        assert!(unwind.is_err());
         assert!(matches!(
             waiter.wait().await,
             RendererAccess::CloseUnconfirmed

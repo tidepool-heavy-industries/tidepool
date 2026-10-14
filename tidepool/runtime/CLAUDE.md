@@ -73,7 +73,11 @@ scratch owner and checked facts across that boundary; an explicit
 `HostAdmissionCancellation` preserves invocation cancellation after END.
 Convenience callers use `compile_cell_program_admitted`, which owns the same
 prepare/close/seal pipeline. Ticket owners use `prepare_cell_program_admitted`
-and pass its independent action/close result to `finish_cell_program_admitted`.
+and pass the opaque owner-issued `CompilerTransactionSettled` product to
+`finish_cell_program_admitted`. Reporting action/close observations cannot
+authorize publication. Prepared cells and renderers retain their exact compiler
+scope origin; another scope cannot publish them even if its own close is clean.
+Nested uncertainty is aggregated by the compiler owner.
 
 Execution intent retains the exact original declaration and value identities.
 A declaration publication captures its relevant public predecessors before
