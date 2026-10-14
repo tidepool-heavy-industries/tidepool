@@ -3977,6 +3977,7 @@ fn native_groups(nodes: &imbl::OrdSet<InventoryNodeKey>) -> BTreeSet<NativeGroup
 }
 /// Select only an owned group whose exact carrier edge names this artifact
 /// binding. The group and carrier have independent issuing scopes.
+#[track_caller]
 fn resolve_group_binding(
     state: &InventoryState,
     owned: &imbl::OrdSet<InventoryNodeKey>,
@@ -4005,7 +4006,34 @@ fn resolve_group_binding(
             original_ordinal: ordinal,
         })
     })?;
-    if candidates.next().is_some() {
+    if let Some(second) = candidates.next() {
+        if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+        {
+            let groups = std::iter::once(group)
+                .chain(std::iter::once(second))
+                .chain(candidates)
+                .collect::<Vec<_>>();
+            let edges = groups
+                .iter()
+                .flat_map(|group| {
+                    state
+                        .graph
+                        .edges(state.indices[&InventoryNodeKey::Group(*group)])
+                        .map(move |edge| {
+                            (
+                                InventoryNodeKey::Group(*group),
+                                state.graph[edge.target()],
+                                edge.weight().clone(),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                reason = "resolve_group_binding_multiple_owned_groups", ?carrier, ordinal, ?groups, ?edges,
+                owner = ?state.payloads.get(&carrier.artifact).map(|entry| &entry.descriptor.owner),
+                resolver_caller = %std::panic::Location::caller(),
+                "exact owned group resolver ambiguity");
+        }
         return Err(admission_failure(
             ArtifactInventoryFailure::BindingAmbiguity {
                 artifact: carrier.artifact,
@@ -4639,7 +4667,12 @@ impl ArtifactView {
                     owned,
                     self.resolve_binding(id, owned)?,
                     original_ordinal,
-                )?);
+                ).map_err(|error| {
+                    self.trace_binding_ambiguity(id, Some(original_ordinal), "native_requirements_group_root_resolution");
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?roots,
+                        "native requirement caller root intent");
+                    error
+                })?);
             }
         }
         let mut seen = BTreeSet::new();
@@ -4777,7 +4810,13 @@ impl ArtifactView {
                 _ => None,
             }).collect::<BTreeSet<_>>();
             for ordinal in ordinals {
-                custody.push(InventoryNodeKey::Group(resolve_group_binding(&state, owned, carrier, ordinal)?));
+                custody.push(InventoryNodeKey::Group(resolve_group_binding(&state, owned, carrier, ordinal).map_err(|error| {
+                    self.trace_binding_ambiguity(carrier.artifact, Some(ordinal), "publication_roots_group_custody_fallback");
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?original, ?carrier,
+                        selected_publication_roots = ?selected, custody_originals = ?retained_ids,
+                        "publication custody fallback root intent");
+                    error
+                })?));
             }
         }
 
