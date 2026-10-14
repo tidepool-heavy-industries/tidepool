@@ -760,8 +760,8 @@ struct SettlementEffects {
 impl RequestStateTable {
     fn admit(&mut self, admission: RequestAdmission) -> RequestId {
         // One process-local sequence issues every request identity. Keep the
-        // distinct initial states in this constructor: command records are
-        // already presented and may be held for a not-yet-registered watch.
+        // distinct initial states in this constructor: command completions start
+        // running and may be held for a not-yet-registered watch.
         // A counter wrap would require 2^64 reservations in one process.
         #[allow(clippy::expect_used)]
         {
