@@ -390,10 +390,10 @@ fn observe(
 ) -> Result<(), TestCaseError> {
     for (inventory, actual) in inventories.iter().enumerate() {
         // Multiple issued bindings may share one immutable payload. The model
-        // independently checks payload custody; scoped graph reclamation has
-        // its own binding-history oracle and zero-node terminal controls.
+        // independently checks selected payload custody; weak semantic interning
+        // can also observe bytes owned by a different inventory's live view.
         prop_assert_eq!(
-            actual.0.lock().unwrap().payloads.len(),
+            actual.0.lock().unwrap().payload_count(),
             model.records[inventory].len()
         );
         if model.records[inventory].is_empty() {

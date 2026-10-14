@@ -28,7 +28,7 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Retaining a complete native carrier must preserve its available exact child
   carriers for unselected bodies. Keep that byte custody separate from source
   roots, compiler input roles and executable group demand. Exact custody seeds
-  retain artifact or group nodes through snapshots, recovery and reclamation;
+  retain artifact or group nodes through snapshots and recovery;
   only issued roots and their closure select executable groups. Later requests can
   select another body without recreating its issuing dependency versions.
   Complete authored group custody can issue private native availability only
@@ -51,6 +51,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   may target an artifact binding from an earlier selection; never manufacture
   an artifact node from a group's scope. Validate typed artifact/group node
   membership, and follow the recorded carrier edge when selecting group demand.
+  Live views traverse only authenticated immutable scope snapshots. Each view
+  owns a persistent payload map filtered to its selected and hidden-custody
+  closure; proof-only ancestors retain no sibling payloads. The inventory may
+  weakly intern equal semantic facts, never acquisition witnesses or payload
+  authority. Issued views merge their scope and payload owners directly; raw
+  decoded recovery facts still require authentication against certified bytes.
   Recovery records scoped bindings, complete binding digest witnesses, exact
   interface/native edges and executable group demand, and validates them against
   the certified payloads before restoring compiler roles. A completed source-compilation instance

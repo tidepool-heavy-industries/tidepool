@@ -580,6 +580,7 @@ impl CertifiedModuleInterface {
         Ok(merged)
     }
 
+    #[cfg(test)]
     pub(crate) fn without_catalog_input_custody(mut self) -> Self {
         self.input_custody = None;
         self

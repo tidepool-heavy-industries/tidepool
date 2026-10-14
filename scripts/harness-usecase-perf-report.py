@@ -571,7 +571,7 @@ def bound_native_demand_observations(host_rows):
     """Inventory totals can overlap between consumers; never sum or difference them."""
     local_names = ("issued_native_groups", "reused_native_groups")
     inventory_names = ("canonical_hits_total", "canonical_comparisons_total",
-                       "canonical_bytes_offered_total", "installed_binding_rows_total",
+                       "canonical_bytes_offered_total", "issued_scope_nodes_total",
                        "graph_visits_total", "entry_handle_copies_total")
     observations = []
     for index, row in enumerate(host_rows):

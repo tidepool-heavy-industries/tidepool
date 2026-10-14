@@ -1168,7 +1168,6 @@ fn acquired_catalog_append_history_retains_only_new_or_changed_custody_handles()
     let inventory = ArtifactInventory::default();
     let mut directory = fixture.output.clone();
     let mut view = inventory.empty_view();
-    let mut expected_handles = 0;
     let mut census = Vec::new();
     for generation in 0..4 {
         if generation > 0 {
@@ -1185,7 +1184,7 @@ fn acquired_catalog_append_history_retains_only_new_or_changed_custody_handles()
             .unwrap(),
         );
         let selected = borrow_catalog(&package).unwrap();
-        for repeat in 0..16 {
+        for _repeat in 0..16 {
             let entries = selected
                 .by_owner
                 .values()
@@ -1194,16 +1193,16 @@ fn acquired_catalog_append_history_retains_only_new_or_changed_custody_handles()
                 })
                 .collect();
             view = inventory.admit(&view, entries).unwrap();
-            if repeat == 0 {
-                expected_handles += selected.by_owner.len();
-            }
-            assert_eq!(view.retained_issuing_payload_handles(), expected_handles,
-                "unchanged offers share ancestor issuing handles; only changed custody adds an override");
+            assert_eq!(
+                view.retained_payload_handles(),
+                selected.by_owner.len(),
+                "one selected payload handle retains merged acquisition custody"
+            );
             assert_eq!(view.entries().len(), 2);
         }
-        census.push(view.retained_issuing_payload_handles());
+        census.push(view.retained_payload_handles());
     }
-    assert_eq!(census, vec![2, 4, 6, 8]);
+    assert_eq!(census, vec![2, 2, 2, 2]);
     eprintln!("acquired custody append census: 64 admissions, 4 actual acquisitions, retained handles {census:?}");
 }
 

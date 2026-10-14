@@ -799,7 +799,7 @@ class ResidentPerformanceReport(unittest.TestCase):
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
             row["public_schema"] = "paired-public-v5"
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
-            row.update(checksum_encode_bytes=20, recovery_validation_hash_bytes=30, recovery_materialization_hash_bytes=40, manifest_write_bytes=len(content), inventory_counter_scope="shared-artifact-inventory-owner", artifact_inventory={field:0 for field in ("structural_whole_graph_copies", "reclamation_runs", "reclamation_candidate_nodes", "reclaimed_nodes", "reclamation_elapsed_ns")})
+            row.update(checksum_encode_bytes=20, recovery_validation_hash_bytes=30, recovery_materialization_hash_bytes=40, manifest_write_bytes=len(content), inventory_counter_scope="shared-artifact-inventory-owner", artifact_inventory={field:0 for field in ("nodes", "issued_scope_nodes", "graph_visits", "canonical_bytes_offered")})
             self.assertEqual(REPORT.analyze_durable([row])["status"], "measured")
             document.update(version=6, public_schema="paired-public-v6")
             content = json.dumps(document).encode()
@@ -841,8 +841,7 @@ class ResidentPerformanceReport(unittest.TestCase):
                     "recovery_materialization_hash_bytes": 40, "manifest_write_bytes": len(content),
                     "inventory_counter_scope": "shared-artifact-inventory-owner",
                     "artifact_inventory": {field: 0 for field in (
-                        "structural_whole_graph_copies", "reclamation_runs",
-                        "reclamation_candidate_nodes", "reclaimed_nodes", "reclamation_elapsed_ns")},
+                        "nodes", "issued_scope_nodes", "graph_visits", "canonical_bytes_offered")},
                 })
         return rows
 
@@ -895,7 +894,7 @@ class ResidentPerformanceReport(unittest.TestCase):
                 elif mutation == "byte_counter":
                     row["recovery_validation_hash_bytes"] = None
                 elif mutation == "inventory_counter":
-                    row["artifact_inventory"].pop("reclamation_runs")
+                    row["artifact_inventory"].pop("issued_scope_nodes")
                 path.write_text(json.dumps(document))
                 row["manifest_bytes"] = path.stat().st_size
                 self.assertEqual(REPORT.analyze_durable(rows)["status"], "invalid")

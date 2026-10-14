@@ -223,7 +223,7 @@ pub(super) fn prepare_install(
         if state
             .selection_plans
             .get(scope)
-            .is_some_and(|existing| existing != proof)
+            .is_some_and(|existing| existing.proof() != proof)
         {
             return Err(failure("scope identity has differing immutable proofs"));
         }
@@ -242,7 +242,14 @@ pub(super) fn install(
     additions: BTreeMap<ArtifactSelectionId, Arc<ScopeProofV3>>,
 ) {
     for (scope, proof) in additions {
-        state.selection_plans.entry(scope).or_insert(proof);
+        if !state.selection_plans.contains_key(&scope) {
+            state
+                .issued_scope_nodes
+                .fetch_add(proof.nodes.len() as u64, Ordering::Relaxed);
+            state
+                .selection_plans
+                .insert(scope, ImmutableScopeProofRef::from_issued(proof));
+        }
     }
 }
 

@@ -129,7 +129,7 @@ fn proof_only_ancestors_survive_retirement_without_payload_authority() {
     let graph = selected.capture_graph_selection();
     assert_eq!(graph.selections.len(), 2);
     let state = inventory.0.lock().unwrap();
-    assert!(!state.payloads.contains_key(&ancestor_id));
+    assert!(state.interned(&ancestor_id).is_none());
     assert_eq!(state.selection_plans.len(), 2);
     drop(state);
     let reopened_inventory = ArtifactInventory::default();

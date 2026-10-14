@@ -686,7 +686,7 @@ def analyze_durable(rows):
                     if type(row.get(counter)) is not int or row[counter] < 0:
                         problems.append(f"durable {row.get('cell')} has unavailable {counter}")
                 inventory = row.get("artifact_inventory")
-                if row.get("inventory_counter_scope") != "shared-artifact-inventory-owner" or not isinstance(inventory, dict) or any(type(inventory.get(counter)) is not int or inventory[counter] < 0 for counter in ("structural_whole_graph_copies", "reclamation_runs", "reclamation_candidate_nodes", "reclaimed_nodes", "reclamation_elapsed_ns")):
+                if row.get("inventory_counter_scope") != "shared-artifact-inventory-owner" or not isinstance(inventory, dict) or any(type(inventory.get(counter)) is not int or inventory[counter] < 0 for counter in ("nodes", "issued_scope_nodes", "graph_visits", "canonical_bytes_offered")):
                     problems.append(f"durable {row.get('cell')} has unavailable owning inventory counters")
             if not matching_format:
                 problems.append("durable sample is not a matching retained artifact graph format")
@@ -736,7 +736,7 @@ def analyze_durable(rows):
         "current_public_schema": CURRENT_RECOVERY_SCHEMA,
         "observed_public_schemas": sorted(observed_schemas),
         "format_note": "v4/v5 rows describe historical timing only; current recovery and durable acceptance require v6",
-        "byte_counter_note": "v5/v6 encode/validation-hash/materialization-hash/write counters are per publication ticket; manifest_bytes is retained file size. Historical v4 counters remain unknown. Inventory counters are shared-owner gauges; structural_whole_graph_copies is an estimate, not a measured copy count.",
+        "byte_counter_note": "v5/v6 encode/validation-hash/materialization-hash/write counters are per publication ticket; manifest_bytes is retained file size. Historical v4 counters remain unknown. Inventory counters describe live scoped nodes, cumulative issued scope facts, traversal visits and bytes offered for canonical comparison.",
     }
 
 

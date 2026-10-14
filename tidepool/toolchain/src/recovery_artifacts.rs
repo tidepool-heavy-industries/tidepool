@@ -282,16 +282,12 @@ impl CertifiedRecoveryProduct {
         Ok(merged)
     }
 
+    #[cfg(test)]
     pub(crate) fn without_catalog_input_custody(mut self) -> Self {
         self.module_interface = self
             .module_interface
             .map(|interface| interface.without_catalog_input_custody());
         self
-    }
-
-    pub(crate) fn without_issuing_authority(mut self) -> Self {
-        self.source_sha256 = None;
-        self.without_catalog_input_custody()
     }
 
     pub(crate) fn module_interface(

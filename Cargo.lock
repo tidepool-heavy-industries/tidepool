@@ -4194,7 +4194,6 @@ dependencies = [
  "imbl",
  "libc",
  "multihash-codetable",
- "petgraph",
  "proptest",
  "rustix",
  "schemars 1.2.2",

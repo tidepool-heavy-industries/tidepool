@@ -77,7 +77,7 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "artifact_inventory::view_read_properties::warmed_read_getters_do_not_visit_graph_nodes",
     "artifact_inventory::view_read_properties::first_read_and_inventory_extension_settle_without_lock_recursion",
     "artifact_inventory::tests::retained_views_reclaim_after_last_reader_without_copying_payloads",
-    "artifact_inventory::tests::reclamation_metrics_follow_last_reader_and_selected_closure",
+    "artifact_inventory::tests::payload_ownership_follows_last_reader_without_drop_traversal",
     "artifact_inventory::tests::empty_admission_and_parent_only_release_do_not_scan_history",
     "artifact_inventory::tests::reused_graph_targets_must_match_the_selected_sealed_dependencies",
     "artifact_inventory::tests::independent_views_retain_existing_nodes_without_sibling_visibility",
@@ -85,7 +85,8 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "artifact_inventory::tests::reclamation_preserves_incoming_cycles_and_does_not_visit_unrelated_history",
     "artifact_inventory::view_read_properties::zero_mask_empty_selection_boundary_releases_valid_fixture_views",
     "artifact_inventory::tests::metadata_snapshot_preserves_canonical_typed_edges_in_one_closure",
-    "artifact_inventory::view_read_properties::linear_view_history_reports_retained_read_projection_cost",
+    "artifact_inventory::view_read_properties::persistent_payload_history_releases_ancestors_and_shares_immutable_entries",
+    "artifact_inventory::view_read_properties::persistent_captures_share_payload_and_scope_owners",
 ]
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:

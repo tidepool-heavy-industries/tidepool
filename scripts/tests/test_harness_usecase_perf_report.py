@@ -1232,7 +1232,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             "message": "bound native demand inventory observation",
             "issued_native_groups": issued, "reused_native_groups": reused,
             "canonical_hits_total": hits, "canonical_comparisons_total": 2,
-            "canonical_bytes_offered_total": 1024, "installed_binding_rows_total": installed,
+            "canonical_bytes_offered_total": 1024, "issued_scope_nodes_total": installed,
             "graph_visits_total": installed, "entry_handle_copies_total": 5},
             "span": {"name": "cell", "execution": execution}}
             for execution, issued, reused, hits, installed in
@@ -1242,7 +1242,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual([row["local_group_work"] for row in observed["observations"]],
                          [{"issued_native_groups": 3, "reused_native_groups": 0},
                           {"issued_native_groups": 0, "reused_native_groups": 3}])
-        self.assertEqual([row["inventory_totals"]["installed_binding_rows_total"]
+        self.assertEqual([row["inventory_totals"]["issued_scope_nodes_total"]
                           for row in observed["observations"]], [30, 34])
         self.assertEqual([row["execution"] for row in observed["observations"]], ["exec-a", "exec-b"])
         self.assertNotIn("counts", observed)

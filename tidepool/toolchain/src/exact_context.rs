@@ -559,7 +559,7 @@ impl ExactSelectionSnapshot {
         }
     }
 
-    fn retained_nodes(
+    pub(crate) fn retained_nodes(
         &self,
     ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
         self.nodes_from_seeds(
@@ -570,7 +570,7 @@ impl ExactSelectionSnapshot {
         )
     }
 
-    fn nodes_from_seeds(
+    pub(crate) fn nodes_from_seeds(
         &self,
         seeds: impl IntoIterator<Item = ArtifactBindingNode>,
     ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
