@@ -1856,6 +1856,7 @@ async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiri
         false,
         Some(work.reservation.clone()),
     );
+    crate::request::test_support::admit_destination(requests, owner, request);
     requests.mark_queued(owner, target, request).unwrap();
     requests.present(target, request).unwrap();
 
@@ -1939,6 +1940,7 @@ async fn invocation_cleanup_observes_request_closure_after_owned_workers_retire(
             false,
             Some(work.reservation.clone()),
         );
+        crate::request::test_support::admit_destination(requests, owner, request);
         requests.mark_queued(owner, target, request).unwrap();
         requests.present(target, request).unwrap();
         pending.push(request);
@@ -2325,6 +2327,7 @@ async fn invocation_cleanup_rolls_back_unsubmitted_and_detached_original_reserva
         requests.observe_response(owner, sibling_request),
         Ok(ResponseObservation::Pending(_))
     ));
+    crate::request::test_support::admit_destination(requests, owner, sibling_request);
     requests
         .mark_queued(owner, target, sibling_request)
         .expect("sibling reservation can still be published");
