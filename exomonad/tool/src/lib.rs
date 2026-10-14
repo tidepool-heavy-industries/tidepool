@@ -659,6 +659,21 @@ mod tests {
             let expects_text = raw_input || native;
             proptest::prop_assert_eq!(plan.admit_arguments(text_input).is_ok(), expects_text);
             proptest::prop_assert_eq!(plan.admit_arguments(object_input).is_ok(), !expects_text);
+            if expects_text {
+                let admitted = plan.admit_arguments(ToolArguments::Raw(text.clone())).unwrap();
+                match (native, admitted) {
+                    (true, EndpointArguments::Haskell(source)) => proptest::prop_assert_eq!(source, text),
+                    (false, EndpointArguments::Resident(serde_json::Value::String(data))) => proptest::prop_assert_eq!(data, text),
+                    _ => proptest::prop_assert!(false, "raw data and notebook source must select different interpreters"),
+                }
+            } else {
+                let expected = serde_json::json!({"value": text});
+                let admitted = plan.admit_arguments(ToolArguments::Structured(expected.clone())).unwrap();
+                match admitted {
+                    EndpointArguments::Resident(arguments) => proptest::prop_assert_eq!(arguments, expected),
+                    _ => proptest::prop_assert!(false, "structured calls must select the installed handler"),
+                }
+            }
             proptest::prop_assert!(plan.admit_arguments(ToolArguments::Structured(serde_json::Value::Null)).is_err());
             proptest::prop_assert_eq!(plan.scheduling() == ToolScheduling::BeforeNextInference, sync);
             proptest::prop_assert_eq!(matches!(plan.execution(), EndpointExecution::HaskellAsync | EndpointExecution::HaskellSync), native);
