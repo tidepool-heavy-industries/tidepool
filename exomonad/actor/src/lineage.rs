@@ -28,9 +28,24 @@ struct ActorAdmissionsState {
 
 struct ReleasedCheckpoint {
     session: SessionId,
-    scope: Option<ScopeId>,
-    cleanup_pending: bool,
+    retirement: CheckpointRetirement,
     retained_scope: Option<std::sync::Weak<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+}
+
+#[derive(Clone, Copy)]
+enum CheckpointRetirement {
+    NotNeeded,
+    Pending(ScopeId),
+    Confirmed(ScopeId),
+}
+
+impl CheckpointRetirement {
+    fn pending_scope(self) -> Option<ScopeId> {
+        match self {
+            Self::Pending(scope) => Some(scope),
+            Self::NotNeeded | Self::Confirmed(_) => None,
+        }
+    }
 }
 
 /// One atomic owner for checkpoint leases and independent spawn reservations.
@@ -315,7 +330,7 @@ impl ActorAdmissionRegistry {
         match *lease.phase.borrow() {
             CheckpointPhase::Failed => return Err(CheckpointRefusal::CaptureFailed),
             CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => {
-                return Err(CheckpointRefusal::ReleasedCheckpoint)
+                return Err(CheckpointRefusal::ReleasedCheckpoint);
             }
             CheckpointPhase::Pending | CheckpointPhase::Published => {}
         }
@@ -388,7 +403,7 @@ impl ActorAdmissionRegistry {
         let mut state = self.state.lock();
         if let Some(released) = state.released_checkpoints.get(token) {
             return if released.session == session {
-                Ok(released.cleanup_pending.then_some(released.scope).flatten())
+                Ok(released.retirement.pending_scope())
             } else {
                 Err(CheckpointRefusal::WrongSession)
             };
@@ -424,8 +439,10 @@ impl ActorAdmissionRegistry {
             token.to_owned(),
             ReleasedCheckpoint {
                 session,
-                scope,
-                cleanup_pending: scope.is_some(),
+                retirement: scope.map_or(
+                    CheckpointRetirement::NotNeeded,
+                    CheckpointRetirement::Pending,
+                ),
                 retained_scope,
             },
         );
@@ -446,11 +463,15 @@ impl ActorAdmissionRegistry {
         if released.session != session {
             return Err(CheckpointRefusal::WrongSession);
         }
-        if released.scope != Some(scope) {
-            return Err(CheckpointRefusal::CaptureFailed);
+        match released.retirement {
+            CheckpointRetirement::Pending(expected) | CheckpointRetirement::Confirmed(expected)
+                if expected == scope =>
+            {
+                released.retirement = CheckpointRetirement::Confirmed(scope);
+                Ok(())
+            }
+            _ => Err(CheckpointRefusal::CaptureFailed),
         }
-        released.cleanup_pending = false;
-        Ok(())
     }
 
     pub fn pending_release_scopes(&self, session: SessionId) -> Vec<(String, ScopeId)> {
@@ -458,10 +479,12 @@ impl ActorAdmissionRegistry {
             .lock()
             .released_checkpoints
             .iter()
+            .filter(|(_, released)| released.session == session)
             .filter_map(|(token, released)| {
-                (released.session == session && released.cleanup_pending)
-                    .then(|| released.scope.map(|scope| (token.clone(), scope)))
-                    .flatten()
+                released
+                    .retirement
+                    .pending_scope()
+                    .map(|scope| (token.clone(), scope))
             })
             .collect()
     }
@@ -581,7 +604,7 @@ impl ActorAdmissionRegistry {
             lease.session == session && *lease.phase.borrow() == CheckpointPhase::Published
         }) || state.released_checkpoints.values().any(|released| {
             released.session == session
-                && (released.cleanup_pending
+                && (released.retirement.pending_scope().is_some()
                     || released
                         .retained_scope
                         .as_ref()
@@ -1005,5 +1028,260 @@ mod tests {
         assert!(registry.pending_release_scopes(SessionId(7)).is_empty());
         assert!(!registry.retains_session(SessionId(7)));
         assert_eq!(registry.release_checkpoint(&token, SessionId(7)), Ok(None));
+    }
+
+    #[derive(Clone, Debug)]
+    enum RetirementOperation {
+        Release {
+            key: usize,
+            wrong_session: bool,
+        },
+        Confirm {
+            key: usize,
+            wrong_session: bool,
+            wrong_scope: bool,
+        },
+    }
+
+    struct RetirementFacts {
+        token: String,
+        session: SessionId,
+        scope: ScopeId,
+        published: bool,
+        failed: bool,
+        released: bool,
+        confirmed: bool,
+    }
+
+    fn retirement_history(
+        operations: &[RetirementOperation],
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        use proptest::prelude::*;
+        let registry = ActorAdmissionRegistry::new();
+        let issuer = ActorRef::first(ActorId(1));
+        let boundary =
+            ContextCheckpointBoundary::external("thread".into(), "request".into(), "call".into());
+        let mut facts = Vec::new();
+        for key in 0..6 {
+            let session = SessionId(7 + key / 3);
+            let scope = ScopeId(10 + key);
+            let token = registry.capture_checkpoint(
+                format!("capture-{key}"),
+                issuer,
+                crate::ActorCapabilities::default(),
+                None,
+                None,
+                crate::CheckpointSourceLayer::default(),
+                session,
+                scope,
+                boundary.clone(),
+            );
+            prop_assert!(facts
+                .iter()
+                .all(|fact: &RetirementFacts| fact.token != token));
+            let published = key % 3 == 1;
+            let failed = key % 3 == 2;
+            if published || failed {
+                prop_assert_eq!(
+                    registry.settle_checkpoint(&token, session, published),
+                    Ok(failed.then_some(scope))
+                );
+            }
+            facts.push(RetirementFacts {
+                token,
+                session,
+                scope,
+                published,
+                failed,
+                released: false,
+                confirmed: false,
+            });
+        }
+        for operation in operations {
+            let (key, wrong_session) = match operation {
+                RetirementOperation::Release { key, wrong_session }
+                | RetirementOperation::Confirm {
+                    key, wrong_session, ..
+                } => (*key, *wrong_session),
+            };
+            let fact = &mut facts[key];
+            let session = if wrong_session {
+                SessionId(99)
+            } else {
+                fact.session
+            };
+            match operation {
+                RetirementOperation::Release { .. } => {
+                    let expected = if wrong_session {
+                        Err(CheckpointRefusal::WrongSession)
+                    } else {
+                        fact.released = true;
+                        Ok((!fact.confirmed).then_some(fact.scope))
+                    };
+                    prop_assert_eq!(
+                        registry.release_checkpoint(&fact.token, session),
+                        expected,
+                        "operation={:?}",
+                        operation
+                    );
+                }
+                RetirementOperation::Confirm { wrong_scope, .. } => {
+                    let scope = if *wrong_scope {
+                        ScopeId(99)
+                    } else {
+                        fact.scope
+                    };
+                    let expected = if !fact.released {
+                        Err(CheckpointRefusal::UnavailableCheckpoint)
+                    } else if wrong_session {
+                        Err(CheckpointRefusal::WrongSession)
+                    } else if *wrong_scope {
+                        Err(CheckpointRefusal::CaptureFailed)
+                    } else {
+                        fact.confirmed = true;
+                        Ok(())
+                    };
+                    prop_assert_eq!(
+                        registry.confirm_checkpoint_release(&fact.token, session, scope),
+                        expected,
+                        "operation={:?}",
+                        operation
+                    );
+                }
+            }
+            for session in [SessionId(7), SessionId(8), SessionId(99)] {
+                let mut expected = facts
+                    .iter()
+                    .filter(|fact| fact.session == session && fact.released && !fact.confirmed)
+                    .map(|fact| (fact.token.clone(), fact.scope))
+                    .collect::<Vec<_>>();
+                let mut actual = registry.pending_release_scopes(session);
+                expected.sort();
+                actual.sort();
+                prop_assert_eq!(actual, expected, "operation={:?}", operation);
+                let retained = facts.iter().any(|fact| {
+                    fact.session == session
+                        && (if fact.released {
+                            !fact.confirmed
+                        } else {
+                            fact.published
+                        })
+                });
+                prop_assert_eq!(
+                    registry.retains_session(session),
+                    retained,
+                    "operation={:?}",
+                    operation
+                );
+            }
+            for fact in &facts {
+                let expected = if fact.released {
+                    Some(CheckpointRefusal::ReleasedCheckpoint)
+                } else if fact.failed {
+                    Some(CheckpointRefusal::CaptureFailed)
+                } else {
+                    None
+                };
+                prop_assert_eq!(
+                    registry.checkpoint(&fact.token, fact.session).err(),
+                    expected,
+                    "operation={:?}",
+                    operation
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retirement_history_covers_refusal_retry_and_duplicate_confirmation() {
+        let mut operations = Vec::new();
+        for key in 0..6 {
+            operations.extend([
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: false,
+                    wrong_scope: false,
+                },
+                RetirementOperation::Release {
+                    key,
+                    wrong_session: true,
+                },
+                RetirementOperation::Release {
+                    key,
+                    wrong_session: false,
+                },
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: true,
+                    wrong_scope: false,
+                },
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: false,
+                    wrong_scope: true,
+                },
+                RetirementOperation::Release {
+                    key,
+                    wrong_session: false,
+                },
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: false,
+                    wrong_scope: false,
+                },
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: false,
+                    wrong_scope: false,
+                },
+                RetirementOperation::Confirm {
+                    key,
+                    wrong_session: false,
+                    wrong_scope: true,
+                },
+                RetirementOperation::Release {
+                    key,
+                    wrong_session: false,
+                },
+            ]);
+        }
+        retirement_history(&operations).unwrap();
+    }
+
+    fn retirement_operation() -> impl proptest::strategy::Strategy<Value = RetirementOperation> {
+        use proptest::prelude::*;
+        prop_oneof![
+            (0usize..6, any::<bool>()).prop_map(|(key, wrong_session)| {
+                RetirementOperation::Release { key, wrong_session }
+            }),
+            (0usize..6, any::<bool>(), any::<bool>()).prop_map(
+                |(key, wrong_session, wrong_scope)| RetirementOperation::Confirm {
+                    key,
+                    wrong_session,
+                    wrong_scope
+                }
+            ),
+        ]
+    }
+
+    fn retirement_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(retirement_property_config())]
+        #[test]
+        fn checkpoint_retirement_histories_preserve_exact_cleanup_obligations(
+            operations in proptest::collection::vec(retirement_operation(), 1..96),
+        ) {
+            retirement_history(&operations)?;
+        }
     }
 }
