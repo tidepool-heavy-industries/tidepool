@@ -55,21 +55,27 @@ async fn completion_case(
     let awaited = awaiting.await.unwrap();
     assert_eq!(awaited["status"], "committed", "{awaited}");
 
-    let projection = committed(
-        campaign,
-        &format!("display (tshow ({}))", example_stage("compact-query")),
-    )
-    .await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let projection_source = format!("display (tshow ({}))", example_stage("compact-query"));
+    let projection = campaign
+        .drive_actor_output(
+            &store,
+            super::tests::dispatch_haskell_script(policy.as_ref(), &projection_source),
+        )
+        .await;
     let projection_text = super::test_campaign::committed_display_text(&projection);
     assert!(
         projection_text.contains("CompletionProjection"),
         "{projection}"
     );
-    let evidence = committed(
-        campaign,
-        &format!("display (tshow ({}))", example_stage("full-evidence")),
-    )
-    .await;
+    let evidence_source = format!("display (tshow ({}))", example_stage("full-evidence"));
+    let evidence = campaign
+        .drive_actor_output(
+            &store,
+            super::tests::dispatch_haskell_script(policy.as_ref(), &evidence_source),
+        )
+        .await;
     let evidence_text = super::test_campaign::committed_display_text(&evidence);
     assert!(evidence_text.contains("CompletionEvidence"), "{evidence}");
     assert_eq!(

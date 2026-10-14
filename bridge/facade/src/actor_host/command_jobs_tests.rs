@@ -2029,11 +2029,7 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                 );
                 let retained =
                     committed(campaign, include_str!("command_presentation_values.hs")).await;
-                assert_eq!(
-                    super::test_campaign::committed_display_text(&retained),
-                    "True",
-                    "bound results and the explicit output page remain readable"
-                );
+                require_committed(&retained);
                 assert_eq!(backend.specs.lock().len(), 3);
             })
         })
