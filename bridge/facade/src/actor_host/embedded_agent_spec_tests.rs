@@ -1032,14 +1032,14 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
 
                 write_spec(&workspace, "new-handler", "new slot");
                 let before_reload = tidepool_extract_cmd::extract_spawn_count();
-                let receipt = dispatch_structured_tool(
+                let receipt = dispatch_haskell_script(
                     old_request.as_ref(),
-                    "reload_agent_spec",
-                    serde_json::json!({}),
+                    "Right outcome <- reloadSource []\n\
+                     if (case outcome of { ReloadPublished _ _ _ -> True; _ -> False }) \
+                     then pure () else error \"same-surface source reload was refused\"",
                 )
-                .await
-                .to_string();
-                assert!(receipt.contains("swapped"), "{receipt}");
+                .await;
+                assert_eq!(receipt["status"], "committed", "{receipt}");
                 let new_request = policy
                     .snapshot_for_request()
                     .expect("reloaded installed spec");
