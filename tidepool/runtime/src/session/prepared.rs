@@ -9727,27 +9727,16 @@ pub(super) mod tests {
     fn producer_program() -> PreparedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
-        wire.constructors.push(ConstructorDecl {
-            identity: testing::constructor_identity(
-                testing::identity("S4Session", "Field"),
-                testing::identity("S4Session", "Field"),
-            ),
-            host_id: tidepool_repr::DataConId(980),
-            result_rep: RuntimeRep::LiftedRef,
-            tag: 1,
-            family_size: 1,
-            field_reps: vec![RuntimeRep::Int(64)],
-            strict_fields: vec![true],
-            layout: CheckedLayout {
-                fields: vec![FieldLayout {
-                    rep: RuntimeRep::Int(64),
-                    offset: 0,
-                }],
-                alignment: 8,
-                payload_size: 8,
-                root_mask: vec![false],
-            },
-        });
+        wire.constructors.push(mount_constructor(
+            "S4Session",
+            "Field",
+            "S4Session",
+            "Field",
+            980,
+            1,
+            1,
+            vec![RuntimeRep::Int(64)],
+        ));
         wire.expressions.nodes[0] = ExprFrame::Construct {
             constructor: ConstructorId(0),
             fields: vec![Atom::Scalar(ScalarLiteral::Int {
