@@ -893,10 +893,11 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
 
     let status = dispatch_haskell_script(observer, "Cmd.status job").await;
     assert_eq!(status["status"], "committed", "{status}");
-    let output = dispatch_haskell_script(observer, "Cmd.pageText <$> Cmd.output job").await;
-    assert_eq!(output["status"], "committed", "{output}");
-    assert!(output.to_string().contains("first-line"), "{output}");
-    assert!(output.to_string().contains("second-line"), "{output}");
+    let output =
+        dispatch_haskell_script(observer, "display =<< (Cmd.pageText <$> Cmd.output job)").await;
+    let output_text = super::test_campaign::committed_display_text(&output);
+    assert!(output_text.contains("first-line"), "{output}");
+    assert!(output_text.contains("second-line"), "{output}");
 
     for (operation, refusal) in [
         ("Cmd.sendInput job \"foreign\"", "not authorized"),
