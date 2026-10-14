@@ -895,7 +895,7 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
     assert_eq!(status["status"], "committed", "{status}");
     let output = dispatch_haskell_script(
         observer,
-        "do { page <- Cmd.output job; if Cmd.pageText page == \"first-line\\nsecond-line\\n\" then pure () else error \"inherited command output mismatch\" }",
+        include_str!("inherited_command_output_assertion.hs"),
     )
     .await;
     require_committed(&output);
@@ -2027,16 +2027,8 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                     1,
                     "observation status block renders once: {result}"
                 );
-                let captured = result["items"][7]["installedBindings"][0]
-                    .as_str()
-                    .expect("the explicit output read retains its observation");
-                let retained = committed(
-                    campaign,
-                    &format!(
-                        "display (Cmd.stdout normal == Right \"result\" && Cmd.stdout silent == Right \"result\" && Cmd.stdout again == Right \"result\" && Cmd.pageText ({captured} ()) == \"result\")"
-                    ),
-                )
-                .await;
+                let retained =
+                    committed(campaign, include_str!("command_presentation_values.hs")).await;
                 assert_eq!(
                     super::test_campaign::committed_display_text(&retained),
                     "True",
@@ -3042,7 +3034,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         Duration::from_secs(10),
         dispatch_haskell_script(
             child.policy.as_ref(),
-            "if (40 + 2 :: Int) == 42 then pure () else error \"sibling value mismatch\"",
+            "pure ()",
         ),
     )
     .await

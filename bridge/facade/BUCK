@@ -992,6 +992,7 @@ rust_filegroup(
         "src/actor_host/cell_model/tests.rs": "bridge/facade/src/actor_host/cell_model/tests.rs",
         "src/actor_host/coherent_reload_acceptance_tests.rs": "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs",
         "src/actor_host/command_jobs_tests.rs": "bridge/facade/src/actor_host/command_jobs_tests.rs",
+        "src/actor_host/command_presentation_values.hs": "bridge/facade/src/actor_host/command_presentation_values.hs",
         "src/actor_host/command_test_support.rs": "bridge/facade/src/actor_host/command_test_support.rs",
         "src/actor_host/commands.rs": "bridge/facade/src/actor_host/commands.rs",
         "src/actor_host/context_transaction_acceptance_tests.rs": "bridge/facade/src/actor_host/context_transaction_acceptance_tests.rs",
@@ -1119,6 +1120,7 @@ rust_filegroup(
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/hosted_tools_tests.rs": "bridge/facade/src/actor_host/hosted_tools_tests.rs",
+        "src/actor_host/inherited_command_output_assertion.hs": "bridge/facade/src/actor_host/inherited_command_output_assertion.hs",
         "src/actor_host/inherited_response_released.hs": "bridge/facade/src/actor_host/inherited_response_released.hs",
         "src/actor_host/invocation_lifetime_tests.rs": "bridge/facade/src/actor_host/invocation_lifetime_tests.rs",
         "src/actor_host/jev_tests.rs": "bridge/facade/src/actor_host/jev_tests.rs",
@@ -2782,6 +2784,7 @@ filegroup(
         "bridge/facade/src/actor_host/cell_model/tests.rs": "src/actor_host/cell_model/tests.rs",
         "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs": "src/actor_host/coherent_reload_acceptance_tests.rs",
         "bridge/facade/src/actor_host/command_jobs_tests.rs": "src/actor_host/command_jobs_tests.rs",
+        "bridge/facade/src/actor_host/command_presentation_values.hs": "src/actor_host/command_presentation_values.hs",
         "bridge/facade/src/actor_host/command_test_support.rs": "src/actor_host/command_test_support.rs",
         "bridge/facade/src/actor_host/commands.rs": "src/actor_host/commands.rs",
         "bridge/facade/src/actor_host/context_transaction_acceptance_tests.rs": "src/actor_host/context_transaction_acceptance_tests.rs",
@@ -2909,6 +2912,7 @@ filegroup(
         "bridge/facade/src/actor_host/host_incarnation.rs": "src/actor_host/host_incarnation.rs",
         "bridge/facade/src/actor_host/hosted_test_context.rs": "src/actor_host/hosted_test_context.rs",
         "bridge/facade/src/actor_host/hosted_tools_tests.rs": "src/actor_host/hosted_tools_tests.rs",
+        "bridge/facade/src/actor_host/inherited_command_output_assertion.hs": "src/actor_host/inherited_command_output_assertion.hs",
         "bridge/facade/src/actor_host/inherited_response_released.hs": "src/actor_host/inherited_response_released.hs",
         "bridge/facade/src/actor_host/invocation_lifetime_tests.rs": "src/actor_host/invocation_lifetime_tests.rs",
         "bridge/facade/src/actor_host/jev_tests.rs": "src/actor_host/jev_tests.rs",
@@ -3144,6 +3148,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f636f6d6d616e645f70726573656e746174696f6e2e6873",
     src = "src/actor_host/command_presentation.hs",
     out = "command_presentation.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f636f6d6d616e645f70726573656e746174696f6e5f76616c7565732e6873",
+    src = "src/actor_host/command_presentation_values.hs",
+    out = "command_presentation_values.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -4334,6 +4345,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f6f627365727665722e6873",
     src = "src/actor_host/inherited_command_observer.hs",
     out = "inherited_command_observer.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f6f75747075745f617373657274696f6e2e6873",
+    src = "src/actor_host/inherited_command_output_assertion.hs",
+    out = "inherited_command_output_assertion.hs",
     visibility = ["PUBLIC"],
 )
 
