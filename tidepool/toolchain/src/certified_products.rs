@@ -5881,6 +5881,7 @@ fn validate_owned_originals_with_validation(
 /// Admit executable groups independently of immutable original byte custody.
 /// The selection comes from the inventory's authenticated demand closure; full
 /// original witnesses remain complete and can supply later group admissions.
+#[track_caller]
 pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     available: &BTreeMap<
         crate::artifact_inventory::ArtifactId,
@@ -5899,6 +5900,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     )
 }
 
+#[track_caller]
 fn validate_selected_originals_with_validation(
     available: &BTreeMap<
         crate::artifact_inventory::ArtifactId,
@@ -6005,6 +6007,32 @@ fn validate_selected_originals_with_validation(
                     if originals.get(&required).is_none_or(|(original, _)| {
                         original.owner != *owner || !original.group.binders().contains(binder)
                     }) {
+                        if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+                        {
+                            let selected_group = originals.get(&required).map(|(original, _)| {
+                                (&original.owner, original.group.binders().contains(binder))
+                            });
+                            let available_group = available
+                                .get(artifact)
+                                .and_then(|product| {
+                                    product
+                                        .original_native()
+                                        .and_then(|witness| witness.group(*original_ordinal))
+                                })
+                                .map(|original| {
+                                    (&original.owner, original.group.binders().contains(binder))
+                                });
+                            let selected_ordinals = originals
+                                .keys()
+                                .filter(|key| key.artifact == *artifact)
+                                .map(|key| key.original_ordinal)
+                                .collect::<Vec<_>>();
+                            tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                                caller = %std::panic::Location::caller(),
+                                consumer = ?key, consumer_owner = ?group.owner,
+                                ?required, ?selected_group, ?available_group, ?selected_ordinals,
+                                "selected original dependency membership refused");
+                        }
                         return Err(source_closure_mismatch(
                             "selected_original_group",
                             Some(owner),
