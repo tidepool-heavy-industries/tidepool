@@ -6162,6 +6162,13 @@ where
                     }
                 };
                 move |session, context, _, settlement| {
+                    let startup = prepared
+                        .as_ref()
+                        .map(|prepared| {
+                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
+                            session.prepare_startup_entry(prepared.entry.compiled().code())
+                        })
+                        .transpose()?;
                     let pending_originals = if matches!(
                         purpose,
                         ToolInstallationPurpose::InitialTools
@@ -6175,17 +6182,12 @@ where
                     } else {
                         None
                     };
-                    let (outcome, warnings) = match (prepared, installer) {
-                        (Some(prepared), None) => {
-                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
-                            let entry =
-                                session.prepare_startup_entry(prepared.entry.compiled().code())?;
-                            (
-                                session.run_startup_entry(entry, settlement),
-                                prepared.entry.compiled().warnings.warnings.clone(),
-                            )
-                        }
-                        (None, Some(installer)) => (
+                    let (outcome, warnings) = match (prepared, startup, installer) {
+                        (Some(prepared), Some(entry), None) => (
+                            session.run_startup_entry(entry, settlement),
+                            prepared.entry.compiled().warnings.warnings.clone(),
+                        ),
+                        (None, None, Some(installer)) => (
                             session.run_rooted_entry_borrowed(
                                 "agent_spec_installer",
                                 &installer,
