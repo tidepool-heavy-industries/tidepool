@@ -88,7 +88,7 @@ enum Value {
     Owners(Result<Vec<RecoveryPublicOwnerState>, StoreError>),
     HasOwners(Result<bool, StoreError>),
     Snapshot(Result<Option<RecoverySnapshotIdentity>, StoreError>),
-    Get(Result<Option<Vec<u8>>, StoreError>),
+    Get(anyhow::Result<Option<Vec<u8>>>),
     Create(StoreDisposition<RecoveryDomainState>),
     Ceiling(StoreDisposition<CeilingCommit>),
     Publish(StoreDisposition<RecoveryDomainState>),
@@ -143,11 +143,7 @@ impl Operation {
             Self::Snapshot { domain, owner } => {
                 Value::Snapshot(storage.read_snapshot_identity(domain, owner.as_ref()))
             }
-            Self::Get { cid } => Value::Get(
-                storage
-                    .get(&cid)
-                    .map_err(|error| store_error(storage.path(), StoreErrorKind::Storage, error)),
-            ),
+            Self::Get { cid } => Value::Get(storage.get(&cid)),
             Self::Create {
                 domain,
                 lineage,
@@ -746,9 +742,9 @@ impl RunRecoveryStore {
             Ok(_) => unreachable!("typed native response differs from request"),
         }
     }
-    pub(crate) fn get_block(&self, cid: Cid) -> Result<Option<Vec<u8>>, StoreError> {
+    pub(crate) fn get_block(&self, cid: Cid) -> anyhow::Result<Option<Vec<u8>>> {
         match self.request(Operation::Get { cid }) {
-            Err(error) => Err(error),
+            Err(error) => Err(anyhow::Error::new(error)),
             Ok(Response {
                 value: Value::Get(value),
                 installation,
@@ -1055,7 +1051,7 @@ impl NativeInstallationReceipt {
 
 impl Blockstore for RunRecoveryStore {
     fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.get_block(*cid)?)
+        self.get_block(*cid)
     }
     fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
         anyhow::bail!("run blocks require an owner-prepared root transaction")

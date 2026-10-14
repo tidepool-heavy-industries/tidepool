@@ -1262,6 +1262,41 @@ mod tests {
     }
 
     #[test]
+    fn run_owner_block_reads_preserve_snapshot_failure_categories() {
+        use tidepool_toolchain::exact_context::SnapshotError;
+
+        let (directory, store) = store();
+        let state = domain(&store, RecoveryDomainId::Root, 7);
+        let cid = *state.snapshot_root.cid();
+
+        let raw = Connection::open(store.path()).unwrap();
+        raw.execute(
+            "UPDATE blocks SET bytes=?1 WHERE cid=?2",
+            params![b"damaged block".as_slice(), cid.to_bytes()],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_value::<(String, RecoveryDomainId, u64), _>(&store, &cid),
+            Err(SnapshotError::Integrity(found)) if found == cid
+        ));
+        raw.pragma_update(None, "foreign_keys", false).unwrap();
+        raw.execute("DELETE FROM blocks WHERE cid=?1", [cid.to_bytes()])
+            .unwrap();
+        assert!(matches!(
+            read_value::<(String, RecoveryDomainId, u64), _>(&store, &cid),
+            Err(SnapshotError::MissingBlock(found)) if found == cid
+        ));
+        drop(raw);
+
+        let moved = directory.path().join("recovery.sqlite.moved");
+        std::fs::rename(store.path(), moved).unwrap();
+        assert!(matches!(
+            read_value::<(String, RecoveryDomainId, u64), _>(&store, &cid),
+            Err(SnapshotError::Storage(_))
+        ));
+    }
+
+    #[test]
     fn independent_domains_and_stale_publication_do_not_erase_siblings() {
         let (_directory, store) = store();
         let root = domain(&store, RecoveryDomainId::Root, 64);
