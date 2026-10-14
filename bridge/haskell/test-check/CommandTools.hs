@@ -29,6 +29,8 @@ data Event
   | Awaited Text Int
   | ReadPage Text Cmd.CommandStream Cmd.CommandPosition
   | Detached Text
+  | InputSubmitted Text Text
+  | PresenterCalled
   deriving (Eq, Show)
 
 newtype Service = Service [Event]
@@ -61,7 +63,7 @@ runCommands action =
         pure $ if key == "error-read-job"
           then Left (Cmd.CommandUnavailable (T.replicate 4000 "λ"))
           else Right (if key == "whole-page-job" then completePage else partialFinishedPage)
-      CommandInputWith _ _ -> pure (Right ())
+      CommandInputWith key text -> record (InputSubmitted key text) >> pure (Right ())
       CommandFinishInputWith _ _ -> pure (Left (Cmd.CommandInputAcceptedCloseUnconfirmed "EOF not confirmed"))
       CommandCloseInputWith _ -> pure (Right ())
       CommandResizeWith _ _ _ -> pure (Right ())
@@ -200,7 +202,7 @@ tests =
         check "fetched prefix within the display budget remains incomplete" uncroppedPrefixIncomplete
     , testCase "yield route detaches a still-running job" $
         check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
-    ] ++ observationTests
+    ] ++ observationTests ++ presenterTests
   where
     isPresentation Presented = True
     isPresentation _ = False
@@ -259,3 +261,33 @@ observationTests =
 
 main :: IO ()
 main = runTests tests
+
+
+presenterTests :: [TestTree]
+presenterTests =
+  [ testCase "accepted input bypasses a refusing optional presenter" $
+      let (result, events) = runCommands $
+            Tools.writeInputWith refusingPresenter
+              (Tools.WriteInput "input-job" (Just "λ") Nothing (Just 0) (Just 1024))
+          acknowledged = case Tools.facts result of
+            Tools.InputReceipt "input-job" Tools.Acknowledged 2 Tools.NotRequested -> True
+            _ -> False
+       in check "accepted input must acknowledge exactly one write without presentation"
+            (acknowledged && events == [InputSubmitted "input-job" "λ"])
+  , testCase "empty input polling preserves an optional presenter refusal" $
+      let (result, events) = runCommands $
+            Tools.writeInputWith refusingPresenter
+              (Tools.WriteInput "input-job" Nothing Nothing (Just 0) (Just 1024))
+          refused = case Tools.facts result of
+            Tools.Rejected Tools.OpWriteStdin (Just "input-job") "presenter refused" Tools.NoSideEffect -> True
+            _ -> False
+       in check "polling must preserve the presenter refusal without submitting input"
+            (refused && Tools.presentation result == "presenter refused" && events == [PresenterCalled])
+  ]
+  where
+    refusingPresenter :: Tools.ObservationPresenter '[Commands, State.State Service]
+    refusingPresenter _ _ _ _ _ = do
+      State.modify (\(Service events) -> Service (PresenterCalled : events))
+      pure (Tools.CommandToolResult
+        (Tools.Rejected Tools.OpWriteStdin (Just "input-job") "presenter refused" Tools.NoSideEffect)
+        "presenter refused")
