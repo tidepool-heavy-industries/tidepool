@@ -10,7 +10,7 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
-import Tidepool.Actors.Exomonad
+import Tidepool.Actors.Exomonad hiding (Call, (:-))
 import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Command as Cmd
 
