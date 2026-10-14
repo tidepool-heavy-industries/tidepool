@@ -260,6 +260,8 @@ async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
                         request_id: "shutdown-probe".into(),
                         call_id: "shutdown-probe".into(),
                     });
+                let observed_invocation = invocation.clone();
+                let observer = policy.clone();
                 let called = tokio::spawn(async move {
                     policy
                         .dispatch_json_boxed(exomonad_tool::ToolInvocation {
@@ -288,6 +290,25 @@ async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
                 let request = backend_request(campaign).await;
                 let backend = TestCommands::new();
                 request.supply(Ok(backend.clone()));
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while backend.executions() == 0 {
+                        let terminal = observer
+                            .retained_operation(observed_invocation.clone())
+                            .expect("admitted operation retains its native owner")
+                            .terminal();
+                        assert!(
+                            !matches!(
+                                terminal,
+                                exomonad_actor::HostedOperationTerminal::Settled(_)
+                            ),
+                            "hook invocation settled before its command started"
+                        );
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("hook command starts before runtime shutdown");
+                drop(observer);
                 assert!(
                     !called.is_finished(),
                     "pending hook cannot deliver final output"
