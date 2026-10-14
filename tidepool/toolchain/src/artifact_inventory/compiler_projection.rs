@@ -433,6 +433,61 @@ impl CompilerInputProjection {
         Ok(metadata)
     }
 
+    /// Resolve selected type evidence by its issued interface ID, independently
+    /// of whether the compiler role also offers an original implementation.
+    pub(crate) fn selected_canonical_interfaces(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<
+        BTreeMap<ExactModuleIdentity, crate::certified_products::CertifiedModuleInterface>,
+        CompileError,
+    > {
+        let metadata = view.metadata_snapshot();
+        self.entries_from_metadata(&metadata)?;
+        Ok(self
+            .roles
+            .iter()
+            .filter_map(
+                |(owner, role)| match &metadata.artifacts[&role.interface()].payload {
+                    ArtifactPayload::Canonical(interface) => {
+                        Some((owner.clone(), interface.clone()))
+                    }
+                    _ => None,
+                },
+            )
+            .collect())
+    }
+
+    /// Retained authored bodies can supplement selected type evidence privately.
+    /// An original role restricts availability to its exact implementation; an
+    /// interface-only role does not select executable groups or mutate its role.
+    pub(crate) fn native_declaration_availability(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<Vec<CertifiedRecoveryProduct>, CompileError> {
+        let interfaces = self.selected_canonical_interfaces(view)?;
+        Ok(view
+            .entries()
+            .into_iter()
+            .filter_map(|entry| {
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return None;
+                };
+                let role = self.roles.get(&entry.descriptor.owner)?;
+                let interface = product.module_interface()?;
+                if !matches!(
+                    interface.origin(),
+                    crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                ) || interfaces.get(&entry.descriptor.owner) != Some(interface)
+                    || role.original().is_some_and(|id| id != entry.descriptor.id)
+                {
+                    return None;
+                }
+                Some(product.clone())
+            })
+            .collect())
+    }
+
     /// Restoration consumes already authenticated original inventory, never a
     /// recovered owner name or an ordinal alone. Every role is checked before
     /// any selected compiler input is published.

@@ -64,14 +64,26 @@ fn issued_declarations(native: bool) -> &'static [DeclarationFixture] {
 }
 
 fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
+    declaration_groups(generation, native, generation as u8, &[3, 17])
+}
+
+fn declaration_groups(
+    generation: u64,
+    native: bool,
+    version: u8,
+    ordinals: &[u32],
+) -> CertifiedRecoveryProduct {
     let module =
         tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation)).module_name();
     let interface = format!("original interface {generation}").into_bytes();
     let product = crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
         "main",
         &module,
-        vec![(3, Vec::new()), (17, Vec::new())],
-        generation as u8,
+        ordinals
+            .iter()
+            .map(|ordinal| (*ordinal, Vec::new()))
+            .collect(),
+        version,
         &BTreeMap::new(),
         interface,
         &BTreeMap::new(),
@@ -88,6 +100,13 @@ fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
 // Each row independently varies source/native origin, native byte custody and
 // the issued compiler interface role. The lexical graph selects only Target.
 fn original_context(rows: &[(bool, bool, bool)]) -> Arc<ExactDeclarationContext> {
+    original_context_with_roles(rows, false)
+}
+
+fn original_context_with_roles(
+    rows: &[(bool, bool, bool)],
+    reusable_originals: bool,
+) -> Arc<ExactDeclarationContext> {
     let fixtures = rows
         .iter()
         .enumerate()
@@ -98,7 +117,7 @@ fn original_context(rows: &[(bool, bool, bool)]) -> Arc<ExactDeclarationContext>
                 .clone()
         })
         .collect::<Vec<_>>();
-    original_context_with_fixtures(rows, fixtures)
+    original_context_with_fixtures(rows, fixtures, reusable_originals)
 }
 
 fn original_context_with_products(
@@ -108,12 +127,14 @@ fn original_context_with_products(
     original_context_with_fixtures(
         rows,
         products.into_iter().map(DeclarationFixture::new).collect(),
+        false,
     )
 }
 
 fn original_context_with_fixtures(
     rows: &[(bool, bool, bool)],
     fixtures: Vec<DeclarationFixture>,
+    reusable_originals: bool,
 ) -> Arc<ExactDeclarationContext> {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let target = ExactModuleIdentity {
@@ -133,8 +154,15 @@ fn original_context_with_fixtures(
     assert_eq!(rows.len(), fixtures.len());
     for ((_, custody, selected), fixture) in rows.iter().zip(fixtures) {
         if *selected {
-            roles.push(CompilerInputRole::InterfaceOnly {
-                interface: fixture.canonical.descriptor.id,
+            roles.push(if reusable_originals && *custody {
+                CompilerInputRole::ReusableOriginal {
+                    interface: fixture.canonical.descriptor.id,
+                    original: fixture.original.descriptor.id,
+                }
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: fixture.canonical.descriptor.id,
+                }
             });
         }
         entries.push(fixture.canonical);
@@ -171,6 +199,7 @@ fn original_context_with_fixtures(
 fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> {
     let scratch = tempfile::tempdir().unwrap();
     let lexical = context.lexical_graph().to_vec();
+    let roles = context.compiler_input_roles();
     let groups = context.artifact_view().selected_native_groups();
     let private = original_native_declaration_inputs(context, PRODUCER).unwrap();
     let request = ExactCompileContext::new(context.clone())
@@ -178,6 +207,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
         .unwrap();
     request.validate_artifacts().unwrap();
     assert_eq!(context.lexical_graph(), lexical);
+    assert_eq!(context.compiler_input_roles(), roles);
     assert_eq!(context.artifact_view().selected_native_groups(), groups);
     assert!(
         groups.is_empty(),
@@ -622,6 +652,81 @@ fn property_config() -> proptest::test_runner::Config {
     config
 }
 
+#[test]
+fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() {
+    let canonical = original_context(&[(true, true, true)]);
+    let original = original_context_with_roles(&[(true, true, true)], true);
+    assert_eq!(
+        offered_native_owners(&original),
+        offered_native_owners(&canonical),
+        "an original role retains its selected canonical type evidence"
+    );
+    let recovered =
+        crate::certified_products::tests::recovered_witness_fixtures(&[declaration_groups(
+            1,
+            true,
+            240,
+            &[3, 17, 88],
+        )]);
+    let substitute = &recovered[0].product;
+    let selected = original.compiler_original_products().unwrap();
+    assert_eq!(
+        selected[0].module_interface(),
+        substitute.module_interface()
+    );
+    assert_ne!(selected[0].product_bytes(), substitute.product_bytes());
+    assert!(!selected[0].same_durable_artifact(substitute));
+    assert!(
+        crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+            &original,
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
+            std::slice::from_ref(substitute),
+        )
+        .is_err(),
+        "an equal interface cannot substitute another issued implementation"
+    );
+
+    let extra = Arc::new(
+        ArtifactEntry::original(
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            substitute.clone(),
+        )
+        .unwrap(),
+    );
+    let expanded = original
+        .artifact_view()
+        .inventory()
+        .admit_shared_with_demand(
+            original.artifact_view(),
+            vec![extra],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let projection = original.compiler_input_projection();
+    let available = projection
+        .native_declaration_availability(&expanded)
+        .unwrap();
+    assert_eq!(
+        available.len(),
+        1,
+        "extra available implementations are not selected"
+    );
+    assert!(available[0].same_durable_artifact(&selected[0]));
+    assert!(expanded.selected_native_groups().is_empty());
+
+    let owners = expanded
+        .interface_owners()
+        .into_iter()
+        .map(|entry| entry.owner)
+        .collect::<Vec<_>>();
+    let types = expanded.interface_projection(&owners).unwrap();
+    assert!(
+        projection.native_declaration_availability(&types).is_err(),
+        "a selected original role cannot silently lose native custody"
+    );
+    assert!(original_native_declaration_inputs(&original, b"wrong preview issuer").is_err());
+}
+
 proptest::proptest! {
     #![proptest_config(property_config())]
     #[test]
@@ -641,13 +746,16 @@ proptest::proptest! {
         let mut before = before;
         before.extend((0..8).map(|mask| (mask & 1 != 0, mask & 2 != 0, mask & 4 != 0)));
         let captured = original_context(&before);
+        let original_roles = original_context_with_roles(&before, true);
         let mut extended = before.clone();
         extended.extend(after);
         let later = original_context(&extended);
         proptest::prop_assert_eq!(offered_native_owners(&captured), expected(&before));
+        proptest::prop_assert_eq!(offered_native_owners(&original_roles), expected(&before));
         proptest::prop_assert_eq!(offered_native_owners(&later), expected(&extended));
         drop(later);
         proptest::prop_assert_eq!(offered_native_owners(&captured), expected(&before));
+        proptest::prop_assert_eq!(offered_native_owners(&original_roles), expected(&before));
         static COMPLETED_HISTORIES: AtomicUsize = AtomicUsize::new(0);
         let completed = COMPLETED_HISTORIES.fetch_add(1, Ordering::Relaxed) + 1;
         if completed.is_power_of_two() {
