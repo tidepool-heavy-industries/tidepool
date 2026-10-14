@@ -60,7 +60,7 @@ use tidepool_runtime::session::{
     HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
     PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent, ResidentError,
     ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
+    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult, WorkbenchRequest,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -2265,7 +2265,9 @@ where
     }
 }
 
-pub(crate) use crate::tool_contract::{decode_installation, SpecInstallation};
+use crate::tool_contract::decode_installation;
+#[cfg(test)]
+use crate::tool_contract::SpecInstallation;
 
 impl ResidentWorkbenchTools {
     fn slots(&self) -> Vec<String> {
@@ -19658,7 +19660,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
         with_test_compiler_owner(async {
-            let (mut session, context, mut source, root) = host_mount_fixture();
+            let (session, context, mut source, _root) = host_mount_fixture();
             let authored = tempfile::tempdir().unwrap();
             std::fs::write(
                 authored.path().join("CapturedSpecInstaller.hs"),
