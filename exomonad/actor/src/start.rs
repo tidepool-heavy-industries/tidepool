@@ -614,12 +614,24 @@ mod tests {
             let id = DataConId(index as u64 + 1);
             let mut table = DataConTable::new();
             let constructor = DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Tidepool.Effects.Core".into(),
-                    namespace: "constructor".into(),
-                    occurrence: name.into(),
-                    record_parent: None,
+                identity: tidepool_repr::execution_schema::ConstructorIdentity {
+                    symbol: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Tidepool.Effects.Core".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.into(),
+                        record_parent: None,
+                    },
+                    family: tidepool_repr::execution_schema::TypeIdentity {
+                        symbol: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: "Tidepool.Effects.Core".into(),
+                            namespace: "type".into(),
+                            occurrence: "ActorEffectKey".into(),
+                            record_parent: None,
+                        },
+                        version: tidepool_repr::execution_schema::TypeVersion::GhcAbi([1; 16]),
+                    },
                 },
                 id,
                 name: name.into(),
@@ -636,7 +648,8 @@ mod tests {
             let foreign_id = DataConId(index as u64 + 10_000);
             let mut foreign = constructor;
             foreign.id = foreign_id;
-            foreign.identity.module = "Foreign.Keys".into();
+            foreign.identity.symbol.module = "Foreign.Keys".into();
+            foreign.identity.family.symbol.module = "Foreign.Keys".into();
             foreign.qualified_name = Some(format!("Foreign.Keys.{name}"));
             table.insert_checked(foreign).unwrap();
             assert!(ActorEffectKeyWire::from_value(

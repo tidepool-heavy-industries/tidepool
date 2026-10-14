@@ -20067,7 +20067,7 @@ pub(crate) mod request_tests {
                 panic!("original captured tool remains callable after refusals")
             };
             assert!(output.contains("captured value"), "{output}");
-            drop(tools);
+            drop(lease);
             wait_for_explicit_installation_cleanup(
                 &workbench,
                 context,

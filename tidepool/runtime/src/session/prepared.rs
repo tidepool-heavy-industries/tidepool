@@ -12106,15 +12106,13 @@ pub(super) mod tests {
         let resume_runner = engine
             .install(json_mount_program(), &bindings, &index)
             .expect("fixture with the prepared two-argument resume ABI installs");
-        let continuation = {
-            let mut builder = engine.machine.managed_builder().unwrap();
-            let root = builder
-                .constructor(DataConId(105), &[])
-                .expect("fixture continuation constructor is declared");
-            builder
-                .finish(RealmId::ROOT, root)
-                .expect("fixture continuation is retained")
-        };
+        let continuation = engine
+            .machine
+            .managed_builder(|mut builder| {
+                let root = builder.constructor(DataConId(105), [])?;
+                builder.finish(RealmId::ROOT, root)
+            })
+            .expect("fixture continuation is retained in its issued construction scope");
         let parked = engine
             .machine
             .park(
