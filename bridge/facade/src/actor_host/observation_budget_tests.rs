@@ -211,9 +211,10 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         .supply(Ok(backend.clone()));
     let started = bash.await.unwrap().unwrap();
     assert_eq!(started["status"], "committed", "{started}");
+    let initial_budgets = backend.output_budgets();
     assert!(
-        backend.output_budgets().is_empty(),
-        "a command returned immediately as a session has no output to preview yet"
+        initial_budgets.iter().all(|bytes| *bytes <= 16 * 1024),
+        "the initial presenter must read only bounded pages"
     );
     let session = started["items"][0]["output"]
         .as_str()
@@ -232,10 +233,16 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     )
     .await;
     assert_eq!(preview["status"], "committed", "{preview}");
+    let observed_budgets = backend.output_budgets();
     assert_eq!(
-        backend.output_budgets().first().copied(),
-        Some(16 * 1024),
-        "observeWith must materialize only a bounded initial page"
+        &observed_budgets[..initial_budgets.len()],
+        initial_budgets.as_slice(),
+        "the explicit observation preserves earlier reads"
+    );
+    assert_eq!(
+        &observed_budgets[initial_budgets.len()..],
+        &[16 * 1024],
+        "observeWith must materialize exactly one bounded initial page"
     );
 
     // Make the presenter's Reflect input exceed the host observation budget
