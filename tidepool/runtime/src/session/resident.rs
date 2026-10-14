@@ -2449,6 +2449,7 @@ pub struct PendingPreparedInstall {
 }
 
 struct PreparedInstallMetadata {
+    constructor_table: DataConTable,
     mode: PendingPreparedMode,
     argument: Option<PreparedHandle>,
     provenance: Arc<ProgramProvenance>,
@@ -2475,7 +2476,6 @@ enum TurnImageAcquisition<'a> {
     Compile,
     Ready {
         bundle: &'a super::prepared::NativeImageBundle,
-        table: &'a DataConTable,
     },
 }
 
@@ -3944,6 +3944,7 @@ where
     pub(crate) fn install_certified_turn_in(
         &mut self,
         scope: ScopeId,
+        metadata: &DataConTable,
         target: super::prepared::CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
@@ -3958,6 +3959,7 @@ where
     > {
         let (program, source_keys) = self.state.install_certified_turn_in(
             scope,
+            metadata,
             target,
             target_owners,
             source_evidence,
@@ -5986,9 +5988,6 @@ where
         let table = code
             .table()
             .with_json_layout(json_runtime_layout_optional(code.prepared()));
-        self.state
-            .merge_table(&table)
-            .map_err(ResidentError::TableCollision)?;
         let (_constructor_table, _sites, prepared, certification) = code.into_parts();
         let (program, source_keys) = if let Some(certification) = certification.as_ref() {
             let resolved = self
@@ -6000,6 +5999,7 @@ where
             )?;
             self.install_certified_turn_in(
                 scope,
+                &table,
                 target,
                 &resolved.target_owners,
                 &resolved.source_evidence,
@@ -6007,7 +6007,10 @@ where
                 &resolved.inherited_needed,
             )?
         } else {
-            (self.state.install_prepared(prepared)?, Default::default())
+            (
+                self.state.install_prepared(prepared, Some(&table))?,
+                Default::default(),
+            )
         };
         let realm = self.run_context.resource_scope;
         let mounted = (|| {
@@ -6820,11 +6823,6 @@ where
             }
         };
         let (constructor_table, _sites, prepared, certification) = code.into_parts();
-        if retained_images.is_none() {
-            self.state
-                .merge_table(&constructor_table)
-                .map_err(ResidentError::TableCollision)?;
-        }
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
         {
@@ -6836,13 +6834,11 @@ where
         let install_prepared_started = std::time::Instant::now();
         let (program, source_keys) = self.install_turn_program_in_with_images(
             lexical_scope,
+            &constructor_table,
             prepared,
             certification.as_ref().as_ref(),
             match retained_images {
-                Some(bundle) => TurnImageAcquisition::Ready {
-                    bundle,
-                    table: constructor_table.as_ref(),
-                },
+                Some(bundle) => TurnImageAcquisition::Ready { bundle },
                 None => TurnImageAcquisition::Compile,
             },
         )?;
@@ -6907,6 +6903,7 @@ where
     fn install_turn_program_in(
         &mut self,
         lexical_scope: ScopeId,
+        metadata: &DataConTable,
         prepared: PreparedProgram,
         certification: Option<&super::turn::TurnCertification>,
     ) -> Result<
@@ -6918,6 +6915,7 @@ where
     > {
         self.install_turn_program_in_with_images(
             lexical_scope,
+            metadata,
             prepared,
             certification,
             TurnImageAcquisition::Compile,
@@ -6927,6 +6925,7 @@ where
     fn install_turn_program_in_with_images(
         &mut self,
         lexical_scope: ScopeId,
+        metadata: &DataConTable,
         prepared: PreparedProgram,
         certification: Option<&super::turn::TurnCertification>,
         images: TurnImageAcquisition<'_>,
@@ -6954,13 +6953,9 @@ where
                     )?
                 }
             };
-            if let TurnImageAcquisition::Ready { table, .. } = images {
-                self.state
-                    .merge_table(table)
-                    .map_err(ResidentError::TableCollision)?;
-            }
             self.install_certified_turn_in(
                 lexical_scope,
+                metadata,
                 target,
                 &resolved.target_owners,
                 &resolved.source_evidence,
@@ -6972,7 +6967,10 @@ where
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
             }
-            Ok((self.state.install_prepared(prepared)?, Default::default()))
+            Ok((
+                self.state.install_prepared(prepared, Some(metadata))?,
+                Default::default(),
+            ))
         }
     }
 
@@ -7018,11 +7016,12 @@ where
         }
         let provenance = self.provenance_for(&code)?;
         let (constructor_table, _sites, prepared, certification) = code.into_parts();
-        self.state
-            .merge_table(&constructor_table)
-            .map_err(ResidentError::TableCollision)?;
-        let (program, source_keys) =
-            self.install_turn_program_in(scope, prepared, certification.as_ref().as_ref())?;
+        let (program, source_keys) = self.install_turn_program_in(
+            scope,
+            &constructor_table,
+            prepared,
+            certification.as_ref().as_ref(),
+        )?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -7156,9 +7155,6 @@ where
         )?;
         let provenance = self.provenance_for(&code)?;
         let (constructor_table, _sites, prepared, certification) = code.into_parts();
-        self.state
-            .merge_table(&constructor_table)
-            .map_err(ResidentError::TableCollision)?;
         if let Some(generation) = mode.generation() {
             // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(generation);
@@ -7198,6 +7194,7 @@ where
         Ok(PendingPreparedInstall {
             snapshot,
             metadata: PreparedInstallMetadata {
+                constructor_table: constructor_table.into_owned(),
                 mode,
                 argument,
                 provenance,
@@ -7223,6 +7220,7 @@ where
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
         let ReadyPreparedInstall { source, metadata } = ready;
         let PreparedInstallMetadata {
+            constructor_table,
             mode,
             argument,
             provenance,
@@ -7237,10 +7235,11 @@ where
         let mut checked_completion = None;
         let (program, source_keys) = match source {
             ReadyPreparedSource::Legacy { snapshot, image } => {
-                match self
-                    .state
-                    .revalidate_and_install_prepared(snapshot, image)?
-                {
+                match self.state.revalidate_and_install_prepared(
+                    snapshot,
+                    image,
+                    Some(&constructor_table),
+                )? {
                     Some(program) => (program, Default::default()),
                     None => return Ok(None),
                 }
@@ -7270,6 +7269,7 @@ where
                     .transpose()?;
                 self.install_certified_turn_in(
                     lexical_scope,
+                    &constructor_table,
                     target,
                     &resolved.target_owners,
                     &resolved.source_evidence,
@@ -9947,6 +9947,7 @@ mod authored_publication_tests {
                         tidepool_repr::execution_schema::testing::wire_program(),
                     )
                     .unwrap(),
+                    None,
                 )
                 .unwrap();
             assert!(session

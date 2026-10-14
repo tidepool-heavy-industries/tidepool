@@ -557,6 +557,15 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Constructor declarations retained by this exact immutable native image.
+    pub fn constructor_declarations(
+        &self,
+    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
+        self.interned_constructors
+            .iter()
+            .map(|(declaration, _)| declaration)
+    }
+
     /// Process-local observation identity; never an image key or authority.
     pub fn image_instance_id(&self) -> u64 {
         self.image_instance

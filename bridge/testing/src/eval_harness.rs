@@ -216,12 +216,9 @@ impl Outcome {
 
 /// As [`Outcome`], but for one target of an [`EvalHarness::compile_many`]
 /// bundle, run via [`EvalHarness::run_target`]/[`run_target_owned`]. A
-/// pre-compiled target has no [`CompileResult`] of its own to hand
-/// `EvalResult::new` (crate-private in `tidepool-runtime`), so this wraps the
-/// raw `HaskellValue` + [`DataConTable`] pair the JIT run itself produces and
-/// renders JSON through the same public [`tidepool_runtime::value_to_json`]
-/// path `EvalResult::to_json` uses internally.
-pub struct TargetOutcome(Result<(HaskellValue, DataConTable), RuntimeError>);
+/// pre-compiled target retains the execution owner's complete result, including
+/// the admitted constructor table used by dispatch and presentation.
+pub struct TargetOutcome(Result<EvalResult, RuntimeError>);
 
 impl TargetOutcome {
     /// Did evaluation succeed?
@@ -234,7 +231,7 @@ impl TargetOutcome {
         self.0.as_ref().err()
     }
 
-    fn result(&self) -> &(HaskellValue, DataConTable) {
+    fn result(&self) -> &EvalResult {
         self.0
             .as_ref()
             .unwrap_or_else(|e| panic!("expected successful eval, got error: {e}"))
@@ -242,24 +239,26 @@ impl TargetOutcome {
 
     /// Borrow the computed [`HaskellValue`] (panics on error).
     pub fn value(&self) -> &HaskellValue {
-        &self.result().0
+        self.result().value()
     }
 
     /// Render the result as JSON (panics on error).
     pub fn json(&self) -> serde_json::Value {
-        let (value, table) = self.result();
-        tidepool_runtime::value_to_json(value, table, 0)
+        self.result().to_json()
     }
 
     /// Consume and return the owned `(HaskellValue, DataConTable)` pair, panicking
     /// with `ctx` + error.
     pub fn expect(self, ctx: &str) -> (HaskellValue, DataConTable) {
-        self.0.unwrap_or_else(|e| panic!("{ctx}: {e}"))
+        self.into_result().unwrap_or_else(|e| panic!("{ctx}: {e}"))
     }
 
     /// The raw `Result` (escape hatch for tests asserting on specific errors).
     pub fn into_result(self) -> Result<(HaskellValue, DataConTable), RuntimeError> {
-        self.0
+        self.0.map(|result| {
+            let table = result.table().clone();
+            (result.into_value(), table)
+        })
     }
 }
 
@@ -505,8 +504,7 @@ impl EvalHarness {
         let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
         let (result, handlers) = with_eval_stack(move || {
             let result =
-                run_compiled_target(artifacts, target, nursery, &mut handlers, &user, |_| {})
-                    .map(|value| (value, artifacts.table.clone()));
+                run_compiled_target(artifacts, target, nursery, &mut handlers, &user, |_| {});
             (result, handlers)
         });
         (TargetOutcome(result), handlers)

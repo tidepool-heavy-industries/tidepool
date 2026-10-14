@@ -108,6 +108,88 @@ struct DataConMetadata {
 }
 
 impl DataConTable {
+    /// Stage dispatch facts for one admitted native batch. Constructor IDs and
+    /// physical shape come from its declarations; compiler render annotations
+    /// enrich those facts without supplying JSON or request-site authority.
+    pub fn stage_constructor_admission<'a>(
+        &self,
+        incoming: Option<&Self>,
+        declarations: impl IntoIterator<Item = &'a ConstructorDecl>,
+    ) -> Result<Self, DataConCollision> {
+        let mut candidate = self.with_json_layout(None);
+        let mut affected = HashSet::new();
+        if let Some(incoming) = incoming {
+            for row in incoming.iter() {
+                candidate.check_collision(row)?;
+                let mut enriched = row.clone();
+                if let Some(existing) = candidate.get(row.id) {
+                    if enriched.qualified_name.is_none() {
+                        enriched.qualified_name.clone_from(&existing.qualified_name);
+                    }
+                    if enriched.field_bangs.is_empty() {
+                        enriched.field_bangs.clone_from(&existing.field_bangs);
+                    }
+                    if enriched.type_name.is_empty() {
+                        enriched.type_name.clone_from(&existing.type_name);
+                    }
+                }
+                if candidate.get(row.id) != Some(&enriched) {
+                    affected.insert(candidate.upsert_no_sort(enriched));
+                }
+                if let Some(labels) = incoming.field_labels_of(row.id) {
+                    if candidate.field_labels_of(row.id) != Some(labels) {
+                        candidate.set_field_labels(row.id, labels.to_vec());
+                    }
+                }
+                if let Some(types) = incoming.field_types_of(row.id) {
+                    if candidate.field_types_of(row.id) != Some(types) {
+                        candidate.set_field_types(row.id, types.to_vec());
+                    }
+                }
+            }
+        }
+        for declaration in declarations {
+            let symbol = &declaration.identity.symbol;
+            let module = match symbol.module.as_str() {
+                "Data.Text.Internal" => "Data.Text",
+                "GHC.Internal.Maybe" => "GHC.Maybe",
+                "GHC.Internal.Data.Either" => "Data.Either",
+                module => module,
+            };
+            let projected = DataCon {
+                identity: declaration.identity.clone(),
+                id: declaration.host_id,
+                name: symbol.occurrence.clone(),
+                tag: declaration.tag,
+                rep_arity: u32::try_from(declaration.field_reps.len()).map_err(|_| {
+                    DataConCollision::InvalidIdentity {
+                        identity: declaration.identity.clone(),
+                        detail: "representation arity exceeds the metadata format",
+                    }
+                })?,
+                field_bangs: Vec::new(),
+                qualified_name: Some(format!("{module}.{}", symbol.occurrence)),
+                type_name: declaration.identity.family.symbol.occurrence.clone(),
+            };
+            candidate.check_collision(&projected)?;
+            match candidate.get(projected.id) {
+                None => {
+                    affected.insert(candidate.upsert_no_sort(projected));
+                }
+                Some(existing) if existing.qualified_name.is_none() => {
+                    let mut enriched = existing.clone();
+                    enriched.qualified_name = projected.qualified_name;
+                    affected.insert(candidate.upsert_no_sort(enriched));
+                }
+                Some(_) => {}
+            }
+        }
+        for name in affected {
+            candidate.sort_type_name_bucket(&name);
+        }
+        Ok(candidate)
+    }
+
     /// Create an empty table.
     pub fn new() -> Self {
         Self::default()
@@ -527,6 +609,128 @@ impl DataConTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn staged_batches_match_independent_identity_history(
+            batches in proptest::collection::vec(proptest::collection::vec(1u64..32, 0..12), 0..16)
+        ) {
+            let mut table = DataConTable::new();
+            let mut expected = std::collections::BTreeMap::new();
+            for batch in batches {
+                let expected_before = expected.clone();
+                let mut incoming = DataConTable::new();
+                for id in batch {
+                    let row = nominal_row(id, "history-unit", "History", &format!("C{id}"), 0);
+                    incoming.insert_checked(row.clone()).unwrap();
+                    expected.insert(id, row);
+                }
+                let before = table.clone();
+                table = table.stage_constructor_admission(Some(&incoming), []).unwrap();
+                proptest::prop_assert_eq!(table.len(), expected.len());
+                for (id, row) in &expected {
+                    proptest::prop_assert_eq!(table.get(DataConId(*id)), Some(row));
+                }
+                proptest::prop_assert_eq!(before.len(), expected_before.len());
+                for (id, row) in &expected_before {
+                    proptest::prop_assert_eq!(before.get(DataConId(*id)), Some(row));
+                }
+                let repeated = table.stage_constructor_admission(Some(&incoming), []).unwrap();
+                proptest::prop_assert!(Arc::ptr_eq(&table.metadata, &repeated.metadata));
+            }
+        }
+    }
+
+    #[test]
+    fn staged_admission_preserves_annotations_and_sharing_and_refuses_atomically() {
+        let mut original = DataConTable::new();
+        original
+            .insert_checked(make_datacon(1, "First", 1, 0))
+            .unwrap();
+        original.set_field_labels(DataConId(1), vec!["label".into()]);
+        original.set_field_types(DataConId(1), vec!["Text".into()]);
+        let unchanged = original
+            .stage_constructor_admission(Some(&original), [])
+            .unwrap();
+        assert!(Arc::ptr_eq(&original.metadata, &unchanged.metadata));
+
+        let mut incoming = DataConTable::new();
+        let mut thin = original.get(DataConId(1)).unwrap().clone();
+        thin.qualified_name = None;
+        incoming.insert_checked(thin).unwrap();
+        incoming.set_field_types(DataConId(1), vec!["Int".into()]);
+        let enriched = original
+            .stage_constructor_admission(Some(&incoming), [])
+            .unwrap();
+        assert_eq!(enriched.get(DataConId(1)), original.get(DataConId(1)));
+        assert_eq!(
+            enriched.field_labels_of(DataConId(1)),
+            original.field_labels_of(DataConId(1))
+        );
+        assert_eq!(enriched.field_types_of(DataConId(1)).unwrap(), ["Int"]);
+        assert_eq!(original.field_types_of(DataConId(1)).unwrap(), ["Text"]);
+
+        incoming
+            .insert_checked(make_datacon(2, "Second", 2, 0))
+            .unwrap();
+        let mut conflicting = make_datacon(1, "Impostor", 1, 0);
+        conflicting.identity.symbol.unit = "another-owner".into();
+        let mut conflict_batch = DataConTable::new();
+        conflict_batch
+            .insert_checked(make_datacon(2, "Second", 2, 0))
+            .unwrap();
+        conflict_batch.insert_checked(conflicting).unwrap();
+        assert!(original
+            .stage_constructor_admission(Some(&conflict_batch), [])
+            .is_err());
+        assert_eq!(original.len(), 1);
+        assert!(original.get(DataConId(2)).is_none());
+    }
+
+    #[test]
+    fn projected_aliases_preserve_nominal_identity_and_issued_shape() {
+        use crate::execution_schema::{CheckedLayout, RuntimeRep};
+        for (module, alias) in [
+            ("Data.Text.Internal", "Data.Text"),
+            ("GHC.Internal.Maybe", "GHC.Maybe"),
+            ("GHC.Internal.Data.Either", "Data.Either"),
+            ("Ordinary.Module", "Ordinary.Module"),
+        ] {
+            let row = nominal_row(18361356118689931113, "exact-unit", module, "RecipeRoot", 0);
+            let declaration = ConstructorDecl {
+                identity: row.identity.clone(),
+                host_id: row.id,
+                result_rep: RuntimeRep::LiftedRef,
+                field_reps: vec![],
+                strict_fields: vec![],
+                layout: CheckedLayout {
+                    fields: vec![],
+                    alignment: 8,
+                    payload_size: 0,
+                    root_mask: vec![],
+                },
+                tag: 3,
+                family_size: 7,
+            };
+            let table = DataConTable::new()
+                .stage_constructor_admission(None, [&declaration])
+                .unwrap();
+            let projected = table.get(row.id).unwrap();
+            assert_eq!(projected.identity, row.identity);
+            assert_eq!(projected.tag, 3);
+            assert_eq!(projected.rep_arity, 0);
+            assert_eq!(
+                projected.qualified_name.as_deref(),
+                Some(format!("{alias}.RecipeRoot").as_str())
+            );
+            assert!(projected.field_bangs.is_empty());
+            assert!(table.json_layout().is_none());
+            let repeated = table
+                .stage_constructor_admission(None, [&declaration])
+                .unwrap();
+            assert!(Arc::ptr_eq(&table.metadata, &repeated.metadata));
+        }
+    }
 
     #[test]
     fn response_contexts_share_metadata_but_replace_json_authority() {

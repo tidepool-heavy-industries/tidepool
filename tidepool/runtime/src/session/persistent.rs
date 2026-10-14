@@ -860,6 +860,7 @@ impl PersistentSession {
     pub(crate) fn install_certified_turn_in(
         &mut self,
         scope: ScopeId,
+        metadata: &DataConTable,
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
@@ -875,6 +876,13 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
+        let admitted_metadata = self.stage_install_metadata(
+            Some(metadata),
+            target.constructor_declarations(),
+            demanded
+                .iter()
+                .flat_map(|selected| selected.image().constructor_declarations()),
+        )?;
         let qualified = target.source_plan().is_some();
         let inherited = if let Some(plan) = target.source_plan() {
             let current = self
@@ -997,6 +1005,7 @@ impl PersistentSession {
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let target = engine.commit_certified_turn(staged);
+                self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
                     self.ensure_machine_incarnation();
@@ -1328,8 +1337,8 @@ impl PersistentSession {
 
     // -- table accumulation ------------------------------------------------
 
-    /// Seed the accumulated session table wholesale (the bootstrap turn's table
-    /// becomes the base; later turns [`Self::merge_table`] onto it).
+    /// Seed representation metadata for a session without a code installation.
+    /// Native installation admits its own validated metadata transactionally.
     pub fn seed_session_table(&mut self, table: DataConTable) {
         self.session_table = table;
     }
@@ -1386,11 +1395,19 @@ impl PersistentSession {
 
     /// Install a prepared turn's program. Every declared global resolves
     /// to a live binding by its recorded import identity.
+    /// Compiler consumers supply their original table for validation before
+    /// supplementation; metadata-free low-level programs project declarations.
     pub fn install_prepared(
         &mut self,
         prepared: PreparedProgram,
+        metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
-        match self.machine.as_mut() {
+        let admitted_metadata = self.stage_install_metadata(
+            metadata,
+            prepared.constructors().iter(),
+            std::iter::empty(),
+        )?;
+        let program = match self.machine.as_mut() {
             None => {
                 let (mut engine, program) = PreparedEngine::bootstrap_shared(
                     prepared,
@@ -1400,10 +1417,28 @@ impl PersistentSession {
                 engine.set_invocation_cancel(self.invocation_cancel.clone());
                 self.machine = Some(engine);
                 self.ensure_machine_incarnation();
-                Ok(program)
+                program
             }
-            Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index),
+            Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index)?,
+        };
+        self.session_table = admitted_metadata;
+        Ok(program)
+    }
+
+    fn stage_install_metadata<'a>(
+        &self,
+        metadata: Option<&DataConTable>,
+        target: impl Iterator<Item = &'a tidepool_repr::execution_schema::ConstructorDecl> + Clone,
+        dependencies: impl Iterator<Item = &'a tidepool_repr::execution_schema::ConstructorDecl>,
+    ) -> Result<DataConTable, PreparedRuntimeError> {
+        if let Some(metadata) = metadata {
+            for declaration in target.clone() {
+                metadata.validate_constructors(std::slice::from_ref(declaration))?;
+            }
         }
+        Ok(self
+            .session_table
+            .stage_constructor_admission(metadata, target.chain(dependencies))?)
     }
 
     pub(crate) fn ensure_machine_incarnation(&mut self) {
@@ -1438,16 +1473,26 @@ impl PersistentSession {
         &mut self,
         snapshot: InstallSnapshot,
         compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        metadata: Option<&DataConTable>,
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
-        match self.machine.as_mut() {
-            None => Ok(None),
+        let admitted_metadata = self.stage_install_metadata(
+            metadata,
+            compiled.constructor_declarations(),
+            std::iter::empty(),
+        )?;
+        let installed = match self.machine.as_mut() {
+            None => None,
             Some(engine) => engine.revalidate_and_install(
                 snapshot,
                 compiled,
                 &self.bindings,
                 &self.binding_index,
-            ),
+            )?,
+        };
+        if installed.is_some() {
+            self.session_table = admitted_metadata;
         }
+        Ok(installed)
     }
 
     /// The live prepared bindings a later turn compiles against: each one's
@@ -4699,7 +4744,15 @@ mod checkpoint_scope_tests {
         assert!(resolved.groups.is_empty());
         let target = CertifiedTargetImage::compile(prepared, &ImageRegistry::new()).unwrap();
         let (program, keys) = session
-            .install_certified_turn_in(scope, target, &[], &BTreeMap::new(), vec![], &[])
+            .install_certified_turn_in(
+                scope,
+                &target.fixture_constructor_metadata(),
+                target,
+                &[],
+                &BTreeMap::new(),
+                vec![],
+                &[],
+            )
             .unwrap();
         assert!(keys.is_empty());
         assert!(session.prepared_mut().unwrap().unpin(program));
@@ -5240,7 +5293,15 @@ mod checkpoint_scope_tests {
                 );
             }
             let (mixed, _) = session
-                .install_certified_turn_in(later, target, &owners, &evidence, demanded, &inherited)
+                .install_certified_turn_in(
+                    later,
+                    &target.fixture_constructor_metadata(),
+                    target,
+                    &owners,
+                    &evidence,
+                    demanded,
+                    &inherited,
+                )
                 .unwrap();
             let d2_leases: Vec<_> = selected_sources(&session, later)
                 .into_iter()
@@ -5312,7 +5373,15 @@ mod checkpoint_scope_tests {
             admitted
         );
         let (program, _) = session
-            .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited)
+            .install_certified_turn_in(
+                scope,
+                &target.fixture_constructor_metadata(),
+                target,
+                &owners,
+                &evidence,
+                demanded,
+                &inherited,
+            )
             .unwrap();
         assert!(session.prepared_mut().unwrap().unpin(program));
     }
@@ -5334,6 +5403,9 @@ mod checkpoint_scope_tests {
         };
         let (target, owners, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
+        let mut metadata = target.fixture_constructor_metadata();
+        let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
+        metadata.insert_checked(staged_only.clone()).unwrap();
         let before = session.public_visibility_snapshot_in(scope).unwrap();
         mint_fixture_origin(&mut session, scope, groups[0].owner().clone());
         let after = session.public_visibility_snapshot_in(scope).unwrap();
@@ -5341,11 +5413,13 @@ mod checkpoint_scope_tests {
         assert_eq!(before.bindings, after.bindings);
         assert_ne!(before.source_selection, after.source_selection);
         assert!(matches!(
-            session
-                .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited),
+            session.install_certified_turn_in(
+                scope, &metadata, target, &owners, &evidence, demanded, &inherited
+            ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
         assert!(session.residency().is_none());
+        assert!(session.session_table().get(staged_only.id).is_none());
         assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
     }
 
@@ -5449,7 +5523,15 @@ mod checkpoint_scope_tests {
             "live anchor cannot issue a stale sibling descriptor"
         );
         let (fresh, _) = session
-            .install_certified_turn_in(b, target, &owners, &evidence, demanded, &inherited)
+            .install_certified_turn_in(
+                b,
+                &target.fixture_constructor_metadata(),
+                target,
+                &owners,
+                &evidence,
+                demanded,
+                &inherited,
+            )
             .unwrap();
         let live = selected_sources(&session, b)
             .into_iter()
@@ -5552,6 +5634,7 @@ mod checkpoint_scope_tests {
         let (program, keys) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
+                &target.fixture_constructor_metadata(),
                 target,
                 &resolved.target_owners,
                 &resolved.source_evidence,
@@ -7820,7 +7903,49 @@ mod constructor_admission_tests {
     };
     use tidepool_repr::DataConId;
 
-    fn constructor(id: u64, occurrence: &str, arity: u32) -> DataCon {
+    #[test]
+    fn installation_validates_original_metadata_before_projection_and_commits_with_code() {
+        use tidepool_repr::execution_schema::{
+            testing, CheckedLayout, ConstructorDecl, RuntimeRep,
+        };
+        let row = constructor(18361356118689931113, "RecipeRoot", 0);
+        let mut wire = testing::wire_program();
+        wire.constructors.push(ConstructorDecl {
+            identity: row.identity.clone(),
+            host_id: row.id,
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: row.tag,
+            family_size: 1,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let mut session = PersistentSession::new(None, 1024);
+        assert!(matches!(
+            session.install_prepared(prepared.clone(), Some(&DataConTable::new())),
+            Err(PreparedRuntimeError::ConstructorMetadata(_))
+        ));
+        assert!(session.residency().is_none());
+        assert!(session.session_table().is_empty());
+        let mut metadata = DataConTable::new();
+        metadata.insert_checked(row.clone()).unwrap();
+        metadata.set_field_labels(row.id, vec!["source-label".into()]);
+        let program = session.install_prepared(prepared, Some(&metadata)).unwrap();
+        assert_eq!(session.session_table().get(row.id), Some(&row));
+        assert_eq!(
+            session.session_table().field_labels_of(row.id).unwrap(),
+            ["source-label"]
+        );
+        assert!(session.prepared_mut().unwrap().unpin(program));
+    }
+
+    pub(super) fn constructor(id: u64, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
             id: DataConId(id),
             identity: ConstructorIdentity {

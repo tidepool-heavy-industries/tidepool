@@ -229,6 +229,10 @@ impl Default for PackageOwnerDiagnosticLimits {
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
+    ConstructorMetadata(#[from] tidepool_repr::datacon_table::ConstructorMetadataMismatch),
+    #[error(transparent)]
+    ConstructorMetadataCollision(#[from] tidepool_repr::datacon_table::DataConCollision),
+    #[error(transparent)]
     Parse(#[from] ParseError),
     #[error(transparent)]
     Link(Box<LinkError>),
@@ -461,6 +465,8 @@ impl PreparedRuntimeError {
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
             Self::Parse(_)
+            | Self::ConstructorMetadata(_)
+            | Self::ConstructorMetadataCollision(_)
             | Self::Link(_)
             | Self::Compile(_)
             | Self::Install(_)
@@ -517,6 +523,8 @@ impl PreparedRuntimeError {
     pub fn kind(&self) -> PreparedFailureKind {
         match self {
             Self::Parse(_)
+            | Self::ConstructorMetadata(_)
+            | Self::ConstructorMetadataCollision(_)
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
@@ -1169,6 +1177,19 @@ impl NativeImageAcquisition<'_> {
 }
 
 impl CertifiedTargetImage {
+    #[cfg(test)]
+    pub(crate) fn fixture_constructor_metadata(&self) -> DataConTable {
+        DataConTable::new()
+            .stage_constructor_admission(None, self.constructor_declarations())
+            .expect("fixture image carries collision-free constructor declarations")
+    }
+
+    pub(crate) fn constructor_declarations(
+        &self,
+    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
+        self.image.constructor_declarations()
+    }
+
     #[cfg(test)]
     pub(crate) fn compile(
         prepared: PreparedProgram,
@@ -7992,7 +8013,15 @@ pub(super) mod tests {
         let (target, owners, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(session, scope, groups, &[root]);
         session
-            .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited)
+            .install_certified_turn_in(
+                scope,
+                &target.fixture_constructor_metadata(),
+                target,
+                &owners,
+                &evidence,
+                demanded,
+                &inherited,
+            )
             .unwrap()
     }
 
@@ -8082,6 +8111,7 @@ pub(super) mod tests {
         assert!(matches!(
             session.install_certified_turn_in(
                 tidepool_codegen::scope::ScopeId(u64::MAX),
+                &DataConTable::new(),
                 CertifiedTargetImage::compile(
                     testing::prepare(testing::wire_program()).unwrap(),
                     &registry,
@@ -8090,7 +8120,7 @@ pub(super) mod tests {
                 &[],
                 &BTreeMap::new(),
                 Vec::new(),
-                &[],
+                &[]
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
@@ -9810,7 +9840,7 @@ pub(super) mod tests {
     ) -> BindingEntry {
         let top = producer.entry();
         let program = state
-            .install_prepared(producer)
+            .install_prepared(producer, None)
             .expect("install fixed producer");
         let engine = state.prepared_mut().expect("installed fixture machine");
         let handle = engine
@@ -13433,7 +13463,7 @@ pub(super) mod tests {
         let mut state = super::super::PersistentSession::new(Some(lib), 1024);
         let producer = producer_program();
         let top = producer.entry();
-        let program = state.install_prepared(producer).unwrap();
+        let program = state.install_prepared(producer, None).unwrap();
         state
             .prepared_mut()
             .unwrap()

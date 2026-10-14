@@ -3501,7 +3501,7 @@ mod tests {
         let mut index = CheckedNativeIndex::new(baseline.clone());
         let ambient_identity = testing::identity("Fixture", "entry");
         let ambient = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
             .unwrap();
         let mut own_wire = testing::wire_program();
         let own_identity = testing::identity("Own", "entry");
@@ -3510,7 +3510,7 @@ mod tests {
         };
         top.identity = own_identity.clone();
         let own = session
-            .install_prepared(testing::prepare(own_wire).unwrap())
+            .install_prepared(testing::prepare(own_wire).unwrap(), None)
             .unwrap();
         let delta = session
             .capture_checked_native_delta(
@@ -3537,7 +3537,7 @@ mod tests {
 
         // A target spelling an ambient definition does not acquire its CAF.
         let repeated = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
             .unwrap();
         assert_ne!(ambient, repeated);
         let absent = session
@@ -3576,7 +3576,7 @@ mod tests {
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let package_identity = testing::identity("Fixture", "entry");
         session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
             .unwrap();
         assert!(!session
             .capture_admitted_native_imports(ScopeId::ROOT)
@@ -3665,7 +3665,7 @@ mod tests {
         };
         top.identity = own_identity.clone();
         let program = session
-            .install_prepared(testing::prepare(wire).unwrap())
+            .install_prepared(testing::prepare(wire).unwrap(), None)
             .unwrap();
         let delta = session
             .capture_checked_native_delta(

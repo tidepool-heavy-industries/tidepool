@@ -152,7 +152,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             "deployment execution {row}: elapsed_ns={}",
             execution_start.elapsed().as_nanos(),
         );
-        let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
+        let displayed = value.to_json();
         assert_eq!(displayed, serde_json::json!("42"));
         eprintln!(
             "deployment catalog {}: {row}: {} cached owners, {replayed} re-extracted; native display {displayed}",

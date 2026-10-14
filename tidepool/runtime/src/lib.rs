@@ -252,19 +252,14 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         |_, _, _| {},
         settlement,
     )?;
-    let value = run_compiled_target(
+    run_compiled_target(
         &artifacts,
         session::PREPARED_SCAFFOLD_TARGET,
         nursery_size,
         handlers,
         user,
         on_ready,
-    )?;
-    Ok(EvalResult::new(
-        value,
-        artifacts.table,
-        artifacts.warnings.warnings,
-    ))
+    )
 }
 
 /// Run an ALREADY-COMPILED prepared program to completion against `handlers`,
@@ -294,9 +289,17 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<HaskellValue, RuntimeError> {
-    let (mut engine, program) =
-        session::prepared::PreparedEngine::bootstrap_with_nursery_bytes(prepared, nursery_size)?;
-    run_installed_program(&mut engine, program, table, handlers, user, on_ready)
+    let mut state = session::PersistentSession::new(None, nursery_size);
+    let program = state.install_prepared(prepared, Some(table))?;
+    let effective = state.session_table().clone();
+    run_installed_program(
+        state.require_prepared()?,
+        program,
+        &effective,
+        handlers,
+        user,
+        on_ready,
+    )
 }
 
 /// Run an ordinary compiler target with its complete certified source closure.
@@ -309,13 +312,14 @@ pub fn run_compiled_target<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
-) -> Result<HaskellValue, RuntimeError> {
+) -> Result<EvalResult, RuntimeError> {
     let mut state = session::PersistentSession::new(None, nursery_size);
     let program = install_compiled_target(&mut state, artifacts, target)?;
+    let table = state.session_table().clone();
     let engine = state.require_prepared()?;
-    let result = run_installed_program(engine, program, &artifacts.table, handlers, user, on_ready);
+    let result = run_installed_program(engine, program, &table, handlers, user, on_ready);
     engine.unpin(program);
-    result
+    result.map(|value| EvalResult::new(value, table, artifacts.warnings.warnings.clone()))
 }
 
 /// Install an ordinary compiler target with its complete certified closure in
@@ -353,6 +357,7 @@ fn install_compiled_target(
     )?;
     let (program, _) = state.install_certified_turn_in(
         ScopeId::ROOT,
+        &artifacts.table,
         target,
         &resolved.target_owners,
         &resolved.source_evidence,
@@ -494,6 +499,237 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn projected_aliases_match_compiler_metadata() {
+        tidepool_testing::eval_harness::require_extract();
+        let artifacts = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::compile_invocation(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source: include_str!("fixtures/ConstructorAdmissionAliases.hs"),
+                    targets: &["text", "maybe", "either"],
+                    include: &[],
+                    fallback_module_name: "ConstructorAdmissionAliases",
+                },
+                |_, _, _| {},
+                settlement,
+            )
+        })
+        .unwrap();
+        let declarations = artifacts
+            .targets
+            .values()
+            .flat_map(|target| target.prepared.prepared().constructors());
+        let projected = DataConTable::new()
+            .stage_constructor_admission(None, declarations)
+            .unwrap();
+        let mut covered = std::collections::BTreeSet::new();
+        for row in projected.iter() {
+            if [
+                "Data.Text.Internal",
+                "GHC.Internal.Maybe",
+                "GHC.Internal.Data.Either",
+            ]
+            .contains(&row.identity.symbol.module.as_str())
+            {
+                let compiler = artifacts.table.get(row.id).unwrap();
+                assert_eq!(row.identity, compiler.identity);
+                assert_eq!(row.tag, compiler.tag);
+                assert_eq!(row.rep_arity, compiler.rep_arity);
+                assert_eq!(row.qualified_name, compiler.qualified_name);
+                covered.insert(row.identity.symbol.module.as_str());
+            }
+        }
+        assert_eq!(
+            covered,
+            std::collections::BTreeSet::from([
+                "Data.Text.Internal",
+                "GHC.Internal.Maybe",
+                "GHC.Internal.Data.Either"
+            ])
+        );
+    }
+
+    #[derive(tidepool_bridge_derive::FromHaskell)]
+    enum RootRequest {
+        RecipeRoot,
+    }
+
+    struct RootHandler(usize);
+
+    impl tidepool_effect::dispatch::EffectHandler<()> for RootHandler {
+        type Request = RootRequest;
+        fn handle(
+            &mut self,
+            _: RootRequest,
+            cx: &tidepool_effect::dispatch::EffectContext<'_, ()>,
+        ) -> Result<tidepool_effect::dispatch::Response, tidepool_effect::EffectError> {
+            self.0 += 1;
+            cx.respond(("fixture".to_owned(), 1_i64, 1_i64))
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn sparse_recipe_root_uses_exact_installed_dependency_metadata() {
+        use tidepool_testing::effect_surface::{TestEffectSurface, TestEffectSurfaceOptions};
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::with_options(
+            &[tidepool_mcp::recipe_check_decl()],
+            TestEffectSurfaceOptions::default(),
+        )
+        .unwrap();
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::actor_sources_path());
+        let source = include_str!("fixtures/ConstructorAdmissionRecipe.hs");
+        for _ in 0..2 {
+            let mut artifacts = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::compile_invocation(
+                    &tidepool_toolchain::artifacts::CompileInvocation {
+                        source,
+                        targets: &["__prepared"],
+                        include: &include,
+                        fallback_module_name: "ConstructorAdmissionRecipe",
+                    },
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
+            .unwrap();
+            let target = artifacts.targets["__prepared"].prepared.prepared();
+            let mut target_metadata = DataConTable::new();
+            target_metadata
+                .extend_checked(
+                    artifacts
+                        .table
+                        .iter()
+                        .filter(|row| {
+                            target
+                                .constructors()
+                                .iter()
+                                .any(|declaration| declaration.host_id == row.id)
+                        })
+                        .cloned(),
+                )
+                .unwrap();
+            target_metadata.validate_program(target).unwrap();
+            artifacts.table = target_metadata;
+            let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
+            let program = install_compiled_target(&mut state, &artifacts, "__prepared").unwrap();
+            let root = state.session_table().get_by_name("RecipeRoot").unwrap();
+            assert_eq!(root.0, 18361356118689931113);
+            assert!(
+                artifacts.table.get(root).is_none(),
+                "RecipeRoot is absent from target metadata"
+            );
+            assert!(state.prepared_mut().unwrap().unpin(program));
+            let mut handlers = frunk::hlist![RootHandler(0)];
+            let result = run_compiled_target(
+                &artifacts,
+                "__prepared",
+                DEFAULT_NURSERY_SIZE,
+                &mut handlers,
+                &(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(handlers.head.0, 1);
+            assert_eq!(result.to_json(), serde_json::json!(42));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn sparse_dependency_constructor_admission_reaches_dispatch_and_result_rendering() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("ConstructorAdmissionSupport.hs"),
+            include_str!("fixtures/ConstructorAdmissionSupport.hs"),
+        )
+        .unwrap();
+        let source = include_str!("fixtures/ConstructorAdmissionConsumer.hs");
+        let compile = || {
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::compile_invocation(
+                    &tidepool_toolchain::artifacts::CompileInvocation {
+                        source,
+                        targets: &["__prepared"],
+                        include: &[
+                            root.path().to_path_buf(),
+                            tidepool_testing::eval_harness::prelude_path(),
+                        ],
+                        fallback_module_name: "ConstructorAdmissionConsumer",
+                    },
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
+            .unwrap()
+        };
+        for mut artifacts in [compile(), compile()] {
+            // Compiler targets may omit rows owned only by cached originals.
+            // Keep this control deterministic by retaining only target rows;
+            // the actual admitted declarations remain unchanged.
+            let target = artifacts.targets["__prepared"].prepared.prepared();
+            let mut target_metadata = DataConTable::new();
+            target_metadata
+                .extend_checked(
+                    artifacts
+                        .table
+                        .iter()
+                        .filter(|row| {
+                            target
+                                .constructors()
+                                .iter()
+                                .any(|declaration| declaration.host_id == row.id)
+                        })
+                        .cloned(),
+                )
+                .unwrap();
+            target_metadata.validate_program(target).unwrap();
+            artifacts.table = target_metadata;
+            let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
+            let program = install_compiled_target(&mut state, &artifacts, "__prepared").unwrap();
+            let id = state
+                .session_table()
+                .get_by_name("Ticket")
+                .expect("installed dependency constructor");
+            assert!(artifacts.targets["__prepared"]
+                .prepared
+                .prepared()
+                .constructors()
+                .iter()
+                .all(|declaration| declaration.host_id != id));
+            assert!(
+                artifacts.table.get(id).is_none(),
+                "target metadata omits dependency-only row"
+            );
+            assert!(state.prepared_mut().unwrap().unpin(program));
+            let result = run_compiled_target(
+                &artifacts,
+                "__prepared",
+                DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(result.table().get(id).unwrap().name, "Ticket");
+            assert_eq!(
+                result.to_json(),
+                serde_json::json!({"constructor": "Ticket", "fields": [42]})
+            );
+            let through_consumer = tidepool_testing::eval_harness::EvalHarness::new().run_target(
+                &artifacts,
+                "__prepared",
+                frunk::HNil,
+            );
+            assert_eq!(through_consumer.json(), result.to_json());
+            let (_, effective) = through_consumer.expect("retained target result");
+            assert_eq!(effective.get(id).unwrap().name, "Ticket");
+        }
+    }
 
     #[test]
     fn selected_artifact_revalidates_nominal_metadata_before_installation() {

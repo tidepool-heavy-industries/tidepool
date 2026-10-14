@@ -506,10 +506,7 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        assert_eq!(
-            crate::value_to_json(&value, &compiled.table, 0),
-            serde_json::json!(42)
-        );
+        assert_eq!(value.to_json(), serde_json::json!(42));
 
         let refused_source = source.replace(
             "keptNumber (Kept (41 :: KeptPayload Bool))",
@@ -556,10 +553,7 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        assert_eq!(
-            crate::value_to_json(&value, &explicit.table, 0),
-            serde_json::json!(141)
-        );
+        assert_eq!(value.to_json(), serde_json::json!(141));
 
         let original_source = refused_source.replace(
             narrowed.module_name(),
