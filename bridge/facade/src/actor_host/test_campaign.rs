@@ -1099,6 +1099,7 @@ fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscribe
             "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
                       exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
                       tidepool_extract_cmd::endpoint=info,exomonad_actor::resident_tools=info,\
+                      exomonad_actor::resident_workbench=info,\
                       exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
                       tidepool_runtime::prepared_install=info,\
                       tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
@@ -1115,7 +1116,8 @@ fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscribe
              exomonad_actor::request=info,tidepool_toolchain::module_candidates=debug,\
              tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
              exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
-             exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug"
+             exomonad_actor::resident_tools=info,exomonad_actor::resident_workbench=info,\
+             exomonad::content=off,harness::runtime_cost=debug"
         }
     };
     tracing_subscriber::EnvFilter::new(directives)

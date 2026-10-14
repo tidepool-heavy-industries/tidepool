@@ -13378,9 +13378,14 @@ where
             self.release_session_state();
             // A live actor or published checkpoint keeps the issuing machine
             // available after this actor's terminal record is written.
-            let session_retained = self.environment.actors.lock().values().any(|record| {
+            let live_session_actor = self.environment.actors.lock().values().any(|record| {
                 record.descriptor.placement().session == session && record.terminal.is_none()
-            }) || self.environment.actor_admissions.retains_session(session);
+            });
+            let retained_checkpoint = self.environment.actor_admissions.retains_session(session);
+            tracing::info!(
+                actor = ?kernel.identity(), ?session, live_session_actor, retained_checkpoint,
+                "actor retirement session retention decision"
+            );
             // A no-op check for every actor that never got a dedicated
             // child session (the shared session is never a member). One
             // bounded checkout, no wait for whoever still needs this
@@ -13389,7 +13394,7 @@ where
             if let Err(error) = self
                 .environment
                 .runner
-                .retire_child_session(session, session_retained)
+                .retire_child_session(session, live_session_actor || retained_checkpoint)
                 .await
             {
                 tracing::warn!(
