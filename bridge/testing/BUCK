@@ -457,6 +457,7 @@ filegroup(
         "exomonad/actor/src/resident_actor/green_runtime_reverse.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f726576657273652e6873",
         "exomonad/actor/src/resident_actor/green_runtime_setup.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f73657475702e6873",
         "exomonad/actor/src/resident_actor/green_runtime_single.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f73696e676c652e6873",
+        "exomonad/actor/src/resident_actor/green_runtime_traversable.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f7472617665727361626c652e6873",
         "exomonad/actor/src/resident_actor/jev_authored_dialogue.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f617574686f7265645f6469616c6f6775652e6873",
         "exomonad/actor/src/resident_actor/jev_form_runtime_failure.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f6661696c7572652e6873",
         "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f737563636573732e6873",

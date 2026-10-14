@@ -369,6 +369,7 @@ rust_filegroup(
         "src/resident_actor/green_runtime_setup.hs": "exomonad/actor/src/resident_actor/green_runtime_setup.hs",
         "src/resident_actor/green_runtime_single.hs": "exomonad/actor/src/resident_actor/green_runtime_single.hs",
         "src/resident_actor/green_runtime_tests.rs": "exomonad/actor/src/resident_actor/green_runtime_tests.rs",
+        "src/resident_actor/green_runtime_traversable.hs": "exomonad/actor/src/resident_actor/green_runtime_traversable.hs",
         "src/resident_actor/green_tests.rs": "exomonad/actor/src/resident_actor/green_tests.rs",
         "src/resident_actor/green_tool.rs": "exomonad/actor/src/resident_actor/green_tool.rs",
         "src/resident_actor/initial_context.rs": "exomonad/actor/src/resident_actor/initial_context.rs",
@@ -956,6 +957,7 @@ filegroup(
         "exomonad/actor/src/resident_actor/green_runtime_setup.hs": "src/resident_actor/green_runtime_setup.hs",
         "exomonad/actor/src/resident_actor/green_runtime_single.hs": "src/resident_actor/green_runtime_single.hs",
         "exomonad/actor/src/resident_actor/green_runtime_tests.rs": "src/resident_actor/green_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/green_runtime_traversable.hs": "src/resident_actor/green_runtime_traversable.hs",
         "exomonad/actor/src/resident_actor/green_tests.rs": "src/resident_actor/green_tests.rs",
         "exomonad/actor/src/resident_actor/green_tool.rs": "src/resident_actor/green_tool.rs",
         "exomonad/actor/src/resident_actor/initial_context.rs": "src/resident_actor/initial_context.rs",
@@ -1307,6 +1309,13 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f73696e676c652e6873",
     src = "src/resident_actor/green_runtime_single.hs",
     out = "green_runtime_single.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f7472617665727361626c652e6873",
+    src = "src/resident_actor/green_runtime_traversable.hs",
+    out = "green_runtime_traversable.hs",
     visibility = ["PUBLIC"],
 )
 

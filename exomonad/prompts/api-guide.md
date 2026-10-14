@@ -84,6 +84,12 @@ and `|||` for products and sums of Kleisli arrows. These operators sequence
 effects; `Tidepool.Async` supplies concurrency. `Control.Lens` is in scope for
 composable projections, updates and traversals through retained data.
 
+`mapConcurrently f inputs` and `forConcurrently inputs f` start one Green
+thread per element before joining, preserving any `Traversable` shape and
+order. `poll thread` returns `ThreadRunning`, `ThreadCancelled`, or
+`ThreadCompleted value`; `waitCatch thread` waits and returns
+`Either AsyncCancelled value`.
+
 Define a small language for the task and a machine that interprets it. Local
 types name commands, observations and replies; a record actor holds state and
 interprets inputs through its handlers. Jev supplies semantic choices whose

@@ -338,6 +338,21 @@ async fn compiled_concurrent_forms_reverse_settlement_preserves_original_heap_cl
 }
 
 #[tokio::test]
+async fn compiled_green_traversable_preserves_shape_and_order_after_reverse_settlement() {
+    let fixture = Fixture::new(753, Scenario::Reverse);
+    let actor = fixture.parent().await;
+    assert_true(
+        fixture
+            .execute(&actor, include_str!("green_runtime_traversable.hs"), None)
+            .await,
+    );
+    assert_eq!(fixture.host.state.lock().committed, ["two", "one"]);
+    assert!(fixture.host.state.lock().closed.is_empty());
+    fixture.assert_live_leases_released();
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn compiled_green_cancel_closes_only_sibling_and_preserves_selected_function() {
     let fixture = Fixture::new(746, Scenario::CancelSibling).await;
     let actor = fixture.parent().await;

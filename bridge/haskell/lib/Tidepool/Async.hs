@@ -42,7 +42,7 @@
 -- or record of functions remains usable by every surviving handle. Nothing
 -- is serialized and no session-lifetime result root is created.
 --
--- == The ONE divergence from @Control.Concurrent.Async@
+-- == Authored results
 --
 -- __A thread's own failure is not an exception.__  The row has none: failure
 -- is data, so a thread that can fail says so
@@ -54,8 +54,9 @@
 -- from behind the author's back.  'wait' on a cancelled thread fails loudly
 -- instead of rethrowing.
 --
--- That is the whole list.  Every other name here means exactly what the
--- package means it to mean.
+-- 'poll' distinguishes 'ThreadRunning', 'ThreadCancelled', and
+-- 'ThreadCompleted' without waiting. Domain failures remain part of the
+-- completed value's type.
 --
 -- Its effectful helpers require @Green@; the module is auto-imported
 -- whenever @Green@ is in the row.
@@ -69,6 +70,7 @@ module Tidepool.Async
     Async
   , asyncThreadId
   , AsyncCancelled (..)
+  , AsyncState (..)
 
     -- * Creating and joining
   , async
@@ -93,7 +95,7 @@ import Prelude
 import Control.Monad.Freer (Eff, Member)
 
 import Tidepool.Async.Internal (Async (..))
-import Tidepool.Async.Types (AsyncCancelled (..), asyncThreadId)
+import Tidepool.Async.Types (AsyncCancelled (..), AsyncState (..), asyncThreadId)
 import Tidepool.Effects.Authored
   ( AsyncStatus (..)
   , Green
@@ -146,16 +148,18 @@ waitCatch (Async t cell) = do
         Nothing -> error "Tidepool.Async.wait: settled thread has an empty exit cell"
     AsyncRunning -> error "Tidepool.Async.wait: join returned a running thread"
 
--- | Has this thread finished?  Never parks and never advances anything.
-poll :: Member Green effs => Async a -> Eff effs (Maybe a)
+-- | Observe running, cancelled, or completed state without parking or
+-- advancing the thread. Completed values remain available to later observers.
+poll :: Member Green effs => Async a -> Eff effs (AsyncState a)
 poll (Async t cell) = do
   st <- asyncStatus t
   case st of
     AsyncSettled ->
       case readExitCell st cell of
-        Just value -> pure (Just value)
+        Just value -> pure (ThreadCompleted value)
         Nothing -> error "Tidepool.Async.poll: settled thread has an empty exit cell"
-    _ -> pure Nothing
+    AsyncRunning -> pure ThreadRunning
+    AsyncWasCancelled -> pure ThreadCancelled
 
 -- | Cancel a thread, discarding its pending suspensions.  Idempotent; a no-op
 -- on a thread that already reached a terminal state.
@@ -210,15 +214,14 @@ concurrently l r = do
   hb <- async r
   waitBoth ha hb
 
--- | One thread per element, all running concurrently; results come back in
--- the ORIGINAL list order.  Completion order is never an input — that is PRD
--- 20's order-insensitivity contract, and it is why this collects by walking
--- the handles rather than by whoever finishes first.
-mapConcurrently :: Member Green effs => (a -> Eff effs b) -> [a] -> Eff effs [b]
+-- | One thread per element, all started before waiting. Results preserve the
+-- input's traversable shape and order, independently of completion order.
+-- An empty structure starts no threads and returns the same empty shape.
+mapConcurrently :: (Traversable t, Member Green effs) => (a -> Eff effs b) -> t a -> Eff effs (t b)
 mapConcurrently f xs = do
-  hs <- mapM (async . f) xs
-  mapM wait hs
+  hs <- traverse (async . f) xs
+  traverse wait hs
 
 -- | 'mapConcurrently' with the arguments flipped — @forConcurrently xs f@.
-forConcurrently :: Member Green effs => [a] -> (a -> Eff effs b) -> Eff effs [b]
+forConcurrently :: (Traversable t, Member Green effs) => t a -> (a -> Eff effs b) -> Eff effs (t b)
 forConcurrently xs f = mapConcurrently f xs
