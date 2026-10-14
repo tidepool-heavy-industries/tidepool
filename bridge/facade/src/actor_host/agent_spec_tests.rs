@@ -121,38 +121,6 @@ noted call result
     )
 }
 
-/// A spec module whose slot can suspend on the resident `Sleep` effect: the
-/// same shape as `spec_module`, with a `Member Sleep effects` constraint and
-/// the imports that constraint needs. Kept separate so the plain
-/// `spec_module` every other test uses never carries an effect constraint it
-/// doesn't need.
-fn spec_module_with_sleep(slot: &str) -> String {
-    format!(
-        r#"{{-# LANGUAGE OverloadedStrings #-}}
-module AgentSpec (agentSpec) where
-
-import Control.Monad.Freer (Eff, Member)
-import Data.Text (Text)
-import qualified Data.Text as T
-import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Sleep, sleep)
-import Tidepool.Duration (seconds)
-import qualified Project.Tools as Tools
-
-agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Sleep effects) => AgentSpec (Tools.SpecTools effects) effects
-agentSpec = defaultSpec
-  {{ specTools = Tools.tools
-  , afterTool = Just noted
-  }}
-
-noted :: Member Sleep effects => ToolCall -> ToolResult -> Eff effects Annotation
-noted call result
-  | toolCallName call /= T.pack "probe" = pure NoAnnotation
-  | otherwise = {slot}
-"#
-    )
-}
-
 /// Derived context beside the tool's own output.
 const ANNOTATES: &str = "pure (Annotated (T.pack \"asked about this topic twice before\"))";
 
@@ -164,12 +132,6 @@ const ABSTAINS: &str = "pure (Abstained (T.pack \"the result is already minimal\
 
 /// A slot that is simply broken.
 const FAILS: &str = "error \"the slot is broken\"";
-
-/// Suspends on the resident `Sleep` effect for three seconds — long enough to
-/// outlast a short after-tool wait while the slot is genuinely parked mid-
-/// effect, not merely slow — and then annotates.
-const SLEEPS_THEN_ANNOTATES: &str =
-    "do { sleep (seconds 3); pure (Annotated (T.pack \"slept then annotated\")) }";
 
 /// A slot that runs the tool's own implementation. Its own tool use must not
 /// bring it back round on itself.
@@ -276,35 +238,6 @@ async fn start_with_cell_slot(slot: &str) -> TestCampaign {
     .await
 }
 
-/// A root whose spec is named by rule two, carrying a slot that can suspend
-/// on the resident `Sleep` effect.
-async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
-    let slot = slot.to_owned();
-    let answer = answer.to_owned();
-    TestCampaign::start_with_config(
-        |admission| admission,
-        move |config| {
-            write_workspace(&config.workspace, DESCRIPTION, &answer);
-            let authored = config.workspace.join(".exomonad");
-            write_spec_config(
-                &authored,
-                &["Project.Tools", "AgentSpec"],
-                Some("AgentSpec.agentSpec"),
-            );
-            std::fs::write(authored.join("AgentSpec.hs"), spec_module_with_sleep(&slot)).unwrap();
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .unwrap(),
-            );
-        },
-    )
-    .await
-}
-
-/// What the one hosted tool answers right now.
 async fn probe(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
     let result =
         dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": "anything"})).await;
@@ -1022,163 +955,50 @@ async fn an_abstention_delivers_the_original_and_appears_only_in_the_receipt() {
         .await;
 }
 
-/// A slot that failed is not a slot that abstained: the original result is
-/// preserved and one compact line warns, because a failure could change how
-/// the result is read. The second failure earns a reference, not a second copy
-/// of the diagnostic.
 #[tokio::test]
-async fn a_slot_that_fails_delivers_the_original_with_one_compact_line() {
+async fn no_annotation_preserves_the_original_successful_receipt() {
+    let campaign = start_with_slot("keptwhole", "pure NoAnnotation").await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_structured_tool(
+                    campaign.root_installation.policy.as_ref(),
+                    "probe",
+                    serde_json::json!({"topic": "anything"}),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result}");
+                assert_eq!(result["items"][0]["output"], "keptwhole", "{result}");
+                assert_eq!(result["items"][0]["value"], "keptwhole", "{result}");
+            })
+        })
+        .await;
+}
+
+/// A failed presentation never changes the successful tool receipt. Its
+/// diagnostic remains available through the actor's invocation log.
+#[tokio::test]
+async fn a_slot_that_fails_preserves_tool_success_and_logs_only() {
     let campaign = start_with_slot("keptwhole", FAILS).await;
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let policy = campaign.root_installation.policy.clone();
-                let policy = policy.as_ref();
-
-                let first = probe(policy).await;
-                assert!(first.contains("keptwhole"), "{first}");
-                assert!(first.contains("the slot did not answer"), "{first}");
-                assert!(first.contains("after-tool#1"), "{first}");
-                assert_eq!(
-                    first.matches("[after-tool]").count(),
-                    1,
-                    "one compact line, not a diagnostic dump: {first}"
-                );
-
-                let second = probe(policy).await;
-                assert!(second.contains("keptwhole"), "{second}");
-                assert!(
-                    second.contains("same failure as after-tool#1"),
-                    "a repeated failure does not fill the conversation with copies: {second}"
-                );
-                assert!(!second.contains("the slot did not answer"), "{second}");
-            })
-        })
-        .await;
-}
-
-/// The result waits for the slot, and when the wait runs out the original is
-/// delivered anyway. Nothing is rolled back and nothing is replayed.
-#[tokio::test]
-async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
-    // The wait is five minutes, which is not a test. Shortening it to nothing
-    // is the whole of what this knob is for.
-    std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "0");
-    let campaign = start_with_slot("keptwhole", ANNOTATES).await;
-    campaign
-        .run_scenario(|campaign| {
-            Box::pin(async move {
-                let policy = campaign.root_installation.policy.clone();
-                let policy = policy.as_ref();
-
-                let result = probe(policy).await;
-                assert!(result.contains("keptwhole"), "{result}");
-                assert!(result.contains("no answer within 0ms"), "{result}");
-                assert!(
-                    !result.contains("asked about this topic twice before"),
-                    "{result}"
-                );
-
-                let status = status(policy).await;
-                assert!(status.contains("timed out after 0ms"), "{status}");
-
-                std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
-            })
-        })
-        .await;
-}
-
-/// A slot cut off while it is suspended on an effect, rather than at its first
-/// await: the wait is 400ms and the slot sleeps three seconds on the resident
-/// `Sleep` effect. Its suspended turn is aborted, so the machine keeps
-/// answering at its usual pace, and the late slot answer reaches nobody.
-#[tokio::test]
-async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
-    std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "400");
-    let campaign = start_with_sleeping_slot("keptwhole", SLEEPS_THEN_ANNOTATES).await;
-    campaign
-        .run_scenario(|campaign| {
-            Box::pin(async move {
-                let policy = campaign.root_installation.policy.clone();
-                let policy = policy.as_ref();
-
-                // The first authored cell pays for the cell template's cold compile. Pay
-                // it here, so the timing below measures the cut-off and nothing else.
-                let warm = std::time::Instant::now();
-                let _ = dispatch_haskell_script(policy, "inspectFull (2 + 2 :: Int)").await;
-                eprintln!("DUMP warm-up cell before any slot [{:?}]", warm.elapsed());
-                let baseline = std::time::Instant::now();
-                let _ = dispatch_haskell_script(policy, "inspectFull (3 + 3 :: Int)").await;
-                let baseline = baseline.elapsed();
-                eprintln!("DUMP warm baseline cell [{baseline:?}]");
-
-                let t0 = std::time::Instant::now();
-                let first = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-                    .await
-                    .expect("first probe did not hang");
-                eprintln!("DUMP first probe [{:?}]: {first}", t0.elapsed());
-                assert!(first.contains("keptwhole"), "{first}");
-                assert!(first.contains("no answer within 400ms"), "{first}");
-
-                // Immediately: the slot future was just dropped mid-effect. Does the next
-                // call on the same actor still work?
-                let t1 = std::time::Instant::now();
-                let second = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-                    .await
-                    .expect("second probe did not hang");
-                eprintln!(
-                    "DUMP second probe (immediately after the cut-off) [{:?}]: {second}",
-                    t1.elapsed()
-                );
-
-                // An authored cell, in the same resident workbench.
-                let t2 = std::time::Instant::now();
-                let cell = tokio::time::timeout(
-                    Duration::from_secs(60),
-                    dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)"),
-                )
-                .await
-                .expect("authored cell did not hang");
-                eprintln!(
-                    "DUMP authored cell after cut-off [{:?}]: {cell}",
-                    t2.elapsed()
-                );
-                // A slot cut off while suspended on an effect must not hold the machine
-                // against the next caller: the cell costs what a warm cell cost before.
+                let policy = campaign.root_installation.policy.as_ref();
+                for ordinal in 1..=2 {
+                    let result = probe(policy).await;
+                    let response: serde_json::Value = serde_json::from_str(&result).unwrap();
+                    assert_eq!(response["status"], "committed", "{response}");
+                    assert_eq!(response["items"][0]["output"], "keptwhole", "{response}");
+                    let status = status(policy).await;
+                    assert!(
+                        status.contains(&format!("after-tool#{ordinal}")),
+                        "{status}"
+                    );
+                    assert!(status.contains("failed:"), "{status}");
+                }
+                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                assert_eq!(cell["status"], "committed", "{cell}");
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
-                assert!(
-        t2.elapsed() < baseline * 2 + Duration::from_secs(5),
-        "a cell after two cut-off slots took {:?} against a warm baseline of {baseline:?}",
-        t2.elapsed()
-    );
-
-                // Wait past when the original 3s sleep would have elapsed, then probe and
-                // check status again.
-                tokio::time::sleep(Duration::from_secs(4)).await;
-
-                let t3 = std::time::Instant::now();
-                let third = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-                    .await
-                    .expect("third probe did not hang");
-                eprintln!(
-        "DUMP third probe (after the original sleep would have elapsed) [{:?}]: {third}",
-        t3.elapsed()
-    );
-
-                let t4 = std::time::Instant::now();
-                let status_after = tokio::time::timeout(Duration::from_secs(60), status(policy))
-                    .await
-                    .expect("status did not hang");
-                eprintln!("DUMP status after [{:?}]: {status_after}", t4.elapsed());
-                assert!(third.contains("keptwhole"), "{third}");
-                assert!(!third.contains("slept then annotated"), "{third}");
-                assert_eq!(
-                    status_after.matches("timed out after 400ms").count(),
-                    3,
-                    "{status_after}"
-                );
-
-                std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
             })
         })
         .await;
@@ -1246,6 +1066,181 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
             let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let status = round.settled_text("conventional-status");
             assert!(status.contains("rule=run module"), "{status}");
+            round.finish();
+        })
+    })
+    .await;
+}
+
+/// The real provider sees a synchronous final result only after presentation.
+#[tokio::test]
+async fn provider_inference_waits_for_after_tool_presentation() {
+    provider_delivery_after_presentation(false).await;
+}
+
+/// Asynchronous acknowledgement is independent of presentation; the eventual
+/// completed output carries the hook result, exactly once.
+#[tokio::test]
+async fn async_acknowledgement_precedes_hook_and_final_delivery_waits() {
+    provider_delivery_after_presentation(true).await;
+}
+
+async fn provider_delivery_after_presentation(asynchronous: bool) {
+    use super::hosted_test_context::HostedTestRuntime;
+    use super::test_campaign::{
+        hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    };
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        super::test_campaign::configure_command_path(config);
+        let owner = exomonad_node::command_resources::CommandResources::delegated(
+            exomonad_node::command_resources::CommandResourcePolicy {
+                general_bytes: 2 * exomonad_node::command_resources::GIB,
+                protected_bytes: 0,
+                swap_max_bytes: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        config.command_resources =
+            Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+        write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
+        write_spec_config(
+            &config.workspace.join(".exomonad"),
+            &["Project.Tools", "AgentSpec"],
+            Some("AgentSpec.agentSpec"),
+        );
+        std::fs::write(
+            config.workspace.join(".exomonad/AgentSpec.hs"),
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/after_tool_delivery_spec.hs",
+            ),
+        )
+        .unwrap();
+        super::test_campaign::commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
+            )
+            .unwrap(),
+        );
+    })
+    .await
+    .unwrap();
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        host.context.config.workspace.join("after-tool-release"),
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Exercise awaited after-tool presentation.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let operation = first.operation("delivery-probe");
+            if asynchronous {
+                first.async_call("delivery-probe", "inspectFull (\"keptwhole\" :: Text)");
+            } else {
+                first.function(
+                    "delivery-probe",
+                    "probe",
+                    serde_json::json!({"topic": "anything"}),
+                );
+            }
+            let acknowledgement = if asynchronous {
+                let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+                assert!(!round
+                    .request
+                    .input
+                    .iter()
+                    .any(|item| item.0.to_string().contains("presentation-finished")));
+                Some(round)
+            } else {
+                None
+            };
+            host.while_operation_succeeds(
+                &operation,
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    while !host
+                        .context
+                        .config
+                        .workspace
+                        .join("after-tool-ready")
+                        .exists()
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }),
+            )
+            .await
+            .expect("actual hook command remains live")
+            .expect("hook command reaches delivery gate");
+            assert!(
+                requests.try_recv().is_err(),
+                "no final-result inference before hook settlement"
+            );
+            let release = host.context.config.workspace.join("after-tool-release");
+            tokio::task::spawn_blocking(move || std::fs::write(release, "release\n"))
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(round) = acknowledgement {
+                round.function("delivery-yield-0", "yield", serde_json::json!({"until": 1}));
+            }
+            let round = if asynchronous {
+                let mut waits = 1;
+                loop {
+                    let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+                    if round
+                        .request
+                        .input
+                        .iter()
+                        .any(|item| item.0.to_string().contains("presentation-finished"))
+                    {
+                        break round;
+                    }
+                    assert!(
+                        waits <= 5,
+                        "final async presentation never reached provider"
+                    );
+                    round.function(
+                        &format!("delivery-yield-{waits}"),
+                        "yield",
+                        serde_json::json!({"until": 1}),
+                    );
+                    waits += 1;
+                }
+            } else {
+                next_hosted_script_round(&mut requests, &mut pending, &root).await
+            };
+            let delivered = round
+                .request
+                .input
+                .iter()
+                .map(|item| item.0.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(delivered.contains("keptwhole"), "{delivered}");
+            assert_eq!(
+                delivered.matches("presentation-finished").count(),
+                1,
+                "{delivered}"
+            );
+            round.function(
+                "delivery-status",
+                "status",
+                serde_json::json!({"view":"detailed"}),
+            );
+            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let status = round.settled_text("delivery-status");
+            assert_eq!(status.matches("after-tool#").count(), 1, "{status}");
             round.finish();
         })
     })

@@ -79,7 +79,6 @@ mod usage_pointer;
 pub use usage_pointer::UsagePointerTable;
 mod wait;
 mod workbench_display;
-pub use after_tool::AFTER_TOOL_WAIT_ENV;
 pub use workbench_display::bounded_output as bound_workbench_display;
 
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
