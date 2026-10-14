@@ -7,6 +7,7 @@ use exomonad_actor::{
     ResidentToolEndpoint, WorkspaceAdmission, WorkspaceCustody, WorkspaceSelection,
 };
 use exomonad_worktree::WorktreeHandle;
+use tidepool_runtime::session::SessionRemovalWait;
 
 pub(super) fn custody_fixture() -> (
     exomonad_worktree::testing::TestRepo,
@@ -407,6 +408,16 @@ pub(super) async fn inherited_response_scenario(
         .await;
     let producer_session = campaign.forest.actor_session(producer.actor.identity()).await.unwrap().unwrap();
     assert_eq!(producer_session != root_session, dedicated, "actual producer placement");
+    let mut producer_teardown = if dedicated {
+        Some(
+            campaign
+                .forest
+                .observe_session_removal(producer_session)
+                .expect("dedicated producer's exact session epoch is admitted"),
+        )
+    } else {
+        None
+    };
     campaign.authority.install_grant(
         producer.actor.identity().into(),
         ActorWorktreeGrant::Bound {
@@ -547,7 +558,12 @@ pub(super) async fn inherited_response_scenario(
             other => Err(other),
         },
     ).await;
-    if dedicated {
+    if let Some(teardown) = &mut producer_teardown {
+        assert_eq!(
+            teardown.wait(Duration::from_secs(120)).await,
+            SessionRemovalWait::Removed,
+            "inherited result remains owned while the producer's machine is removed"
+        );
         assert_eq!(campaign.forest.session_state_of(producer_session),
             tidepool_runtime::session::ResidentSessionState::Gone);
     }

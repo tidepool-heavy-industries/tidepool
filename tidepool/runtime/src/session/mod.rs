@@ -122,7 +122,8 @@ pub use recovery::{
 };
 
 pub use registry::{
-    fresh_session_id, Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, Slot, SlotKind,
+    fresh_session_id, Checkout, CheckoutError, CheckoutReceipt, SessionObservationError,
+    SessionRegistry, SessionRemovalObserver, SessionRemovalWait, Slot, SlotKind,
 };
 
 /// The console-output buffer an effect handler writes into and a turn driver

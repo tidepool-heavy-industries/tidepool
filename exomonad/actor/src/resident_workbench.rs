@@ -4804,6 +4804,16 @@ impl<H, O> ResidentActorRunner<H, O> {
         }
     }
 
+    pub(crate) fn observe_session_removal(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> Result<
+        tidepool_runtime::session::SessionRemovalObserver<'_, ResidentSession<H, O>, String>,
+        tidepool_runtime::session::SessionObservationError,
+    > {
+        self.access.machines.observe_removal(session)
+    }
+
     pub(crate) fn resident_session_state(
         &self,
         session: tidepool_repr::SessionId,

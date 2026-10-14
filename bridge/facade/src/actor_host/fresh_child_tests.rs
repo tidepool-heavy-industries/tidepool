@@ -5,6 +5,7 @@ use super::test_campaign::{
 };
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
+use tidepool_runtime::session::SessionRemovalWait;
 
 #[tokio::test]
 async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
@@ -28,6 +29,10 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
         let successor_session = campaign.forest.actor_session(successor.actor).await.unwrap().unwrap();
         assert_ne!(successor_session, root_session);
         assert_ne!(successor_session, predecessor_session, "replacement owns a fresh machine");
+        let mut successor_teardown = campaign
+            .forest
+            .observe_session_removal(successor_session)
+            .expect("successor's exact session epoch is admitted");
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
         let previous = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
             "previousExit <- awaitExit callableExitActor\ndisplay (case previousExit of { Cancelled _ -> True; _ -> False })")).await;
@@ -39,6 +44,11 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
                 LocalResidentDeployment::Retired { actor, terminal } if actor == successor.actor => Ok(terminal),
                 other => Err(other),
             }).await;
+        assert_eq!(
+            successor_teardown.wait(Duration::from_secs(120)).await,
+            SessionRemovalWait::Removed,
+            "successor teardown completes after actor retirement"
+        );
         assert_eq!(campaign.forest.session_state_of(successor_session),
             tidepool_runtime::session::ResidentSessionState::Gone);
         let returned = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
@@ -74,6 +84,10 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
             .find(|node| node.label == "ordered-source-collector").unwrap();
         let collector_session = campaign.forest.actor_session(collector.actor).await.unwrap().unwrap();
         assert_ne!(collector_session, root_session, "source observation crosses actual machines");
+        let mut collector_teardown = campaign
+            .forest
+            .observe_session_removal(collector_session)
+            .expect("collector's exact session epoch is admitted");
         let published = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
             "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)", "source remaining progress and result", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(published["status"], "replied", "{published}");
@@ -95,6 +109,11 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
                 LocalResidentDeployment::Retired { actor, terminal } if actor == collector.actor => Ok(terminal),
                 other => Err(other),
             }).await;
+        assert_eq!(
+            collector_teardown.wait(Duration::from_secs(120)).await,
+            SessionRemovalWait::Removed,
+            "collector's callable result remains checked after actual session removal"
+        );
         assert_eq!(campaign.forest.session_state_of(collector_session),
             tidepool_runtime::session::ResidentSessionState::Gone);
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
@@ -189,6 +208,10 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     child_session, root_session,
                     "callable response crosses actual machines"
                 );
+                let mut child_teardown = campaign
+                    .forest
+                    .observe_session_removal(child_session)
+                    .expect("callable child's exact session epoch is admitted");
                 assert_eq!(setup["status"], "committed", "{setup}");
                 let root_id = campaign.actor.identity();
                 campaign
@@ -242,6 +265,11 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                         },
                     )
                     .await;
+                assert_eq!(
+                    child_teardown.wait(Duration::from_secs(120)).await,
+                    SessionRemovalWait::Removed,
+                    "callable result is checked after confirmed child-session removal"
+                );
                 assert_eq!(
                     campaign.forest.session_state_of(child_session),
                     tidepool_runtime::session::ResidentSessionState::Gone
@@ -511,6 +539,10 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         child_session, root_session,
         "the explicit fresh-context launch must own its own machine"
     );
+    let mut child_teardown = campaign
+        .forest
+        .observe_session_removal(child_session)
+        .expect("fresh child's exact session epoch is admitted");
 
     campaign.acknowledge_native_spawn(&installation);
     let setup = setup.await.unwrap();
@@ -639,6 +671,11 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
             },
         )
         .await;
+    assert_eq!(
+        child_teardown.wait(Duration::from_secs(120)).await,
+        SessionRemovalWait::Removed,
+        "selected child's session is physically removed after retirement"
+    );
     assert_eq!(
         campaign.forest.session_state_of(child_session),
         tidepool_runtime::session::ResidentSessionState::Gone,

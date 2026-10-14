@@ -201,6 +201,61 @@ struct SessionAvailability {
     changed: Notify,
 }
 
+/// The exact registry-entry epoch captured by a read-only removal observer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRemovalWait {
+    Removed,
+    Replaced { current_epoch: u64 },
+    TimedOut,
+}
+
+/// Refusal to observe an id that has no current registry entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("cannot observe removal of unregistered session {0}")]
+pub struct SessionObservationError(pub SessionId);
+
+/// Read-only observation of one admitted registry epoch. It never owns or
+/// cancels the machine's cleanup; it only waits for the entry to change.
+pub struct SessionRemovalObserver<'a, M, H> {
+    registry: &'a SessionRegistry<M, H>,
+    id: SessionId,
+    epoch: u64,
+    availability: std::sync::Arc<SessionAvailability>,
+}
+
+impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRemovalObserver<'_, M, H> {
+    /// Wait for the captured epoch to leave the registry. A replacement of
+    /// the same id is reported separately from removal.
+    pub async fn wait(&mut self, timeout: std::time::Duration) -> SessionRemovalWait {
+        let wait = async {
+            loop {
+                let changed = self.availability.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+
+                let current_epoch = self
+                    .registry
+                    .slots
+                    .lock()
+                    .get(&self.id)
+                    .map(|entry| entry.epoch);
+                match current_epoch {
+                    Some(epoch) if epoch == self.epoch => changed.await,
+                    Some(current_epoch) => {
+                        return SessionRemovalWait::Replaced { current_epoch };
+                    }
+                    None => return SessionRemovalWait::Removed,
+                }
+            }
+        };
+
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(outcome) => outcome,
+            Err(_) => SessionRemovalWait::TimedOut,
+        }
+    }
+}
+
 /// The resident-session registry: owns every session's [`Slot`] and gates all
 /// machine access through atomic checkout/settlement transitions.
 pub struct SessionRegistry<M, H> {
@@ -233,6 +288,23 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// A fresh, empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Capture the exact epoch of a currently registered session. The
+    /// observer remains valid after removal and does not acquire machine
+    /// custody or alter retirement.
+    pub fn observe_removal(
+        &self,
+        id: SessionId,
+    ) -> Result<SessionRemovalObserver<'_, M, H>, SessionObservationError> {
+        let slots = self.slots.lock();
+        let entry = slots.get(&id).ok_or(SessionObservationError(id))?;
+        Ok(SessionRemovalObserver {
+            registry: self,
+            id,
+            epoch: entry.epoch,
+            availability: std::sync::Arc::clone(&entry.availability),
+        })
     }
 
     /// Record why `id` left the registry, evicting the oldest tombstone once
@@ -821,6 +893,89 @@ mod tests {
                 ..
             })
         )
+    }
+
+    #[tokio::test]
+    async fn removal_observation_requires_a_live_entry_and_catches_removal_before_wait() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(50);
+        assert!(matches!(
+            reg.observe_removal(id),
+            Err(SessionObservationError(observed)) if observed == id
+        ));
+
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        let mut observer = reg.observe_removal(id).unwrap();
+        reg.remove(id, "test retirement").unwrap();
+        assert_eq!(
+            observer.wait(std::time::Duration::from_secs(1)).await,
+            SessionRemovalWait::Removed,
+            "observation is issued against the live epoch and remains valid after removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_observers_are_independent_and_cancellation_does_not_own_cleanup() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(51);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        let cancelled = reg.observe_removal(id).unwrap();
+        let mut retained = reg.observe_removal(id).unwrap();
+        let mut cancelled = cancelled;
+        let mut cancelled_waiter = Box::pin(cancelled.wait(std::time::Duration::from_secs(30)));
+        assert!(poll_pending(cancelled_waiter.as_mut()));
+        drop(cancelled_waiter);
+        let (outcome, ()) = tokio::join!(
+            retained.wait(std::time::Duration::from_secs(1)),
+            async {
+                tokio::task::yield_now().await;
+                reg.remove(id, "test retirement").unwrap();
+            },
+        );
+        assert_eq!(
+            outcome,
+            SessionRemovalWait::Removed,
+            "cancelling one observer leaves registry removal and other observers intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_observation_timeout_is_nonterminal_and_can_be_waited_again() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(52);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        let mut observer = reg.observe_removal(id).unwrap();
+        assert_eq!(
+            observer.wait(std::time::Duration::ZERO).await,
+            SessionRemovalWait::TimedOut
+        );
+        assert_eq!(reg.kind(id), Some(SlotKind::Idle));
+        reg.remove(id, "test retirement").unwrap();
+        assert_eq!(
+            observer.wait(std::time::Duration::from_secs(1)).await,
+            SessionRemovalWait::Removed
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_observation_distinguishes_replacement_and_fences_stale_settlement() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(53);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
+        let mut observer = reg.observe_removal(id).unwrap();
+        let (stale_machine, stale_receipt) = reg.checkout_run(id).unwrap().into_parts();
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 99 }));
+        assert!(matches!(
+            observer.wait(std::time::Duration::from_secs(1)).await,
+            SessionRemovalWait::Replaced { .. }
+        ));
+
+        reg.settle_suspended(stale_receipt, stale_machine, Vec::new());
+        assert_eq!(
+            reg.peek(id, |machine| machine.turns),
+            Some(99),
+            "settling the observed stale epoch cannot overwrite its replacement"
+        );
     }
 
     #[test]

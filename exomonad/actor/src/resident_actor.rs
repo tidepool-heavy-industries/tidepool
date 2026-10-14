@@ -13979,6 +13979,23 @@ where
         self.environment.runner.resident_session_state(session)
     }
 
+    /// Observe removal of this exact currently admitted session epoch.
+    /// The observer is read-only and remains valid after removal.
+    #[must_use]
+    pub fn observe_session_removal(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> Result<
+        tidepool_runtime::session::SessionRemovalObserver<
+            '_,
+            tidepool_runtime::session::resident::ResidentSession<H, O>,
+            String,
+        >,
+        tidepool_runtime::session::SessionObservationError,
+    > {
+        self.environment.runner.observe_session_removal(session)
+    }
+
     /// Read-only resident counters for matched measurement harnesses. A
     /// running or retired machine has no snapshot rather than fabricated
     /// zeroes.
