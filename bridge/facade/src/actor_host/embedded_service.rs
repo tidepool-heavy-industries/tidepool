@@ -1532,7 +1532,10 @@ mod shutdown_tests {
                 primary: Box::new(primary),
                 persistence,
             };
-            assert_eq!(EmbeddedDriverError::Engine(error).requires_recovery(), expected);
+            assert_eq!(
+                EmbeddedDriverError::Engine(error).requires_recovery(),
+                expected
+            );
         }
     }
 
