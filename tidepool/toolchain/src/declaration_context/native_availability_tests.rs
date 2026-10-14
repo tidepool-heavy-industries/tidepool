@@ -954,6 +954,18 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .is_empty());
     assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
     assert_eq!(captured, before_custody);
+    // Fresh request-type authentication extends only interfaces. The issued
+    // parent's complete body graph must survive that handoff as private custody.
+    let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
+        .unwrap()
+        .extend_interface_context(&native_context)
+        .unwrap();
+    assert!(fresh.inventory.selected_native_groups().is_empty());
+    assert!(fresh
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", true);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.

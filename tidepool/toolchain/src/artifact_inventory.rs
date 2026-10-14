@@ -4863,13 +4863,77 @@ impl ArtifactView {
                 }
             }
         }
-        let custody_roots = retained_ids
+        let mut custody_roots = retained_ids
             .difference(&initial)
             .map(|id| {
                 self.resolve_binding(*id, owned)
                     .map(InventoryNodeKey::Artifact)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Interface projection narrows roots, but cannot discard the exact
+        // issued body proof already owned for its retained original carriers.
+        // These groups remain custody only; no census is inferred from bytes.
+        let selected_nodes = selected.iter().copied().collect::<BTreeSet<_>>();
+        let interface_nodes = admitted_closure(&state, selected.iter().copied());
+        // Keep an already issued original carrier only when its recorded
+        // canonical edge points into the selected interface closure. Artifact
+        // bytes alone do not qualify a carrier or provide missing Group nodes.
+        let carriers = owned
+            .iter()
+            .flat_map(|node| {
+                let InventoryNodeKey::Group(group) = node else {
+                    return Vec::new();
+                };
+                state
+                    .graph
+                    .edges(state.indices[node])
+                    .filter_map(|edge| {
+                        let carrier_node = state.graph[edge.target()];
+                        let InventoryNodeKey::Artifact(carrier) = carrier_node else {
+                            return None;
+                        };
+                        if carrier.artifact != group.binding.artifact
+                            || *edge.weight() != ArtifactDependency::Interface
+                        {
+                            return None;
+                        }
+                        let ArtifactPayload::Original(product) = &state.payloads[&carrier.artifact].payload else {
+                            return None;
+                        };
+                        let canonical = ArtifactEntry::canonical(product.module_interface()?.clone()).descriptor.id;
+                        state
+                            .graph
+                            .edges(state.indices[&carrier_node])
+                            .any(|pair| {
+                                *pair.weight() == ArtifactDependency::Interface
+                                    && matches!(state.graph[pair.target()], InventoryNodeKey::Artifact(binding)
+                                        if binding.artifact == canonical)
+                                    && interface_nodes.contains(&state.graph[pair.target()])
+                            })
+                            .then_some(carrier_node)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeSet<_>>();
+        custody_roots.extend(
+            carriers
+                .into_iter()
+                .filter(|node| !selected_nodes.contains(node)),
+        );
+        let retained_nodes =
+            admitted_closure(&state, selected.iter().chain(custody_roots.iter()).copied());
+        custody_roots.extend(owned.iter().copied().filter(|node| {
+            let InventoryNodeKey::Group(group) = node else {
+                return false;
+            };
+            !selected_nodes.contains(node)
+                && state.graph.edges(state.indices[node]).any(|edge| {
+                    matches!(state.graph[edge.target()], InventoryNodeKey::Artifact(carrier)
+                        if carrier.artifact == group.binding.artifact)
+                        && *edge.weight() == ArtifactDependency::Interface
+                        && retained_nodes.contains(&state.graph[edge.target()])
+                })
+        }));
         drop(state);
         let retained = self
             .lease
@@ -5679,12 +5743,16 @@ mod tests {
             let id = original.descriptor.id;
             let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
             let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            let owner = ExactModuleIdentity { unit: product.owner().unit.clone(), module: product.owner().module.clone() };
             let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
             let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
             for _ in 0..repeats {
                 view = inventory.empty_view().merge_compiler_inputs(
                     &CompilerInputProjection::default(), &view, &roles,
                 ).unwrap().0;
+                view = view.interface_projection(&[owner.clone()]).unwrap();
+                proptest::prop_assert!(view.roots().iter().all(|root|
+                    matches!(root, InventoryNodeKey::Artifact(binding) if binding.artifact == canonical)));
                 let before = ExactArtifactSelection::capture(&view);
                 let proof = NativeOriginalRequirement::from_issued_group_custody(id, canonical, &view)
                     .unwrap().expect("one complete issued carrier remains available");
@@ -5726,6 +5794,44 @@ mod tests {
             proptest::prop_assert!(NativeOriginalRequirement::from_issued_group_custody(id, canonical, &combined)
                 .unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn interface_projection_does_not_retain_native_importers() {
+        let inventory = ArtifactInventory::default();
+        let child = Arc::new(entry("OnlyImportedType", &[]));
+        let native = Arc::new(issued_native_groups(
+            "UnrelatedNative",
+            vec![(7, Vec::new())],
+            &[&child],
+            &BTreeMap::new(),
+        ));
+        let native_id = native.descriptor.id;
+        let ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        let native_canonical_id =
+            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
+        let child_id = child.descriptor.id;
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![native, child.clone()])
+            .unwrap();
+        assert!(view
+            .binding_dependencies()
+            .iter()
+            .any(
+                |(from, to, dependency)| from.artifact() == native_canonical_id
+                    && to.artifact() == child_id
+                    && *dependency == ArtifactDependency::Interface
+            ));
+        let projected = view
+            .interface_projection(&[child.descriptor.owner.clone()])
+            .unwrap();
+        assert!(projected.selected_native_groups().is_empty());
+        assert!(!projected.artifact_ids().contains(&native_id));
+        assert!(projected.capture_graph_selection().native_groups.is_empty());
     }
 
     #[test]
@@ -5864,6 +5970,34 @@ mod tests {
                 .is_none(),
             "equal canonical bytes cannot substitute another recorded binding"
         );
+        let owner = native.descriptor.owner.clone();
+        for view in [&ambiguous, &split, &mismatch] {
+            match view.interface_projection(&[owner.clone()]) {
+                Ok(projected) => {
+                    assert!(projected.selected_native_groups().is_empty());
+                    if !projected.artifact_ids().contains(&id) {
+                        continue;
+                    }
+                    match NativeOriginalRequirement::from_issued_group_custody(
+                        id,
+                        canonical_id,
+                        &projected,
+                    ) {
+                        Ok(proof) => assert!(proof.is_none()),
+                        Err(CompileError::ArtifactInventory(error)) => assert!(matches!(
+                            error.failure,
+                            ArtifactInventoryFailure::BindingAmbiguity { .. }
+                        )),
+                        Err(other) => panic!("unexpected projection refusal: {other:?}"),
+                    }
+                }
+                Err(CompileError::ArtifactInventory(error)) => assert!(matches!(
+                    error.failure,
+                    ArtifactInventoryFailure::BindingAmbiguity { .. }
+                )),
+                Err(other) => panic!("unexpected projection refusal: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -10759,6 +10893,24 @@ mod tests {
                 .roots
                 .iter()
                 .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
+            let projected = view
+                .interface_projection(&[native.descriptor.owner.clone()])
+                .unwrap();
+            assert!(projected.selected_native_groups().is_empty());
+            let private = NativeOriginalRequirement::from_issued_group_custody(
+                native_id,
+                canonical_id,
+                &projected,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(private
+                .selection
+                .graph_selection()
+                .native_groups
+                .iter()
+                .any(|group| group.original_ordinal == 7
+                    && group.binding.selection != original_binding.selection));
             view.native_requirements_from_roots(&[NativeRequirementRoot::Group {
                 artifact: native_id,
                 original_ordinal: 7,
