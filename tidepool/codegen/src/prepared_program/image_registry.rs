@@ -1017,92 +1017,256 @@ mod tests {
     #[derive(Clone, Debug)]
     enum HistoryOp {
         Fresh(bool),
-        Lookup(u8),
-        CloneOwner(u8),
-        Release(u8),
+        Lookup(usize),
+        CloneOwner(usize),
+        Release(usize),
     }
 
-    fn replay_liveness_history(history: &[HistoryOp]) {
-        // Owners are the liveness oracle; no Weak counts or production sweep
-        // state determine expectations. Keys remain distinct across fresh ops.
+    #[derive(Default, Debug)]
+    struct LivenessCoverage {
+        fresh_retained: usize,
+        fresh_unretained: usize,
+        live_lookups: usize,
+        expired_lookups: usize,
+        lookup_missing_operand: usize,
+        clones: usize,
+        clone_missing_operand: usize,
+        clone_released_owner: usize,
+        releases: usize,
+        release_missing_operand: usize,
+        release_released_owner: usize,
+        shared_releases: usize,
+        last_releases: usize,
+        peak_owners: usize,
+        reclaimed: usize,
+    }
+
+    fn liveness_operation() -> impl Strategy<Value = HistoryOp> {
+        proptest::prop_oneof![
+            proptest::arbitrary::any::<bool>().prop_map(HistoryOp::Fresh),
+            (0usize..16).prop_map(HistoryOp::Lookup),
+            (0usize..16).prop_map(HistoryOp::CloneOwner),
+            (0usize..16).prop_map(HistoryOp::Release),
+        ]
+    }
+
+    fn shared_owner_history(prefix: &[HistoryOp], cold_keys: usize) -> Vec<HistoryOp> {
+        // This newly issued logical key cannot be changed by the prefix.
+        // Rebuilding the core after shrinking preserves both its live lookup
+        // after a shared release and its expired lookup after the last release.
+        let slot = prefix
+            .iter()
+            .filter(|op| matches!(op, HistoryOp::Fresh(_)))
+            .count();
+        let mut history = prefix.to_vec();
+        history.extend([
+            HistoryOp::Fresh(true),
+            HistoryOp::CloneOwner(slot),
+            HistoryOp::Release(slot),
+            HistoryOp::Lookup(slot),
+            HistoryOp::Release(slot),
+            HistoryOp::Lookup(slot),
+            HistoryOp::CloneOwner(slot),
+            HistoryOp::Release(slot),
+            HistoryOp::Fresh(false),
+        ]);
+        // Fresh keys must not postpone collection of unrelated expired keys.
+        history.extend(std::iter::repeat_n(HistoryOp::Fresh(false), cold_keys));
+        history
+    }
+
+    fn replay_liveness_history(
+        history: &[HistoryOp],
+        coverage: &mut LivenessCoverage,
+    ) -> proptest::test_runner::TestCaseResult {
+        // The explicit holder vectors are the model. Weak image handles only
+        // observe physical release and never supply expected ownership.
         let registry = ImageRegistry::new();
         let mut keys = Vec::new();
         let mut owners: Vec<Vec<Arc<CompiledProgram>>> = Vec::new();
+        let mut images = Vec::new();
         let mut deadlines = Vec::new();
+        let mut reclaimed = std::collections::BTreeSet::new();
         let mut indexed_ops = 0usize;
-        for op in history {
+        for (step, op) in history.iter().enumerate() {
             match *op {
                 HistoryOp::Fresh(retain) => {
                     let key = program_returning(keys.len() as i64);
                     let image = Arc::new(CompiledProgram::compile(&key).unwrap());
                     let image = registry.insert(key.clone(), image);
                     indexed_ops += 1;
+                    images.push(Arc::downgrade(&image));
                     keys.push(key);
                     owners.push(if retain { vec![image] } else { vec![] });
                     deadlines.push((!retain).then_some(indexed_ops + keys.len()));
+                    coverage.fresh_retained += usize::from(retain);
+                    coverage.fresh_unretained += usize::from(!retain);
+                    coverage.peak_owners = coverage.peak_owners.max(usize::from(retain));
                 }
-                HistoryOp::Lookup(slot) if !keys.is_empty() => {
-                    let slot = usize::from(slot) % keys.len();
-                    let found = registry.lookup(&keys[slot]);
-                    indexed_ops += 1;
-                    if let Some(owner) = owners[slot].first() {
-                        assert!(Arc::ptr_eq(owner, &found.expect("live owner is reusable")));
+                HistoryOp::Lookup(slot) => {
+                    if keys.is_empty() {
+                        coverage.lookup_missing_operand += 1;
                     } else {
-                        assert!(found.is_none(), "released image must not be retained");
+                        let slot = slot % keys.len();
+                        let found = registry.lookup(&keys[slot]);
+                        indexed_ops += 1;
+                        if let Some(owner) = owners[slot].first() {
+                            coverage.live_lookups += 1;
+                            proptest::prop_assert!(
+                                found
+                                    .as_ref()
+                                    .is_some_and(|image| Arc::ptr_eq(owner, image)),
+                                "live owner is reusable at step {}: {:?}",
+                                step,
+                                history
+                            );
+                        } else {
+                            coverage.expired_lookups += 1;
+                            proptest::prop_assert!(
+                                found.is_none(),
+                                "released image retained at step {}: {:?}",
+                                step,
+                                history
+                            );
+                        }
+                        // A successful lookup is a temporary strong owner. It
+                        // must leave before any physical-release observation.
+                        drop(found);
                     }
                 }
-                HistoryOp::CloneOwner(slot) if !keys.is_empty() => {
-                    let slot = usize::from(slot) % keys.len();
-                    if let Some(owner) = owners[slot].first().cloned() {
-                        owners[slot].push(owner);
+                HistoryOp::CloneOwner(slot) => {
+                    if keys.is_empty() {
+                        coverage.clone_missing_operand += 1;
+                    } else {
+                        let slot = slot % keys.len();
+                        if let Some(owner) = owners[slot].first().cloned() {
+                            owners[slot].push(owner);
+                            coverage.clones += 1;
+                            coverage.peak_owners = coverage.peak_owners.max(owners[slot].len());
+                        } else {
+                            coverage.clone_released_owner += 1;
+                        }
                     }
                 }
-                HistoryOp::Release(slot) if !keys.is_empty() => {
-                    let slot = usize::from(slot) % keys.len();
-                    if owners[slot].pop().is_some() && owners[slot].is_empty() {
-                        // The frozen interval cannot exceed all keys issued so
-                        // far. Later fresh keys must not extend this deadline.
-                        deadlines[slot] = Some(indexed_ops + keys.len());
+                HistoryOp::Release(slot) => {
+                    if keys.is_empty() {
+                        coverage.release_missing_operand += 1;
+                    } else {
+                        let slot = slot % keys.len();
+                        if owners[slot].pop().is_some() {
+                            coverage.releases += 1;
+                            if owners[slot].is_empty() {
+                                coverage.last_releases += 1;
+                                // Later fresh keys cannot extend this deadline.
+                                deadlines[slot] = Some(indexed_ops + keys.len());
+                            } else {
+                                coverage.shared_releases += 1;
+                            }
+                        } else {
+                            coverage.release_released_owner += 1;
+                        }
                     }
                 }
-                _ => {}
             }
+            // Neither check calls lookup, sweeps, or retains an upgraded image.
             let entries = registry.entries.lock().unwrap();
             for (slot, key) in keys.iter().enumerate() {
+                proptest::prop_assert_eq!(
+                    images[slot].upgrade().is_some(),
+                    !owners[slot].is_empty(),
+                    "physical image lifetime at step {}, slot {}: {:?}",
+                    step,
+                    slot,
+                    history
+                );
                 let entry = entries
                     .images
                     .get(&ImageKey::Program(key.prepared().clone()));
                 if !owners[slot].is_empty() {
-                    assert!(
+                    proptest::prop_assert!(
                         matches!(entry, Some(Entry::Ready(_))),
-                        "live key {slot} lost"
+                        "live key {} lost at step {}: {:?}",
+                        slot,
+                        step,
+                        history
                     );
-                } else if deadlines[slot].is_some_and(|deadline| indexed_ops >= deadline) {
-                    assert!(entry.is_none(), "dead key {slot} retained beyond liveness bound at op {indexed_ops}: {history:?}");
+                } else {
+                    if entry.is_none() && reclaimed.insert(slot) {
+                        coverage.reclaimed += 1;
+                    }
+                    if deadlines[slot].is_some_and(|deadline| indexed_ops >= deadline) {
+                        proptest::prop_assert!(
+                            entry.is_none(),
+                            "dead key {} beyond liveness bound at op {}: {:?}",
+                            slot,
+                            indexed_ops,
+                            history
+                        );
+                    }
                 }
             }
         }
+        Ok(())
     }
 
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config::default())]
-        #[test]
-        fn generated_owner_histories_bound_dead_keys(
-            prefix in proptest::collection::vec(
-                proptest::prop_oneof![
-                    proptest::arbitrary::any::<bool>().prop_map(HistoryOp::Fresh),
-                    (0u8..16).prop_map(HistoryOp::Lookup),
-                    (0u8..16).prop_map(HistoryOp::CloneOwner),
-                    (0u8..16).prop_map(HistoryOp::Release),
-                ], 0..40),
-            cold_keys in 8usize..24,
-        ) {
-            let mut history = prefix;
-            // Targeted fresh-key growth follows arbitrary shared-owner history.
-            history.extend([HistoryOp::Fresh(true), HistoryOp::Fresh(false)]);
-            history.extend(std::iter::repeat_n(HistoryOp::Fresh(false), cold_keys));
-            replay_liveness_history(&history);
+    #[test]
+    fn owner_history_support_distinguishes_effective_operations_and_refusals() {
+        let prefix = [
+            HistoryOp::Lookup(0),
+            HistoryOp::CloneOwner(0),
+            HistoryOp::Release(0),
+        ];
+        let mut coverage = LivenessCoverage::default();
+        replay_liveness_history(&shared_owner_history(&prefix, 8), &mut coverage).unwrap();
+        assert_eq!(coverage.lookup_missing_operand, 1);
+        assert_eq!(coverage.clone_missing_operand, 1);
+        assert_eq!(coverage.release_missing_operand, 1);
+        assert_eq!(coverage.clones, 1);
+        assert_eq!(coverage.clone_released_owner, 1);
+        assert_eq!(coverage.release_released_owner, 1);
+        assert_eq!(coverage.shared_releases, 1);
+        assert_eq!(coverage.last_releases, 1);
+        assert_eq!(coverage.live_lookups, 1);
+        assert_eq!(coverage.expired_lookups, 1);
+        assert_eq!(coverage.peak_owners, 2);
+        assert!(coverage.reclaimed > 0);
+        eprintln!("image owner deterministic support: {coverage:?}");
+    }
+
+    #[test]
+    fn generated_owner_histories_bound_dead_keys() {
+        use proptest::test_runner::{
+            contextualize_config, Config, FileFailurePersistence, TestRunner,
+        };
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
         }
+        let mut config = contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::generated_owner_histories_bound_dead_keys"
+        ));
+        let cases = config.cases;
+        let callbacks = std::cell::Cell::new(0usize);
+        let coverage = std::cell::RefCell::new(LivenessCoverage::default());
+        let result = TestRunner::new(config).run(
+            &(
+                proptest::collection::vec(liveness_operation(), 0..40),
+                8usize..24,
+            ),
+            |(prefix, cold_keys)| {
+                callbacks.set(callbacks.get() + 1);
+                replay_liveness_history(
+                    &shared_owner_history(&prefix, cold_keys),
+                    &mut coverage.borrow_mut(),
+                )
+            },
+        );
+        eprintln!("image owner campaign configured_cases={cases} callbacks_including_replay_and_shrinking={} coverage={:?}",
+            callbacks.get(), coverage.borrow());
+        result.unwrap();
     }
 
     #[test]

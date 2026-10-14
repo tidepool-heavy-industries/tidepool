@@ -547,6 +547,7 @@ impl Rows {
             physical: issued_groups.clone(),
             namespace: namespace.clone(),
             roots: BTreeSet::new(),
+            demand: BTreeSet::new(),
         };
         for raw in &planned_groups {
             let carrier = namespace[&catalog.originals[raw.0].descriptor.id];
@@ -600,6 +601,7 @@ impl Rows {
             physical,
             namespace,
             roots: parent.roots.clone(),
+            demand: catalog.group_closure(&parent.demand.union(demanded).copied().collect()),
         }
     }
 }
@@ -609,8 +611,10 @@ struct View {
     inventory: usize,
     physical: BTreeSet<Physical>,
     namespace: BTreeMap<ArtifactId, Physical>,
-    // Demand intent is separate from physical carrier custody.
+    // Artifact-root observation and closed executable demand are distinct
+    // from the complete physical byte custody.
     roots: BTreeSet<ArtifactId>,
+    demand: BTreeSet<RawGroup>,
 }
 
 impl View {
@@ -668,6 +672,7 @@ fn root_groups(root: u8) -> BTreeSet<RawGroup> {
         3 => (0..MODULES)
             .flat_map(|node| ORDINALS.map(|ordinal| (node, ordinal)))
             .collect(),
+        5 => BTreeSet::from([(3, 29)]),
         _ => BTreeSet::new(),
     }
 }
@@ -677,7 +682,7 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
     proptest::collection::vec(
         prop_oneof![
             1 => (0usize..2, slot.clone()).prop_map(|(inventory, to)| Op::Empty { inventory, to }),
-            5 => (slot.clone(), 0u8..5, any::<bool>(), any::<bool>(), slot.clone())
+            5 => (slot.clone(), 0u8..6, any::<bool>(), any::<bool>(), slot.clone())
                 .prop_map(|(parent, root, future, reverse, to)| Op::Admit { parent, root, future, reverse, to }),
             2 => (slot.clone(), slot.clone()).prop_map(|(from, to)| Op::Clone { from, to }),
             2 => slot.clone().prop_map(Op::Drop),
@@ -713,6 +718,9 @@ struct Coverage {
     indexed_unique: usize,
     indexed_unavailable: usize,
     indexed_ambiguous: usize,
+    custody_only_views: usize,
+    custody_only_reads: usize,
+    selected_retained_body: usize,
 }
 
 fn prefix() -> Vec<Op> {
@@ -985,11 +993,24 @@ fn check_native_selection_index(
 }
 
 fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError> {
+    let mut coverage = Coverage::default();
+    let result = run_history_observed(catalog, ops, &mut coverage);
+    if result.is_err() {
+        eprintln!("native failed history coverage: {coverage:?}; operations={ops:?}");
+    }
+    result?;
+    Ok(coverage)
+}
+
+fn run_history_observed(
+    catalog: &Catalog,
+    ops: &[Op],
+    coverage: &mut Coverage,
+) -> Result<(), TestCaseError> {
     let inventories = [ArtifactInventory::default(), ArtifactInventory::default()];
     let mut actual: [Option<ArtifactView>; SLOTS] = std::array::from_fn(|_| None);
     let mut model: [Option<View>; SLOTS] = std::array::from_fn(|_| None);
     let mut rows = Rows::default();
-    let mut coverage = Coverage::default();
     let mut prior_live = [0; 2];
     for (step, op) in ops.iter().enumerate() {
         match op {
@@ -1000,6 +1021,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     physical: BTreeSet::new(),
                     namespace: BTreeMap::new(),
                     roots: BTreeSet::new(),
+                    demand: BTreeSet::new(),
                 });
             }
             Op::Admit {
@@ -1043,6 +1065,10 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         }
                         actual[*to] = Some(result);
                         model[*to] = Some(admitted);
+                        coverage.selected_retained_body += demanded
+                            .intersection(&groups(&view.facts()))
+                            .filter(|group| !view.demand.contains(group))
+                            .count();
                         coverage.admissions += 1;
                     } else {
                         prop_assert_eq!(
@@ -1096,7 +1122,25 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                                 }
                             }
                         }
-                        let mut physical = rows.close(selected);
+                        let selected_closure = rows.close(selected);
+                        let demand = groups(&selected_closure.iter().map(|row| row.fact).collect());
+                        let mut physical = selected_closure.clone();
+                        // A retained canonical interface can keep several exact
+                        // original carriers. Their recorded canonical edge must
+                        // land in the independently selected interface closure.
+                        for group in view
+                            .physical
+                            .iter()
+                            .filter(|row| matches!(row.fact, Fact::Group(_)))
+                        {
+                            let carrier = rows.carrier(*group);
+                            if rows.edges[&carrier].iter().any(|(target, edge)| {
+                                *edge == ArtifactDependency::Interface
+                                    && selected_closure.contains(target)
+                            }) {
+                                physical.insert(carrier);
+                            }
+                        }
                         // All bodies' source bytes retain available dependency
                         // carriers; this adds no executable group demand.
                         loop {
@@ -1123,6 +1167,19 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                                     }
                                 }
                             }
+                            // An already issued body belongs to retained byte
+                            // custody whenever its exact carrier remains held.
+                            // This does not add it to the demand closure above.
+                            physical.extend(
+                                view.physical
+                                    .iter()
+                                    .filter(|row| {
+                                        matches!(row.fact, Fact::Group(_))
+                                            && physical.contains(&rows.carrier(**row))
+                                    })
+                                    .copied()
+                                    .collect::<Vec<_>>(),
+                            );
                             physical = rows.close(physical);
                             if physical == prior {
                                 break;
@@ -1140,6 +1197,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                             physical,
                             namespace,
                             roots: ids,
+                            demand,
                         });
                         coverage.projections += 1;
                     } else {
@@ -1181,12 +1239,15 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     namespace.extend(right_view.namespace);
                     let mut roots = left_view.roots;
                     roots.extend(right_view.roots);
+                    let mut demand = left_view.demand;
+                    demand.extend(right_view.demand);
                     actual[*to] = Some(result.unwrap());
                     model[*to] = Some(View {
                         inventory,
                         physical,
                         namespace,
                         roots,
+                        demand,
                     });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
@@ -1285,6 +1346,8 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         );
                         prop_assert_eq!(result.bindings, catalog.bindings_for(&requested));
                         prop_assert!(result.packages.is_empty());
+                        coverage.custody_only_reads +=
+                            usize::from(!requested.is_subset(&view.demand));
                         coverage.reads += 1;
                     } else {
                         coverage.read_refusals += 1;
@@ -1309,7 +1372,9 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         matches!(row.fact, Fact::Group(_)) && rows.carrier(**row).scope != row.scope
                     })
                     .count();
-                check_native_selection_index(observed, &mut coverage)?;
+                coverage.custody_only_views +=
+                    usize::from(!groups(&view.facts()).is_subset(&view.demand));
+                check_native_selection_index(observed, coverage)?;
                 let graph = observed.capture_graph_selection();
                 let expected_handles = view
                     .physical
@@ -1370,7 +1435,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 );
                 prop_assert_eq!(
                     observed.selected_native_groups(),
-                    catalog.selection(&groups(&view.facts())),
+                    catalog.selection(&view.demand),
                     "step {}, slot {}",
                     step,
                     slot
@@ -1424,7 +1489,535 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
     for inventory in &inventories {
         prop_assert_eq!(inventory.node_count(), 0, "all parents and clones released");
     }
-    Ok(coverage)
+    Ok(())
+}
+
+fn retained_body_history() -> Vec<Op> {
+    vec![
+        Op::Empty {
+            inventory: 0,
+            to: 0,
+        },
+        Op::Admit {
+            parent: 0,
+            root: 3,
+            future: true,
+            reverse: false,
+            to: 1,
+        },
+        Op::Project {
+            from: 1,
+            nodes: vec![1],
+            to: 2,
+        },
+        Op::Read {
+            from: 2,
+            node: 3,
+            ordinal: 29,
+            all: false,
+        },
+        Op::Drop(1),
+        Op::Recover {
+            from: 2,
+            inventory: 1,
+            to: 3,
+        },
+        Op::Read {
+            from: 3,
+            node: 3,
+            ordinal: 29,
+            all: false,
+        },
+        Op::Admit {
+            parent: 3,
+            root: 5,
+            future: true,
+            reverse: false,
+            to: 4,
+        },
+        Op::Drop(2),
+        Op::Drop(3),
+        Op::Read {
+            from: 4,
+            node: 3,
+            ordinal: 29,
+            all: false,
+        },
+    ]
+}
+
+#[test]
+fn projected_complete_carrier_custody_matches_minimized_history() {
+    let catalog = Catalog::new(&[0, 0, 0, 1], &[0; 2 * MODULES], 1);
+    let mut history = prefix();
+    // The causal tail from the retained fail-before trace; its six trailing
+    // empty operations were only the arbitrary strategy's minimum vector size.
+    history.extend([
+        Op::Admit {
+            parent: 0,
+            root: 1,
+            future: true,
+            reverse: false,
+            to: 1,
+        },
+        Op::Project {
+            from: 1,
+            nodes: vec![1],
+            to: 0,
+        },
+    ]);
+    let coverage = run_history(&catalog, &history).unwrap();
+    assert!(coverage.custody_only_views > 0, "{coverage:?}");
+    eprintln!("complete carrier custody regression: {coverage:?}");
+}
+
+#[test]
+fn retained_body_enters_demand_only_after_explicit_selection() {
+    let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let coverage = run_history(&catalog, &retained_body_history()).unwrap();
+    assert!(coverage.custody_only_views > 0, "{coverage:?}");
+    assert!(coverage.custody_only_reads >= 2, "{coverage:?}");
+    assert!(coverage.selected_retained_body > 0, "{coverage:?}");
+
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let all_groups = root_groups(3);
+    let parent = inventory
+        .admit_recovery_selection(
+            &empty,
+            catalog.entries(true, false),
+            &catalog.selection(&all_groups),
+        )
+        .unwrap();
+    let projected = parent
+        .select_roots(vec![catalog.originals[1].descriptor.id])
+        .unwrap();
+    let body = catalog.key((3, 29));
+    let graph = projected.capture_graph_selection();
+    let held = *graph
+        .native_groups
+        .iter()
+        .find(|group| {
+            group.binding.artifact == body.artifact
+                && group.original_ordinal == body.original_ordinal
+        })
+        .expect("the exact carrier keeps its already issued body bytes");
+    let expected =
+        catalog.group_closure(&ORDINALS.into_iter().map(|ordinal| (1, ordinal)).collect());
+    assert_eq!(
+        projected.selected_native_groups(),
+        catalog.selection(&expected)
+    );
+    assert!(!projected.selected_native_groups().contains(&body));
+    let available = projected
+        .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: body.artifact,
+            original_ordinal: body.original_ordinal,
+        }])
+        .unwrap();
+    assert!(available.bindings.is_empty() && available.packages.is_empty());
+    assert_eq!(
+        projected.selected_native_groups(),
+        catalog.selection(&expected),
+        "a query does not select demand"
+    );
+    drop(parent);
+    let mut requested = expected.clone();
+    requested.insert((3, 29));
+    let selected = inventory
+        .admit_recovery_selection(&projected, Vec::new(), &catalog.selection(&requested))
+        .unwrap();
+    assert_eq!(
+        selected.selected_native_groups(),
+        catalog.selection(&requested)
+    );
+    assert!(
+        selected
+            .capture_graph_selection()
+            .native_groups
+            .contains(&held),
+        "selection reuses the exact retained issuing body"
+    );
+    assert_eq!(
+        projected.selected_native_groups(),
+        catalog.selection(&expected),
+        "selection never widens the older view"
+    );
+    drop(projected);
+    drop(selected);
+    drop(empty);
+    assert_eq!(inventory.node_count(), 0);
+}
+
+#[derive(Default, Debug)]
+struct ColdNativeCoverage {
+    callbacks: usize,
+    completed: usize,
+    eager_reads: usize,
+    delayed_reads: usize,
+    slot_reuses: usize,
+    recoveries: usize,
+    cross_scope_carriers: usize,
+}
+
+fn check_cold_native_projection(
+    view: &ArtifactView,
+    catalog: &Catalog,
+    selected: &BTreeSet<RawGroup>,
+    roots: Option<&[usize]>,
+) -> Result<(), TestCaseError> {
+    // The initial diamond reaches every supplied original. Expected payloads,
+    // native selection and binding requirements come from authored fixture facts.
+    prop_assert_eq!(
+        view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+        carrier_ids(&catalog.facts(catalog.supplied_ids(false), selected.clone()))
+    );
+    prop_assert_eq!(view.selected_native_groups(), catalog.selection(selected));
+    prop_assert_eq!(
+        view.root_entries()
+            .into_iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>(),
+        roots.map_or_else(
+            || catalog.supplied_ids(false),
+            |roots| roots
+                .iter()
+                .map(|node| catalog.originals[*node].descriptor.id)
+                .collect::<BTreeSet<_>>()
+        )
+    );
+    let (requirements, groups) = view
+        .native_requirements_with_groups_from_roots(&[NativeRequirementRoot::Group {
+            artifact: catalog.key((0, 3)).artifact,
+            original_ordinal: 3,
+        }])
+        .unwrap();
+    prop_assert_eq!(requirements.bindings, catalog.bindings_for(&root_groups(0)));
+    prop_assert!(requirements.packages.is_empty());
+    prop_assert_eq!(
+        groups,
+        catalog.selection(&catalog.group_closure(&root_groups(0)))
+    );
+    prop_assert!(
+        view.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: catalog.key((0, 11)).artifact,
+            original_ordinal: 11,
+        },])
+            .is_err(),
+        "available original bytes do not select the future body"
+    );
+    Ok(())
+}
+
+fn cold_native_history(
+    catalog: &Catalog,
+    schedule: [bool; 3],
+    coverage: &mut ColdNativeCoverage,
+) -> Result<(), TestCaseError> {
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let selected = catalog.group_closure(&root_groups(0));
+    let retired = Arc::new(ArtifactEntry::canonical(
+        crate::certified_products::fixture_module_interface(
+            [9; 32],
+            "fixture",
+            "ColdRetired",
+            BTreeMap::new(),
+        ),
+    ));
+    let mut entries = catalog.entries(false, false);
+    entries.push(retired.clone());
+    let parent = inventory
+        .admit_recovery_selection(&empty, entries, &catalog.selection(&selected))
+        .unwrap();
+    let projection = parent
+        .select_roots(vec![catalog.originals[0].descriptor.id])
+        .unwrap();
+    let alias = projection.clone();
+    let left = parent
+        .select_roots(vec![catalog.originals[0].descriptor.id])
+        .unwrap();
+    let right = parent
+        .select_roots(vec![catalog.originals[1].descriptor.id])
+        .unwrap();
+    let merged = left.merge(&right).unwrap();
+    let parent_reads = Arc::downgrade(&parent.reads);
+    let left_reads = Arc::downgrade(&left.reads);
+    let right_reads = Arc::downgrade(&right.reads);
+    prop_assert!(Arc::ptr_eq(&projection.lease, &alias.lease));
+    prop_assert!(Arc::ptr_eq(&projection.reads, &alias.reads));
+    // Only explicit operations may initialize these outputs. The checker never
+    // uses public getters merely to establish that an output is still cold.
+    prop_assert!(projection.reads.read_projection.get().is_none());
+    prop_assert!(merged.reads.read_projection.get().is_none());
+    for (index, (view, roots)) in [
+        (&projection, &[0usize][..]),
+        (&alias, &[0usize][..]),
+        (&merged, &[0usize, 1][..]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if schedule[index] {
+            check_cold_native_projection(view, catalog, &selected, Some(roots))?;
+            coverage.eager_reads += 1;
+        }
+    }
+    let cold_projection = projection.reads.read_projection.get().is_none();
+    let cold_merged = merged.reads.read_projection.get().is_none();
+    // Detached metadata copies retain payload observations, but never a view
+    // lease or its derived read cache. Keep them alive beyond final reclamation.
+    let metadata = parent.metadata_snapshot();
+    let mut expected_metadata = catalog.supplied_ids(false);
+    expected_metadata.insert(retired.descriptor.id);
+    let retired_slot = {
+        let state = inventory.0.lock().unwrap();
+        let slots = state.indices.iter().filter_map(|(node, slot)| {
+            matches!(node, InventoryNodeKey::Artifact(binding) if binding.artifact == retired.descriptor.id).then_some(*slot)
+        }).collect::<Vec<_>>();
+        prop_assert_eq!(slots.len(), 1, "one unrelated admitted row must retire");
+        slots[0]
+    };
+    drop(parent);
+    drop(left);
+    drop(right);
+    prop_assert!(parent_reads.upgrade().is_none());
+    prop_assert!(left_reads.upgrade().is_none());
+    prop_assert!(right_reads.upgrade().is_none());
+    prop_assert_eq!(
+        inventory.node_count(),
+        catalog
+            .facts(catalog.supplied_ids(false), selected.clone())
+            .len()
+    );
+    let replacement = Arc::new(ArtifactEntry::canonical(
+        crate::certified_products::fixture_module_interface(
+            [9; 32],
+            "fixture",
+            "ColdReplacement",
+            BTreeMap::new(),
+        ),
+    ));
+    let unrelated = inventory
+        .admit_shared(&empty, vec![replacement.clone()])
+        .unwrap();
+    {
+        let state = inventory.0.lock().unwrap();
+        let slots = state.indices.iter().filter_map(|(node, slot)| {
+            matches!(node, InventoryNodeKey::Artifact(binding) if binding.artifact == replacement.descriptor.id).then_some(*slot)
+        }).collect::<Vec<_>>();
+        prop_assert_eq!(slots.len(), 1);
+        prop_assert_eq!(
+            slots[0],
+            retired_slot,
+            "the history must actually reuse the retired slot"
+        );
+    }
+    coverage.slot_reuses += 1;
+    prop_assert_eq!(
+        projection.reads.read_projection.get().is_none(),
+        cold_projection
+    );
+    prop_assert_eq!(merged.reads.read_projection.get().is_none(), cold_merged);
+    check_cold_native_projection(&projection, catalog, &selected, Some(&[0]))?;
+    check_cold_native_projection(&merged, catalog, &selected, Some(&[0, 1]))?;
+    coverage.delayed_reads += usize::from(cold_projection) + usize::from(cold_merged);
+    let graph = merged.capture_graph_selection();
+    let dependencies = merged.binding_dependencies();
+    let recovery_inventory = ArtifactInventory::default();
+    let recovered = recovery_inventory
+        .recover_selection(
+            &recovery_inventory.empty_view(),
+            merged.entries(),
+            &graph,
+            &dependencies,
+        )
+        .unwrap();
+    prop_assert!(recovered.reads.read_projection.get().is_none());
+    check_cold_native_projection(&recovered, catalog, &selected, Some(&[0, 1]))?;
+    prop_assert_eq!(&recovered.capture_graph_selection(), &graph);
+    prop_assert_eq!(recovered.binding_dependencies(), dependencies);
+    coverage.recoveries += 1;
+    let projection_lease = Arc::downgrade(&projection.lease);
+    drop(projection);
+    prop_assert!(
+        projection_lease.upgrade().is_some(),
+        "the actual clone still owns its lease"
+    );
+    drop(alias);
+    prop_assert!(projection_lease.upgrade().is_none());
+    drop(merged);
+    drop(unrelated);
+    drop(empty);
+    drop(recovered);
+    prop_assert_eq!(
+        inventory.node_count(),
+        0,
+        "metadata observation grants no graph custody"
+    );
+    prop_assert_eq!(recovery_inventory.node_count(), 0);
+    for owner in [&inventory, &recovery_inventory] {
+        let state = owner.0.lock().unwrap();
+        prop_assert!(state.payloads.is_empty());
+        prop_assert!(state.roots.is_empty());
+    }
+    prop_assert_eq!(
+        metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
+        expected_metadata
+    );
+    prop_assert_eq!(
+        metadata.selected_native_groups,
+        catalog.selection(&selected)
+    );
+    prop_assert_eq!(
+        graph
+            .native_groups
+            .iter()
+            .map(|group| NativeGroupKey {
+                artifact: group.binding.artifact,
+                original_ordinal: group.original_ordinal,
+            })
+            .collect::<BTreeSet<_>>(),
+        catalog.selection(&selected)
+    );
+    Ok(())
+}
+
+fn cold_later_group_history(
+    catalog: &Catalog,
+    eager: bool,
+    coverage: &mut ColdNativeCoverage,
+) -> Result<(), TestCaseError> {
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let selected = catalog.group_closure(&root_groups(0));
+    let parent = inventory
+        .admit_recovery_selection(
+            &empty,
+            catalog.entries(false, false),
+            &catalog.selection(&selected),
+        )
+        .unwrap();
+    let old_graph = parent.capture_graph_selection();
+    let old_root_carrier = *old_graph
+        .namespace
+        .iter()
+        .find(|binding| binding.artifact == catalog.originals[0].descriptor.id)
+        .unwrap();
+    let mut later_selected = selected.clone();
+    later_selected.insert((0, 29)); // An independently authored zero-edge body.
+    let later = inventory
+        .admit_recovery_selection(&parent, Vec::new(), &catalog.selection(&later_selected))
+        .unwrap();
+    let parent_reads = Arc::downgrade(&parent.reads);
+    prop_assert!(later.reads.read_projection.get().is_none());
+    if eager {
+        check_cold_native_projection(&later, catalog, &later_selected, None)?;
+        coverage.eager_reads += 1;
+    }
+    drop(parent);
+    prop_assert!(
+        parent_reads.upgrade().is_none(),
+        "retaining parent custody does not retain its read cache"
+    );
+    prop_assert_eq!(later.reads.read_projection.get().is_none(), !eager);
+    check_cold_native_projection(&later, catalog, &later_selected, None)?;
+    coverage.delayed_reads += usize::from(!eager);
+    let graph = later.capture_graph_selection();
+    let group = *graph
+        .native_groups
+        .iter()
+        .find(|group| {
+            group.binding.artifact == catalog.originals[0].descriptor.id
+                && group.original_ordinal == 29
+        })
+        .unwrap();
+    let carriers = later
+        .binding_dependencies()
+        .into_iter()
+        .filter_map(|(source, target, edge)| {
+            (source == ArtifactBindingNode::Group(group) && edge == ArtifactDependency::Interface)
+                .then_some(target)
+        })
+        .collect::<BTreeSet<_>>();
+    prop_assert_eq!(
+        carriers,
+        BTreeSet::from([ArtifactBindingNode::Artifact(old_root_carrier)])
+    );
+    prop_assert_ne!(
+        group.binding.selection,
+        old_root_carrier.selection,
+        "new group retains the exact earlier carrier"
+    );
+    coverage.cross_scope_carriers += 1;
+    drop(later);
+    drop(empty);
+    prop_assert_eq!(inventory.node_count(), 0);
+    prop_assert!(
+        !old_graph
+            .native_groups
+            .iter()
+            .any(|group| group.original_ordinal == 29),
+        "old detached selection never widens"
+    );
+    Ok(())
+}
+
+#[test]
+fn cold_native_history_support_covers_read_and_lease_partitions() {
+    let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let mut coverage = ColdNativeCoverage::default();
+    for schedule in [
+        [false; 3],
+        [true; 3],
+        [true, false, false],
+        [false, true, false],
+        [false, false, true],
+    ] {
+        cold_native_history(&catalog, schedule, &mut coverage).unwrap();
+    }
+    for eager in [false, true] {
+        cold_later_group_history(&catalog, eager, &mut coverage).unwrap();
+    }
+    assert!(coverage.eager_reads > 0 && coverage.delayed_reads > 0);
+    assert_eq!(coverage.slot_reuses, 5);
+    assert_eq!(coverage.recoveries, 5);
+    assert_eq!(coverage.cross_scope_carriers, 2);
+    eprintln!("cold native deterministic support: {coverage:?}");
+}
+
+#[test]
+fn generated_cold_native_histories_preserve_exact_carriers_after_retirement() {
+    use proptest::test_runner::{contextualize_config, TestRunner};
+    let mut config = contextualize_config(property_config());
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::generated_cold_native_histories_preserve_exact_carriers_after_retirement"
+    ));
+    let cases = config.cases;
+    let coverage = std::cell::RefCell::new(ColdNativeCoverage::default());
+    let result = TestRunner::new(config).run(
+        &(
+            proptest::collection::vec(0u8..16, MODULES),
+            proptest::collection::vec(0u64..8, 2 * MODULES),
+            any::<[bool; 3]>(),
+            any::<bool>(),
+        ),
+        |(masks, generations, schedule, eager)| {
+            coverage.borrow_mut().callbacks += 1;
+            let catalog = Catalog::new(&masks, &generations, 1);
+            cold_native_history(&catalog, schedule, &mut coverage.borrow_mut())?;
+            cold_later_group_history(&catalog, eager, &mut coverage.borrow_mut())?;
+            coverage.borrow_mut().completed += 1;
+            Ok(())
+        },
+    );
+    eprintln!(
+        "cold native campaign configured_cases={cases} coverage={:?}",
+        coverage.borrow()
+    );
+    result.unwrap();
 }
 
 fn property_config() -> ProptestConfig {
@@ -1659,6 +2252,7 @@ proptest! {
     ) {
         let catalog = Catalog::new(&masks, &generations, 1);
         let mut history = prefix(); history.extend(tail);
+        history.extend(retained_body_history());
         let coverage = run_history(&catalog, &history)?;
         prop_assert!(coverage.admissions >= 6 && coverage.refusals >= 2);
         prop_assert!(coverage.clones > 0 && coverage.projections > 0 && coverage.merges >= 2);
@@ -1666,6 +2260,7 @@ proptest! {
         prop_assert!(coverage.recoveries > 0 && coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
         prop_assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
         prop_assert!(coverage.indexed_unique > 0 && coverage.indexed_unavailable > 0);
+        prop_assert!(coverage.custody_only_views > 0 && coverage.custody_only_reads >= 2 && coverage.selected_retained_body > 0);
         eprintln!("native history coverage: {coverage:?}");
     }
 }
