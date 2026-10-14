@@ -2465,6 +2465,7 @@ impl ModuleCandidateOffer {
                 })?,
                 sealed.typed_entry.as_ref(),
                 &sealed.pending_imports,
+                &sealed.target_native_selection,
             )?;
             prepared_items.insert(index, prepared);
         }
@@ -3061,6 +3062,7 @@ pub struct SealedTurnProducts {
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
+    target_native_selection: crate::artifact_inventory::IssuedTargetNativeSelection,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
@@ -3613,7 +3615,7 @@ fn seal_turn_outputs_with_validation(
     let producer =
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
             .sha256();
-    let artifact_view = match segment_originals {
+    let admitted_target = match segment_originals {
         Some(originals) => {
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
@@ -3642,6 +3644,10 @@ fn seal_turn_outputs_with_validation(
             )?
         }
     };
+    let crate::artifact_inventory::AdmittedTargetArtifacts {
+        artifacts: artifact_view,
+        selection: target_native_selection,
+    } = admitted_target;
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
@@ -3787,6 +3793,7 @@ fn seal_turn_outputs_with_validation(
                             .expect("checked output has full original execution evidence"),
                         None,
                         &pending_imports,
+                        &target_native_selection,
                         None,
                     )?,
                 )
@@ -3832,6 +3839,7 @@ fn seal_turn_outputs_with_validation(
     Ok(Some(SealedTurnProducts {
         artifact_view,
         typed_entry,
+        target_native_selection,
         original_execution,
         original_compile_input,
         checked,
@@ -5257,7 +5265,8 @@ fn compile_invocation_inner(
                 ),
                 &mut validation,
                 &certified.source_selection,
-            )?;
+            )?
+            .artifacts;
         certified.groups =
             crate::declaration_context::certify_artifact_view_groups_with_validation(
                 &artifacts.artifact_view,

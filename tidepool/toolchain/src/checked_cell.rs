@@ -2643,6 +2643,7 @@ pub struct ExactCompiledItem {
 struct SealedTypedEntry {
     entry: CheckedTypedEntry,
     native_sites: SelectedNativeSites,
+    native_requirements: crate::artifact_inventory::NativeRequirements,
 }
 
 /// Sites from the checked target's exact original native dependency closure.
@@ -3049,11 +3050,8 @@ impl ExactCompiledItem {
             ),
         >,
     ) -> Result<(), CompileError> {
-        if let Some(proof) = self.typed_entry() {
-            let requirements = self
-                .original_execution
-                .artifact_view()
-                .native_requirements_from_roots(&[proof.native_requirement_root()])?;
+        if let Some(proof) = &self.typed_entry {
+            let requirements = &proof.native_requirements;
             self.settled_values.validate_required(
                 requirements
                     .bindings
@@ -3073,13 +3071,10 @@ impl ExactCompiledItem {
         &self,
         actual: impl IntoIterator<Item = (&'a tidepool_repr::execution_schema::SymbolIdentity, u64)>,
     ) -> Result<(), CompileError> {
-        let Some(proof) = self.typed_entry() else {
+        let Some(proof) = &self.typed_entry else {
             return Ok(());
         };
-        let requirements = self
-            .original_execution
-            .artifact_view()
-            .native_requirements_from_roots(&[proof.native_requirement_root()])?;
+        let requirements = &proof.native_requirements;
         let actual = actual.into_iter().collect::<BTreeSet<_>>();
         for (identity, generation) in requirements
             .bindings
@@ -3863,6 +3858,7 @@ impl CheckedItemOffer {
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
         program_entry: Option<&CheckedTypedEntry>,
         target_imports: &[crate::certified_products::PendingImportOwner],
+        target_native_selection: &crate::artifact_inventory::IssuedTargetNativeSelection,
         produced: Option<&ProducedValueTypeInterfaces>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let output = PreparedCheckedItemOutput::capture(
@@ -3877,6 +3873,7 @@ impl CheckedItemOffer {
             original_execution,
             program_entry,
             target_imports,
+            target_native_selection,
         )?;
         self.seal_prepared(
             output,
@@ -3985,6 +3982,7 @@ impl PreparedCheckedItemOutput {
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
         program_entry: Option<&CheckedTypedEntry>,
         target_imports: &[crate::certified_products::PendingImportOwner],
+        target_native_selection: &crate::artifact_inventory::IssuedTargetNativeSelection,
     ) -> Result<Self, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if is_program { 9 } else { 8 })?;
@@ -4076,19 +4074,24 @@ impl PreparedCheckedItemOutput {
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
-        let groups = original_execution
-            .artifact_view()
-            .native_groups_for_target(typed_entry.as_ref(), target_imports)?;
+        let groups = target_native_selection.groups_for_target(
+            original_execution.artifact_view(),
+            typed_entry.as_ref(),
+            target_imports,
+        )?;
         let source_originals = original_execution
             .published_source_original_selections_for_target(&groups, target_imports)?;
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
                     .artifact_view()
-                    .native_sites_for_target(&entry, target_imports)?;
+                    .native_sites_for_groups(&groups)?;
+                let native_requirements = target_native_selection
+                    .requirements_for_entry(original_execution.artifact_view(), &entry)?;
                 Ok::<_, CompileError>(SealedTypedEntry {
                     entry,
                     native_sites,
+                    native_requirements,
                 })
             })
             .transpose()?;
@@ -5017,16 +5020,20 @@ mod tests {
         let baseline = inventory
             .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &BTreeSet::new())
             .unwrap();
-        let authored_only = inventory
-            .admit_shared_with_demand(
+        let authored_admission = inventory
+            .admit_product_artifacts(
                 &baseline,
                 entries.clone(),
                 NativeArtifactDemand::VerifiedTarget {
                     entry: &entry,
                     imports: &[],
                 },
+                None,
             )
+            .unwrap()
+            .into_target()
             .unwrap();
+        let authored_only = &authored_admission.artifacts;
         let authored_groups =
             crate::declaration_context::certify_artifact_view_groups_with_validation(
                 &authored_only,
@@ -5043,16 +5050,20 @@ mod tests {
             &BTreeMap::new()
         )
         .is_err());
-        let complete = inventory
-            .admit_shared_with_demand(
+        let complete_admission = inventory
+            .admit_product_artifacts(
                 &baseline,
                 entries.clone(),
                 NativeArtifactDemand::VerifiedTarget {
                     entry: &entry,
                     imports: &imports,
                 },
+                None,
             )
+            .unwrap()
+            .into_target()
             .unwrap();
+        let complete = &complete_admission.artifacts;
         assert_eq!(
             complete.selected_native_groups(),
             BTreeSet::from([
@@ -5064,9 +5075,29 @@ mod tests {
             ])
         );
         assert_eq!(complete.artifact_ids(), baseline.artifact_ids());
-        let authored_sites = authored_only.native_sites_for_target(&entry, &[]).unwrap();
+        let authored_closure = authored_admission
+            .selection
+            .groups_for_target(authored_only, Some(&entry), &[])
+            .unwrap();
+        let authored_sites = authored_only
+            .native_sites_for_groups(&authored_closure)
+            .unwrap();
         assert_eq!(authored_sites.ids().collect::<Vec<_>>(), vec![80]);
-        let complete_sites = complete.native_sites_for_target(&entry, &imports).unwrap();
+        let complete_closure = complete_admission
+            .selection
+            .groups_for_target(complete, Some(&entry), &imports)
+            .unwrap();
+        let complete_sites = complete.native_sites_for_groups(&complete_closure).unwrap();
+        assert_eq!(
+            authored_admission
+                .selection
+                .requirements_for_entry(authored_only, &entry)
+                .unwrap(),
+            complete_admission
+                .selection
+                .requirements_for_entry(complete, &entry)
+                .unwrap()
+        );
         assert_eq!(complete_sites.ids().collect::<Vec<_>>(), vec![80, 81]);
         for unselected in [120, 121] {
             assert!(
