@@ -747,6 +747,10 @@ mod effect_catalogue_tests {
             let identity = key.nominal_identity().unwrap();
             assert_eq!(identity.name, key.haskell_name());
             assert_eq!(Some(identity.module), key.haskell_module());
+            assert_eq!(
+                key.is_invocation_only(),
+                !matches!(key, ToolEffectKey::Actor(_))
+            );
         }
         for key in ActorEffectKey::ALL {
             let decoded: ActorEffectKey =

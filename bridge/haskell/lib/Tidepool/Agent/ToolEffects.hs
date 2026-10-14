@@ -20,8 +20,8 @@ module Tidepool.Agent.ToolEffects
 import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import GHC.TypeLits (ErrorMessage (..), TypeError)
 import Tidepool.Effects.Core (ContextReadWrite)
+import Tidepool.Internal.ActorProfiles (AsyncEffects)
 import qualified Tidepool.Internal.ActorProfiles as Catalogue
 import Tidepool.Effects.Row (Subset)
 
@@ -52,9 +52,3 @@ instance KnownToolEffects '[] where
 
 instance (Catalogue.KnownToolEffect effect, KnownToolEffects effects) => KnownToolEffects (effect ': effects) where
   toolEffectNames _ = Catalogue.knownToolEffectName (Proxy @effect) : toolEffectNames (Proxy @effects)
-
-type family AsyncEffects (effects :: [Type -> Type]) :: Constraint where
-  AsyncEffects '[] = ()
-  AsyncEffects (ContextReadWrite ': effects) =
-    TypeError ('Text "ContextReadWrite cannot be used by an asynchronous tool, model callback, or hook.")
-  AsyncEffects (effect ': effects) = AsyncEffects effects

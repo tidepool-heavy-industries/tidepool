@@ -301,6 +301,13 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             effect.identity.core_module.unwrap()
         ));
     }
+    rust.push_str("        }\n    }\n\n    pub const fn is_invocation_only(self) -> bool {\n        match self {\n            Self::Actor(_) => false,\n");
+    for effect in &invocation {
+        rust.push_str(&format!(
+            "            Self::{} => true,\n",
+            effect.identity.rust_wire
+        ));
+    }
     rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n            }),\n            None => None,\n        }\n    }\n}\n\nimpl From<ActorEffectKey> for ToolEffectKey {\n    fn from(key: ActorEffectKey) -> Self {\n        Self::Actor(key)\n    }\n}\n\nimpl serde::Serialize for ToolEffectKey {\n    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {\n        serializer.serialize_str(self.wire_name())\n    }\n}\n\nimpl<'de> serde::Deserialize<'de> for ToolEffectKey {\n    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {\n        let name = <String as serde::Deserialize>::deserialize(deserializer)?;\n        match name.as_str() {\n");
     for effect in &invocation {
         rust.push_str(&format!(
@@ -349,12 +356,12 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         ));
     }
     profiles.push_str("];\n");
-    let mut hs = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE OverloadedStrings #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n{-# LANGUAGE TypeApplications #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
+    let mut hs = "{-# LANGUAGE ConstraintKinds #-}\n{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE OverloadedStrings #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n{-# LANGUAGE TypeApplications #-}\n{-# LANGUAGE TypeFamilies #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
     hs.push_str(&crate::gen::header(
         "-- ",
         "Nominal effect identities and profiles",
     ));
-    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName) ) where\n\nimport Data.Kind (Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
+    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName), AsyncEffects ) where\n\nimport Data.Kind (Constraint, Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport GHC.TypeLits (ErrorMessage (..), TypeError)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
     hs.push_str(&imports(effects));
     hs.push_str("\n\ntype ActorEffects =\n  '[");
     hs.push_str(
@@ -402,6 +409,11 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     for effect in &invocation {
         hs.push_str(&format!("\ninstance {{-# OVERLAPPING #-}} KnownToolEffect {} where\n  knownToolEffectName _ = toolEffectName {}\n", effect.identity.haskell_name, effect.constructor));
     }
+    hs.push_str("\ntype family AsyncEffects (effects :: [Type -> Type]) :: Constraint where\n  AsyncEffects '[] = ()\n");
+    for effect in &invocation {
+        hs.push_str(&format!("  AsyncEffects ({} ': effects) =\n    TypeError ('Text \"{} cannot be used by an asynchronous tool, model callback, or hook.\")\n", effect.identity.haskell_name, effect.identity.haskell_name));
+    }
+    hs.push_str("  AsyncEffects (effect ': effects) = AsyncEffects effects\n");
     let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
     row.push_str(&crate::gen::header("-- ", "Effect row witnesses"));
     row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\n");
@@ -495,6 +507,59 @@ mod tests {
         let mut changed = EFFECTS.to_vec();
         changed.last_mut().unwrap().default_order = Some(25);
         assert!(validate(&changed).is_err());
+    }
+
+    #[test]
+    fn invocation_catalogue_mutation_generates_witnesses_and_async_refusal_without_delegation() {
+        let mut changed = EFFECTS.to_vec();
+        changed.push(NominalEffect {
+            identity: ExternalType {
+                haskell_name: "InvocationProbe",
+                rust_wire: "InvocationProbe",
+                core_module: Some("Example.Invocation"),
+            },
+            constructor: "InvocationProbeKey",
+            wire_name: "InvocationProbeWire",
+            scope: EffectScope::InvocationOnly,
+            default_order: None,
+            rust_order: 28,
+            bridge_order: 26,
+        });
+        assert!(validate(&changed).is_ok());
+        for file in render(&changed) {
+            if file.path.ends_with("ActorProfiles.hs") {
+                assert!(file.contents.contains("KnownToolEffect InvocationProbe"));
+                assert!(file
+                    .contents
+                    .contains("AsyncEffects (InvocationProbe ': effects)"));
+                assert!(file
+                    .contents
+                    .contains("Example.Invocation (InvocationProbe)"));
+            } else if file.path.ends_with("effect_keys.rs") {
+                assert!(file.contents.contains("Self::InvocationProbe => true"));
+                let actor_enum = file
+                    .contents
+                    .split("pub enum ActorEffectKey {")
+                    .nth(1)
+                    .unwrap()
+                    .split('}')
+                    .next()
+                    .unwrap();
+                assert!(!actor_enum.contains("InvocationProbe"));
+            } else {
+                assert!(
+                    !file.contents.contains("InvocationProbe"),
+                    "{} promoted invocation effect",
+                    file.path
+                );
+            }
+        }
+        let TypeShape::Sum { variants } = actor_key_definition_for(&changed).shape else {
+            panic!()
+        };
+        assert!(variants
+            .iter()
+            .all(|variant| variant.ctor != "InvocationProbeKey"));
     }
 
     #[test]
