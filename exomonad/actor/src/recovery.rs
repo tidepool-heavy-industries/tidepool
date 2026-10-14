@@ -3119,7 +3119,7 @@ mod tests {
                 prompts: ComposedPromptSnapshot::capture(format!("prompt {marker}")),
             };
             let a = session
-                .prepare_notebook_generation(original, &old_owner, None, references(1))
+                .prepare_notebook_generation(original, &old_owner, None, references(1), None)
                 .unwrap();
             session
                 .commit_notebook_generation(a, &PublicationDecision::new(), |_| {})
@@ -3131,7 +3131,13 @@ mod tests {
                 .unwrap();
             let replacement = session.mint_isolated_scope();
             let b = session
-                .prepare_notebook_generation(replacement, &old_owner, Some(head_a), references(2))
+                .prepare_notebook_generation(
+                    replacement,
+                    &old_owner,
+                    Some(head_a),
+                    references(2),
+                    None,
+                )
                 .unwrap();
             session
                 .commit_notebook_generation(b, &PublicationDecision::new(), |_| {})

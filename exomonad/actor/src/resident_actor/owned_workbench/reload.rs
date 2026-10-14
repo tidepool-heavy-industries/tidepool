@@ -148,6 +148,7 @@ where
                 self.descriptor.clone(),
                 Some(self.expected.clone()),
                 references,
+                installation.clone(),
             )
             .await
             .map_err(unreadable)?;

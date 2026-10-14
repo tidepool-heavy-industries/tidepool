@@ -142,6 +142,13 @@ impl ActiveNotebookGeneration {
         self.owner.notebook_generation()
     }
 }
+pub(crate) struct PreparedGenerationSource {
+    pub(crate) selection:
+        std::sync::Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+    pub(crate) context:
+        std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+}
+
 /// Prepared under one session view; only commit can publish its issued owner.
 pub struct PreparedNotebookGeneration {
     pub(crate) owner_stamp: super::OwnerStamp,
@@ -153,6 +160,7 @@ pub struct PreparedNotebookGeneration {
     pub(crate) snapshot: super::PublicVisibilitySnapshot,
     pub(crate) next: ActiveNotebookGeneration,
     pub(crate) expected: Option<ActiveNotebookGeneration>,
+    pub(crate) source: Option<PreparedGenerationSource>,
 }
 impl PreparedNotebookGeneration {
     pub fn selection(&self) -> ActiveNotebookGeneration {

@@ -8028,7 +8028,7 @@ where
             .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
         let prepared = workbench
-            .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references)
+            .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references, tools.clone())
             .await?;
         match workbench
             .commit_actor_generation(

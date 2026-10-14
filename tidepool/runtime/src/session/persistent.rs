@@ -6197,7 +6197,7 @@ mod checkpoint_scope_tests {
         let ready_a = session.durable_public_readiness(&owner, a).unwrap();
         let decision = PublicationDecision::new();
         let initial = session
-            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1), None)
             .unwrap();
         assert!(matches!(
             session
@@ -6216,7 +6216,7 @@ mod checkpoint_scope_tests {
             .unwrap();
         let b = session.mint_isolated_scope();
         let prepared = session
-            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2))
+            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2), None)
             .unwrap();
         let owner_b = prepared.owner().clone();
         // Allocation metadata is a benign intervening write. The prepared
@@ -6259,7 +6259,7 @@ mod checkpoint_scope_tests {
             .unwrap();
         let c = session.mint_isolated_scope();
         let prepared_c = session
-            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3))
+            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3), None)
             .unwrap();
         let owner_c = prepared_c.owner().clone();
         assert!(matches!(
@@ -6291,7 +6291,7 @@ mod checkpoint_scope_tests {
         let root = tempfile::tempdir().unwrap();
         let (mut session, a, owner) = bootstrap_session(root.path(), 961);
         let prepared = session
-            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1), None)
             .unwrap();
         session
             .commit_notebook_generation(prepared, &PublicationDecision::new(), |_| {})
@@ -6303,11 +6303,17 @@ mod checkpoint_scope_tests {
             .unwrap();
         let inherited = session.mint_scope(a).unwrap();
         assert!(session
-            .prepare_notebook_generation(inherited, &owner, Some(head.clone()), generation_refs(2))
+            .prepare_notebook_generation(
+                inherited,
+                &owner,
+                Some(head.clone()),
+                generation_refs(2),
+                None
+            )
             .is_err());
         let b = session.mint_isolated_scope();
         let prepared = session
-            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2))
+            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2), None)
             .unwrap();
         let decision = PublicationDecision::new();
         decision.request_cancellation();
@@ -6326,7 +6332,7 @@ mod checkpoint_scope_tests {
             Some(head.clone())
         );
         let prepared = session
-            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2))
+            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2), None)
             .unwrap();
         let value = super::super::prepared::tests::rooted_publication_fixture(
             &mut session,
@@ -6354,7 +6360,7 @@ mod checkpoint_scope_tests {
         let root = tempfile::tempdir().unwrap();
         let (mut session, a, owner) = bootstrap_session(root.path(), 966);
         let initial = session
-            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1), None)
             .unwrap();
         session
             .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
@@ -6363,7 +6369,7 @@ mod checkpoint_scope_tests {
         let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
         let b = session.mint_isolated_scope();
         let refused = session
-            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2))
+            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2), None)
             .unwrap();
         store.inject_fault(StoreFault::BeforeCommit);
         let refused_decision = PublicationDecision::new();
@@ -6383,7 +6389,7 @@ mod checkpoint_scope_tests {
         );
 
         let uncertain = session
-            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(3))
+            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(3), None)
             .unwrap();
         store.inject_fault(StoreFault::CommitError);
         let uncertain_decision = PublicationDecision::new();
@@ -6407,7 +6413,7 @@ mod checkpoint_scope_tests {
         let root = tempfile::tempdir().unwrap();
         let (mut session, a, owner) = bootstrap_session(root.path(), 965);
         let initial = session
-            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1), None)
             .unwrap();
         session
             .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
@@ -6415,7 +6421,7 @@ mod checkpoint_scope_tests {
         let head_a = session.active_notebook_generation(&owner).unwrap().unwrap();
         let b = session.mint_isolated_scope();
         let prepared_b = session
-            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(2))
+            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(2), None)
             .unwrap();
         let decision = PublicationDecision::new();
         let mut cancel_result = None;
@@ -6443,7 +6449,7 @@ mod checkpoint_scope_tests {
         let head_b = session.active_notebook_generation(&owner).unwrap().unwrap();
         let c = session.mint_isolated_scope();
         let prepared_c = session
-            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3))
+            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3), None)
             .unwrap();
         assert!(matches!(
             session
@@ -6505,7 +6511,7 @@ mod checkpoint_scope_tests {
             .initialize_durable_public_scope(actor.clone(), a)
             .unwrap();
         let initial = session
-            .prepare_notebook_generation(a, &actor, None, generation_refs(1))
+            .prepare_notebook_generation(a, &actor, None, generation_refs(1), None)
             .unwrap();
         session
             .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
@@ -6513,7 +6519,7 @@ mod checkpoint_scope_tests {
         let head_a = session.active_notebook_generation(&actor).unwrap().unwrap();
         let b = session.mint_isolated_scope();
         let prepared = session
-            .prepare_notebook_generation(b, &actor, Some(head_a), generation_refs(2))
+            .prepare_notebook_generation(b, &actor, Some(head_a), generation_refs(2), None)
             .unwrap();
         session
             .commit_notebook_generation(prepared, &PublicationDecision::new(), |_| {})
@@ -6578,7 +6584,13 @@ mod checkpoint_scope_tests {
             .is_err());
         let c = recovered.mint_isolated_scope();
         let prepared = recovered
-            .prepare_notebook_generation(c, &successor, Some(successor_head), generation_refs(3))
+            .prepare_notebook_generation(
+                c,
+                &successor,
+                Some(successor_head),
+                generation_refs(3),
+                None,
+            )
             .unwrap();
         let owner_c = prepared.owner().clone();
         recovered
@@ -6627,7 +6639,7 @@ mod checkpoint_scope_tests {
             (&mut right, a_right, &right_actor),
         ] {
             let initial = session
-                .prepare_notebook_generation(scope, actor, None, generation_refs(1))
+                .prepare_notebook_generation(scope, actor, None, generation_refs(1), None)
                 .unwrap();
             session
                 .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
@@ -6652,6 +6664,7 @@ mod checkpoint_scope_tests {
                 &actor,
                 Some(left_head.clone()),
                 generation_refs(2),
+                None,
             )
             .unwrap();
         let decision = PublicationDecision::new();
@@ -7596,8 +7609,26 @@ impl PersistentSession {
         actor: &super::RecoveryPublicOwner,
         expected: Option<super::ActiveNotebookGeneration>,
         references: super::DurableGenerationReferences,
+        source: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     ) -> Result<super::PreparedNotebookGeneration, SessionError> {
         references.validate()?;
+        if expected.is_none() && source.is_some() {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let source = source
+            .map(|selection| {
+                let context = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
+                    &[],
+                    &[],
+                    Vec::new(),
+                )?
+                .with_published_source_originals(&selection)?;
+                Ok::<_, SessionError>(super::notebook_generation::PreparedGenerationSource {
+                    selection,
+                    context: Arc::new(context),
+                })
+            })
+            .transpose()?;
         let snapshot = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -7635,7 +7666,13 @@ impl PersistentSession {
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let mut candidate = state.graph.candidate();
+        let (graph, source_root) = super::recovery_hydration::materialize_public_compiler_context(
+            &state.graph,
+            &state.artifact_root,
+            source.as_ref().map(|seed| &seed.context),
+            None,
+        )?;
+        let mut candidate = graph.candidate();
         let epoch = if expected.is_none() {
             let surface = state
                 .graph
@@ -7648,6 +7685,7 @@ impl PersistentSession {
             surface.epoch
         } else {
             let mut surface = super::recovery::RecoveryPublicSurface::empty(owner.clone());
+            surface.context_root = source_root;
             surface.epoch = snapshot
                 .epoch
                 .checked_add(1)
@@ -7676,6 +7714,7 @@ impl PersistentSession {
             snapshot,
             next,
             expected,
+            source,
         })
     }
 
@@ -7719,6 +7758,7 @@ impl PersistentSession {
             snapshot,
             next,
             expected,
+            source,
         } = prepared;
         if !owner_stamp.matches(self.admission_owner())
             || self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot)
@@ -7753,6 +7793,13 @@ impl PersistentSession {
         if current.revision != staged.prepared.expected_revision {
             let graph = super::recovery::load_domain_graph(state.store.clone(), state.domain_id)
                 .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+            let (graph, source_root) =
+                super::recovery_hydration::materialize_public_compiler_context(
+                    &graph,
+                    &state.artifact_root,
+                    source.as_ref().map(|seed| &seed.context),
+                    None,
+                )?;
             let mut candidate = graph.candidate();
             if expected.is_some() {
                 let surface = staged
@@ -7760,8 +7807,10 @@ impl PersistentSession {
                     .surface(&next.owner)
                     .map_err(|e| super::recovery::graph_error(&state.path, e))?
                     .ok_or(SessionError::WrongPublicManifestTicket)?;
+                let mut surface = (*surface).clone();
+                surface.context_root = source_root;
                 candidate
-                    .replace_surface((*surface).clone())
+                    .replace_surface(surface)
                     .map_err(|e| super::recovery::graph_error(&state.path, e))?;
             }
             staged = candidate
@@ -7776,6 +7825,7 @@ impl PersistentSession {
         let store = state.store.clone();
         let domain = state.domain_id;
         let path = state.path.clone();
+        let artifact_root = state.artifact_root.clone();
         let surface = staged
             .graph
             .surface(&next.owner)
@@ -7784,12 +7834,17 @@ impl PersistentSession {
         let mut scopes = lib.durable_public_scopes.clone();
         scopes.insert(next.owner.clone(), scope);
         let mut tips = lib.tips.clone();
-        tips.entry(scope)
+        let tip = tips
+            .entry(scope)
             .or_insert_with(|| super::ScopeDeclarationState {
                 tip: snapshot.declaration_tip,
                 exact_context: None,
                 published_sources: Vec::new(),
             });
+        if let Some(source) = &source {
+            tip.exact_context = Some(source.context.clone());
+            tip.published_sources = vec![source.selection.clone()];
+        }
         self.public_visibility_epochs.try_reserve(1).map_err(|e| {
             SessionError::RecoveryManifest {
                 path: self.lib().root.clone(),
@@ -7821,9 +7876,14 @@ impl PersistentSession {
                             .map_err(|e| super::recovery::graph_error(&path, e))?;
                         let revision = graph.store_revision();
                         let ceiling = graph.high_water();
+                        let (graph, source_root) = super::recovery_hydration::materialize_public_compiler_context(
+                            &graph, &artifact_root, source.as_ref().map(|seed| &seed.context), None,
+                        )?;
                         let mut candidate = graph.candidate();
                         if expected.is_some() {
-                            candidate.replace_surface((*surface).clone())
+                            let mut surface = (*surface).clone();
+                            surface.context_root = source_root;
+                            candidate.replace_surface(surface)
                                 .map_err(|e| super::recovery::graph_error(&path, e))?;
                         }
                         let mut retry = candidate.prepare(revision, ceiling)

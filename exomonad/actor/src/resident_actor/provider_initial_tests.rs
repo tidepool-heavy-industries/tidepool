@@ -226,7 +226,7 @@ impl NativeFixture {
             prompts: prompts.clone(),
         };
         let prepared = resident
-            .prepare_notebook_generation(scope.scope(), &canonical, previous, references)
+            .prepare_notebook_generation(scope.scope(), &canonical, previous, references, None)
             .unwrap();
         let selected = prepared.selection();
         let owner = WorkbenchPublicOwner::prepare_generation(

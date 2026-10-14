@@ -3546,10 +3546,11 @@ where
         actor: &super::RecoveryPublicOwner,
         expected: Option<super::ActiveNotebookGeneration>,
         references: super::DurableGenerationReferences,
+        source: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     ) -> Result<super::PreparedNotebookGeneration, SessionError> {
         self.settle_dropped_custody();
         self.state
-            .prepare_notebook_generation(scope, actor, expected, references)
+            .prepare_notebook_generation(scope, actor, expected, references, source)
     }
     pub fn commit_notebook_generation(
         &mut self,
