@@ -367,6 +367,7 @@ fn every_schema_effect_is_reachable() {
             "Console",
             "Exec",
             "Journal",
+            "Web",
             "Worktree",
             "RepoEvent",
             "AskUser",

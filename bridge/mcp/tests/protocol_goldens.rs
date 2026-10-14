@@ -45,6 +45,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "Console",
             "Exec",
             "Journal",
+            "Web",
             "Worktree",
             "RepoEvent",
             "AskUser",
