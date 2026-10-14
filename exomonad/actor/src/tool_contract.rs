@@ -51,13 +51,28 @@ pub(crate) fn decode_installation(
 /// Installation-owned executable entry and its exact compiler row.
 #[derive(Debug, Clone)]
 pub(crate) struct AdmittedEndpoint {
-    pub(crate) plan: exomonad_tool::EndpointPlan,
-    pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
+    plan: exomonad_tool::EndpointPlan,
+    execution_effects: tidepool_runtime::session::HaskellTypeSource,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct AfterToolEntry {
-    pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
+    execution_effects: tidepool_runtime::session::HaskellTypeSource,
+}
+
+impl AdmittedEndpoint {
+    pub(crate) fn plan(&self) -> &exomonad_tool::EndpointPlan {
+        &self.plan
+    }
+    pub(crate) fn execution_effects(&self) -> &tidepool_runtime::session::HaskellTypeSource {
+        &self.execution_effects
+    }
+}
+
+impl AfterToolEntry {
+    pub(crate) fn execution_effects(&self) -> &tidepool_runtime::session::HaskellTypeSource {
+        &self.execution_effects
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,16 +134,21 @@ pub(crate) fn admit_installation(
                 | exomonad_tool::EndpointExecution::ResidentSync(_) => dispatcher_effects.clone(),
                 exomonad_tool::EndpointExecution::HaskellAsync
                 | exomonad_tool::EndpointExecution::HaskellSync => {
+                    let mut imports = tidepool_runtime::session::SourceImports::default();
+                    let names = plan
+                        .effect_keys()
+                        .iter()
+                        .map(|key| {
+                            let identity = key
+                                .nominal_identity()
+                                .expect("admission requires a nominal effect owner");
+                            imports.extend_text(&format!("qualified {}", identity.module));
+                            format!("{}.{}", identity.module, identity.name)
+                        })
+                        .collect::<Vec<_>>();
                     tidepool_runtime::session::HaskellTypeSource::new(
-                        format!(
-                            "'[{}]",
-                            plan.effect_keys()
-                                .iter()
-                                .map(|key| key.haskell_name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        dispatcher_effects.required_imports().clone(),
+                        format!("'[{}]", names.join(", ")),
+                        imports,
                     )
                 }
             };
@@ -280,7 +300,7 @@ fn validate_row(
             }
             _ => {}
         }
-        if !installed.contains(&key) {
+        if !installed.contains(&key) || key.nominal_identity().is_none() {
             return Err(ToolContractError::Unsupported {
                 tool: name.into(),
                 effect: key,
@@ -334,7 +354,7 @@ mod tests {
         assert!(installed.after_tool.is_none());
         assert_eq!(
             installed.endpoints[0].execution_effects.expression(),
-            "'[Jev]"
+            "'[Tidepool.Effects.Core.Jev]"
         );
         let installed = admit_installation(
             make(
@@ -443,11 +463,13 @@ mod tests {
     #[test]
     fn legacy_decoded_key_does_not_assert_interpreter_availability() {
         let legacy: ToolEffectKey = serde_json::from_str("\"Forks\"").unwrap();
-        let selected = native(ToolScheduling::Async, vec![legacy]);
-        assert!(matches!(
-            validate(selected, &[ActorEffectKey::Forks], &[]),
-            Err(ToolContractError::Unsupported { effect, .. }) if effect == legacy
-        ));
+        for support in [vec![], vec![legacy]] {
+            let selected = native(ToolScheduling::Async, vec![legacy]);
+            assert!(matches!(
+                validate(selected, &[ActorEffectKey::Forks], &support),
+                Err(ToolContractError::Unsupported { effect, .. }) if effect == legacy
+            ));
+        }
     }
 
     #[test]

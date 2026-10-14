@@ -3033,7 +3033,7 @@ struct WorkbenchEffectState {
     model: Option<Arc<dyn crate::CellModelBinding>>,
     context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
     installed_tools: Option<crate::InstalledToolLease>,
-    selected_tool: Option<crate::resident_workbench::InstalledToolSelection>,
+    selected_tool: Option<Arc<crate::resident_workbench::AdmittedToolCall>>,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
     invocation_work: Arc<InvocationWork>,
@@ -3056,7 +3056,7 @@ struct WorkbenchCursor {
     starting: Option<owned_workbench::WorkbenchUnitStart>,
     started: Option<Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>>,
     unit: WorkbenchUnitState,
-    tool_dispatch: Option<Arc<RootCustody>>,
+    resident_tool: bool,
     completed: Option<WorkbenchItemReceipt>,
     after_tool: Option<WorkbenchAfterToolExecution>,
 }
@@ -3128,7 +3128,7 @@ impl Default for WorkbenchCursor {
             starting: None,
             started: None,
             unit: WorkbenchUnitState::default(),
-            tool_dispatch: None,
+            resident_tool: false,
             completed: None,
             after_tool: None,
         }
@@ -3482,7 +3482,7 @@ struct WorkbenchAdmission {
     context: ActorSessionContext,
     request: WorkbenchRequest,
     installed_tools: Option<crate::InstalledToolLease>,
-    selected_tool: Option<crate::resident_workbench::InstalledToolSelection>,
+    selected_tool: Option<Arc<crate::resident_workbench::AdmittedToolCall>>,
     admitted_source: crate::CheckpointSourceLayer,
     compilation_authority: Option<Arc<WorkbenchCompilationAuthority>>,
     public_owner: Arc<WorkbenchPublicOwner>,
@@ -3775,7 +3775,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let issued = invocation
             .selected_tool
             .as_ref()
-            .map(|call| call.selected.snapshot().clone())
+            .map(|call| call.selected().snapshot().clone())
             .or(invocation.installed_tools)
             .or_else(|| self.installed_tools.snapshot());
         let issued_generation = issued
@@ -3835,44 +3835,52 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let invocation_key = control
             .as_ref()
             .and_then(|control| control.invocation.clone());
-        let direct_tool_call = invocation.selected_tool.is_none();
-        let selected_tool = invocation
-            .selected_tool
-            .map(|call| call.selected)
-            .or_else(|| {
-                if current_builtin {
-                    return None;
-                }
-                request
-                    .tool_call()
-                    .and_then(|call| issued.as_ref()?.select(&call.name))
-            });
-        if !current_builtin && request.tool_call().is_some() && selected_tool.is_none() {
-            return Err(KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor,
-                detail: "unknown installed endpoint".into(),
-                diagnostic: None,
-            });
-        }
-        if let Some(selected) = &selected_tool {
-            let endpoint = selected.endpoint();
-            if let Some(call) = request.tool_call().filter(|_| direct_tool_call) {
-                let arguments = if let Some(text) = call.arguments.as_str() {
-                    exomonad_tool::ToolArguments::Raw(text.into())
-                } else {
-                    exomonad_tool::ToolArguments::Structured(call.arguments.clone())
-                };
-                endpoint.plan.admit_arguments(arguments).map_err(|error| {
-                    KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor,
-                        detail: error.to_string(),
-                        diagnostic: None,
+        let selected_tool = match invocation.selected_tool {
+            Some(call) => Some(Arc::new(call)),
+            None if !current_builtin => match request.tool_call() {
+                Some(call) => {
+                    let selected = installed_tools
+                        .as_ref()
+                        .and_then(|lease| lease.select(&call.name))
+                        .ok_or_else(|| KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
+                            actor,
+                            detail: "unknown installed endpoint".into(),
+                            diagnostic: None,
+                        })?;
+                    let arguments = if let Some(text) = call.arguments.as_str() {
+                        exomonad_tool::ToolArguments::Raw(text.into())
+                    } else {
+                        exomonad_tool::ToolArguments::Structured(call.arguments.clone())
+                    };
+                    let admitted = selected.admit(arguments).map_err(|error| {
+                        KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
+                            actor,
+                            detail: error.to_string(),
+                            diagnostic: None,
+                        }
+                    })?;
+                    let mut checked_request = admitted.request();
+                    checked_request.input = request.input.clone();
+                    checked_request.verbose = request.verbose;
+                    if let Some(execution) = request.execution_id() {
+                        checked_request = checked_request.with_execution_id(execution.clone());
                     }
-                })?;
-            }
-            if endpoint.plan.effect_keys().iter().any(|key| match key {
+                    if let Some(boundary) = request.checkpoint_boundary() {
+                        checked_request =
+                            checked_request.with_checkpoint_boundary(boundary.clone());
+                    }
+                    request = checked_request;
+                    Some(Arc::new(admitted))
+                }
+                None => None,
+            },
+            None => None,
+        };
+        if let Some(call) = &selected_tool {
+            let endpoint = call.selected().endpoint();
+            if endpoint.plan().effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
                     !self.descriptor.capabilities().effect_keys().contains(key)
                 }
@@ -3885,14 +3893,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     diagnostic: None,
                 });
             }
-            context.haskell_effects_alias = endpoint.execution_effects.clone();
+            context.haskell_effects_alias = endpoint.execution_effects().clone();
         }
         if invocation.context_binding.is_some() {
             admit_context_authority(
                 actor,
                 selected_tool
                     .as_ref()
-                    .map(|selected| &selected.endpoint().plan),
+                    .map(|call| call.selected().endpoint().plan()),
                 invocation_key.as_ref().map(|key| key.invocation()),
             )?;
         }
@@ -9891,23 +9899,16 @@ where
         context: &ActorSessionContext,
         execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
-        tools: &crate::resident_workbench::ResidentWorkbenchTools,
+        handler: &crate::resident_workbench::InstalledAfterTool,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
         value: Option<serde_json::Value>,
     ) -> String {
         use crate::after_tool::{Annotation, Disposition, Invocation};
 
-        if tools.after_tool.is_none() {
-            return output;
-        }
+        let tools = handler.tools();
         let mut slot_context = context.clone();
-        slot_context.haskell_effects_alias = tools
-            .after_tool
-            .as_ref()
-            .expect("admitted slot")
-            .execution_effects
-            .clone();
+        slot_context.haskell_effects_alias = handler.entry().execution_effects().clone();
         let context = &slot_context;
         // A slot's own effects and tool use never trigger a slot.
         if execution_state.after_tool_active {
@@ -10195,23 +10196,12 @@ where
                 .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
-                cursor.tool_dispatch = if effects.initial_context {
-                    Some(Arc::clone(
-                        &installed_tools
-                            .as_ref()
-                            .and_then(crate::InstalledToolLease::tools)
-                            .expect("startup admission retains installed dispatcher")
-                            .dispatch,
-                    ))
-                } else {
-                    effects.selected_tool.as_ref().filter(|selected| matches!(
-                    selected.endpoint().plan.execution(), exomonad_tool::EndpointExecution::ResidentAsync(_) | exomonad_tool::EndpointExecution::ResidentSync(_)
-                )).map(|selected| {
-                    let tools = selected.lease().tools().expect("selected installation retained");
-                    tracing::info!(actor = %context.actor, tool = %selected.endpoint().plan.name(), spec = %tools.provenance(), "hosted tool call served by an installed spec");
-                    Arc::clone(&tools.dispatch)
-                })
-                };
+                cursor.resident_tool = effects.selected_tool.as_ref().is_some_and(|call| {
+                    if !matches!(call.selected().endpoint().plan().execution(), exomonad_tool::EndpointExecution::ResidentAsync(_) | exomonad_tool::EndpointExecution::ResidentSync(_)) { return false; }
+                    let tools = call.selected().lease().tools().expect("selected installation retained");
+                    tracing::info!(actor = %context.actor, tool = %call.selected().endpoint().plan().name(), spec = %tools.provenance(), "hosted tool call served by an installed spec");
+                    true
+                });
                 cursor.dispatch_initialized = true;
             }
             if reload_spec_call.is_some() {
@@ -10501,23 +10491,13 @@ where
                                     total: request.items.len(),
                                 },
                             );
-                            let request_start = if effects.initial_context {
-                                owned_workbench::WorkbenchUnitStartRequest::InitialContext {
-                                    dispatch: Arc::clone(
-                                        cursor.tool_dispatch.as_ref().expect("startup dispatcher"),
-                                    ),
-                                    input: request.input.clone().expect("startup input"),
-                                }
-                            } else if let (Some(call), Some(_dispatch)) =
-                                (request.tool_call(), &cursor.tool_dispatch)
-                            {
+                            let request_start = if cursor.resident_tool {
                                 owned_workbench::WorkbenchUnitStartRequest::Tool {
-                                    selected: effects
+                                    call: effects
                                         .selected_tool
                                         .as_ref()
-                                        .expect("selected resident endpoint")
+                                        .expect("admitted resident endpoint call")
                                         .clone(),
-                                    arguments: call.arguments.clone(),
                                 }
                             } else {
                                 let Some(items) = cursor.prepared_cell.as_mut() else {
@@ -10665,17 +10645,12 @@ where
                         } else {
                             format!("{command_prefix}\n{output}")
                         };
-                        // The tool-result boundary: the result exists and has not
-                        // been returned. A hosted tool call reaches here with its
-                        // own dispatcher; an authored Haskell cell reaches here
-                        // too, under the `haskell` tool name and the same
-                        // installed spec's dispatcher — `status` and
-                        // `reload` and `reload_helpers` are the only committed outcomes
-                        // that never acquire one, so a broken slot can never
-                        // block its own repair.
+                        // Hook input retains the selected endpoint name. Generic
+                        // notebook calls use the notebook label; builtin controls
+                        // produce no hook call, keeping their repair routes usable.
                         let hosted_call = request
                             .tool_call()
-                            .filter(|_| cursor.tool_dispatch.is_some())
+                            .filter(|_| cursor.resident_tool)
                             .cloned();
                         let cell_call = if hosted_call.is_none() && cursor.cell_check.is_some() {
                             installed_tools
@@ -10683,7 +10658,13 @@ where
                                 .and_then(crate::InstalledToolLease::tools)
                                 .map(
                                     |_| tidepool_runtime::session::workbench::WorkbenchToolCall {
-                                        name: crate::HASKELL_TOOL.to_string(),
+                                        name: effects
+                                            .selected_tool
+                                            .as_ref()
+                                            .map_or(crate::HASKELL_TOOL, |call| {
+                                                call.selected().endpoint().plan().name()
+                                            })
+                                            .to_string(),
                                         arguments: serde_json::Value::String(
                                             request.items[cursor.index].clone(),
                                         ),
@@ -10711,8 +10692,7 @@ where
                         if let Some(call) = call {
                             if let Some(handler) = installed_tools
                                 .as_ref()
-                                .and_then(crate::InstalledToolLease::handler)
-                                .filter(|handler| handler.tools().after_tool.is_some())
+                                .and_then(crate::InstalledToolLease::after_tool)
                             {
                                 if effects.park_effects {
                                     let frame = after_tool_wait::capture(
@@ -10746,7 +10726,7 @@ where
                                         context,
                                         effects,
                                         workbench,
-                                        handler.tools(),
+                                        &handler,
                                         &call,
                                         receipt.output,
                                         receipt.value.clone(),

@@ -107,10 +107,15 @@ impl EndpointPlan {
                 })
             }
         };
-        if declaration.schedule == ToolScheduling::Async
-            && declaration
-                .effect_keys
-                .contains(&ToolEffectKey::ContextReadWrite)
+        let mut seen = std::collections::HashSet::new();
+        if declaration
+            .effect_keys
+            .iter()
+            .any(|key| key.nominal_identity().is_none() || !seen.insert(*key))
+            || (declaration.schedule == ToolScheduling::Async
+                && declaration
+                    .effect_keys
+                    .contains(&ToolEffectKey::ContextReadWrite))
         {
             return Err(ToolDeclarationError::UnsupportedEndpoint {
                 name: declaration.name,

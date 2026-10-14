@@ -235,7 +235,6 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         context: Option<Arc<dyn crate::HostedContextBinding>>,
     ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
-        let tools = self.tools.clone();
         let installed_tools = self
             .issued_tools
             .clone()
@@ -244,23 +243,20 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             let issued = client.issue_workbench_call(invocation.context.clone());
             let validated = (|| {
                 let arguments = arguments?;
-                if !tools.iter().any(|tool| tool.name() == invocation.name) {
-                    return Err(ResidentToolError::InvalidInvocation(format!(
-                        "unknown actor tool {:?}",
-                        invocation.name
-                    )));
-                }
                 if is_builtin(&invocation.name) {
                     return Ok((builtin_request(&invocation.name, arguments)?, None));
                 }
-                let selected = installed_tools
-                    .as_ref()
-                    .and_then(|lease| lease.select(&invocation.name))
-                    .ok_or_else(|| {
-                        ResidentToolError::Unavailable(
-                            "actor has no installed endpoint snapshot".into(),
-                        )
-                    })?;
+                let lease = installed_tools.as_ref().ok_or_else(|| {
+                    ResidentToolError::Unavailable(
+                        "actor has no installed endpoint snapshot".into(),
+                    )
+                })?;
+                let selected = lease.select(&invocation.name).ok_or_else(|| {
+                    ResidentToolError::InvalidInvocation(format!(
+                        "unknown actor tool {:?}",
+                        invocation.name
+                    ))
+                })?;
                 let admitted = selected.admit(arguments)?;
                 Ok((admitted.request(), Some(admitted)))
             })();

@@ -23,7 +23,7 @@ pub(super) fn result_payload(
 }
 
 pub(super) struct AfterToolFrame {
-    handler: crate::resident_workbench::InstalledToolHandler,
+    handler: crate::resident_workbench::InstalledAfterTool,
     call: WorkbenchToolCall,
     output: String,
     value: Option<serde_json::Value>,
@@ -37,7 +37,7 @@ pub(super) struct AfterToolFrame {
 /// The actor reserves this slot ordinal and selects its original handler
 /// before capture. The frame is moved through successor tasks, never recaptured.
 pub(super) fn capture(
-    handler: crate::resident_workbench::InstalledToolHandler,
+    handler: crate::resident_workbench::InstalledAfterTool,
     call: WorkbenchToolCall,
     output: String,
     value: Option<serde_json::Value>,
@@ -162,14 +162,7 @@ where
         ))
     } else {
         let mut context = context;
-        context.haskell_effects_alias = frame
-            .handler
-            .tools()
-            .after_tool
-            .as_ref()
-            .expect("captured admitted after-tool entry")
-            .execution_effects
-            .clone();
+        context.haskell_effects_alias = frame.handler.entry().execution_effects().clone();
         workbench
             .begin_after_tool(
                 context,

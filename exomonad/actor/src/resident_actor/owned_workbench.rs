@@ -416,8 +416,7 @@ pub(super) enum WorkbenchUnitStartRequest {
         input: serde_json::Value,
     },
     Tool {
-        selected: crate::resident_workbench::InstalledToolSelection,
-        arguments: serde_json::Value,
+        call: Arc<crate::resident_workbench::AdmittedToolCall>,
     },
     Prepared {
         block: ParsedBlock,
@@ -441,13 +440,8 @@ where
                     .begin_initial_context(context, dispatch, input)
                     .await
             }
-            WorkbenchUnitStartRequest::Tool {
-                selected,
-                arguments,
-            } => {
-                workbench
-                    .begin_selected_tool(context, selected, arguments)
-                    .await
+            WorkbenchUnitStartRequest::Tool { call } => {
+                workbench.begin_selected_tool(context, call).await
             }
             WorkbenchUnitStartRequest::Prepared { block, item } => {
                 workbench

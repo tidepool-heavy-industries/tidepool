@@ -1579,7 +1579,7 @@ impl InstalledToolSelection {
         self,
         arguments: exomonad_tool::ToolArguments,
     ) -> Result<AdmittedToolCall, crate::ResidentToolError> {
-        let arguments = self.endpoint().plan.admit_arguments(arguments)?;
+        let arguments = self.endpoint().plan().admit_arguments(arguments)?;
         Ok(AdmittedToolCall {
             selected: self,
             arguments,
@@ -1589,15 +1589,19 @@ impl InstalledToolSelection {
 
 /// Invocation arguments and their issuing endpoint selection travel together.
 pub(crate) struct AdmittedToolCall {
-    pub(crate) selected: InstalledToolSelection,
+    selected: InstalledToolSelection,
     arguments: exomonad_tool::EndpointArguments,
 }
 
 impl AdmittedToolCall {
+    pub(crate) fn selected(&self) -> &InstalledToolSelection {
+        &self.selected
+    }
+
     pub(crate) fn request(&self) -> WorkbenchRequest {
         match &self.arguments {
             exomonad_tool::EndpointArguments::Resident(arguments) => WorkbenchRequest::for_tool(
-                self.selected.endpoint().plan.name().into(),
+                self.selected.endpoint().plan().name().into(),
                 arguments.clone(),
             ),
             exomonad_tool::EndpointArguments::Haskell(source) => {
@@ -1607,14 +1611,21 @@ impl AdmittedToolCall {
     }
 }
 
-/// One original installed handler, retaining its actor and source authority.
-pub(crate) struct InstalledToolHandler {
+/// One admitted after-tool slot, retaining its exact actor, source and implementation.
+pub(crate) struct InstalledAfterTool {
     actor: crate::ActorRef,
     _source: crate::CheckpointSourceLayer,
     tools: Arc<ResidentWorkbenchTools>,
 }
 
-impl InstalledToolHandler {
+impl InstalledAfterTool {
+    pub(crate) fn entry(&self) -> &crate::tool_contract::AfterToolEntry {
+        self.tools
+            .after_tool
+            .as_ref()
+            .expect("issued after-tool selection retains its admitted entry")
+    }
+
     pub(crate) fn actor(&self) -> crate::ActorRef {
         self.actor
     }
@@ -1679,18 +1690,20 @@ impl InstalledToolLease {
             .as_ref()?
             .endpoints
             .iter()
-            .position(|endpoint| endpoint.plan.name() == name)?;
+            .position(|endpoint| endpoint.plan().name() == name)?;
         Some(InstalledToolSelection {
             snapshot: ActorRequestSnapshot::Bootstrap(self.clone()),
             index,
         })
     }
 
-    pub(crate) fn handler(&self) -> Option<InstalledToolHandler> {
-        Some(InstalledToolHandler {
+    pub(crate) fn after_tool(&self) -> Option<InstalledAfterTool> {
+        let tools = self.tools.clone()?;
+        tools.after_tool.as_ref()?;
+        Some(InstalledAfterTool {
             actor: self.actor,
             _source: self.source.clone(),
-            tools: self.tools.clone()?,
+            tools,
         })
     }
 
@@ -2270,7 +2283,7 @@ impl ResidentWorkbenchTools {
     pub(crate) fn surface(&self) -> Vec<exomonad_tool::HostedTool> {
         self.endpoints
             .iter()
-            .map(|endpoint| endpoint.plan.surface())
+            .map(|endpoint| endpoint.plan().surface())
             .collect()
     }
 
@@ -6515,18 +6528,29 @@ where
     pub(crate) async fn begin_selected_tool(
         &self,
         context: crate::ActorSessionContext,
-        selected: InstalledToolSelection,
-        arguments: serde_json::Value,
+        call: Arc<AdmittedToolCall>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let selected = call.selected();
         let dispatch = selected
             .lease()
             .tools()
             .expect("selected installation retained")
             .dispatch
             .clone();
-        let name = selected.endpoint().plan.name().into();
-        self.begin_installed_entry(context, dispatch, selected.entry_index(), name, arguments)
-            .await
+        let name = selected.endpoint().plan().name().into();
+        let exomonad_tool::EndpointArguments::Resident(arguments) = &call.arguments else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "native notebook cannot enter the compiled handler interpreter".into(),
+            ));
+        };
+        self.begin_installed_entry(
+            context,
+            dispatch,
+            selected.entry_index(),
+            name,
+            arguments.clone(),
+        )
+        .await
     }
 
     /// Apply immutable installed code through the common invocation input and
@@ -19772,7 +19796,7 @@ pub(crate) mod request_tests {
                     .admit(exomonad_tool::ToolArguments::Raw("input".into()))
                     .unwrap();
                 let step = workbench
-                    .begin_selected_tool(context.clone(), call.selected, serde_json::json!("input"))
+                    .begin_selected_tool(context.clone(), Arc::new(call))
                     .await
                     .unwrap();
                 let step = match step {
