@@ -197,6 +197,7 @@
     "bridge/facade/src/actor_host/fresh_result_source_actor.hs",
     "bridge/facade/src/actor_host/fresh_selected_child_setup.hs",
     "bridge/facade/src/actor_host/hosted_tools_fixture.hs",
+    "bridge/facade/src/actor_host/inherited_command_completion_assertion.hs",
     "bridge/facade/src/actor_host/inherited_command_helpers.hs",
     "bridge/facade/src/actor_host/inherited_command_observer.hs",
     "bridge/facade/src/actor_host/inherited_command_output_assertion.hs",

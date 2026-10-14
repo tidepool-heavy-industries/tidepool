@@ -932,12 +932,12 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
     assert_eq!(backend.control_count(), 1, "owner lost command control");
 
     backend.finish();
-    let completed = dispatch_haskell_script(observer, "Cmd.await job").await;
-    assert_eq!(completed["status"], "committed", "{completed}");
-    assert!(
-        completed.to_string().contains("CommandExited 0"),
-        "{completed}"
-    );
+    let completed = dispatch_haskell_script(
+        observer,
+        include_str!("inherited_command_completion_assertion.hs"),
+    )
+    .await;
+    require_committed(&completed);
     assert_eq!(backend.executions(), 1, "foreign reads reran the command");
 })).await;
 }

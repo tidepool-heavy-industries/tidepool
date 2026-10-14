@@ -325,6 +325,7 @@ filegroup(
         "bridge/facade/src/actor_host/fresh_result_source_actor.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f726573756c745f736f757263655f6163746f722e6873",
         "bridge/facade/src/actor_host/fresh_selected_child_setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f73656c65637465645f6368696c645f73657475702e6873",
         "bridge/facade/src/actor_host/hosted_tools_fixture.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f686f737465645f746f6f6c735f666978747572652e6873",
+        "bridge/facade/src/actor_host/inherited_command_completion_assertion.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f636f6d706c6574696f6e5f617373657274696f6e2e6873",
         "bridge/facade/src/actor_host/inherited_command_helpers.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f68656c706572732e6873",
         "bridge/facade/src/actor_host/inherited_command_observer.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f6f627365727665722e6873",
         "bridge/facade/src/actor_host/inherited_command_output_assertion.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f636f6d6d616e645f6f75747075745f617373657274696f6e2e6873",
