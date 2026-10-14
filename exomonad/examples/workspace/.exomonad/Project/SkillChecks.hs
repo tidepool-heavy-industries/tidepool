@@ -95,7 +95,7 @@ requestRoundTrip owner = do
     , "import qualified Tidepool.Agent.Reply as SkillReply"
     , "Tidepool.Check.assertThat \"the worker receives the typed skill request\" ((sessionInput :: Text) == \"typed skill request\")"
     , "firstScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))"
-    , "let firstSkillRequest = case firstScope of { SkillReply.RequestActive request _ -> SkillReply.requestIdNumber request; _ -> -1 }"
+    , "let firstSkillRequest = case firstScope of { SkillReply.RequestActive request _ -> SkillReply.requestIdNumber (SkillReply.replyRequestId request); _ -> -1 }"
     , "Tidepool.Check.assertThat \"the first skill request has its own active typed identity\" (case firstScope of { SkillReply.RequestActive _ active -> active == (sessionInput :: Text); _ -> False })"
     ]
   void $ turn (checkActor worker) "respond (\"typed result\" :: Text)"
@@ -125,7 +125,7 @@ actorReuseHistory owner worker = do
   check "the heterogeneous request activates the same actor incarnation"
     (checkActor reused == checkActor resultsWorker)
   awaitCellBy (checkActor resultsWorker) "the retained actor mounts the new skill request and reply type"
-    "\\scope -> case scope of { Right (request, active) -> SkillReply.requestIdNumber request /= firstSkillRequest && active == \"typed skill request\"; _ -> False }"
+    "\\scope -> case scope of { Right (request, active) -> SkillReply.requestIdNumber (SkillReply.replyRequestId request) /= firstSkillRequest && active == \"typed skill request\"; _ -> False }"
     "do { scope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate))); pure (case scope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure }) }"
   void $ turn (checkActor resultsWorker) $ Text.unlines
     [ "import qualified Tidepool.Check"
@@ -245,7 +245,7 @@ reviewProvenance = do
   assertCell (checkActor reviewer) "typed request preserves both revision identities"
     ("reviewBase (reviewBasis current) == " <> gitOidLiteral baseline <> " && candidateCommit latest == " <> gitOidLiteral candidate)
   void $ turn (checkActor reviewer)
-    "import qualified Tidepool.Agent.Reply as ReviewReply\noldScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet oldId = case oldScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
+    "import qualified Tidepool.Agent.Reply as ReviewReply\noldScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet oldId = case oldScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber (ReviewReply.replyRequestId request); _ -> -1 }"
   assertCell (checkActor reviewer) "request scope borrows the exact active review input"
     ("case oldScope of { ReviewReply.RequestActive _ active -> candidateCommit (reviewInput active) == " <> gitOidLiteral candidate <> "; _ -> False }")
   void $ turn (checkActor reviewer)
@@ -278,9 +278,9 @@ reviewProvenance = do
     (checkActor assignedReviewer == checkActor reviewer)
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
   void $ turn (checkActor reviewer)
-    "newScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
+    "newScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber (ReviewReply.replyRequestId request); _ -> -1 }"
   assertCell (checkActor reviewer) "a prepared retained request replaces identity and mounted input"
-    ("case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber request /= oldId && candidateCommit (reviewInput active) == " <> gitOidLiteral revised <> "; _ -> False }")
+    ("case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber (ReviewReply.replyRequestId request) /= oldId && candidateCommit (reviewInput active) == " <> gitOidLiteral revised <> "; _ -> False }")
   void $ turn (checkActor reviewer)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis current) latest [\"checked revised candidate\"] \"assigned acceptance\")))"
   void $ turn owner "retained <- pollResponse assignedReview"

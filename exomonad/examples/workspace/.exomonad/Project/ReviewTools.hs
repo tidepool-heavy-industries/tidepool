@@ -17,7 +17,7 @@ import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Aeson.Value (ToJSON)
 import Tidepool.Agent.Reply
   ( ReplyError, Replies, RequestScope (..), RequestScopeError (..)
-  , attemptReply, currentRequest, requestIdNumber, requestReplyOf
+  , attemptReply, currentRequest, replyRequestId, requestIdNumber, requestReplyOf
   )
 import Tidepool.Actors.Worktree (boundWorktree, observeSubmission)
 import Tidepool.Effects.Core
@@ -71,8 +71,8 @@ submitReview submission = do
   case scope of
     RequestUnavailable reason -> pure (scopeRefusal reason)
     RequestActive request current
-      | requestIdNumber request /= expectedRequestId submission ->
-          pure (RequestIdMismatch (requestIdNumber request))
+      | requestIdNumber (replyRequestId request) /= expectedRequestId submission ->
+          pure (RequestIdMismatch (requestIdNumber (replyRequestId request)))
       | candidateCommit (reviewInput current) /= expectedCandidateOid submission ->
           pure (CandidateOidMismatch (candidateCommit (reviewInput current)))
       | otherwise -> do

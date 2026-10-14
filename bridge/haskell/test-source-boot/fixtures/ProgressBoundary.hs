@@ -26,6 +26,11 @@ answerCurrent = do
 scopeReply :: Public.RequestScope Int Int -> Maybe (Public.Reply Int)
 scopeReply = Public.requestReplyOf
 
+scopeRequestNumber :: Public.RequestScope Int Int -> Maybe Int
+scopeRequestNumber scope = case scope of
+  Public.RequestUnavailable _ -> Nothing
+  Public.RequestActive target _ -> Just (Public.requestIdNumber (Public.replyRequestId target))
+
 data Protocol a where
   ProgressEvent :: ProgressState ProgressNote -> Protocol ()
 
