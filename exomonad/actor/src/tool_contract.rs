@@ -108,8 +108,7 @@ pub(crate) fn admit_installation(
     .map_err(|failure| error(failure.to_string()))?;
     let mut names = HashSet::from([
         crate::status_tool::STATUS_TOOL.to_string(),
-        crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
-        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL.to_string(),
+        crate::reload_tool::RELOAD_TOOL.to_string(),
     ]);
     let endpoints = tools
         .into_iter()

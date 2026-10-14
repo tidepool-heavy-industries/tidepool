@@ -25,9 +25,9 @@ pub fn web() -> Effect {
             Verb { ctor: "WebExtract", method: "web_extract", args: vec![arg("url", HsType::Text)], ret: HsType::Value, errors: Some("WebError"), handling: HandlingClass::OuterDispatch(OuterEffect::Web) },
         ],
         helpers: vec![
-            Helper { name: "webFollowRaw", ctor: Some("WebFollow"), visibility: crate::schema::HelperVisibility::Public, doc: &["Resolve a link against a retrieved URL and extract that page."], body: HelperBody::Applied(&["base", "target"]) },
-            Helper { name: "webSearchRaw", ctor: Some("WebSearch"), visibility: crate::schema::HelperVisibility::Public, doc: &["Basic search. Result budget is Tavily's 1–20 API range; domain filters are optional."], body: HelperBody::Applied(&["query", "limit", "includeDomains", "excludeDomains"]) },
-            Helper { name: "webExtractRaw", ctor: Some("WebExtract"), visibility: crate::schema::HelperVisibility::Public, doc: &["Extract complete available Markdown without provider query filtering."], body: HelperBody::Pointfree },
+            Helper { name: "webFollowRaw", ctor: Some("WebFollow"), substrate: false, doc: &["Resolve a link against a retrieved URL and extract that page."], body: HelperBody::Applied(&["base", "target"]) },
+            Helper { name: "webSearchRaw", ctor: Some("WebSearch"), substrate: false, doc: &["Basic search. Result budget is Tavily's 1–20 API range; domain filters are optional."], body: HelperBody::Applied(&["query", "limit", "includeDomains", "excludeDomains"]) },
+            Helper { name: "webExtractRaw", ctor: Some("WebExtract"), substrate: false, doc: &["Extract complete available Markdown without provider query filtering."], body: HelperBody::Pointfree },
         ],
         polymorphism: Polymorphism::None, generated_handler: true,
         handler_execution: crate::schema::HandlerExecution::BlockingPrepared, caller_principal: false,

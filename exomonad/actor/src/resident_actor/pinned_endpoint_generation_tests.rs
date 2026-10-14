@@ -65,7 +65,7 @@ pub(crate) fn assert_pinned_preflight(
             replacement.clone(),
         ),
     ] {
-        let endpoint_effects = selected.endpoint().execution_effects.clone();
+        let endpoint_effects = selected.endpoint().execution_effects().clone();
         let expected_dispatch = selected.lease().tools().unwrap().dispatch.clone();
         let admitted = selected
             .admit(exomonad_tool::ToolArguments::Structured(
@@ -107,6 +107,7 @@ pub(crate) fn assert_pinned_preflight(
                 .selected_tool
                 .as_ref()
                 .unwrap()
+                .selected()
                 .lease()
                 .tools()
                 .unwrap()

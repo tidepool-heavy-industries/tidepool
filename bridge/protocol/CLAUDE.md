@@ -21,6 +21,9 @@ identity, delegability and ordered default profiles. Its projections supply
 Rust and Haskell sums, reflection and row witnesses; runtime interpreter
 support and resource grants remain independently observed. External nominal
 entries use `ExternalType`, including handwritten Replies and Watches.
+Declaration origin distinguishes generated Core schemas, MCP's handwritten
+FsRead/FsWrite definitions and external modules. A defining module alone does
+not identify the declaration producer; real GHC reflection validates emission.
 The legacy Rust `Forks` spelling remains decodable/re-encodable for retained
 contracts, but has no nominal Haskell identity, witness, default membership or
 installed interpreter. Authored launch uses AgentLaunch.

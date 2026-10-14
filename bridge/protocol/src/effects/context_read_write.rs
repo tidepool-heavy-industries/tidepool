@@ -87,7 +87,7 @@ pub fn context_read_write() -> Effect {
             Helper {
                 name: "getInitialContext",
                 ctor: Some("GetInitialContextWith"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &["Observe retained startup evidence without rerunning initialization or editing context."],
                 body: HelperBody::Nullary,
             },

@@ -98,8 +98,7 @@ fn builtin_request(
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        crate::status_tool::STATUS_TOOL
-            | crate::reload_tool::RELOAD_TOOL
+        crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
     )
 }
 

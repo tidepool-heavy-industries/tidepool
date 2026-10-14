@@ -17,9 +17,9 @@ pub fn web_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            "-- | Resolve a link against a retrieved URL and extract that page.\nwebFollowRaw :: forall effs. Member Web effs => Text -> Text -> Eff effs (Either WebError Value)\nwebFollowRaw base target = send (WebFollow base target)",
-            "-- | Basic search. Result budget is Tavily's 1–20 API range; domain filters are optional.\nwebSearchRaw :: forall effs. Member Web effs => Text -> Int -> [Text] -> [Text] -> Eff effs (Either WebError Value)\nwebSearchRaw query limit includeDomains excludeDomains = send (WebSearch query limit includeDomains excludeDomains)",
-            "-- | Extract complete available Markdown without provider query filtering.\nwebExtractRaw :: forall effs. Member Web effs => Text -> Eff effs (Either WebError Value)\nwebExtractRaw = send . WebExtract",
+            crate::effect_defs::helper_decl!(@ Some("webFollowRaw"), Public, { raw ["-- | Resolve a link against a retrieved URL and extract that page.\nwebFollowRaw :: forall effs. Member Web effs => Text -> Text -> Eff effs (Either WebError Value)\nwebFollowRaw base target = send (WebFollow base target)"] }),
+            crate::effect_defs::helper_decl!(@ Some("webSearchRaw"), Public, { raw ["-- | Basic search. Result budget is Tavily's 1–20 API range; domain filters are optional.\nwebSearchRaw :: forall effs. Member Web effs => Text -> Int -> [Text] -> [Text] -> Eff effs (Either WebError Value)\nwebSearchRaw query limit includeDomains excludeDomains = send (WebSearch query limit includeDomains excludeDomains)"] }),
+            crate::effect_defs::helper_decl!(@ Some("webExtractRaw"), Public, { raw ["-- | Extract complete available Markdown without provider query filtering.\nwebExtractRaw :: forall effs. Member Web effs => Text -> Eff effs (Either WebError Value)\nwebExtractRaw = send . WebExtract"] }),
         ],
         type_params: &[],
         default_row_args: &[],

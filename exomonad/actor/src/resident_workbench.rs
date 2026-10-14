@@ -1876,21 +1876,31 @@ impl InstalledToolsState {
         self.0.lock().available().cloned()
     }
 
-    pub(crate) fn snapshot_for_call(&self) -> Result<ActorRequestSnapshot, crate::ResidentToolError> {
-        let unavailable = |actor| crate::ResidentToolError::Invocation(
-            crate::KernelInvocationFailure::Rejected {
-                receipts: Vec::new(), actor,
-                detail: "actor's installed source is unavailable".into(), diagnostic: None,
-            },
-        );
+    pub(crate) fn snapshot_for_call(
+        &self,
+    ) -> Result<ActorRequestSnapshot, crate::ResidentToolError> {
+        let unavailable = |actor| {
+            crate::ResidentToolError::Invocation(crate::KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor,
+                detail: "actor's installed source is unavailable".into(),
+                diagnostic: None,
+            })
+        };
         match &*self.0.lock() {
-            InstalledToolsAvailability::Available(lease) => Ok(ActorRequestSnapshot::Bootstrap(lease.clone())),
-            InstalledToolsAvailability::Generation(generation) => Ok(ActorRequestSnapshot::Generation(generation.clone())),
+            InstalledToolsAvailability::Available(lease) => {
+                Ok(ActorRequestSnapshot::Bootstrap(lease.clone()))
+            }
+            InstalledToolsAvailability::Generation(generation) => {
+                Ok(ActorRequestSnapshot::Generation(generation.clone()))
+            }
             InstalledToolsAvailability::Empty => Err(crate::ResidentToolError::Unavailable(
                 "actor has no installed endpoint snapshot".into(),
             )),
             InstalledToolsAvailability::SourceUnavailable { actor, .. } => Err(unavailable(*actor)),
-            InstalledToolsAvailability::GenerationUnavailable(generation) => Err(unavailable(generation.context.actor)),
+            InstalledToolsAvailability::GenerationUnavailable(generation) => {
+                Err(unavailable(generation.context.actor))
+            }
         }
     }
 
@@ -20042,7 +20052,7 @@ pub(crate) mod request_tests {
                 .admit(exomonad_tool::ToolArguments::Raw("input".into()))
                 .unwrap();
             let step = workbench
-                .begin_selected_tool(context.clone(), call.selected, serde_json::json!("input"))
+                .begin_selected_tool(context.clone(), Arc::new(call))
                 .await
                 .unwrap();
             let step = match step {

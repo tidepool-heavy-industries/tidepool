@@ -10492,8 +10492,12 @@ where
                             );
                             let request_start = if effects.initial_context {
                                 owned_workbench::WorkbenchUnitStartRequest::InitialContext {
-                                    dispatch: installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
-                                        .expect("startup admission retains installed dispatcher").dispatch.clone(),
+                                    dispatch: installed_tools
+                                        .as_ref()
+                                        .and_then(crate::InstalledToolLease::tools)
+                                        .expect("startup admission retains installed dispatcher")
+                                        .dispatch
+                                        .clone(),
                                     input: request.input.clone().expect("startup input"),
                                 }
                             } else if cursor.resident_tool {

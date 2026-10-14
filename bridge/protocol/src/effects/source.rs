@@ -228,7 +228,7 @@ pub fn source() -> Effect {
             },
         ],
         helpers: vec![
-            Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), visibility: crate::schema::HelperVisibility::Public,
+            Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), substrate: false,
                 doc: &["Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
             Helper {
                 name: "reloadSource",

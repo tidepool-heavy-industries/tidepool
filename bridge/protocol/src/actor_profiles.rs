@@ -14,11 +14,36 @@ pub enum EffectScope {
     InvocationOnly,
 }
 
+/// The declaration producer, independently of the emitted defining module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclarationOrigin {
+    GeneratedCore,
+    HandwrittenCore(HandwrittenCoreEffect),
+    ExternalModule,
+}
+
+/// Core declarations owned by MCP's handwritten effect registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandwrittenCoreEffect {
+    FsRead,
+    FsWrite,
+}
+
+impl HandwrittenCoreEffect {
+    const fn haskell_name(self) -> &'static str {
+        match self {
+            Self::FsRead => "FsRead",
+            Self::FsWrite => "FsWrite",
+        }
+    }
+}
+
 /// A nominal declaration: defining module/type, key constructor, wire spelling,
 /// classification and independent stable orders for each existing projection.
 #[derive(Clone, Copy, Debug)]
 pub struct NominalEffect {
     pub identity: ExternalType,
+    pub origin: DeclarationOrigin,
     pub constructor: &'static str,
     pub wire_name: &'static str,
     pub scope: EffectScope,
@@ -29,12 +54,24 @@ pub struct NominalEffect {
 
 macro_rules! nominal {
     ($name:ident, $constructor:ident, $default:expr, $rust:expr, $bridge:expr, $module:expr) => {
+        nominal!(
+            $name,
+            $constructor,
+            $default,
+            $rust,
+            $bridge,
+            $module,
+            DeclarationOrigin::GeneratedCore
+        )
+    };
+    ($name:ident, $constructor:ident, $default:expr, $rust:expr, $bridge:expr, $module:expr, $origin:expr) => {
         NominalEffect {
             identity: ExternalType {
                 haskell_name: stringify!($name),
                 rust_wire: stringify!($name),
                 core_module: Some($module),
             },
+            origin: $origin,
             constructor: stringify!($constructor),
             wire_name: stringify!($name),
             scope: EffectScope::Delegable,
@@ -47,40 +84,164 @@ macro_rules! nominal {
 
 /// Catalogue order preserves the Haskell sum's existing constructor tags.
 pub const EFFECTS: &[NominalEffect] = &[
-    nominal!(ResourceScopes, EffectResourceScopes, 2, 1, 0, "Tidepool.Effects.Core"),
-    nominal!(Replies, EffectReplies, 0, 0, 1, "Tidepool.Agent.Reply.Internal"),
-    nominal!(Watches, EffectWatches, 1, 2, 2, "Tidepool.Agent.Watch.Internal"),
-    nominal!(ActorContext, EffectActorContext, 3, 4, 3, "Tidepool.Effects.Core"),
-    nominal!(AgentLaunch, EffectAgentLaunch, 4, 5, 4, "Tidepool.Effects.Core"),
-    nominal!(AgentInspection, EffectAgentInspection, 5, 6, 5, "Tidepool.Effects.Core"),
-    nominal!(AgentControl, EffectAgentControl, 6, 7, 6, "Tidepool.Effects.Core"),
-    nominal!(BoundWorktree, EffectBoundWorktree, 7, 8, 7, "Tidepool.Effects.Core"),
-    nominal!(WorktreeRegistry, EffectWorktreeRegistry, 8, 9, 8, "Tidepool.Effects.Core"),
-    nominal!(WorktreeAllocation, EffectWorktreeAllocation, 9, 10, 9, "Tidepool.Effects.Core"),
-    nominal!(WorktreeIntegration, EffectWorktreeIntegration, 10, 11, 10, "Tidepool.Effects.Core"),
+    nominal!(
+        ResourceScopes,
+        EffectResourceScopes,
+        2,
+        1,
+        0,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        Replies,
+        EffectReplies,
+        0,
+        0,
+        1,
+        "Tidepool.Agent.Reply.Internal",
+        DeclarationOrigin::ExternalModule
+    ),
+    nominal!(
+        Watches,
+        EffectWatches,
+        1,
+        2,
+        2,
+        "Tidepool.Agent.Watch.Internal",
+        DeclarationOrigin::ExternalModule
+    ),
+    nominal!(
+        ActorContext,
+        EffectActorContext,
+        3,
+        4,
+        3,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        AgentLaunch,
+        EffectAgentLaunch,
+        4,
+        5,
+        4,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        AgentInspection,
+        EffectAgentInspection,
+        5,
+        6,
+        5,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        AgentControl,
+        EffectAgentControl,
+        6,
+        7,
+        6,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        BoundWorktree,
+        EffectBoundWorktree,
+        7,
+        8,
+        7,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        WorktreeRegistry,
+        EffectWorktreeRegistry,
+        8,
+        9,
+        8,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        WorktreeAllocation,
+        EffectWorktreeAllocation,
+        9,
+        10,
+        9,
+        "Tidepool.Effects.Core"
+    ),
+    nominal!(
+        WorktreeIntegration,
+        EffectWorktreeIntegration,
+        10,
+        11,
+        10,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Sleep, EffectSleep, 11, 12, 11, "Tidepool.Effects.Core"),
-    nominal!(Commands, EffectCommands, 15, 16, 15, "Tidepool.Effects.Core"),
+    nominal!(
+        Commands,
+        EffectCommands,
+        15,
+        16,
+        15,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Console, EffectConsole, 16, 17, 16, "Tidepool.Effects.Core"),
     nominal!(AskUser, EffectAskUser, 17, 18, 17, "Tidepool.Effects.Core"),
     nominal!(Green, EffectGreen, 18, 19, 18, "Tidepool.Effects.Core"),
-    nominal!(Notifications, EffectNotifications, 12, 13, 12, "Tidepool.Effects.Core"),
+    nominal!(
+        Notifications,
+        EffectNotifications,
+        12,
+        13,
+        12,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Jev, EffectJev, 13, 14, 13, "Tidepool.Effects.Core"),
-    nominal!(ModelCall, EffectModelCall, 14, 15, 14, "Tidepool.Effects.Core"),
+    nominal!(
+        ModelCall,
+        EffectModelCall,
+        14,
+        15,
+        14,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Actor, EffectActor, 19, 20, 19, "Tidepool.Effects.Core"),
     nominal!(Reflect, EffectReflect, 20, 21, 20, "Tidepool.Effects.Core"),
     nominal!(Lookup, EffectLookup, 21, 22, 21, "Tidepool.Effects.Core"),
-    nominal!(RepoEvent, EffectRepoEvent, 27, 23, 22, "Tidepool.Effects.Core"),
+    nominal!(
+        RepoEvent,
+        EffectRepoEvent,
+        27,
+        23,
+        22,
+        "Tidepool.Effects.Core"
+    ),
     nominal!(Source, EffectSource, 22, 28, 23, "Tidepool.Effects.Core"),
     nominal!(Journal, EffectJournal, 23, 24, 24, "Tidepool.Effects.Core"),
     nominal!(Web, EffectWeb, 24, 25, 25, "Tidepool.Effects.Core"),
-    nominal!(FsRead, EffectFsRead, 25, 26, 26, "Tidepool.Effects.Core"),
-    nominal!(FsWrite, EffectFsWrite, 26, 27, 27, "Tidepool.Effects.Core"),
+    nominal!(
+        FsRead,
+        EffectFsRead,
+        25,
+        26,
+        26,
+        "Tidepool.Effects.Core",
+        DeclarationOrigin::HandwrittenCore(HandwrittenCoreEffect::FsRead)
+    ),
+    nominal!(
+        FsWrite,
+        EffectFsWrite,
+        26,
+        27,
+        27,
+        "Tidepool.Effects.Core",
+        DeclarationOrigin::HandwrittenCore(HandwrittenCoreEffect::FsWrite)
+    ),
     NominalEffect {
         identity: ExternalType {
             haskell_name: "ContextReadWrite",
             rust_wire: "ContextReadWrite",
             core_module: Some("Tidepool.Effects.Core"),
         },
+        origin: DeclarationOrigin::GeneratedCore,
         constructor: "InvocationContextReadWrite",
         wire_name: "ContextReadWrite",
         scope: EffectScope::InvocationOnly,
@@ -134,15 +295,22 @@ fn validate(effects: &[NominalEffect]) -> Result<(), String> {
             .identity
             .core_module
             .ok_or_else(|| format!("missing defining module: {}", effect.wire_name))?;
-        if module == "Tidepool.Effects.Core"
-            && !declarations.iter().any(|declaration| {
-                declaration.name == effect.identity.haskell_name
-                    && declaration.type_params.is_empty()
-            })
-        {
+        let generated = declarations.iter().any(|declaration| {
+            declaration.name == effect.identity.haskell_name && declaration.type_params.is_empty()
+        });
+        let valid_origin = match effect.origin {
+            DeclarationOrigin::GeneratedCore => module == "Tidepool.Effects.Core" && generated,
+            DeclarationOrigin::HandwrittenCore(owner) => {
+                module == "Tidepool.Effects.Core"
+                    && effect.identity.haskell_name == owner.haskell_name()
+                    && !generated
+            }
+            DeclarationOrigin::ExternalModule => module != "Tidepool.Effects.Core",
+        };
+        if !valid_origin {
             return Err(format!(
-                "no unary Core effect declares {}",
-                effect.identity.haskell_name
+                "declaration origin {:?} does not issue {}.{}",
+                effect.origin, module, effect.identity.haskell_name
             ));
         }
         if let Some(rank) = effect.default_order {
@@ -510,6 +678,37 @@ mod tests {
     }
 
     #[test]
+    fn handwritten_core_identity_requires_its_exact_declaration_origin() {
+        assert!(validate(EFFECTS).is_ok());
+        for owner in [
+            HandwrittenCoreEffect::FsRead,
+            HandwrittenCoreEffect::FsWrite,
+        ] {
+            let index = EFFECTS
+                .iter()
+                .position(|effect| effect.origin == DeclarationOrigin::HandwrittenCore(owner))
+                .unwrap();
+            for wrong_origin in [
+                DeclarationOrigin::GeneratedCore,
+                DeclarationOrigin::ExternalModule,
+            ] {
+                let mut changed = EFFECTS.to_vec();
+                changed[index].origin = wrong_origin;
+                assert!(validate(&changed).is_err());
+            }
+            let mut changed = EFFECTS.to_vec();
+            changed[index].identity.haskell_name = "NotAnEffect";
+            assert!(validate(&changed).is_err());
+            let mut changed = EFFECTS.to_vec();
+            changed[index].identity.core_module = Some("Foreign.Core");
+            assert!(validate(&changed).is_err());
+        }
+        let mut changed = EFFECTS.to_vec();
+        changed[0].origin = DeclarationOrigin::HandwrittenCore(HandwrittenCoreEffect::FsRead);
+        assert!(validate(&changed).is_err());
+    }
+
+    #[test]
     fn invocation_catalogue_mutation_generates_witnesses_and_async_refusal_without_delegation() {
         let mut changed = EFFECTS.to_vec();
         changed.push(NominalEffect {
@@ -518,12 +717,13 @@ mod tests {
                 rust_wire: "InvocationProbe",
                 core_module: Some("Example.Invocation"),
             },
+            origin: DeclarationOrigin::ExternalModule,
             constructor: "InvocationProbeKey",
             wire_name: "InvocationProbeWire",
             scope: EffectScope::InvocationOnly,
             default_order: None,
-            rust_order: 28,
-            bridge_order: 26,
+            rust_order: 30,
+            bridge_order: 29,
         });
         assert!(validate(&changed).is_ok());
         for file in render(&changed) {
@@ -572,6 +772,7 @@ mod tests {
                 rust_wire: "Probe",
                 core_module: Some("Example.Probe"),
             },
+            origin: DeclarationOrigin::ExternalModule,
             constructor: "EffectProbe",
             wire_name: "ProbeWire",
             scope: EffectScope::Delegable,

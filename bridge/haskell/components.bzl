@@ -899,6 +899,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -1098,8 +1099,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -1242,6 +1242,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -1441,8 +1442,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -1576,6 +1576,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -1775,8 +1776,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -1906,6 +1906,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -1967,8 +1968,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -2101,6 +2101,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -2173,8 +2174,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -2304,6 +2304,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -2363,8 +2364,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -2481,6 +2481,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -2540,8 +2541,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -2681,7 +2681,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
-        "lib/Tidepool/Effects/Row.hs": "lib/Tidepool/Effects/Row.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -2885,6 +2885,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -3086,8 +3087,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -3226,6 +3226,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -3288,8 +3289,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -3425,6 +3425,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -3500,8 +3501,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -3661,6 +3661,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -3875,8 +3876,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -4035,6 +4035,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -4222,8 +4223,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -4362,6 +4362,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -4421,8 +4422,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -4538,6 +4538,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -4598,8 +4599,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "test-swarm/SwarmSpec.hs": "test-swarm/SwarmSpec.hs",
-        "test-swarm/SwarmSpecTest.hs": "test-swarm/SwarmSpecTest.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-swarm/SwarmSpecTest.hs": "test-swarm/SwarmSpecTest.hs"
     },
     )
     sh_test(
@@ -4733,6 +4733,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -4920,8 +4921,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -5057,6 +5057,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -5258,8 +5259,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -5399,6 +5399,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -5586,8 +5587,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -5725,6 +5725,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -5786,8 +5787,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -5922,6 +5922,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -5983,8 +5984,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "test-worker-response/WorkerResponseCases.hs": "test-worker-response/WorkerResponseCases.hs",
         "test-worker-response/WorkerResponseChildMain.hs": "test-worker-response/WorkerResponseChildMain.hs",
-        "test-worker-response/WorkerResponseTest.hs": "test-worker-response/WorkerResponseTest.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-worker-response/WorkerResponseTest.hs": "test-worker-response/WorkerResponseTest.hs"
     },
     )
     sh_test(
@@ -6363,6 +6363,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -6428,8 +6429,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -6578,6 +6578,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -6675,8 +6676,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -6826,6 +6826,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -6923,8 +6924,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -7270,6 +7270,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -7328,8 +7329,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -7647,6 +7647,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -7705,8 +7706,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -7884,6 +7884,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -7981,8 +7982,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
@@ -8158,6 +8158,7 @@ def declare_haskell_components():
         "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
         "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
         "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
         "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
@@ -8255,8 +8256,7 @@ def declare_haskell_components():
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
         "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
-        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "lib/Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]"
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
     sh_test(
