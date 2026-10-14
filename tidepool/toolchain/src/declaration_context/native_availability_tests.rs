@@ -316,12 +316,14 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let helper = product("TypeOnlyHelper", 73);
     let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
     let authored = crate::certified_products::fixture_native_declaration_product(
-        original_groups_fixture_with_interface(
+        crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+            "main",
             &module,
             vec![(7, vec![source_import(&helper, 7)]), (9001, vec![])],
             74,
             &BTreeMap::new(),
             b"issued authored interface".to_vec(),
+            &BTreeMap::new(),
         ),
         producer.sha256(),
         1,
@@ -410,10 +412,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .metadata
         .selected_native_groups
         .is_empty());
-    let helper_owner = crate::declaration_join::ExactModuleIdentity {
-        unit: "main".into(),
-        module: "TypeOnlyHelper".into(),
-    };
+    let helper_owner = entries
+        .iter()
+        .find(|entry| entry.descriptor.owner.module == "TypeOnlyHelper")
+        .unwrap()
+        .descriptor
+        .owner
+        .clone();
     assert!(
         request
             .compiler_inputs()
