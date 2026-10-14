@@ -5,12 +5,26 @@ module ProgressBoundary where
 
 import Control.Monad.Freer (Eff)
 import Data.Coerce (coerce)
+import Data.Void (Void)
+import qualified Tidepool.Agent.Reply as Public
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Actor.Source
 import Tidepool.Internal.RequestSite (RequestSite)
 
 newtype ProgressNote = ProgressNote Int
+
+-- Public observation preserves the issued result type through settlement.
+{-# OPAQUE answerCurrent #-}
+answerCurrent :: Eff '[Replies] (Either ReplyError Void)
+answerCurrent = do
+  scope <- Public.currentRequest @Int @Int
+  case scope of
+    Public.RequestUnavailable _ -> pure (Left Public.ReplyStale)
+    Public.RequestActive target input -> Public.attemptReply target input
+
+scopeReply :: Public.RequestScope Int Int -> Maybe (Public.Reply Int)
+scopeReply = Public.requestReplyOf
 
 data Protocol a where
   ProgressEvent :: ProgressState ProgressNote -> Protocol ()

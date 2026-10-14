@@ -576,6 +576,12 @@ Pure reusable helpers belong in named library modules. Effect constructors and
 wire records belong in `tidepool-protocol`/`tidepool-mcp`, not handwritten
 copies in the library.
 
+Runtime-typed handles declare nominal payload roles. Observations preserve the
+issued typed handle rather than reconstructing one from an identifier. Public
+observation patterns are unidirectional and use distinct private constructor
+names. Cover payload coercion and handle reissuance with negative compiler
+controls alongside compiled public usage in the existing surface suites.
+
 `ask` and `llm` share the `Schema` vocabulary. `ask` suspends for a caller
 reply, which the caller checks; `llm` requests schema-constrained output from
 the model provider and parses its JSON response.

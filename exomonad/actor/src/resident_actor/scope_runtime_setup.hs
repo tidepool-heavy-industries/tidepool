@@ -11,16 +11,16 @@ let targetSpec :: AgentSpec ScopeTargetTools '[Replies]
           { acknowledge = presentWith presentDisplay $
               tool "Acknowledge the active request cancellation." $ \_ -> do
                 request <- Reply.currentRequest @() @Int
-                _ <- case Reply.requestReplyOf request of
-                  Nothing -> Tidepool.Prelude.error "cooperative target has no active request"
-                  Just reply -> Reply.acknowledgeCancellation reply
+                _ <- case request of
+                  Reply.RequestUnavailable _ -> Tidepool.Prelude.error "cooperative target has no active request"
+                  Reply.RequestActive target _ -> Reply.acknowledgeCancellation target
                 pure ()
           , respond = presentWith presentDisplay $
               tool "Answer the active request." $ \argument -> do
                 request <- Reply.currentRequest @() @Int
-                _ <- case Reply.requestReplyOf request of
-                  Nothing -> Tidepool.Prelude.error "cooperative target has no active request"
-                  Just reply -> Reply.reply reply (sentinel argument)
+                _ <- case request of
+                  Reply.RequestUnavailable _ -> Tidepool.Prelude.error "cooperative target has no active request"
+                  Reply.RequestActive target _ -> Reply.reply target (sentinel argument)
                 pure ()
           }
       }

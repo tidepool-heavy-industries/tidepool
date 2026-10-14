@@ -711,6 +711,15 @@ impl ScopeFixture {
             .await,
         );
         self.wait_next_activation().await;
+        let requests = &self.forest.environment.requests;
+        let target = self.request_target.as_ref().unwrap().identity();
+        let active = requests.open_without_reply(target).unwrap();
+        assert_eq!(
+            requests.begin_reply(owner.identity(), active),
+            Err(crate::ReplyError::Unauthorized),
+            "the requester cannot settle its target's native request"
+        );
+        assert_eq!(requests.open_without_reply(target), Some(active));
         let result = tokio::time::timeout(
             Duration::from_secs(240),
             self.request_policy

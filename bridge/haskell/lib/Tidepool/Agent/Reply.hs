@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | Typed request observation and one-shot target settlement.
 module Tidepool.Agent.Reply
@@ -9,7 +10,7 @@ module Tidepool.Agent.Reply
   , RequestError (..)
   , SettlementReporting (..)
   , Reply
-  , RequestScope (..)
+  , RequestScope (RequestUnavailable, RequestActive)
   , RequestScopeError (..)
   , currentRequest
   , requestReplyOf
@@ -50,7 +51,7 @@ module Tidepool.Agent.Reply
 
 import Tidepool.Agent.Reply.Internal
   ( Reply
-  , RequestScope (..)
+  , RequestScope (RequestUnavailable)
   , RequestScopeError (..)
   , currentRequest
   , requestReplyOf
@@ -94,6 +95,13 @@ import Tidepool.Agent.Reply.Internal
   , responseRequestId
   , responseActor
   )
+import qualified Tidepool.Agent.Reply.Internal as Internal
+
+-- | Observe the runtime-issued reply capability and request input. The pattern
+-- cannot issue a scope or reconstruct a reply capability from a request ID.
+pattern RequestActive :: Reply result -> input -> RequestScope input result
+pattern RequestActive target input <- Internal.RequestScopeActive target input
+{-# COMPLETE RequestUnavailable, RequestActive #-}
 
 requestId :: Request result -> RequestId
 requestId = responseRequestId

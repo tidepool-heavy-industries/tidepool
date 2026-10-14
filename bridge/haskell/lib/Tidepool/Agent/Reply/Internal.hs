@@ -125,6 +125,7 @@ data RequestError
   | RequestInvalidDeadline Text
   deriving (Show, Eq)
 
+type role Reply nominal
 newtype Reply (result :: Type) = Reply RequestId
   deriving (Show, Eq)
 
@@ -134,13 +135,14 @@ data RequestScopeError
   | RequestInputShadowed
   deriving (Show, Eq)
 
+type role RequestScope representational nominal
 data RequestScope input (result :: Type)
   = RequestUnavailable RequestScopeError
-  | RequestActive RequestId input
+  | RequestScopeActive (Reply result) input
 
 requestReplyOf :: RequestScope input result -> Maybe (Reply result)
 requestReplyOf (RequestUnavailable _) = Nothing
-requestReplyOf (RequestActive request _) = Just (Reply request)
+requestReplyOf (RequestScopeActive target _) = Just target
 
 requestIdNumber :: RequestId -> Int
 requestIdNumber (RequestId request) = request

@@ -41,11 +41,31 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
       :: IO (Either SomeException PreparedPipelineResult)
     unless (case rejected of Left _ -> True; Right _ -> False) $
       fail "opaque nominal RequestSite accepted a forged reply, input vector, or integer"
+  forM_ [
+      ("reply result coercion", "bad :: Reply Int -> Reply Bool\nbad = coerce"),
+      ("nominal reply result", "newtype ResultWrapper = ResultWrapper Int\nbad :: Reply Int -> Reply ResultWrapper\nbad = coerce"),
+      ("scope result coercion", "bad :: RequestScope () Int -> RequestScope () Bool\nbad = coerce"),
+      ("nominal scope result", "newtype ResultWrapper = ResultWrapper Int\nbad :: RequestScope () Int -> RequestScope () ResultWrapper\nbad = coerce"),
+      ("raw ID reconstruction", "bad :: RequestId -> RequestScope () Bool\nbad request = RequestActive request ()"),
+      ("scope reissuance", "bad :: Reply Int -> RequestScope () Int\nbad target = RequestActive target ()"),
+      ("private scope issuance", "bad :: Reply Int -> RequestScope () Int\nbad target = RequestScopeActive target ()"),
+      ("reply issuance", "bad :: RequestId -> Reply Bool\nbad = Reply"),
+      ("pattern result relabeling", "bad :: RequestScope () Int -> Maybe (Reply Bool)\nbad (RequestActive target _) = Just target\nbad (RequestUnavailable _) = Nothing")
+    ] $ \(boundary, declaration) -> do
+    putStrLn ("reply boundary refusal control: " ++ boundary)
+    let mismatch = work </> "ReplyMismatch.hs"
+    writeFile mismatch (unlines ["{-# LANGUAGE DataKinds #-}", "module ReplyMismatch where",
+      "import Data.Coerce (coerce)", "import Tidepool.Agent.Reply", declaration])
+    rejected <- try (runPipelineSelected PreparedStg mismatch [work, "lib", effects])
+      :: IO (Either SomeException PreparedPipelineResult)
+    unless (case rejected of Left _ -> True; Right _ -> False) $
+      fail ("public typed reply boundary accepted " ++ boundary)
   prepared <- case filter ((== "ProgressBoundary") . moduleNameString . moduleName . pmModule) (pprModules result) of
     [value] -> pure value
     _ -> fail "progress fixture has no original prepared module"
   let rejections = [(getOccString (srBinder rejection), srMessage rejection) | rejection <- pmSiteRejections prepared]
-      sites = pmYieldSites prepared
+      allSites = pmYieldSites prepared
+      sites = filter ((== 1) . length . ysInputs) allSites
       protected = ["rawPublish", "rawObserve", "rawWatch", "bareRaw", "partialRaw", "tickedRaw", "castedRaw",
         "copiedPublisher", "copiedObserver", "copiedWatch", "copiedMany", "copiedSource", "copiedIntPublisher", "copiedRawPublisher"]
   forM_ protected $ \owner -> unless
@@ -56,6 +76,9 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
   unless (length sites == 6 && all (\site -> length (ysInputs site) == 1
       && length (ysInputTypeWitnesses site) == 1 && all isJust (ysInputTypeWitnesses site)) sites) $
     fail "supported direct/watch/source progress helper lost canonical input authority"
+  unless (length allSites == 7 && length [() | site <- allSites,
+      length (ysInputs site) == 3, all isJust (ysInputTypeWitnesses site)] == 1) $
+    fail "public currentRequest/pattern/reply usage lost its closed request evidence"
   unless (length [() | site <- sites, input <- ysInputs site, "ProgressNote" `T.isInfixOf` stType input] == 5) $
     fail "progress helper metadata erased nominal newtype identity"
   let context = ProjectionContext "test" "matched"
@@ -103,7 +126,7 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
       unless (getOccString (srBinder rejection) `notElem`
           ["reportRequestProgressSited", "pollProgressSited", "afterSited", "installSource", "attachSource"]) $
         fail "trusted progress forwarding implementation was rejected"
-  putStrLn "progress boundary: concrete direct/watch/source evidence; raw, copied Sited and open references refused"
+  putStrLn "progress/reply boundary: concrete helper evidence; raw, copied Sited, open, coercion and issuance controls refused"
  where
   scratch = do
     root <- getTemporaryDirectory

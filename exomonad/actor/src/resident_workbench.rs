@@ -10895,14 +10895,18 @@ where
                         {
                             crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
                         } else {
+                            // RequestScopeActive carries Reply result and input. Reply and
+                            // RequestId are newtypes, erased to this framed Int by
+                            // the matched Haskell translation; the typed site above
+                            // remains the authority for the scope's result parameter.
                             let constructor = tidepool_bridge::get_qualified(
                                 session.data_con_table(),
-                                "Tidepool.Agent.Reply.Internal.RequestActive",
+                                "Tidepool.Agent.Reply.Internal.RequestScopeActive",
                                 2,
                             )
                             .ok_or_else(|| {
                                 BridgeError::UnknownDataConName(
-                                    "Tidepool.Agent.Reply.Internal.RequestActive".into(),
+                                    "Tidepool.Agent.Reply.Internal.RequestScopeActive".into(),
                                 )
                             })?;
                             let request = i64::try_from(request.0).map_err(|_| {
@@ -24258,7 +24262,7 @@ pub(crate) mod request_tests {
     }
 
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner() {
-        assert_current_request_alias_borrow(true).await;
+        assert_current_request_alias_borrow(true, false).await;
     }
 
     #[tokio::test]
@@ -24272,10 +24276,15 @@ pub(crate) mod request_tests {
 
     async fn current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
     ) {
-        assert_current_request_alias_borrow(false).await;
+        assert_current_request_alias_borrow(false, false).await;
     }
 
-    async fn assert_current_request_alias_borrow(shadowed: bool) {
+    #[tokio::test]
+    async fn current_request_refuses_a_different_result_type_without_issuing_reply() {
+        with_test_compiler_owner(assert_current_request_alias_borrow(false, true)).await;
+    }
+
+    async fn assert_current_request_alias_borrow(shadowed: bool, mismatched_result: bool) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -24325,8 +24334,11 @@ pub(crate) mod request_tests {
             .admit_private_cell_for_test(context)
             .await
             .unwrap();
-        let cell =
+        let mut cell =
             tidepool_testing::fixture_source("exomonad/actor/src/fixtures/request-alias-borrow.hs");
+        if mismatched_result {
+            cell = cell.replace("RequestScope () ()", "RequestScope () Bool");
+        }
         let (_, prepared) = workbench
             .prepare_cell(context.clone(), cell.clone())
             .await
@@ -24406,9 +24418,12 @@ pub(crate) mod request_tests {
                 let types = session
                     .request_site_type_evidence(request_site.site)
                     .expect("original unit input and complete reply evidence");
-                assert!(session
-                    .request_scope_types_match(&types, site)
-                    .map_err(ResidentError::Prepared)?);
+                assert_eq!(
+                    session
+                        .request_scope_types_match(&types, site)
+                        .map_err(ResidentError::Prepared)?,
+                    !mismatched_result
+                );
                 Ok((
                     types,
                     session.outstanding_custody(),
@@ -24463,14 +24478,19 @@ pub(crate) mod request_tests {
                 let preview = session
                     .render_retained_preview(&result, 128)
                     .expect("inspect the actual native RequestScope reply");
-                if shadowed {
+                if mismatched_result {
+                    assert_eq!(
+                        preview, "(RequestUnavailable RequestTypeMismatch)",
+                        "a different result type cannot acquire the active reply capability"
+                    );
+                } else if shadowed {
                     assert_eq!(
                         preview, "(RequestUnavailable RequestInputShadowed)",
                         "the stale binding reaches typed refusal, with matching request types"
                     );
                 } else {
                     assert!(
-                        preview.starts_with("(RequestActive 1 "),
+                        preview.starts_with("(RequestScopeActive 1 "),
                         "the exact current input is borrowed: {preview}"
                     );
                 }
