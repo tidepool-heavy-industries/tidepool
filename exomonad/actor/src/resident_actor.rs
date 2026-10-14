@@ -3839,9 +3839,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(call) => Some(Arc::new(call)),
             None if !current_builtin => match request.tool_call() {
                 Some(call) => {
-                    let selected = installed_tools
+                    let selected = issued
                         .as_ref()
-                        .and_then(|lease| lease.select(&call.name))
+                        .and_then(|snapshot| snapshot.select(&call.name))
                         .ok_or_else(|| KernelInvocationFailure::Rejected {
                             receipts: Vec::new(),
                             actor,
@@ -10491,7 +10491,13 @@ where
                                     total: request.items.len(),
                                 },
                             );
-                            let request_start = if cursor.resident_tool {
+                            let request_start = if effects.initial_context {
+                                owned_workbench::WorkbenchUnitStartRequest::InitialContext {
+                                    dispatch: installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
+                                        .expect("startup admission retains installed dispatcher").dispatch.clone(),
+                                    input: request.input.clone().expect("startup input"),
+                                }
+                            } else if cursor.resident_tool {
                                 owned_workbench::WorkbenchUnitStartRequest::Tool {
                                     call: effects
                                         .selected_tool

@@ -115,7 +115,8 @@ impl EndpointPlan {
             || (declaration.schedule == ToolScheduling::Async
                 && declaration
                     .effect_keys
-                    .contains(&ToolEffectKey::ContextReadWrite))
+                    .iter()
+                    .any(|key| key.is_invocation_only()))
         {
             return Err(ToolDeclarationError::UnsupportedEndpoint {
                 name: declaration.name,
@@ -618,6 +619,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn structural_admission_refuses_malformed_profiles_and_wire_fields() {
+        let mut raw = declaration(ToolKind::Raw, serde_json::json!({"type":"string"}));
+        for keys in [
+            vec![ToolEffectKey::ContextReadWrite],
+            vec![ActorEffectKey::Jev.into(), ActorEffectKey::Jev.into()],
+            vec![ActorEffectKey::Forks.into()],
+        ] {
+            raw.effect_keys = keys;
+            assert!(EndpointPlan::admit(raw.clone()).is_err());
+        }
+        raw.effect_keys = vec![ToolEffectKey::ContextReadWrite];
+        raw.schedule = ToolScheduling::BeforeNextInference;
+        assert!(EndpointPlan::admit(raw.clone()).is_ok());
+        let mut wire = serde_json::to_value(raw).unwrap();
+        wire["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ToolDeclaration>(wire).is_err());
     }
 
     proptest::proptest! {

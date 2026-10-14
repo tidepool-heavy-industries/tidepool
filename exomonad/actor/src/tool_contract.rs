@@ -289,8 +289,8 @@ fn validate_row(
             });
         }
         match key {
-            ToolEffectKey::ContextReadWrite if scheduling == ToolScheduling::Async => {
-                return Err(ToolContractError::AsyncContext(name.into()));
+            key if key.is_invocation_only() && scheduling == ToolScheduling::Async => {
+                return Err(ToolContractError::AsyncContext(name.into()))
             }
             ToolEffectKey::Actor(effect) if !granted.contains(&effect) => {
                 return Err(ToolContractError::Ungranted {
