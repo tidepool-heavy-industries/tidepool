@@ -1276,6 +1276,7 @@ pub(crate) struct PreparedRequestReceiver {
 #[derive(Clone, Copy)]
 enum ToolInstallationPurpose {
     InitialTools,
+    RecoveredTools,
     CandidateTools,
     SpawnApplication,
 }
@@ -5877,7 +5878,7 @@ where
             granted_effects,
             ready.effects,
             InstalledToolCode::SourcePrepared(ready.prepared),
-            ToolInstallationPurpose::InitialTools,
+            ToolInstallationPurpose::RecoveredTools,
         )
         .await
         .map(|installation| installation.tools)
@@ -6315,7 +6316,7 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     let (settled, receiver) = match purpose {
-                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::CandidateTools => (settled, None),
+                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::RecoveredTools | ToolInstallationPurpose::CandidateTools => (settled, None),
                         ToolInstallationPurpose::SpawnApplication => {
                             let ResidentOutcome::Suspended { hole, request, .. } = settled else {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -18710,6 +18711,73 @@ pub(crate) mod request_tests {
                 "published imports and later declarations retain quotation41"
             );
         }
+        let (before_reinstall, before_visibility, bootstrap) = workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let view = session.compile_view_in(scope).unwrap();
+                    let visibility = session.public_visibility_snapshot_in(scope).unwrap();
+                    assert!(
+                        !visibility.bindings.is_empty(),
+                        "published quoted-source cells establish binding winners"
+                    );
+                    let bootstrap = session
+                        .begin_durable_public_bootstrap(owner, scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    Ok((view, visibility, bootstrap))
+                }
+            })
+            .await
+            .unwrap();
+        let before_reinstall_recovered = recover_context();
+        let reinstalled = workbench
+            .install_tools_action(
+                context.clone(),
+                10,
+                Vec::new(),
+                Vec::new(),
+                InstalledToolCode::SourcePrepared(Arc::clone(&warmed.prepared)),
+                ToolInstallationPurpose::RecoveredTools,
+            )
+            .await
+            .unwrap();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                assert_eq!(
+                    session.public_visibility_snapshot_in(scope).unwrap(),
+                    before_visibility
+                );
+                session
+                    .publish_durable_public_bootstrap(bootstrap)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                assert_eq!(
+                    session.public_visibility_snapshot_in(scope).unwrap(),
+                    before_visibility
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let after_reinstall_recovered = recover_context();
+        assert_eq!(
+            after_reinstall_recovered, before_reinstall_recovered,
+            "native recovery installation preserves the exact durable compiler and binding surface"
+        );
+        assert_eq!(
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+        drop(reinstalled);
         let before_failed_cell = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
