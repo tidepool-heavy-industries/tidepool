@@ -609,19 +609,22 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     drop(observed);
     resident.settle_dropped_custody();
 
-    let registration = suspended(
-        tidepool_testing::with_settlement(|settlement| {
-            resident.run_rooted_entry_borrowed(
-                "issuedReceiverInstaller",
-                &installer,
-                0,
-                realm,
-                None,
-                settlement,
-            )
-        })
-        .unwrap(),
-    );
+    let register = |resident: &mut TestSession| {
+        suspended(
+            tidepool_testing::with_settlement(|settlement| {
+                resident.run_rooted_entry_borrowed(
+                    "issuedReceiverInstaller",
+                    &installer,
+                    0,
+                    realm,
+                    None,
+                    settlement,
+                )
+            })
+            .unwrap(),
+        )
+    };
+    let registration = register(&mut resident);
     assert_eq!(parked_site(&mut resident, &registration), site);
     assert!(
         resident
@@ -653,6 +656,21 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     assert_eq!(resident.value_handle_count(), handles);
     assert_eq!(resident.parked_realm(&registration), Some(realm));
 
+    assert!(matches!(
+        resident.capture_request_receiver_entry(&registration, site_wire, realm),
+        Err(ResidentError::MissingRequestReceiverEntry { .. })
+    ));
+    assert_eq!(resident.outstanding_custody(), custody);
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.parked_realm(&registration), Some(realm));
+    assert!(matches!(
+        resident.abort(registration.cont_id(), "dropped receiver capture".into()),
+        Err(ResidentError::Run(crate::RuntimeError::Jit(
+            tidepool_effect::error::EffectError::Handler(_)
+        )))
+    ));
+    assert_eq!(resident.parked_count(), 0);
+    let registration = register(&mut resident);
     let entry = resident
         .capture_request_receiver_entry(&registration, site_wire, realm)
         .unwrap();
@@ -667,6 +685,15 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     assert_eq!(resident.value_handle_count(), handles);
     assert_eq!(resident.parked_realm(&registration), Some(realm));
     assert_eq!(foreign.parked_count(), 0);
+
+    assert!(matches!(
+        resident.abort(registration.cont_id(), "foreign receiver refusal".into()),
+        Err(ResidentError::Run(crate::RuntimeError::Jit(
+            tidepool_effect::error::EffectError::Handler(_)
+        )))
+    ));
+    assert_eq!(resident.parked_count(), 0);
+    let registration = register(&mut resident);
 
     let entry = resident
         .capture_request_receiver_entry(&registration, site_wire, realm)
