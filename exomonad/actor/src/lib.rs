@@ -170,7 +170,7 @@ pub use resident_tools::{
     HostedOperationTerminal, ProviderFinalizationKind, ResidentToolDispatchFuture,
     ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolPolicy,
     ResidentToolResponse, WorkbenchBoundaryReconciliation, WorkbenchCancellationOutcome,
-    WorkbenchExecutionControl,
+    WorkbenchCancellationCause, WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
     ActivationCompileStage, ActorInstallationRecoveryError, ActorMachineRegistry,

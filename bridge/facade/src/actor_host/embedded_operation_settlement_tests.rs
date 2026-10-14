@@ -88,6 +88,7 @@ struct AdmissionHost {
     installation: Arc<EmbeddedPolicyInstallation>,
     wakes: tokio::sync::mpsc::UnboundedSender<harness::mailbox::DurableMailboxWake>,
     round_control: Arc<EmbeddedRoundControl>,
+    fixed_surface: Option<Arc<ToolSurface>>,
 }
 
 struct SentinelAdmission {
@@ -112,6 +113,9 @@ impl HostActor for AdmissionHost {
     }
     async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
         let _admission = self.admit().await?;
+        if let Some(surface) = &self.fixed_surface {
+            return Ok(surface.clone());
+        }
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -270,6 +274,7 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
         installation,
         wakes,
         round_control: Arc::new(EmbeddedRoundControl::default()),
+        fixed_surface: None,
     };
     for (call, name, arguments) in [
         (
@@ -346,6 +351,7 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
         installation,
         wakes,
         round_control: Arc::new(EmbeddedRoundControl::default()),
+        fixed_surface: None,
     };
     actor.seal_hosted_work().await.unwrap();
     let (_, sealed, invocation) = operation(actor.identity(), "sealed");
@@ -729,6 +735,7 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
             installation,
             wakes,
             round_control,
+            fixed_surface: None,
         }),
         actor: actor.clone(),
         policy,
@@ -901,4 +908,69 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
         output
     );
     host.inner.output_committed(&operation).await.unwrap();
+}
+
+/// Component round evidence uses real LocalActor admission and the public
+/// Conversation binding. No resident machine or workbench authority is issued.
+pub(in crate::actor_host) struct AdmittedRoundFixture {
+    pub(in crate::actor_host) conversation: harness::embedding::Conversation,
+    actor: exomonad_actor::LocalActorRef,
+    task: ComponentActorTask,
+    _incoming: tokio::sync::mpsc::UnboundedReceiver<harness::mailbox::DurableMailboxWake>,
+}
+impl AdmittedRoundFixture {
+    pub(in crate::actor_host) async fn finish(&mut self) {
+        self.actor
+            .shutdown(ActorTerminal {
+                kind: exomonad_actor::ActorExitKind::Cancelled,
+                summary: "round evidence fixture complete".into(),
+                diagnostic: None,
+            })
+            .await
+            .unwrap();
+        if let Some(task) = self.task.0.as_mut() {
+            task.await.unwrap();
+        }
+        self.task.0.take();
+    }
+}
+struct ComponentActorTask(Option<tokio::task::JoinHandle<()>>);
+impl Drop for ComponentActorTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+pub(in crate::actor_host) async fn admitted_round_fixture(
+    store: Arc<Store>,
+    surface: Arc<ToolSurface>,
+) -> AdmittedRoundFixture {
+    let (actor, task) = exomonad_actor::spawn_local_actor(None, AdmissionSentinel)
+        .await
+        .unwrap();
+    let task = ComponentActorTask(Some(task));
+    let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
+        exomonad_actor::ResidentInteractivePolicy::local(actor.clone()),
+    );
+    let installation = Arc::new(EmbeddedPolicyInstallation::new(actor.identity(), policy));
+    let (identity, _, _) = operation(actor.identity(), "round-fixture");
+    let (wakes, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let host = Arc::new(AdmissionHost {
+        identity,
+        actor: actor.clone(),
+        installation,
+        wakes,
+        round_control: Arc::new(EmbeddedRoundControl::default()),
+        fixed_surface: Some(surface),
+    });
+    let conversation = harness::embedding::Conversation::attach(store, host, None)
+        .await
+        .unwrap();
+    AdmittedRoundFixture {
+        conversation,
+        actor,
+        task,
+        _incoming: incoming,
+    }
 }

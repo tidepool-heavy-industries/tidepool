@@ -578,15 +578,15 @@ async fn wait_for_observation<F: std::future::Future>(
             if control.claim_expiry() {
                 Ok(observation)
             } else {
-                Err("command observation interrupted by delivered input".into())
+                Err(control.interruption_detail("command observation"))
             }
         }
-        () = control.wait_for_cancellation() => {
-            Err("command observation interrupted by delivered input".into())
+        _ = control.wait_for_cancellation() => {
+            Err(control.interruption_detail("command observation"))
         }
         terminal = kernel.wait_requested_shutdown() => {
-            control.request_cancellation();
-            Err(format!("command observation interrupted by actor retirement: {}", terminal.summary))
+            control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
+            Err(format!("{}; observed actor retirement: {}", control.interruption_detail("command observation"), terminal.summary))
         }
     }
 }

@@ -65,7 +65,7 @@ async fn wait_watch_event(
     tokio::select! {
         biased;
         terminal = retirement.wait_requested_shutdown() => WatchWaitEvent::Retired(terminal),
-        () = control.wait_for_cancellation() => WatchWaitEvent::Cancelled,
+        _ = control.wait_for_cancellation() => WatchWaitEvent::Cancelled,
         observation = &mut waiting => {
             tracing::debug!(?actor, ?watch, ?observation, "owned watch received settlement");
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
@@ -126,7 +126,7 @@ where
                 .abort_live(
                     context,
                     poll.continuation,
-                    "awaitWatch interrupted by delivered input".into(),
+                    control.interruption_detail("awaitWatch"),
                 )
                 .await;
             if consumed {
@@ -135,14 +135,15 @@ where
             outcome
         }
         WatchWaitEvent::Retired(terminal) => {
-            control.request_cancellation();
+            control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             let (outcome, consumed) = environment
                 .runner
                 .abort_live(
                     context,
                     poll.continuation,
                     format!(
-                        "awaitWatch interrupted by actor retirement: {}",
+                        "{}; observed actor retirement: {}",
+                        control.interruption_detail("awaitWatch"),
                         terminal.summary
                     ),
                 )

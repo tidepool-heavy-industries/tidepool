@@ -23,7 +23,7 @@ pub(crate) async fn wait_drain_event(
     tokio::select! {
         biased;
         terminal = retirement.wait_requested_shutdown() => DrainWaitEvent::Retired(terminal),
-        () = control.wait_for_cancellation() => DrainWaitEvent::Cancelled,
+        _ = control.wait_for_cancellation() => DrainWaitEvent::Cancelled,
         result = target.drain() => {
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
                 Ok(deliver) => DrainWaitEvent::Settled { result, deliver },
@@ -74,21 +74,23 @@ where
                     retained_job_binding: None,
                 };
             }
-            "drainActor interrupted by delivered input".into()
+            control.interruption_detail("drainActor")
         }
-        DrainWaitEvent::Cancelled => "drainActor interrupted by delivered input".into(),
+        DrainWaitEvent::Cancelled => control.interruption_detail("drainActor"),
         DrainWaitEvent::Retired(terminal) => {
-            control.request_cancellation();
+            control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             format!(
-                "drainActor interrupted by actor retirement: {}",
+                "{}; observed actor retirement: {}",
+                        control.interruption_detail("drainActor"),
                 terminal.summary
             )
         }
         DrainWaitEvent::RetiredAfterSettlement { result, terminal } => {
             disposition = drain_disposition(&result);
-            control.request_cancellation();
+            control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             format!(
-                "drainActor interrupted by actor retirement: {}",
+                "{}; observed actor retirement: {}",
+                        control.interruption_detail("drainActor"),
                 terminal.summary
             )
         }

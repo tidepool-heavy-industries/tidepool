@@ -278,6 +278,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     fn cancel_workbench_boxed(
         &self,
         invocation: exomonad_tool::ToolInvocationContext,
+        cause: crate::WorkbenchCancellationCause,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -287,7 +288,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         >,
     > {
         let client = self.client.clone();
-        Box::pin(async move { client.cancel_workbench(invocation).await })
+        Box::pin(async move { client.cancel_workbench(invocation, cause).await })
     }
 }
 

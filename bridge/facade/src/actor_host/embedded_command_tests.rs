@@ -745,14 +745,12 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
         let driver = drivers.spawn(async move {
             engine_completion.await.unwrap();
             let outcome = if cleanup_failed {
-                Err(embedded_service::EmbeddedDriverError::Engine(
-                    harness::engine::EngineError::Cleanup {
-                        primary: Box::new(harness::engine::EngineError::Cancelled {
-                            head_request: None,
-                        }),
-                        cleanup: "native owner cleanup remains unconfirmed".into(),
+                Err(embedded_service::round_fixture::failure(
+                    embedded_service::round_fixture::Outcome::UnstartedClaimRefusal {
+                        reopen: false,
                     },
-                ))
+                )
+                .await)
             } else {
                 Ok(())
             };
@@ -794,7 +792,7 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
             let release = release.await.unwrap();
             if cleanup_failed {
                 assert!(matches!(release, ResourceRelease::Retained(ref detail)
-                    if detail.contains("native owner cleanup remains unconfirmed")));
+                    if detail.contains("policy recording refused")));
                 drop(acknowledge);
             } else {
                 assert_eq!(release, ResourceRelease::Released);

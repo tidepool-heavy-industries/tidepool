@@ -1334,7 +1334,7 @@ where
                             },
                             _ = retirement.wait_requested_shutdown() => {
                                 if let Some(model) = &model { model.cancel(); }
-                                control.request_cancellation();
+                                control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
                                 advance.await
                             },
                         }
@@ -2196,7 +2196,7 @@ where
                         .execution;
                     tokio::select! {
                         biased;
-                        () = control.wait_for_cancellation() => {
+                        _ = control.wait_for_cancellation() => {
                             execution.cancel_parent();
                             Err(ResidentActorWorkbenchError::InvocationCancelled)
                         }

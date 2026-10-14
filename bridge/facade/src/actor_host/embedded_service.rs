@@ -243,7 +243,7 @@ async fn initialize_context(
         state => {
             return Err(format!(
                 "initial context is not ready for inference: {state:?}"
-            ))
+            ));
         }
     }
     attachment
@@ -661,25 +661,29 @@ impl Drop for EmbeddedService {
 #[derive(Debug, thiserror::Error)]
 pub(super) enum EmbeddedDriverError {
     #[error(transparent)]
-    Engine(#[from] harness::engine::EngineError),
+    Round(Arc<harness::engine::EmbeddedRoundFailure>),
     #[error(transparent)]
     NativeAdmission(#[from] exomonad_actor::NativeProviderStartError),
-    #[error(transparent)]
-    ProviderSettlement(#[from] exomonad_actor::NativeProviderSettlementError),
-    #[error("provider settlement failed: {source}; primary outcome: {primary}")]
-    ProviderAndEngineSettlement {
+    #[error("provider settlement failed after settled Engine action: {source}")]
+    ProviderAndRoundSettlement {
         #[source]
         source: exomonad_actor::NativeProviderSettlementError,
-        primary: Box<EmbeddedDriverError>,
+        report: Box<harness::engine::EmbeddedRoundSettlement>,
     },
-    #[error("round settlement failed: {source}; Engine cleanup failed: {cleanup}")]
-    RoundSettlement {
+    #[error("provider settlement failed: {source}; primary outcome: {primary}")]
+    ProviderAndRoundFailure {
         #[source]
-        source: harness::store::StoreError,
-        cleanup: Box<EmbeddedDriverError>,
+        source: exomonad_actor::NativeProviderSettlementError,
+        primary: Arc<harness::engine::EmbeddedRoundFailure>,
     },
     #[error("{0}")]
     Host(String),
+}
+
+impl From<harness::engine::EmbeddedRoundFailure> for EmbeddedDriverError {
+    fn from(error: harness::engine::EmbeddedRoundFailure) -> Self {
+        Self::Round(Arc::new(error))
+    }
 }
 
 impl From<String> for EmbeddedDriverError {
@@ -696,81 +700,49 @@ impl From<&str> for EmbeddedDriverError {
 
 impl EmbeddedDriverError {
     pub(super) fn requires_recovery(&self) -> bool {
-        fn store_requires_recovery(error: &harness::store::StoreError) -> bool {
-            matches!(
-                error,
-                harness::store::StoreError::RecoveryRequired(_)
-                    | harness::store::StoreError::AdmissionFenced
-            )
-        }
-        fn engine_requires_recovery(error: &harness::engine::EngineError) -> bool {
-            match error {
-                harness::engine::EngineError::Store(error) => store_requires_recovery(error),
-                harness::engine::EngineError::Cleanup { primary, .. } => {
-                    engine_requires_recovery(primary)
-                }
-                harness::engine::EngineError::InferenceBlockPersistence {
-                    primary,
-                    persistence,
-                } => engine_requires_recovery(primary) || store_requires_recovery(persistence),
-                _ => false,
-            }
-        }
         match self {
+            Self::Round(error) => {
+                error.assessment().store_continuation()
+                    == harness::engine::StoreContinuation::ReopenRequired
+            }
             Self::NativeAdmission(error) => {
                 matches!(error, exomonad_actor::NativeProviderStartError::Native(_))
             }
-            Self::ProviderSettlement(_) | Self::ProviderAndEngineSettlement { .. } => true,
-            Self::Engine(error) => engine_requires_recovery(error),
-            Self::RoundSettlement { source, cleanup } => {
-                store_requires_recovery(source) || cleanup.requires_recovery()
-            }
+            Self::ProviderAndRoundSettlement { .. } | Self::ProviderAndRoundFailure { .. } => true,
             Self::Host(_) => false,
         }
     }
-
-    pub(super) fn cleanup_failed(&self) -> bool {
+    /// Includes unobserved release; this does not imply cleanup was attempted.
+    pub(super) fn cleanup_unconfirmed(&self) -> bool {
         match self {
-            Self::Engine(harness::engine::EngineError::Cleanup { .. }) => true,
-            Self::RoundSettlement { cleanup, .. } => cleanup.cleanup_failed(),
-            Self::ProviderAndEngineSettlement { primary, .. } => primary.cleanup_failed(),
-            _ => false,
+            Self::Round(error) => {
+                error.assessment().cleanup() == harness::engine::RoundCleanup::Unconfirmed
+            }
+            Self::ProviderAndRoundSettlement { report, .. } => {
+                report.assessment().cleanup() == harness::engine::RoundCleanup::Unconfirmed
+            }
+            Self::ProviderAndRoundFailure { primary, .. } => {
+                primary.assessment().cleanup() == harness::engine::RoundCleanup::Unconfirmed
+            }
+            Self::NativeAdmission(_) | Self::Host(_) => false,
         }
     }
 }
 
 async fn fail_provider_round(
     observed: exomonad_actor::NativeProviderTurnLease,
-    primary: EmbeddedDriverError,
+    primary: harness::engine::EmbeddedRoundFailure,
 ) -> EmbeddedDriverError {
     match observed
         .fail(exomonad_model::ProviderFailure::Other(primary.to_string()))
         .await
     {
-        Ok(()) => primary,
-        Err(source) => EmbeddedDriverError::ProviderAndEngineSettlement {
+        Ok(()) => primary.into(),
+        Err(source) => EmbeddedDriverError::ProviderAndRoundFailure {
             source,
-            primary: Box::new(primary),
+            primary: Arc::new(primary),
         },
     }
-}
-
-fn cancelled_round(
-    error: harness::engine::EngineError,
-    previous_head: Option<harness::model::RequestId>,
-) -> Result<
-    (
-        Option<harness::model::RequestId>,
-        Option<EmbeddedDriverError>,
-    ),
-    EmbeddedDriverError,
-> {
-    let Some(head) = cancelled_head(&error) else {
-        return Err(error.into());
-    };
-    let cleanup = matches!(&error, harness::engine::EngineError::Cleanup { .. })
-        .then(|| EmbeddedDriverError::Engine(error));
-    Ok((head.or(previous_head), cleanup))
 }
 
 pub(super) async fn drive_conversation(
@@ -846,8 +818,7 @@ where
         Some(observer) => engine.with_output_observer(observer),
         None => engine,
     };
-    let store = runtime.store();
-    let mut recovering = true;
+    let mut driver = engine.into_embedded_rounds()?;
     loop {
         if *cancellation.borrow() {
             return Ok(());
@@ -855,63 +826,22 @@ where
         let recovery_changed = round_control.recovery_changed();
         tokio::pin!(recovery_changed);
         recovery_changed.as_mut().enable();
-        let inference = store
-            .embedded_inference_state(conversation.identity())
-            .map_err(harness::engine::EngineError::from)?;
-        if matches!(
-            inference,
-            harness::embedding::HostInferenceState::Blocked { .. }
-        ) {
-            lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-            tokio::select! {
-                biased;
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() { return Ok(()); }
+        let selection = match driver.next_round()? {
+            harness::engine::EmbeddedRoundReadiness::Selected(selection) => selection,
+            harness::engine::EmbeddedRoundReadiness::Waiting(_) => {
+                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+                tokio::select! {
+                    biased;
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() { return Ok(()); }
+                    }
+                    () = &mut recovery_changed => {}
+                    wake = incoming.recv() => if wake.is_none() { return Ok(()); },
                 }
-                () = &mut recovery_changed => {}
-                wake = incoming.recv() => if wake.is_none() { return Ok(()); },
+                continue;
             }
-            continue;
-        }
-        let authorized_recovery = matches!(
-            inference,
-            harness::embedding::HostInferenceState::Recovering { .. }
-        );
-        // Wakes are hints. A prior Engine round may have returned while a
-        // forwarded hint remained in its receiver; the Store is authoritative.
-        let frontier = store
-            .embedded_round_frontier(conversation.identity())
-            .map_err(harness::engine::EngineError::from)?;
-        let first = store
-            .unread(&actor.0)
-            .map_err(harness::engine::EngineError::from)?
-            .first()
-            .map(|envelope| harness::mailbox::DurableMailboxWake {
-                envelope_id: envelope.id,
-            });
-        if !authorized_recovery
-            && first.is_none()
-            && (frontier.pending_interruption.is_some() || frontier.pending_head.is_none())
-        {
-            tokio::select! {
-                biased;
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() { return Ok(()); }
-                }
-                () = &mut recovery_changed => {}
-                wake = incoming.recv() => if wake.is_none() { return Ok(()); },
-            }
-            continue;
-        }
-        let head = frontier.settled_head;
+        };
         let (forward, forwarded) = mpsc::unbounded_channel();
-        if let Some(first) = first {
-            forward
-                .send(first)
-                .map_err(|_| "embedded Engine wake receiver closed")?;
-        }
-        let recovering_this_round =
-            authorized_recovery || recovering || frontier.pending_head.is_some();
         let mut lifetime_stopped = false;
         let round = round_control
             .begin()
@@ -937,22 +867,7 @@ where
         };
         let result = {
             lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
-            let run = async {
-                if recovering_this_round {
-                    engine
-                        .run_recovering_embedded(
-                            head.clone(),
-                            Vec::new(),
-                            round.cancellation(),
-                            forwarded,
-                        )
-                        .await
-                } else {
-                    engine
-                        .run_embedded(head.clone(), Vec::new(), round.cancellation(), forwarded)
-                        .await
-                }
-            };
+            let run = driver.run_round(selection, round.cancellation(), forwarded);
             tokio::pin!(run);
             let mut incoming_closed = false;
             loop {
@@ -973,134 +888,42 @@ where
                 }
             }
         };
-        let (durable_head, interrupted, rejected, cleanup_failure) = match result {
-            Ok(completion) => (Some(completion.head_request), false, false, None),
-            Err(harness::engine::EngineError::RequestRejected { head_request, .. }) => {
-                (Some(head_request), false, true, None)
-            }
-            Err(harness::engine::EngineError::InterruptedModelRound {
-                head_request,
-                cause,
-            }) => {
-                if !matches!(
-                    store.embedded_inference_state(conversation.identity())
-                        .map_err(harness::engine::EngineError::from)?,
-                    harness::embedding::HostInferenceState::Blocked { block }
-                        if block.request == head_request
-                ) {
-                    return Err(
-                        "interrupted provider round lacks its exact durable inference block".into(),
-                    );
-                }
-                tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit recovery");
-                observed_round
-                    .fail(exomonad_model::ProviderFailure::TransportFailed)
-                    .await?;
-                recovering = true;
-                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-                continue;
-            }
-            Err(harness::engine::EngineError::InferenceBlocked { block }) => {
-                if !matches!(
-                    store.embedded_inference_state(conversation.identity())
-                        .map_err(harness::engine::EngineError::from)?,
-                    harness::embedding::HostInferenceState::Blocked { block: retained }
-                        if retained == block
-                ) {
-                    return Err("provider refusal lacks its exact durable inference block".into());
-                }
-                observed_round
-                    .fail(exomonad_model::ProviderFailure::Other(format!(
-                        "{:?}",
-                        block.reason
-                    )))
-                    .await?;
-                recovering = true;
-                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-                continue;
-            }
-            Err(error) => {
-                let (head, cleanup) = match cancelled_round(error, head.clone()) {
-                    Ok(cancelled) => cancelled,
-                    Err(error) => {
-                        return Err(fail_provider_round(observed_round, error).await);
-                    }
-                };
-                (head, true, false, cleanup)
-            }
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => return Err(fail_provider_round(observed_round, error).await),
         };
-        // A clean rejection already committed its exact failed head in Engine.
-        let advanced = if rejected || durable_head == head {
-            Ok(true)
-        } else if let Some(durable_head) = &durable_head {
-            store.settle_embedded_round(
-                conversation.identity(),
-                head.as_ref(),
-                durable_head,
-                if interrupted {
-                    harness::store::EmbeddedRoundOutcome::Cancelled
-                } else {
-                    harness::store::EmbeddedRoundOutcome::Completed
-                },
-            )
-        } else {
-            Ok(false)
-        };
-        let advanced = match advanced {
-            Ok(advanced) => advanced,
-            Err(source) => {
-                let error = match cleanup_failure {
-                    Some(cleanup) => EmbeddedDriverError::RoundSettlement {
-                        source,
-                        cleanup: Box::new(cleanup),
-                    },
-                    None => harness::engine::EngineError::Store(source).into(),
-                };
-                return Err(fail_provider_round(observed_round, error).await);
-            }
-        };
-        if let Some(error) = cleanup_failure {
-            return Err(fail_provider_round(observed_round, error).await);
-        }
-        if !advanced {
-            return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
+        let assessment = report.assessment();
+        if let Some(issue) = report.issue() {
+            tracing::warn!(?actor, execution = ?assessment.execution(), %issue, "embedded provider action retains its round obligations");
         }
         drop(round);
-        // Provider idleness authorizes typed cleanup. Publish it only after
-        // Engine settlement and the matching durable head transition.
-        if interrupted {
-            observed_round.interrupt().await?;
-        } else if rejected {
-            observed_round
-                .fail(exomonad_model::ProviderFailure::RequestRejected)
-                .await?;
-        } else {
-            observed_round.succeed().await?;
+        // Native idleness follows the driver's issued head and release evidence.
+        // Inference permission remains independently owned by Harness.
+        let settled = match assessment.execution() {
+            harness::engine::RoundExecution::Completed => observed_round.succeed().await,
+            harness::engine::RoundExecution::Cancelled => observed_round.interrupt().await,
+            harness::engine::RoundExecution::Rejected => {
+                observed_round
+                    .fail(exomonad_model::ProviderFailure::RequestRejected)
+                    .await
+            }
+            harness::engine::RoundExecution::Interrupted
+            | harness::engine::RoundExecution::Failed => {
+                observed_round
+                    .fail(exomonad_model::ProviderFailure::TransportFailed)
+                    .await
+            }
+        };
+        if let Err(source) = settled {
+            return Err(EmbeddedDriverError::ProviderAndRoundSettlement {
+                source,
+                report: Box::new(report),
+            });
         }
         if lifetime_stopped || *cancellation.borrow() {
             return Ok(());
         }
-        if interrupted {
-            // The interrupted request and its settled claims are durable.
-            // Reconcile exact claims before the next model request.
-            recovering = true;
-            lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-            continue;
-        }
         lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-        // Cleanup may retain a settled tool output on an ancestor claim.
-        // Reconcile the branch lineage before the next explicit-input request.
-        recovering = rejected;
-    }
-}
-
-fn cancelled_head(
-    error: &harness::engine::EngineError,
-) -> Option<Option<harness::model::RequestId>> {
-    match error {
-        harness::engine::EngineError::Cancelled { head_request } => Some(head_request.clone()),
-        harness::engine::EngineError::Cleanup { primary, .. } => cancelled_head(primary),
-        _ => None,
     }
 }
 
@@ -1133,9 +956,165 @@ pub(super) async fn submit_browser_command(
 }
 
 #[cfg(test)]
+pub(super) mod round_fixture {
+    use super::*;
+    use harness::provider::Provider;
+
+    #[derive(Clone, Copy)]
+    pub(in crate::actor_host) enum Outcome {
+        Completed,
+        Rejected,
+        CompletedHeadRefusal { reopen: bool },
+        UnstartedClaimRefusal { reopen: bool },
+        UnobservedRefusal,
+    }
+    struct Offline;
+    impl harness::transport::Auth for Offline {
+        fn access(&self) -> Result<String, TransportError> {
+            panic!("component fixture has no network authentication")
+        }
+    }
+    struct NoDispatch;
+    #[async_trait::async_trait]
+    impl Provider for NoDispatch {
+        async fn call(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, harness::provider::ProviderError> {
+            panic!("unstarted policy refusal must precede provider dispatch")
+        }
+        fn tools(&self) -> Vec<serde_json::Value> {
+            vec![
+                serde_json::json!({"type":"function","name":"work","description":"fixture","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+            ]
+        }
+    }
+    struct Script(Outcome);
+    #[async_trait::async_trait]
+    impl harness::engine::ResponsesTransport for Script {
+        fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+            Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
+        }
+        async fn create(
+            &self,
+            _: harness::transport::PreparedProviderRequest,
+        ) -> Result<harness::transport::ResponsesTurn, TransportError> {
+            if matches!(self.0, Outcome::Rejected) {
+                return Err(TransportError::Authentication);
+            }
+            let items = if matches!(self.0, Outcome::UnstartedClaimRefusal { .. }) {
+                vec![harness::item::Item(
+                    serde_json::json!({"type":"function_call","call_id":"fixture-work","name":"work","arguments":"{}","async":true}),
+                )]
+            } else {
+                vec![harness::item::Item(
+                    serde_json::json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}),
+                )]
+            };
+            Ok(harness::transport::ResponsesTurn {
+                response_id: "fixture".into(),
+                items,
+                usage: Default::default(),
+            })
+        }
+    }
+    /// Real component admission, Store transactions and owner driver produce
+    /// these facts. This does not exercise the resident compiler or native lease.
+    pub(in crate::actor_host) async fn run(
+        outcome: Outcome,
+    ) -> Result<harness::engine::EmbeddedRoundSettlement, harness::engine::EmbeddedRoundFailure>
+    {
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("store.sqlite");
+        let store = Arc::new(harness::store::Store::open(&path).unwrap());
+        let mut admitted =
+            crate::actor_host::embedded_policy::operation_settlement_tests::admitted_round_fixture(
+                store.clone(),
+                Arc::new(
+                    harness::embedding::ToolSurface::new(
+                        "round-fixture".into(),
+                        NoDispatch.tools(),
+                        Arc::new(NoDispatch),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await;
+        let input = admitted
+            .conversation
+            .input("first", "human", "run fixture")
+            .await
+            .unwrap();
+        assert!(input.wake_error.is_none());
+        let identity = admitted.conversation.identity().clone();
+        let config = EngineConfig {
+            instructions: "fixture".into(),
+            tools: Vec::new(),
+            model: "fixture".into(),
+            effort: Effort::Low,
+            session_id: "owner-fixture".into(),
+            agent: identity.actor,
+        };
+        let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
+        let result = if matches!(outcome, Outcome::UnobservedRefusal) {
+            // Standalone entry has no embedded binding or affirmative cleanup receipt.
+            harness::engine::Engine::<Offline, NoDispatch, Script>::with_transport(
+                Script(outcome),
+                store,
+                scheduler,
+                Arc::new(NoDispatch),
+                config,
+            )
+            .into_embedded_rounds()
+            .err()
+            .map_or_else(|| panic!("unbound engine must refuse"), Err)
+        } else {
+            let engine = admitted
+                .conversation
+                .engine::<Offline, _>(
+                    Script(outcome),
+                    scheduler,
+                    config,
+                    std::num::NonZeroU64::new(100_000).unwrap(),
+                )
+                .unwrap();
+            let sql = rusqlite::Connection::open(&path).unwrap();
+            match outcome {
+                Outcome::CompletedHeadRefusal { reopen: false } => sql.execute_batch("CREATE TRIGGER head_fault BEFORE UPDATE OF head_request ON agents WHEN NEW.head_request IS NOT OLD.head_request BEGIN SELECT RAISE(ABORT,'head settlement refused'); END;").unwrap(),
+                Outcome::CompletedHeadRefusal { reopen: true } => sql.execute_batch("CREATE TABLE fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE fault_child(id INTEGER REFERENCES fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER head_fault AFTER UPDATE OF head_request ON agents WHEN NEW.head_request IS NOT OLD.head_request BEGIN INSERT INTO fault_child VALUES(1); END;").unwrap(),
+                Outcome::UnstartedClaimRefusal { reopen } => {
+                    sql.execute_batch("CREATE TRIGGER policy_fault BEFORE INSERT ON events WHEN NEW.kind='tool_scheduling' BEGIN SELECT RAISE(ABORT,'policy recording refused'); END;").unwrap();
+                    if reopen { sql.execute_batch("CREATE TABLE fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE fault_child(id INTEGER REFERENCES fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER claim_fault AFTER UPDATE ON claims BEGIN INSERT INTO fault_child VALUES(1); END;").unwrap(); }
+                    else { sql.execute_batch("CREATE TRIGGER claim_fault BEFORE UPDATE ON claims BEGIN SELECT RAISE(IGNORE); END;").unwrap(); }
+                }
+                Outcome::Completed | Outcome::Rejected => {}
+                Outcome::UnobservedRefusal => unreachable!(),
+            }
+            let mut driver = engine.into_embedded_rounds().unwrap();
+            let harness::engine::EmbeddedRoundReadiness::Selected(selection) =
+                driver.next_round().unwrap()
+            else {
+                panic!("durable fixture input must select");
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            driver
+                .run_round(selection, cancellation, mpsc::unbounded_channel().1)
+                .await
+        };
+        admitted.finish().await;
+        result
+    }
+    pub(in crate::actor_host) async fn failure(outcome: Outcome) -> EmbeddedDriverError {
+        run(outcome).await.unwrap_err().into()
+    }
+}
+
+#[cfg(test)]
 mod shutdown_tests {
     use super::*;
-    use harness::{engine::EngineError, model::RequestId};
+    use harness::engine::EngineError;
+    use harness::model::RequestId;
 
     use std::{
         future::Future,
@@ -1474,79 +1453,116 @@ mod shutdown_tests {
         }
     }
 
-    #[test]
-    fn cancellation_retains_durable_head_and_distinguishes_cleanup_failure() {
-        let previous = RequestId("previous".into());
-        let (head, cleanup) = cancelled_round(
-            EngineError::Cancelled { head_request: None },
-            Some(previous.clone()),
-        )
-        .unwrap();
-        assert_eq!(head, Some(previous.clone()));
-        assert!(
-            cleanup.is_none(),
-            "confirmed cancellation is a successful stop"
-        );
-
-        let exact = RequestId("cancelled-request".into());
-        let (head, cleanup) = cancelled_round(
-            EngineError::Cleanup {
-                primary: Box::new(EngineError::Cancelled {
-                    head_request: Some(exact.clone()),
-                }),
-                cleanup: "outstanding call claim could not be settled".into(),
-            },
-            Some(previous),
-        )
-        .unwrap();
-        assert_eq!(head, Some(exact));
-        let error = cleanup.expect("cancellation must retain cleanup failure");
-        assert!(error.cleanup_failed());
-        assert!(
-            matches!(error, EmbeddedDriverError::Engine(EngineError::Cleanup { cleanup, .. })
-            if cleanup == "outstanding call claim could not be settled")
-        );
-    }
-
-    #[test]
-    fn inference_block_persistence_preserves_storage_recovery_requirement() {
-        use harness::store::StoreError;
-
-        for (primary_fenced, persistence_fenced, expected) in [
-            (false, false, false),
-            (true, false, true),
-            (false, true, true),
-            (true, true, true),
-        ] {
-            let primary = if primary_fenced {
-                EngineError::Store(StoreError::AdmissionFenced)
-            } else {
-                EngineError::InvalidFunctionCall
-            };
-            let persistence = if persistence_fenced {
-                StoreError::AdmissionFenced
-            } else {
-                StoreError::InvalidForm
-            };
-            let error = EngineError::InferenceBlockPersistence {
-                primary: Box::new(primary),
-                persistence,
-            };
-            assert_eq!(
-                EmbeddedDriverError::Engine(error).requires_recovery(),
-                expected
+    #[tokio::test]
+    async fn native_settlement_error_retains_completed_and_rejected_reports() {
+        for rejected in [false, true] {
+            let report = Box::new(
+                round_fixture::run(if rejected {
+                    round_fixture::Outcome::Rejected
+                } else {
+                    round_fixture::Outcome::Completed
+                })
+                .await
+                .unwrap(),
             );
+            let expected = report.assessment();
+            let completion = report
+                .original_completion()
+                .map(|completion| completion as *const _);
+            let issue = report.issue().map(|issue| issue as *const _);
+            let error = EmbeddedDriverError::ProviderAndRoundSettlement {
+                source: if rejected {
+                    exomonad_actor::NativeProviderSettlementError::StaleTurn
+                } else {
+                    exomonad_actor::NativeProviderSettlementError::Unavailable
+                },
+                report,
+            };
+            assert!(error.requires_recovery());
+            assert!(!error.cleanup_unconfirmed());
+            let EmbeddedDriverError::ProviderAndRoundSettlement { report, source } = error else {
+                unreachable!()
+            };
+            assert_eq!(report.assessment().execution(), expected.execution());
+            assert_eq!(
+                report.assessment().inference_obligations(),
+                expected.inference_obligations()
+            );
+            assert_eq!(
+                report
+                    .original_completion()
+                    .map(|completion| completion as *const _),
+                completion
+            );
+            assert_eq!(report.issue().map(|issue| issue as *const _), issue);
+            assert_eq!(
+                report.assessment().cleanup(),
+                harness::engine::RoundCleanup::Confirmed
+            );
+            assert_eq!(
+                report.assessment().store_continuation(),
+                harness::engine::StoreContinuation::NoReopenRequired
+            );
+            if rejected {
+                assert_eq!(
+                    source,
+                    exomonad_actor::NativeProviderSettlementError::StaleTurn
+                );
+                assert!(matches!(
+                    report.issue(),
+                    Some(EngineError::RequestRejected {
+                        error: TransportError::Authentication,
+                        ..
+                    })
+                ));
+                assert!(matches!(
+                    report.assessment().inference_obligations(),
+                    [harness::engine::InferenceObligation::RecoverBlock { .. }]
+                ));
+            } else {
+                assert_eq!(
+                    source,
+                    exomonad_actor::NativeProviderSettlementError::Unavailable
+                );
+                assert!(!report.original_completion().unwrap().transcript.is_empty());
+            }
         }
     }
 
-    #[test]
-    fn generic_engine_error_remains_failure_during_cancellation() {
-        let error = cancelled_round(EngineError::InvalidFunctionCall, None).unwrap_err();
-        assert!(matches!(
-            error,
-            EmbeddedDriverError::Engine(EngineError::InvalidFunctionCall)
-        ));
-        assert!(!error.cleanup_failed());
+    #[tokio::test]
+    async fn native_settlement_error_accumulates_owner_reopen_and_cleanup_obligations() {
+        let primary = Arc::new(
+            round_fixture::run(round_fixture::Outcome::UnstartedClaimRefusal { reopen: true })
+                .await
+                .unwrap_err(),
+        );
+        let original = primary.primary_error().unwrap() as *const _;
+        let error = EmbeddedDriverError::ProviderAndRoundFailure {
+            source: exomonad_actor::NativeProviderSettlementError::Unavailable,
+            primary,
+        };
+        assert!(error.requires_recovery());
+        assert!(error.cleanup_unconfirmed());
+        let EmbeddedDriverError::ProviderAndRoundFailure { primary, source } = error else {
+            unreachable!()
+        };
+        assert_eq!(
+            source,
+            exomonad_actor::NativeProviderSettlementError::Unavailable
+        );
+        assert_eq!(primary.primary_error().unwrap() as *const _, original);
+        assert_eq!(
+            primary.assessment().store_continuation(),
+            harness::engine::StoreContinuation::ReopenRequired
+        );
+        assert_eq!(
+            primary.assessment().cleanup(),
+            harness::engine::RoundCleanup::Unconfirmed
+        );
+        assert!(primary
+            .assessment()
+            .secondary_failure_stages()
+            .contains(&harness::engine::RoundFailureStage::NativeCleanup));
     }
 }
 

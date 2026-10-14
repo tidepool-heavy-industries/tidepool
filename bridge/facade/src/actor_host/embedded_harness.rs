@@ -48,8 +48,12 @@ fn request_surface_version(
     generation: Option<tidepool_runtime::session::NotebookGenerationId>,
     sequence: u64,
 ) -> String {
-    let generation = generation.map_or_else(|| "control".to_owned(), |value| value.get().to_string());
-    format!("{}:{}:{}:{generation}:{sequence}", identity.run, identity.actor.0, identity.incarnation)
+    let generation =
+        generation.map_or_else(|| "control".to_owned(), |value| value.get().to_string());
+    format!(
+        "{}:{}:{}:{generation}:{sequence}",
+        identity.run, identity.actor.0, identity.incarnation
+    )
 }
 
 struct StoreAdmission {
@@ -922,7 +926,8 @@ impl HostActor for EmbeddedHostActor {
                 .map_err(|error| EmbeddedError::Surface(error.to_string()))?,
         );
         let sequence = self.next_surface.fetch_add(1, Ordering::Relaxed);
-        let version = request_surface_version(&self.identity, snapshot.request_generation(), sequence);
+        let version =
+            request_surface_version(&self.identity, snapshot.request_generation(), sequence);
         let manifest = snapshot.manifest();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             attachment: self.attachment.clone(),
@@ -1703,6 +1708,8 @@ impl Provider for EmbeddedDispatcher {
             .as_ref()
             .map(|binding| binding.clone() as Arc<dyn exomonad_actor::HostedContextBinding>);
         let cancellation = context.cancel.clone();
+        let cancellation_intent = context.cancellation_intent.clone();
+        let cancellation_handle = context.handle.clone();
         let operation = context.operation.clone();
         let result = self
             .dispatch(name, arguments, context, authority)
@@ -1720,7 +1727,22 @@ impl Provider for EmbeddedDispatcher {
         let terminal = match retained_terminal {
             Some(exomonad_actor::HostedOperationTerminal::Settled(terminal)) => Some(Ok(terminal)),
             _ if cancellation.is_cancelled() => Some(match invocation.as_ref() {
-                Some(Ok(invocation)) => self.snapshot.cancel(invocation.clone()).await,
+                Some(Ok(invocation)) => {
+                    let intent = operation
+                        .as_ref()
+                        .and_then(|operation| {
+                            cancellation_intent.as_ref().and_then(|observation| {
+                                observation.observed_for(operation, &cancellation_handle)
+                            })
+                        })
+                        .unwrap_or(harness::provider::CancellationCause::Unknown);
+                    self.snapshot
+                        .cancel(
+                            invocation.clone(),
+                            EmbeddedCancellationOwner::native_cause(intent),
+                        )
+                        .await
+                }
                 Some(Err(error)) => Err(ResidentToolError::Unavailable(error.to_string())),
                 None => Err(ResidentToolError::Unavailable(
                     "native cancellation requires an exact operation".into(),
@@ -1818,6 +1840,33 @@ impl InvocationCompletionSource for UneditedInvocationCompletion {
     }
 }
 
+impl EmbeddedCancellationOwner {
+    fn native_cause(
+        cause: harness::provider::CancellationCause,
+    ) -> exomonad_actor::WorkbenchCancellationCause {
+        match cause {
+            harness::provider::CancellationCause::DeliveredInput => {
+                exomonad_actor::WorkbenchCancellationCause::DeliveredInput
+            }
+            harness::provider::CancellationCause::ProviderFailureCleanup => {
+                exomonad_actor::WorkbenchCancellationCause::ProviderFailureCleanup
+            }
+            harness::provider::CancellationCause::RoundFailureCleanup => {
+                exomonad_actor::WorkbenchCancellationCause::RoundFailureCleanup
+            }
+            harness::provider::CancellationCause::ExplicitCancellation => {
+                exomonad_actor::WorkbenchCancellationCause::ExplicitCancellation
+            }
+            harness::provider::CancellationCause::Retirement => {
+                exomonad_actor::WorkbenchCancellationCause::Retirement
+            }
+            harness::provider::CancellationCause::Unknown => {
+                exomonad_actor::WorkbenchCancellationCause::Unknown
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CancellationOwner for EmbeddedCancellationOwner {
     fn cancellation_wait(&self) -> harness::provider::CancellationWait {
@@ -1831,12 +1880,14 @@ impl CancellationOwner for EmbeddedCancellationOwner {
         &self,
         operation: &OperationId,
         _handle: &JobHandle,
+        cause: harness::provider::CancellationCause,
     ) -> CancellationAcknowledgment {
         let context = match embedded_invocation_context(&self.identity, operation) {
             Ok(context) => context,
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
-        match self.snapshot.cancel(context.clone()).await {
+        let cause = Self::native_cause(cause);
+        match self.snapshot.cancel(context.clone(), cause).await {
             Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
                 match self.snapshot.abort_operation(context).await {
                     Ok(()) => CancellationAcknowledgment::StoppedWithReceipt(
@@ -2074,6 +2125,7 @@ mod round_control_tests {
                 &self,
                 operation: &OperationId,
                 _: &JobHandle,
+                _cause: harness::provider::CancellationCause,
             ) -> CancellationAcknowledgment {
                 assert_eq!(operation, &self.0);
                 CancellationAcknowledgment::Completed(Ok(json!({"native":42})))
@@ -2304,10 +2356,17 @@ mod round_control_tests {
 mod tests {
     #[test]
     fn surface_version_tracks_generation_even_when_sequence_and_actor_are_unchanged() {
-        let identity = harness::embedding::HostIdentity { run:"run".into(), actor:harness::model::AgentPath("/root".into()), incarnation:"one".into() };
+        let identity = harness::embedding::HostIdentity {
+            run: "run".into(),
+            actor: harness::model::AgentPath("/root".into()),
+            incarnation: "one".into(),
+        };
         let first = tidepool_runtime::session::NotebookGenerationId::INITIAL;
         let second = serde_json::from_value(serde_json::json!(2)).unwrap();
-        assert_ne!(super::request_surface_version(&identity,Some(first),1),super::request_surface_version(&identity,Some(second),1));
+        assert_ne!(
+            super::request_surface_version(&identity, Some(first), 1),
+            super::request_surface_version(&identity, Some(second), 1)
+        );
     }
 
     use super::*;

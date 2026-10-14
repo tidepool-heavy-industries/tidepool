@@ -10,8 +10,9 @@ use std::{sync::atomic::AtomicBool, time::Duration};
 
 struct HeldDispatch {
     dispatcher: Arc<EmbeddedDispatcher>,
-    dispatched: AtomicU64,
+    dispatched: Arc<AtomicU64>,
     dropped: Arc<AtomicBool>,
+    scenario_lifetime: watch::Receiver<()>,
 }
 
 struct WaiterDrop(Arc<AtomicBool>);
@@ -49,18 +50,217 @@ impl Provider for HeldDispatch {
             .dispatcher
             .call_custom_with_context(name, input, context)
             .await;
-        // The actual actor reply is ready, but its scheduler waiter cannot win
-        // settlement before the independent cancellation owner returns it.
-        std::future::pending::<()>().await;
+        // Hold the ordinary waiter until the owner wins. Scenario unwinding
+        // closes this observer so a task receiving actor cleanup can terminate.
+        let _ = self.scenario_lifetime.clone().changed().await;
         reply
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancellationOrder {
+    OwnerFirst,
+    FallbackFirst,
+}
+
+struct CancellationRace {
+    order: CancellationOrder,
+    abandon_dispatch: tokio::sync::Notify,
+    native_entry: tokio::sync::Notify,
+    fallback_finished: tokio::sync::Notify,
+    native_causes: Mutex<Vec<exomonad_actor::WorkbenchCancellationCause>>,
+    intents: Mutex<Vec<harness::provider::CancellationCause>>,
+}
+
+/// Fault only the dispatch observer after actual actor admission. The exact
+/// endpoint, operation, completion owner and cancellation endpoint remain real.
+#[derive(Clone)]
+struct AbandonedDispatchEndpoint {
+    inner: Arc<dyn exomonad_actor::ResidentToolEndpoint>,
+    race: Arc<CancellationRace>,
+}
+impl exomonad_actor::ResidentToolEndpoint for AbandonedDispatchEndpoint {
+    fn snapshot_for_request(
+        &self,
+    ) -> Result<Arc<dyn exomonad_actor::ResidentToolEndpoint>, ResidentToolError> {
+        Ok(Arc::new(Self {
+            inner: self.inner.snapshot_for_request()?,
+            race: self.race.clone(),
+        }))
+    }
+    fn tools(&self) -> &[exomonad_tool::HostedTool] {
+        self.inner.tools()
+    }
+    fn instructions(&self) -> Option<&str> {
+        self.inner.instructions()
+    }
+    fn request_instructions(&self) -> Option<&str> {
+        self.inner.request_instructions()
+    }
+    fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
+        self.inner.request_generation()
+    }
+    fn retained_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
+        self.inner.retained_operation(context)
+    }
+    fn dispatch_boxed(
+        &self,
+        invocation: exomonad_tool::ToolInvocation,
+    ) -> exomonad_actor::ResidentToolDispatchFuture {
+        self.inner.dispatch_boxed(invocation)
+    }
+    fn dispatch_validated_with_context_boxed(
+        &self,
+        invocation: exomonad_tool::ToolInvocation,
+        arguments: Result<ToolArguments, ResidentToolError>,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
+    ) -> exomonad_actor::ResidentToolDispatchFuture {
+        let actual = self
+            .inner
+            .dispatch_validated_with_context_boxed(invocation, arguments, capture, context);
+        let race = self.race.clone();
+        Box::pin(async move {
+            tokio::select! {
+                result = actual => result,
+                _ = race.abandon_dispatch.notified() => Err(ResidentToolError::Unavailable("dispatch observer abandoned after native admission".into())),
+            }
+        })
+    }
+    fn cancel_workbench_boxed(
+        &self,
+        context: ToolInvocationContext,
+        cause: exomonad_actor::WorkbenchCancellationCause,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<WorkbenchCancellationOutcome, ResidentToolError>,
+                > + Send
+                + 'static,
+        >,
+    > {
+        let actual = self.inner.cancel_workbench_boxed(context, cause);
+        let race = self.race.clone();
+        Box::pin(async move {
+            race.native_causes.lock().unwrap().push(cause);
+            race.native_entry.notify_one();
+            actual.await
+        })
+    }
+    fn abort_boxed(
+        &self,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> exomonad_actor::ResidentToolFuture {
+        self.inner.abort_boxed(boundary)
+    }
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> exomonad_actor::ResidentToolFuture {
+        self.inner.complete_boxed(boundary)
+    }
+}
+
+struct OrderedCancellationOwner {
+    actual: Arc<dyn CancellationOwner>,
+    race: Arc<CancellationRace>,
+}
+#[async_trait::async_trait]
+impl CancellationOwner for OrderedCancellationOwner {
+    fn cancellation_wait(&self) -> harness::provider::CancellationWait {
+        harness::provider::CancellationWait::OwnerSettlement
+    }
+    async fn cancel(
+        &self,
+        operation: &OperationId,
+        handle: &JobHandle,
+        cause: harness::provider::CancellationCause,
+    ) -> CancellationAcknowledgment {
+        self.race.intents.lock().unwrap().push(cause);
+        if self.race.order == CancellationOrder::FallbackFirst {
+            self.race.abandon_dispatch.notify_one();
+            self.race.native_entry.notified().await;
+            assert_eq!(
+                self.race.native_causes.lock().unwrap().len(),
+                1,
+                "actual fallback reached native endpoint before owner forwarding"
+            );
+        }
+        let actual = self.actual.cancel(operation, handle, cause);
+        tokio::pin!(actual);
+        let acknowledgment = if self.race.order == CancellationOrder::OwnerFirst {
+            let first = futures_util::poll!(&mut actual);
+            assert_eq!(
+                self.race.native_causes.lock().unwrap().len(),
+                1,
+                "actual owner reached native endpoint before dispatch observer abandonment"
+            );
+            self.race.abandon_dispatch.notify_one();
+            match first {
+                std::task::Poll::Ready(ack) => ack,
+                std::task::Poll::Pending => actual.await,
+            }
+        } else {
+            actual.await
+        };
+        self.race.fallback_finished.notified().await;
+        acknowledgment
+    }
+}
+
+struct RaceDispatch {
+    dispatcher: Arc<EmbeddedDispatcher>,
+    owner: Arc<OrderedCancellationOwner>,
+    dispatched: Arc<AtomicU64>,
+    dropped: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl Provider for RaceDispatch {
+    fn tools(&self) -> Vec<Value> {
+        self.dispatcher.tools()
+    }
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(self.owner.clone())
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        unreachable!("exact completion entry required")
+    }
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: harness::item::ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        let _drop = WaiterDrop(self.dropped.clone());
+        self.dispatched.fetch_add(1, Ordering::SeqCst);
+        let completion = self.dispatcher.complete_call(name, input, context).await;
+        self.owner.race.fallback_finished.notify_one();
+        completion
     }
 }
 
 #[tokio::test]
 async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abort() {
+    cancelled_prefix_with_order(None).await;
+}
+
+#[tokio::test]
+async fn actual_owner_first_completion_retains_cancellation_intent_and_native_receipt() {
+    cancelled_prefix_with_order(Some(CancellationOrder::OwnerFirst)).await;
+}
+
+#[tokio::test]
+async fn actual_fallback_first_completion_and_owner_forward_same_issued_intent() {
+    cancelled_prefix_with_order(Some(CancellationOrder::FallbackFirst)).await;
+}
+
+async fn cancelled_prefix_with_order(order: Option<CancellationOrder>) {
     let campaign = TestCampaign::start().await;
     campaign
-        .run_scenario(|campaign| {
+        .run_scenario(move |campaign| {
             Box::pin(async move {
                 let identity = HostIdentity {
                     run: "cancelled-prefix-run".into(),
@@ -78,8 +278,25 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                     call: CallId("cancelled-prefix-cell".into()),
                 };
                 let store = Arc::new(Store::memory().unwrap());
+                let race = order.map(|order| {
+                    Arc::new(CancellationRace {
+                        order,
+                        abandon_dispatch: Default::default(),
+                        native_entry: Default::default(),
+                        fallback_finished: Default::default(),
+                        native_causes: Default::default(),
+                        intents: Default::default(),
+                    })
+                });
+                let mut request_installation = campaign.root_installation.clone();
+                if let Some(race) = &race {
+                    request_installation.policy = Arc::new(AbandonedDispatchEndpoint {
+                        inner: request_installation.policy.clone(),
+                        race: race.clone(),
+                    });
+                }
                 let installation =
-                    EmbeddedPolicyInstallation::from_installation(&campaign.root_installation);
+                    EmbeddedPolicyInstallation::from_installation(&request_installation);
                 let dispatcher = Arc::new(EmbeddedDispatcher {
                     attachment: super::super::provider_attachment::ProviderAttachment::admit(
                         campaign.forest.clone(),
@@ -93,11 +310,32 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                     store: store.clone(),
                     context_models: Arc::new(OnceLock::new()),
                 });
-                let provider = Arc::new(HeldDispatch {
-                    dispatcher,
-                    dispatched: AtomicU64::new(0),
-                    dropped: Arc::new(AtomicBool::new(false)),
-                });
+                let dispatched = Arc::new(AtomicU64::new(0));
+                let dropped = Arc::new(AtomicBool::new(false));
+                let (_scenario_lifetime, scenario_lifetime) = watch::channel(());
+                let provider: Arc<dyn Provider> = if let Some(race) = &race {
+                    assert!(
+                        !dispatcher.snapshot.context_read_write("haskell").unwrap(),
+                        "fixture must use the real read-only async tool declaration"
+                    );
+                    let actual = dispatcher.cancellation_owner().unwrap();
+                    Arc::new(RaceDispatch {
+                        owner: Arc::new(OrderedCancellationOwner {
+                            actual,
+                            race: race.clone(),
+                        }),
+                        dispatcher,
+                        dispatched: dispatched.clone(),
+                        dropped: dropped.clone(),
+                    })
+                } else {
+                    Arc::new(HeldDispatch {
+                        dispatcher,
+                        dispatched: dispatched.clone(),
+                        dropped: dropped.clone(),
+                        scenario_lifetime,
+                    })
+                };
                 let scheduler = JobScheduler::new(1).unwrap();
                 scheduler
                     .start_operation(
@@ -156,16 +394,52 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 .await
                 .expect("the performed prefix must reach its next native sleep");
                 assert_eq!(backend.executions(), 1);
-                let settlement = scheduler
-                    .cancel(&operation)
+                let cancel = async {
+                    match order {
+                        Some(_) => {
+                            scheduler
+                                .cancel_with_cause(
+                                    &operation,
+                                    harness::provider::CancellationCause::DeliveredInput,
+                                )
+                                .await
+                        }
+                        None => scheduler.cancel(&operation).await,
+                    }
+                };
+                let settlement = tokio::time::timeout(Duration::from_secs(30), cancel)
                     .await
-                    .unwrap()
-                    .expect("cancellation owner wins before held waiter");
-                assert_eq!(settlement.operation, operation);
-                let JobOutput::CancelledWithReceipt(receipt) = &settlement.output else {
+                    .expect("actual owner and completion observer settle in forced order")
+                    .unwrap();
+                let output = match settlement {
+                    Some(settlement) => {
+                        assert_eq!(settlement.operation, operation);
+                        settlement.output
+                    }
+                    None if race.is_some() => scheduler.wait(&operation).await.unwrap(),
+                    None => panic!("cancellation owner must win before the held legacy waiter"),
+                };
+                if let Some(race) = &race {
+                    assert_eq!(
+                        *race.intents.lock().unwrap(),
+                        vec![harness::provider::CancellationCause::DeliveredInput]
+                    );
+                    let causes = race.native_causes.lock().unwrap();
+                    assert!(!causes.is_empty());
+                    assert!(causes.iter().all(|cause| *cause
+                        == exomonad_actor::WorkbenchCancellationCause::DeliveredInput));
+                    if order == Some(CancellationOrder::FallbackFirst) {
+                        assert_eq!(
+                            causes.len(),
+                            2,
+                            "actual fallback and owner both forwarded to retained native endpoint"
+                        );
+                    }
+                }
+                let JobOutput::CancelledWithReceipt(receipt) = &output else {
                     panic!(
                         "confirmed cancellation must retain its owner receipt: {:?}",
-                        settlement.output
+                        output
                     );
                 };
                 let failure = receipt
@@ -218,26 +492,32 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                     !failure.message().contains("unreachable suffix"),
                     "the suffix must not execute: {failure}"
                 );
-                let item = Item::tool_output(&operation.call, ToolKind::Custom, &settlement.output);
+                let item = Item::tool_output(&operation.call, ToolKind::Custom, &output);
                 assert_eq!(item.0["type"], "custom_tool_call_output");
                 assert_eq!(item.0["call_id"], operation.call.0);
-                let output: Value =
+                let rendered_output: Value =
                     serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
-                assert_eq!(output["error"], "job cancelled");
+                assert_eq!(rendered_output["error"], "job cancelled");
                 assert_eq!(
-                    output["receipt"]["failure"]["originalOperation"],
+                    rendered_output["receipt"]["failure"]["originalOperation"],
                     json!(operation)
                 );
                 assert!(matches!(
-                    TerminalOutcome::from(&settlement.output),
+                    TerminalOutcome::from(&output),
                     TerminalOutcome::CancelledWithReceipt(_)
                 ));
-                assert_eq!(scheduler.wait(&operation).await.unwrap(), settlement.output);
-                assert_eq!(
-                    scheduler.provider_completion(&operation).await.unwrap(),
-                    None
-                );
-                assert!(provider.dropped.load(Ordering::SeqCst));
+                assert_eq!(scheduler.wait(&operation).await.unwrap(), output);
+                if race.is_none() {
+                    assert_eq!(
+                        scheduler.provider_completion(&operation).await.unwrap(),
+                        None
+                    );
+                } else if let Some(completion) =
+                    scheduler.invocation_completion(&operation).await.unwrap()
+                {
+                    assert_eq!(completion.output, output);
+                }
+                assert!(dropped.load(Ordering::SeqCst));
                 assert_eq!(scheduler.cancel(&operation).await.unwrap(), None);
                 for observation in [
                     owner.terminal(),
@@ -257,7 +537,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                     assert_eq!(&execution, native_execution);
                     assert_eq!(&reply, native_reply);
                 }
-                assert_eq!(provider.dispatched.load(Ordering::SeqCst), 1);
+                assert_eq!(dispatched.load(Ordering::SeqCst), 1);
                 assert_eq!(
                     backend.executions(),
                     1,

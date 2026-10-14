@@ -68,6 +68,30 @@ pub use operation_settlement::{
 };
 pub(crate) use operation_settlement::{HostedOperationWeak, ProviderFinalization};
 
+/// Attribution belongs to the transition that wins cancellation. It grants
+/// neither request acceptance, native cleanup acknowledgment nor recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkbenchCancellationCause {
+    DeliveredInput,
+    ProviderFailureCleanup,
+    RoundFailureCleanup,
+    ExplicitCancellation,
+    Retirement,
+    Unknown,
+}
+impl std::fmt::Display for WorkbenchCancellationCause {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(match self {
+            Self::DeliveredInput => "delivered input",
+            Self::ProviderFailureCleanup => "provider failure cleanup",
+            Self::RoundFailureCleanup => "round failure cleanup",
+            Self::ExplicitCancellation => "explicit cancellation",
+            Self::Retirement => "actor retirement",
+            Self::Unknown => "cancellation with unavailable attribution",
+        })
+    }
+}
+
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
     pub(crate) provider_finalization: Arc<ProviderFinalization>,
@@ -75,6 +99,8 @@ pub struct WorkbenchExecutionControl {
     pub(crate) provider_replay: std::sync::OnceLock<HostedOperationSettlement>,
     publication: Arc<PublicationDecision>,
     native_cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancellation_cause: std::sync::OnceLock<WorkbenchCancellationCause>,
+    pending_cancellation_cause: std::sync::OnceLock<WorkbenchCancellationCause>,
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
     execution: std::sync::OnceLock<WorkbenchExecutionId>,
     context_binding: std::sync::OnceLock<Arc<dyn crate::HostedContextBinding>>,
@@ -124,6 +150,8 @@ impl WorkbenchExecutionControl {
             provider_replay: std::sync::OnceLock::new(),
             publication: PublicationDecision::new(),
             native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancellation_cause: std::sync::OnceLock::new(),
+            pending_cancellation_cause: std::sync::OnceLock::new(),
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
             execution: std::sync::OnceLock::new(),
             context_binding: std::sync::OnceLock::new(),
@@ -156,6 +184,12 @@ impl WorkbenchExecutionControl {
         if terminal.is_some() || self.terminal_reply().is_some() {
             return;
         }
+        let cause = self
+            .pending_cancellation_cause
+            .get()
+            .copied()
+            .unwrap_or(WorkbenchCancellationCause::Unknown);
+        self.cancellation_cause.get_or_init(|| cause);
         self.native_cancel
             .store(true, std::sync::atomic::Ordering::Release);
         let _ = self.phase.fetch_update(
@@ -304,13 +338,15 @@ impl WorkbenchExecutionControl {
         );
     }
 
-    pub(crate) async fn wait_for_cancellation(&self) {
+    pub(crate) async fn wait_for_cancellation(&self) -> WorkbenchCancellationCause {
         loop {
             // Capture the notification generation before observing the phase: a
             // cancellation can notify between that observation and the await.
             let notified = self.changed.notified();
             if self.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_CANCEL_REQUESTED {
-                return;
+                return self
+                    .cancellation_cause()
+                    .expect("cancellation waiter joins winning attribution");
             }
             #[cfg(test)]
             if let Some(observed) = self.cancellation_observed.lock().take() {
@@ -443,7 +479,10 @@ impl WorkbenchExecutionControl {
         reply
     }
 
-    fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
+    fn admit_cancellation(
+        &self,
+        cause: WorkbenchCancellationCause,
+    ) -> (bool, Option<PublicationCancellation>) {
         let terminal = self.cell_terminal.lock();
         if terminal.is_some() || self.terminal_reply().is_some() {
             return (false, None);
@@ -471,11 +510,17 @@ impl WorkbenchExecutionControl {
                 .is_ok();
             // Keep winning evidence inside the publication decision lock.
             if claimed {
+                self.cancellation_cause
+                    .set(cause)
+                    .expect("one cancellation transition owns attribution");
                 self.native_cancel
                     .store(true, std::sync::atomic::Ordering::Release);
             }
             claimed
         });
+        if publication == Some(PublicationCancellation::PendingCommitOutcome) {
+            self.pending_cancellation_cause.get_or_init(|| cause);
+        }
         if claimed {
             self.changed.notify_waiters();
         }
@@ -515,8 +560,41 @@ impl WorkbenchExecutionControl {
         Some(operation())
     }
 
+    /// A boundary without attribution must remain honest about its uncertainty.
     pub(crate) fn request_cancellation(&self) -> bool {
-        self.admit_cancellation().0
+        self.request_cancellation_with_cause(WorkbenchCancellationCause::Unknown)
+    }
+
+    pub(crate) fn request_cancellation_with_cause(
+        &self,
+        cause: WorkbenchCancellationCause,
+    ) -> bool {
+        self.admit_cancellation(cause).0
+    }
+
+    pub(crate) fn cancellation_cause(&self) -> Option<WorkbenchCancellationCause> {
+        // The phase CAS and cause publication are inside this same cutoff.
+        // A waiter that observes the phase before cause publication joins it.
+        let _terminal = self.cell_terminal.lock();
+        if !self
+            .native_cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(
+            *self
+                .cancellation_cause
+                .get()
+                .expect("winning cancellation published its cause"),
+        )
+    }
+
+    pub(crate) fn interruption_detail(&self, operation: &str) -> String {
+        match self.cancellation_cause() {
+            Some(cause) => format!("{operation} interrupted by {cause}"),
+            None => format!("{operation} interrupted without a winning cancellation"),
+        }
     }
 
     pub(crate) fn cancellation_requested(&self) -> bool {
@@ -935,6 +1013,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
     fn cancel_workbench_boxed(
         &self,
         _invocation: ToolInvocationContext,
+        _cause: WorkbenchCancellationCause,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<WorkbenchCancellationOutcome, ResidentToolError>>
@@ -1141,6 +1220,7 @@ impl ResidentToolClient {
     pub(crate) async fn cancel_workbench(
         &self,
         invocation: ToolInvocationContext,
+        cause: WorkbenchCancellationCause,
     ) -> Result<WorkbenchCancellationOutcome, ResidentToolError> {
         let execution = execution_id(self.actor.identity(), &invocation.clone().into());
         let retained = self
@@ -1184,7 +1264,7 @@ impl ResidentToolClient {
         if let Some(reply) = control.terminal_reply() {
             return Ok(control.cancellation_outcome(execution, reply));
         }
-        let (claimed, publication) = control.admit_cancellation();
+        let (claimed, publication) = control.admit_cancellation(cause);
         let phase = control.phase.load(std::sync::atomic::Ordering::Acquire);
         if !claimed
             && !control.cell_finished()
@@ -2229,13 +2309,26 @@ mod tests {
             })
         };
         entered.wait();
-        let cancelling = {
+        let ready = Arc::new(std::sync::Barrier::new(3));
+        let cancelling = [
+            WorkbenchCancellationCause::ExplicitCancellation,
+            WorkbenchCancellationCause::Retirement,
+        ]
+        .map(|cause| {
             let control = control.clone();
-            std::thread::spawn(move || control.request_cancellation())
-        };
+            let ready = ready.clone();
+            std::thread::spawn(move || {
+                ready.wait();
+                (cause, control.request_cancellation_with_cause(cause))
+            })
+        });
+        ready.wait();
         finish.wait();
         assert_eq!(committing.join().unwrap(), Some("durably answered"));
-        assert!(cancelling.join().unwrap());
+        let results = cancelling.map(|task| task.join().unwrap());
+        let winners: Vec<_> = results.iter().filter(|(_, won)| *won).collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(control.cancellation_cause(), Some(winners[0].0));
         assert!(control
             .admit_interaction(|| panic!("cancelled owner must not commit a later answer"))
             .is_none());
@@ -2300,7 +2393,7 @@ mod tests {
         control.arm_sleep();
         let decision = control.publication_decision();
         let claim = decision.claim_commit().unwrap();
-        let (claimed, admitted) = control.admit_cancellation();
+        let (claimed, admitted) = control.admit_cancellation(WorkbenchCancellationCause::Unknown);
         assert!(!claimed);
         assert_eq!(
             admitted,
@@ -2328,7 +2421,7 @@ mod tests {
         control.arm_sleep();
         let decision = control.publication_decision();
         let claim = decision.claim_commit().unwrap();
-        let (claimed, admitted) = control.admit_cancellation();
+        let (claimed, admitted) = control.admit_cancellation(WorkbenchCancellationCause::Unknown);
         assert!(!claimed);
         assert_eq!(
             admitted,
@@ -2359,7 +2452,9 @@ mod tests {
         let control = WorkbenchExecutionControl::untracked();
         let claim = control.publication_decision().claim_commit().unwrap();
         assert_eq!(
-            control.admit_cancellation().1,
+            control
+                .admit_cancellation(WorkbenchCancellationCause::Unknown)
+                .1,
             Some(PublicationCancellation::PendingCommitOutcome)
         );
         assert!(claim.before_rename_failure());
@@ -2381,7 +2476,9 @@ mod tests {
         let control = WorkbenchExecutionControl::untracked();
         let claim = control.publication_decision().claim_commit().unwrap();
         assert_eq!(
-            control.admit_cancellation().1,
+            control
+                .admit_cancellation(WorkbenchCancellationCause::Unknown)
+                .1,
             Some(PublicationCancellation::PendingCommitOutcome)
         );
         assert!(claim.before_rename_failure());
@@ -2416,7 +2513,9 @@ mod tests {
         let control = WorkbenchExecutionControl::untracked();
         let claim = control.publication_decision().claim_commit().unwrap();
         assert_eq!(
-            control.admit_cancellation().1,
+            control
+                .admit_cancellation(WorkbenchCancellationCause::Unknown)
+                .1,
             Some(PublicationCancellation::PendingCommitOutcome)
         );
         drop(claim);
@@ -2615,7 +2714,10 @@ mod tests {
             control.arm_sleep();
             let execution = control.execution_id(actor.identity());
             {
-                let observer = client.cancel_workbench(invocation.clone());
+                let observer = client.cancel_workbench(
+                    invocation.clone(),
+                    crate::WorkbenchCancellationCause::Unknown,
+                );
                 tokio::pin!(observer);
                 assert!(futures_util::poll!(&mut observer).is_pending());
                 assert!(control.cancellation_requested());
@@ -2633,7 +2735,10 @@ mod tests {
                 }
             }
             if lose_first_observer {
-                let observer = client.cancel_workbench(invocation.clone());
+                let observer = client.cancel_workbench(
+                    invocation.clone(),
+                    crate::WorkbenchCancellationCause::Unknown,
+                );
                 tokio::pin!(observer);
                 assert!(futures_util::poll!(&mut observer).is_pending());
                 terminal
@@ -2658,6 +2763,99 @@ mod tests {
             );
             address.stop(None);
             actor_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_cancellation_endpoint_preserves_first_observer_and_prior_winners() {
+        use crate::WorkbenchCancellationCause as Cause;
+        struct CollectorTask(ractor::concurrency::JoinHandle<()>);
+        impl Drop for CollectorTask {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        for (first, second, prior) in [
+            (Cause::DeliveredInput, Cause::ProviderFailureCleanup, None),
+            (Cause::ProviderFailureCleanup, Cause::DeliveredInput, None),
+            (
+                Cause::DeliveredInput,
+                Cause::RoundFailureCleanup,
+                Some(Cause::ExplicitCancellation),
+            ),
+            (
+                Cause::RoundFailureCleanup,
+                Cause::DeliveredInput,
+                Some(Cause::Retirement),
+            ),
+        ] {
+            let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let (actor, address, actor_task, _terminal, _directory) = spawn_collector(send).await;
+            let mut actor_task = CollectorTask(actor_task);
+            let client = ResidentToolClient::local(actor.clone());
+            let invocation = ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            );
+            let dispatch = client.dispatch_workbench(
+                WorkbenchRequest::from_cell_input("pure True"),
+                Some(invocation.clone()),
+            );
+            tokio::pin!(dispatch);
+            let (_ingress, control, reply) = tokio::select! {
+                result = &mut dispatch => panic!("dispatch ended before owning receipt: {result:?}"),
+                received = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv()) => {
+                    match received {
+                        Ok(Some(received)) => received,
+                        other => {
+                            actor_task.0.abort();
+                            let _ = (&mut actor_task.0).await;
+                            panic!("actual dispatch did not reach owner: {}", if other.is_err() { "timeout" } else { "inbox closed" });
+                        }
+                    }
+                },
+            };
+            let control = control.unwrap();
+            let execution = control.execution_id(actor.identity());
+            control.arm_sleep();
+            if let Some(cause) = prior {
+                assert!(control.request_cancellation_with_cause(cause));
+            }
+            let first_observer = client.cancel_workbench(invocation.clone(), first);
+            tokio::pin!(first_observer);
+            assert!(futures_util::poll!(&mut first_observer).is_pending());
+            assert_eq!(control.cancellation_cause(), Some(prior.unwrap_or(first)));
+            let second_observer = client.cancel_workbench(invocation, second);
+            tokio::pin!(second_observer);
+            assert!(futures_util::poll!(&mut second_observer).is_pending());
+            assert_eq!(control.cancellation_cause(), Some(prior.unwrap_or(first)));
+            let response = WorkbenchResponse {
+                publication: None,
+                status: WorkbenchRunStatus::Committed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 1,
+                total: 1,
+            };
+            control.acknowledge_cancellation();
+            control.settle(Ok(response.clone()));
+            for outcome in [
+                first_observer.await.unwrap(),
+                second_observer.await.unwrap(),
+            ] {
+                assert!(matches!(outcome,
+                    WorkbenchCancellationOutcome::Cancelled { execution: observed, .. }
+                    if observed == execution));
+            }
+            assert_eq!(control.cancellation_cause(), Some(prior.unwrap_or(first)));
+            actor.hosted_cell().complete(&control);
+            reply.send(Ok(response)).unwrap();
+            dispatch.await.unwrap();
+            address.stop(None);
+            (&mut actor_task.0).await.unwrap();
         }
     }
 
@@ -2701,7 +2899,8 @@ mod tests {
             .finish_cell(execution, &result, true)
             .permits_context_commit());
         assert!(control.terminal_reply().is_none());
-        let cancelled = client.cancel_workbench(invocation);
+        let cancelled =
+            client.cancel_workbench(invocation, crate::WorkbenchCancellationCause::Unknown);
         tokio::pin!(cancelled);
         assert!(futures_util::poll!(&mut cancelled).is_pending());
         assert!(!control.context_cancellation_requested());
@@ -2855,3 +3054,7 @@ mod tests {
         assert!(slot.find(|_| true).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "resident_tools/cancellation_history_tests.rs"]
+mod cancellation_history_tests;

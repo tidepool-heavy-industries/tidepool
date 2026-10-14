@@ -1678,7 +1678,10 @@ async fn resident_await_watch_case(case: WatchCase) {
     let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match policy
-                .cancel_workbench_boxed(cancelled_context.clone())
+                .cancel_workbench_boxed(
+                    cancelled_context.clone(),
+                    exomonad_actor::WorkbenchCancellationCause::Unknown,
+                )
                 .await
                 .expect("cancel awaitWatch")
             {

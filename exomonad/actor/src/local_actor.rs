@@ -1518,11 +1518,15 @@ async fn handle_parked_message<B: KernelBehavior>(
                 match pending {
                     PendingActorTask::Workbench(pending) => {
                         if let Some(control) = &pending.control {
-                            control.request_cancellation();
+                            control.request_cancellation_with_cause(
+                                crate::WorkbenchCancellationCause::Retirement,
+                            );
                         }
                     }
                     PendingActorTask::Tool(pending) => {
-                        pending.control.request_cancellation();
+                        pending.control.request_cancellation_with_cause(
+                            crate::WorkbenchCancellationCause::Retirement,
+                        );
                     }
                     PendingActorTask::Kernel(_) => {}
                 }
@@ -4784,7 +4788,7 @@ mod tests {
                                     match &control {
                                         Some(control) => tokio::select! {
                                             () = release.notified() => { control.finish_sleep(); }
-                                            () = control.wait_for_cancellation() => {
+                                            _ = control.wait_for_cancellation() => {
                                                 control.acknowledge_cancellation();
                                             }
                                         },

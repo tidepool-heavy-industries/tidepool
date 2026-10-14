@@ -1150,7 +1150,10 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
                 );
                 // Poll the exact native cancellation owner through admission before
                 // releasing installation. The actor handle is not published by spawn yet.
-                let mut cancelled = policy.cancel_workbench_boxed(invocation);
+                let mut cancelled = policy.cancel_workbench_boxed(
+                    invocation,
+                    exomonad_actor::WorkbenchCancellationCause::Unknown,
+                );
                 std::future::poll_fn(|cx| {
                     assert!(cancelled.as_mut().poll(cx).is_pending());
                     std::task::Poll::Ready(())

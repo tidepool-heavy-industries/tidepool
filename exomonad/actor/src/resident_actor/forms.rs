@@ -161,8 +161,8 @@ where
                         }
                         tokio::select! {
                             biased;
-                            _ = retirement.wait_requested_shutdown() => { control.request_cancellation(); return Err(FormCause::FormClosed); }
-                            () = control.wait_for_cancellation() => return Err(FormCause::FormClosed),
+                            _ = retirement.wait_requested_shutdown() => { control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement); return Err(FormCause::FormClosed); }
+                            _ = control.wait_for_cancellation() => return Err(FormCause::FormClosed),
                             change = changed => change?,
                         }
                     }

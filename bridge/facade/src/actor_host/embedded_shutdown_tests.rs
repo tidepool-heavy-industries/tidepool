@@ -1,4 +1,6 @@
 use super::*;
+use embedded_service::round_fixture::{failure as actual_round_failure, Outcome as RoundOutcome};
+use embedded_service::EmbeddedDriverError;
 
 fn registered_shutdown_owners(
     registrations: impl IntoIterator<Item = (ActorRef, tokio::task::Id)>,
@@ -25,48 +27,27 @@ fn native_recovery_driver_error() -> embedded_service::EmbeddedDriverError {
 #[tokio::test]
 async fn driver_observed_recovery_escalates_without_erasing_cleanup_uncertainty() {
     use application_supervisor::{settle_embedded_completion, EmbeddedTaskCompletion};
-    use embedded_service::EmbeddedDriverError;
     use exomonad_actor::{ActorId, ResourceRelease};
-    use harness::engine::EngineError;
-    use harness::store::StoreError;
-
     for (error, recovery, retained) in [
         (native_recovery_driver_error(), true, false),
         (
-            EngineError::Store(StoreError::AdmissionFenced).into(),
+            actual_round_failure(RoundOutcome::CompletedHeadRefusal { reopen: true }).await,
             true,
             false,
         ),
         (
-            EngineError::Cleanup {
-                primary: Box::new(EngineError::Store(StoreError::AdmissionFenced)),
-                cleanup: "native release was not acknowledged".into(),
-            }
-            .into(),
+            actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: true }).await,
             true,
             true,
         ),
         (
-            EngineError::Cleanup {
-                primary: Box::new(EngineError::InvalidFunctionCall),
-                cleanup: "native release was not acknowledged".into(),
-            }
-            .into(),
+            actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await,
             false,
             true,
         ),
         (
-            EmbeddedDriverError::RoundSettlement {
-                source: StoreError::AdmissionFenced,
-                cleanup: Box::new(
-                    EngineError::Cleanup {
-                        primary: Box::new(EngineError::Cancelled { head_request: None }),
-                        cleanup: "native release was not acknowledged".into(),
-                    }
-                    .into(),
-                ),
-            },
-            true,
+            actual_round_failure(RoundOutcome::UnobservedRefusal).await,
+            false,
             true,
         ),
         (
@@ -105,7 +86,6 @@ async fn driver_observed_recovery_escalates_without_erasing_cleanup_uncertainty(
 
 #[tokio::test]
 async fn embedded_shutdown_reports_driver_failure_and_accepts_confirmed_cancellation() {
-    use embedded_service::EmbeddedDriverError;
     let actor = ActorRef::first(exomonad_actor::ActorId(42));
     let mut tasks = JoinSet::new();
     let task = tasks.spawn(async move { (actor, (), Ok(())) });
@@ -120,9 +100,7 @@ async fn embedded_shutdown_reports_driver_failure_and_accepts_confirmed_cancella
         (
             actor,
             (),
-            Err(EmbeddedDriverError::Engine(
-                harness::engine::EngineError::InvalidFunctionCall,
-            )),
+            Err(actual_round_failure(RoundOutcome::CompletedHeadRefusal { reopen: false }).await),
         )
     });
     let owners = registered_shutdown_owners([(actor, task.id())]);
@@ -131,24 +109,14 @@ async fn embedded_shutdown_reports_driver_failure_and_accepts_confirmed_cancella
             .await
             .driver_failure
             .unwrap();
-    assert!(
-        failure.contains("malformed Responses tool call item"),
-        "{failure}"
-    );
+    assert!(failure.contains("head settlement refused"), "{failure}");
     assert!(failure.contains("42"), "{failure}");
 
     let task = tasks.spawn(async move {
         (
             actor,
             (),
-            Err(EmbeddedDriverError::Engine(
-                harness::engine::EngineError::Cleanup {
-                    primary: Box::new(harness::engine::EngineError::Cancelled {
-                        head_request: None,
-                    }),
-                    cleanup: "claim settlement failed".into(),
-                },
-            )),
+            Err(actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await),
         )
     });
     let owners = registered_shutdown_owners([(actor, task.id())]);
@@ -157,7 +125,7 @@ async fn embedded_shutdown_reports_driver_failure_and_accepts_confirmed_cancella
             .await
             .cleanup_failure
             .unwrap();
-    assert!(failure.contains("claim settlement failed"), "{failure}");
+    assert!(failure.contains("policy recording refused"), "{failure}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -198,28 +166,22 @@ async fn embedded_shutdown_timeout_does_not_wait_for_unconfirmed_abort() {
     }
 }
 
-#[test]
-fn embedded_resource_release_preserves_cleanup_uncertainty() {
-    use embedded_service::EmbeddedDriverError;
-    use harness::engine::EngineError;
+#[tokio::test]
+async fn embedded_resource_release_preserves_cleanup_uncertainty() {
     assert_eq!(
         embedded_resource_release(None),
         exomonad_actor::ResourceRelease::Released
     );
-    let cleanup = EmbeddedDriverError::Engine(EngineError::Cleanup {
-        primary: Box::new(EngineError::Cancelled { head_request: None }),
-        cleanup: "claim settlement failed".into(),
-    });
+    let cleanup = actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await;
     assert!(
         matches!(embedded_resource_release(Some(&cleanup)), exomonad_actor::ResourceRelease::Retained(detail)
-        if detail.contains("claim settlement failed"))
+        if detail.contains("policy recording refused"))
     );
 }
 
-#[test]
-fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cleanup() {
+#[tokio::test]
+async fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cleanup() {
     use exomonad_actor::{ActorId, ResourceRelease};
-    use harness::engine::EngineError;
     let actor = ActorRef::first(ActorId(42));
     let owner = InteractiveApplicationOwner::embedded();
     let owners = Arc::new(Mutex::new(HashMap::from([(actor, owner)])));
@@ -231,17 +193,13 @@ fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cl
         observed_resource_release(actor, &owners),
         Some(ResourceRelease::Released)
     );
+    let failure = actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await;
     update_embedded_state(&owners, actor, |state| {
-        state.cleanup_failure = Some(embedded_service::EmbeddedDriverError::Engine(
-            EngineError::Cleanup {
-                primary: Box::new(EngineError::Cancelled { head_request: None }),
-                cleanup: "claim settlement failed".into(),
-            },
-        ));
+        state.cleanup_failure = Some(failure);
     });
     assert!(matches!(
         observed_resource_release(actor, &owners),
-        Some(ResourceRelease::Retained(detail)) if detail.contains("claim settlement failed")
+        Some(ResourceRelease::Retained(detail)) if detail.contains("policy recording refused")
     ));
 }
 
@@ -266,14 +224,7 @@ async fn embedded_shutdown_settles_exact_waiters_and_preserves_timeout_uncertain
         (
             actors[1],
             (),
-            Err(embedded_service::EmbeddedDriverError::Engine(
-                harness::engine::EngineError::Cleanup {
-                    primary: Box::new(harness::engine::EngineError::Cancelled {
-                        head_request: None,
-                    }),
-                    cleanup: "claim settlement failed".into(),
-                },
-            )),
+            Err(actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await),
         )
     });
     let pending = tasks.spawn(std::future::pending());
@@ -287,7 +238,7 @@ async fn embedded_shutdown_settles_exact_waiters_and_preserves_timeout_uncertain
             .await
             .cleanup_failure
             .unwrap();
-    assert!(failure.contains("claim settlement failed"));
+    assert!(failure.contains("policy recording refused"));
     assert!(failure.contains("cleanup unconfirmed"));
     assert_eq!(waiters.len(), 1);
     assert!(waiters.contains_key(&actors[2]));
@@ -308,7 +259,7 @@ async fn embedded_shutdown_settles_exact_waiters_and_preserves_timeout_uncertain
         ResourceRelease::Released
     );
     assert!(
-        matches!(replies.next().unwrap().await.unwrap(), ResourceRelease::Retained(detail) if detail.contains("claim settlement failed"))
+        matches!(replies.next().unwrap().await.unwrap(), ResourceRelease::Retained(detail) if detail.contains("policy recording refused"))
     );
     assert!(matches!(
         replies.next().unwrap().await.unwrap(),
@@ -495,11 +446,7 @@ async fn draining_join_retains_failed_cancellation_receipt_for_later_release_wai
     });
     let (request, reply) = ReleaseAwait::channel(actor);
     let mut waiters = HashMap::from([(actor, vec![request])]);
-    let failure =
-        embedded_service::EmbeddedDriverError::Engine(harness::engine::EngineError::Cleanup {
-            primary: Box::new(harness::engine::EngineError::Cancelled { head_request: None }),
-            cleanup: "exact native owner did not acknowledge cancellation".into(),
-        });
+    let failure = actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await;
     assert!(matches!(
         application_supervisor::settle_embedded_completion(
             actor,
@@ -559,16 +506,9 @@ async fn driver_join_after_forest_settlement_preserves_execution_and_cleanup_out
         let task = tasks.spawn(async move {
             completion.await.unwrap();
             let error = if cleanup_failed {
-                embedded_service::EmbeddedDriverError::Engine(
-                    harness::engine::EngineError::Cleanup {
-                        primary: Box::new(harness::engine::EngineError::InvalidFunctionCall),
-                        cleanup: "native release remains unconfirmed".into(),
-                    },
-                )
+                actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await
             } else {
-                embedded_service::EmbeddedDriverError::Engine(
-                    harness::engine::EngineError::InvalidFunctionCall,
-                )
+                actual_round_failure(RoundOutcome::CompletedHeadRefusal { reopen: false }).await
             };
             (actor, (), Err(error))
         });
@@ -699,6 +639,23 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
         module_path!(),
         "::generated_driver_receipt_histories_preserve_exact_owner_and_cleanup"
     ));
+    // Reuse immutable owner-issued failure facts; each history independently
+    // exercises fresh task registration and supervisor release transitions.
+    let EmbeddedDriverError::Round(cleanup) =
+        actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: false }).await
+    else {
+        unreachable!()
+    };
+    let EmbeddedDriverError::Round(recovery) =
+        actual_round_failure(RoundOutcome::CompletedHeadRefusal { reopen: true }).await
+    else {
+        unreachable!()
+    };
+    let EmbeddedDriverError::Round(recovery_cleanup) =
+        actual_round_failure(RoundOutcome::UnstartedClaimRefusal { reopen: true }).await
+    else {
+        unreachable!()
+    };
     let mut runner = TestRunner::new(config);
     runner
         .run(&prop::collection::vec(operation, 0..64), |history| {
@@ -749,37 +706,11 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
                         };
                         let outcome = match kind {
                             CompletionKind::Success => Ok(()),
-                            CompletionKind::ExecutionFailure => {
-                                Err(embedded_service::EmbeddedDriverError::Host(
-                                    "execution failed".into(),
-                                ))
-                            }
-                            CompletionKind::CleanupFailure => {
-                                Err(embedded_service::EmbeddedDriverError::Engine(
-                                    harness::engine::EngineError::Cleanup {
-                                        primary: Box::new(
-                                            harness::engine::EngineError::Cancelled {
-                                                head_request: None,
-                                            },
-                                        ),
-                                        cleanup: "release unconfirmed".into(),
-                                    },
-                                ))
-                            }
+                            CompletionKind::ExecutionFailure => Err(EmbeddedDriverError::Host("execution failed".into())),
+                            CompletionKind::CleanupFailure => Err(EmbeddedDriverError::Round(cleanup.clone())),
                             CompletionKind::NativeRecovery => Err(native_recovery_driver_error()),
-                            CompletionKind::HarnessRecovery => Err(
-                                harness::engine::EngineError::Store(
-                                    harness::store::StoreError::AdmissionFenced,
-                                ).into(),
-                            ),
-                            CompletionKind::RecoveryCleanupFailure => Err(
-                                harness::engine::EngineError::Cleanup {
-                                    primary: Box::new(harness::engine::EngineError::Store(
-                                        harness::store::StoreError::AdmissionFenced,
-                                    )),
-                                    cleanup: "release unconfirmed".into(),
-                                }.into(),
-                            ),
+                            CompletionKind::HarnessRecovery => Err(EmbeddedDriverError::Round(recovery.clone())),
+                            CompletionKind::RecoveryCleanupFailure => Err(EmbeddedDriverError::Round(recovery_cleanup.clone())),
                         };
                         let expected_admission = matches!(models[index], Model::Pending)
                             && matches!(registration, Registration::Exact);

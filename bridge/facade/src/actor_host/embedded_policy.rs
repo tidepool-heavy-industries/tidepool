@@ -215,8 +215,9 @@ impl EmbeddedPolicySnapshot {
     pub(super) async fn cancel(
         &self,
         context: ToolInvocationContext,
+        cause: exomonad_actor::WorkbenchCancellationCause,
     ) -> Result<exomonad_actor::WorkbenchCancellationOutcome, ResidentToolError> {
-        self.policy.cancel_workbench_boxed(context).await
+        self.policy.cancel_workbench_boxed(context, cause).await
     }
 }
 
@@ -995,4 +996,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "embedded_operation_settlement_tests.rs"]
-mod operation_settlement_tests;
+pub(super) mod operation_settlement_tests;

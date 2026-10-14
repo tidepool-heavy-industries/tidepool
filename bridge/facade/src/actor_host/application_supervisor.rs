@@ -1339,7 +1339,7 @@ pub(super) fn settle_embedded_completion(
         Err(error) if error.requires_recovery() => {
             EmbeddedTaskCompletion::RecoveryRequired(error.to_string())
         }
-        Err(error) if error.cleanup_failed() => {
+        Err(error) if error.cleanup_unconfirmed() => {
             EmbeddedTaskCompletion::CleanupFailed(error.to_string())
         }
         Err(error) => EmbeddedTaskCompletion::ExecutionFailed(error.to_string()),
@@ -1359,7 +1359,7 @@ pub(super) fn settle_embedded_completion(
         state.live = false;
         state.cancellation = None;
         if let Err(error) = outcome {
-            if error.cleanup_failed() {
+            if error.cleanup_unconfirmed() {
                 state.cleanup_failure = Some(error);
             }
         }

@@ -68,6 +68,7 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
         'exomonad/actor/src/resident_actor/replacement/refusal_tests.rs',
         'exomonad/actor/src/resident_actor/scope_runtime_tests.rs',
+        'exomonad/actor/src/resident_tools/cancellation_history_tests.rs',
         'exomonad/actor/src/resident_workbench/display_callback_tests.rs',
         'exomonad/actor/src/resident_workbench/replacement_input_tests.rs',
     }),

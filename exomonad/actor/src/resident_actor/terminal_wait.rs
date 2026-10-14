@@ -16,7 +16,7 @@ async fn wait_exit_event(
     tokio::select! {
         biased;
         terminal = retirement.wait_requested_shutdown() => ExitWaitEvent::Retired(terminal),
-        () = control.wait_for_cancellation() => ExitWaitEvent::Cancelled,
+        _ = control.wait_for_cancellation() => ExitWaitEvent::Cancelled,
         terminal = target.wait() => {
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
                 Ok(true) => ExitWaitEvent::Observed(terminal),
@@ -48,11 +48,12 @@ where
             control.finish_sleep();
             return outcome;
         }
-        ExitWaitEvent::Cancelled => "awaitExit interrupted by delivered input".into(),
+        ExitWaitEvent::Cancelled => control.interruption_detail("awaitExit"),
         ExitWaitEvent::Retired(terminal) => {
-            control.request_cancellation();
+            control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             format!(
-                "awaitExit interrupted by actor retirement: {}",
+                "{}; observed actor retirement: {}",
+                        control.interruption_detail("awaitExit"),
                 terminal.summary
             )
         }

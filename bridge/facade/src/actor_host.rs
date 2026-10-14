@@ -4150,7 +4150,7 @@ impl std::error::Error for RootCompilationFailure {
 fn embedded_resource_release(
     error: Option<&embedded_service::EmbeddedDriverError>,
 ) -> exomonad_actor::ResourceRelease {
-    match error.filter(|error| error.cleanup_failed()) {
+    match error.filter(|error| error.cleanup_unconfirmed()) {
         Some(error) => exomonad_actor::ResourceRelease::Retained(format!(
             "embedded Engine cleanup unconfirmed: {error}"
         )),

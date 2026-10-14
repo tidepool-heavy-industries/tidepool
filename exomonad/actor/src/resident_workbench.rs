@@ -7672,7 +7672,7 @@ where
                 // wait for that request to settle before abandoning its hole.
                 tokio::select! {
                     result = &mut spawn => result.map_err(ResidentActorWorkbenchError::Join)?,
-                    () = control.wait_for_cancellation() => {
+                    _ = control.wait_for_cancellation() => {
                         cancellation.cancel();
                         let _ = spawn.await.map_err(ResidentActorWorkbenchError::Join)?;
                         cancel_on_drop.0 = None;

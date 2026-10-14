@@ -377,7 +377,7 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                 assert_eq!(script.dropped.load(Ordering::SeqCst), 0);
                 let cancelled = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    endpoint.cancel_workbench_boxed(context),
+                    endpoint.cancel_workbench_boxed(context, exomonad_actor::WorkbenchCancellationCause::Unknown),
                 )
                 .await
                 .unwrap()

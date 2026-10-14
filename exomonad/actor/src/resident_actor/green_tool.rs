@@ -315,7 +315,7 @@ where
             let execution = &mut cursor.execution;
             let completion = tokio::select! {
                 biased;
-                () = cursor.control.wait_for_cancellation() => {
+                _ = cursor.control.wait_for_cancellation() => {
                     cursor.work.close(); execution.cancel_parent();
                     return Err(ResidentActorWorkbenchError::InvocationCancelled);
                 }

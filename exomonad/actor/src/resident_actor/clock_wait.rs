@@ -20,19 +20,19 @@ async fn wait_sleep_event(
     tokio::select! {
         biased;
         terminal = retirement.wait_requested_shutdown() => {
-            if control.request_cancellation() || control.cancellation_requested() {
+            if control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement) || control.cancellation_requested() {
                 SleepWaitEvent::Retired(terminal)
             } else {
                 SleepWaitEvent::Expired
             }
         }
-        () = control.wait_for_cancellation() => SleepWaitEvent::Cancelled,
+        _ = control.wait_for_cancellation() => SleepWaitEvent::Cancelled,
         () = &mut timer => {
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
                 Ok(true) => SleepWaitEvent::Expired,
                 Ok(false) => SleepWaitEvent::Cancelled,
                 Err(terminal) => {
-                    control.request_cancellation();
+                    control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
                     SleepWaitEvent::Retired(terminal)
                 }
             }
@@ -64,7 +64,7 @@ where
                 .abort_live(
                     context,
                     continuation,
-                    "sleep interrupted by delivered input".into(),
+                    control.interruption_detail("sleep"),
                 )
                 .await;
             if consumed {
@@ -79,7 +79,8 @@ where
                     context,
                     continuation,
                     format!(
-                        "sleep interrupted by actor retirement: {}",
+                        "{}; observed actor retirement: {}",
+                        control.interruption_detail("sleep"),
                         terminal.summary
                     ),
                 )

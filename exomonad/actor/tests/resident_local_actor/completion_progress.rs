@@ -61,9 +61,10 @@ async fn parked_cell_does_not_block_another_calls_acknowledgement_or_control() {
     );
     let cancellation = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        fixture
-            .policy
-            .cancel_workbench_boxed(ConcurrentResident::cell_context("completion-B")),
+        fixture.policy.cancel_workbench_boxed(
+            ConcurrentResident::cell_context("completion-B"),
+            exomonad_actor::WorkbenchCancellationCause::Unknown,
+        ),
     )
     .await
     .expect("settled B cancellation inspection progresses")

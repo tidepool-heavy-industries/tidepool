@@ -3566,7 +3566,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     tidepool_extract_cmd::reset_extract_spawn_count();
     let cancelled = tokio::time::timeout(
         Duration::from_secs(30),
-        policy.cancel_workbench_boxed(invocation.clone()),
+        policy.cancel_workbench_boxed(invocation.clone(), exomonad_actor::WorkbenchCancellationCause::Unknown),
     )
     .await
     .unwrap()
@@ -3655,7 +3655,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         .unwrap();
     release_ack.send(()).unwrap();
     held_host.await.unwrap();
-    let replay = policy.cancel_workbench_boxed(invocation).await.unwrap();
+    let replay = policy.cancel_workbench_boxed(invocation, exomonad_actor::WorkbenchCancellationCause::Unknown).await.unwrap();
     let exomonad_actor::WorkbenchCancellationOutcome::Cancelled { reply: replay, .. } = replay
     else {
         panic!("cancellation replay lost its original outcome: {replay:?}")
