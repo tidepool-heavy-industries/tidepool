@@ -118,8 +118,8 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
             tidepool_runtime::session::ResidentSessionState::Gone);
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
         let collected = campaign.drive_actor_output(&store, dispatch_haskell_script_with_deadline(root.as_ref(),
-            "collected <- awaitExit collector\ndisplay (case collected of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })", "source callable values after collector Gone", COLD_DEBUG_CELL_SETTLEMENT_BUDGET)).await;
-        assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &collected), "True", "{collected}");
+            "collected <- awaitExit collector\ndisplay (show (case collected of { Completed values -> Just (reverse values); _ -> Nothing }))", "source callable values after collector Gone", COLD_DEBUG_CELL_SETTLEMENT_BUDGET)).await;
+        assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &collected), "Just [13,30,-7,-1,42]", "{collected}");
     })).await;
 }
 
