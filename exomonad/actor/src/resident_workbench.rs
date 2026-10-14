@@ -1561,6 +1561,347 @@ impl InstalledToolSelection {
     pub(crate) fn lease(&self) -> &InstalledToolLease {
         self.snapshot.installation()
     }
+    pub(crate) fn snapshot(&self) -> &ActorRequestSnapshot {
+        &self.snapshot
+    }
+    pub(crate) fn entry_index(&self) -> i64 {
+        (self.index + 3) as i64
+    }
+    pub(crate) fn endpoint(&self) -> &crate::tool_contract::AdmittedEndpoint {
+        &self
+            .lease()
+            .tools
+            .as_ref()
+            .expect("selection retains installation")
+            .endpoints[self.index]
+    }
+    pub(crate) fn admit(
+        self,
+        arguments: exomonad_tool::ToolArguments,
+    ) -> Result<AdmittedToolCall, crate::ResidentToolError> {
+        let arguments = self.endpoint().plan().admit_arguments(arguments)?;
+        Ok(AdmittedToolCall {
+            selected: self,
+            arguments,
+        })
+    }
+}
+
+/// Invocation arguments and their issuing endpoint selection travel together.
+pub(crate) struct AdmittedToolCall {
+    selected: InstalledToolSelection,
+    arguments: exomonad_tool::EndpointArguments,
+}
+
+impl AdmittedToolCall {
+    pub(crate) fn selected(&self) -> &InstalledToolSelection {
+        &self.selected
+    }
+
+    pub(crate) fn request(&self) -> WorkbenchRequest {
+        match &self.arguments {
+            exomonad_tool::EndpointArguments::Resident(arguments) => WorkbenchRequest::for_tool(
+                self.selected.endpoint().plan().name().into(),
+                arguments.clone(),
+            ),
+            exomonad_tool::EndpointArguments::Haskell(source) => {
+                WorkbenchRequest::from_cell_input(source)
+            }
+        }
+    }
+}
+
+/// One admitted after-tool slot, retaining its exact actor, source and implementation.
+pub(crate) struct InstalledAfterTool {
+    actor: crate::ActorRef,
+    _source: crate::CheckpointSourceLayer,
+    tools: Arc<ResidentWorkbenchTools>,
+}
+
+impl InstalledAfterTool {
+    pub(crate) fn entry(&self) -> &crate::tool_contract::AfterToolEntry {
+        self.tools
+            .after_tool
+            .as_ref()
+            .expect("issued after-tool selection retains its admitted entry")
+    }
+
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.actor
+    }
+
+    pub(crate) fn tools(&self) -> &ResidentWorkbenchTools {
+        &self.tools
+    }
+}
+
+impl InstalledToolLease {
+    /// A transferred source callback may inspect its retained inputs, but it
+    /// carries no destination AgentSpec or notebook publication authority.
+    pub(crate) fn source_callback_custody(
+        actor: crate::ActorRef,
+        source: crate::CheckpointSourceLayer,
+    ) -> Self {
+        Self {
+            actor,
+            source,
+            tools: None,
+        }
+    }
+
+    pub(crate) fn new(
+        actor: crate::ActorRef,
+        source: crate::CheckpointSourceLayer,
+        tools: Option<Arc<ResidentWorkbenchTools>>,
+    ) -> Self {
+        Self {
+            actor,
+            source,
+            tools,
+        }
+    }
+
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.actor
+    }
+
+    pub(crate) fn source(&self) -> &crate::CheckpointSourceLayer {
+        &self.source
+    }
+
+    pub(crate) fn tools(&self) -> Option<&ResidentWorkbenchTools> {
+        self.tools.as_deref()
+    }
+
+    #[must_use]
+    pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
+        self.tools
+            .as_ref()
+            .and_then(|tools| tools.code.prepared().map(|prepared| &prepared.acquisition))
+    }
+
+    pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
+        self.tools.clone()
+    }
+
+    fn select(&self, name: &str) -> Option<InstalledToolSelection> {
+        let index = self
+            .tools
+            .as_ref()?
+            .endpoints
+            .iter()
+            .position(|endpoint| endpoint.plan().name() == name)?;
+        Some(InstalledToolSelection {
+            snapshot: ActorRequestSnapshot::Bootstrap(self.clone()),
+            index,
+        })
+    }
+
+    pub(crate) fn after_tool(&self) -> Option<InstalledAfterTool> {
+        let tools = self.tools.clone()?;
+        tools.after_tool.as_ref()?;
+        Some(InstalledAfterTool {
+            actor: self.actor,
+            _source: self.source.clone(),
+            tools,
+        })
+    }
+
+    pub(crate) fn generation_references(
+        &self,
+        source: tidepool_runtime::session::GenerationArtifactReference,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
+        let installation = PersistedActorInstallation::capture(self, &source)?;
+        let bytes = serde_json::to_vec(&installation).map_err(|error| error.to_string())?;
+        Ok(tidepool_runtime::session::DurableGenerationReferences {
+            source,
+            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
+            prompts,
+        })
+    }
+
+    pub(crate) fn verify_recovered_generation(
+        &self,
+        references: &tidepool_runtime::session::DurableGenerationReferences,
+    ) -> Result<(), ActorInstallationRecoveryError> {
+        let installation =
+            PersistedActorInstallation::decode(&references.installation, &references.source)?;
+        installation.verify(self, &references.source)
+    }
+
+    pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {
+        Self {
+            source,
+            ..self.clone()
+        }
+    }
+}
+
+/// Immutable actor configuration and its notebook publication domain.
+pub(crate) struct ActorGeneration {
+    pub(crate) id: tidepool_runtime::session::NotebookGenerationId,
+    pub(crate) installation: InstalledToolLease,
+    pub(crate) prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    pub(crate) context: crate::ActorSessionContext,
+    pub(crate) public_owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+    pub(crate) scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    pub(crate) configuration_digest: [u8; 32],
+    pub(crate) durable: Option<tidepool_runtime::session::ActiveNotebookGeneration>,
+}
+
+pub(crate) enum PreparedGenerationCommit {
+    Restored {
+        selected: tidepool_runtime::session::ActiveNotebookGeneration,
+        readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+    },
+    Ephemeral {
+        id: tidepool_runtime::session::NotebookGenerationId,
+        source: Option<tidepool_runtime::session::PendingPublishedSourceOriginals>,
+    },
+    Durable {
+        prepared: tidepool_runtime::session::PreparedNotebookGeneration,
+        selected: tidepool_runtime::session::ActiveNotebookGeneration,
+    },
+}
+
+pub(crate) struct PreparedActorGeneration {
+    installation: InstalledToolLease,
+    context: crate::ActorSessionContext,
+    scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    commit: PreparedGenerationCommit,
+    public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
+}
+
+pub(crate) enum ActorGenerationCommit {
+    Published {
+        generation: Arc<ActorGeneration>,
+        cancellation_pending: bool,
+    },
+    Refused(String),
+    Unconfirmed(String),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ActorGenerationPublication {
+    Terminal,
+    Continuing,
+}
+
+/// Bootstrap policies precede generation publication. Production requests
+/// retain one complete generation rather than independently selected heads.
+#[derive(Clone)]
+pub(crate) enum ActorRequestSnapshot {
+    Bootstrap(InstalledToolLease),
+    SourceCallback(InstalledToolLease),
+    Generation(Arc<ActorGeneration>),
+}
+
+impl ActorRequestSnapshot {
+    pub(crate) fn select(&self, name: &str) -> Option<InstalledToolSelection> {
+        let mut selected = self.installation().select(name)?;
+        selected.snapshot = self.clone();
+        Some(selected)
+    }
+
+    pub(crate) fn installation(&self) -> &InstalledToolLease {
+        match self {
+            Self::Bootstrap(lease) | Self::SourceCallback(lease) => lease,
+            Self::Generation(generation) => &generation.installation,
+        }
+    }
+
+    pub(crate) fn generation(&self) -> Option<&Arc<ActorGeneration>> {
+        match self {
+            Self::Bootstrap(_) | Self::SourceCallback(_) => None,
+            Self::Generation(generation) => Some(generation),
+        }
+    }
+}
+
+/// The actor's single current installation. Requests clone an immutable lease;
+/// spec reload replaces the paired source and handlers at source visibility.
+#[derive(Default)]
+pub(crate) struct InstalledToolsState(Mutex<InstalledToolsAvailability>);
+
+#[derive(Default)]
+enum InstalledToolsAvailability {
+    #[default]
+    Empty,
+    Available(InstalledToolLease),
+    Generation(Arc<ActorGeneration>),
+    GenerationUnavailable(Arc<ActorGeneration>),
+    SourceUnavailable {
+        actor: crate::ActorRef,
+        tools: Option<Arc<ResidentWorkbenchTools>>,
+    },
+}
+
+pub(crate) enum InstalledToolsObservation {
+    Empty,
+    Available(Option<Arc<ResidentWorkbenchTools>>),
+    SourceUnavailable(Option<Arc<ResidentWorkbenchTools>>),
+}
+
+impl InstalledToolsAvailability {
+    fn available(&self) -> Option<&InstalledToolLease> {
+        match self {
+            Self::Available(lease) => Some(lease),
+            Self::Generation(generation) => Some(&generation.installation),
+            Self::Empty | Self::GenerationUnavailable(_) | Self::SourceUnavailable { .. } => None,
+        }
+    }
+}
+
+impl InstalledToolsState {
+    pub(crate) fn observe(&self) -> InstalledToolsObservation {
+        match &*self.0.lock() {
+            InstalledToolsAvailability::Empty => InstalledToolsObservation::Empty,
+            InstalledToolsAvailability::Available(lease) => {
+                InstalledToolsObservation::Available(lease.tools_arc())
+            }
+            InstalledToolsAvailability::Generation(generation) => {
+                InstalledToolsObservation::Available(generation.installation.tools_arc())
+            }
+            InstalledToolsAvailability::GenerationUnavailable(generation) => {
+                InstalledToolsObservation::SourceUnavailable(generation.installation.tools_arc())
+            }
+            InstalledToolsAvailability::SourceUnavailable { tools, .. } => {
+                InstalledToolsObservation::SourceUnavailable(tools.clone())
+            }
+        }
+    }
+
+    pub(crate) fn current(&self) -> Option<InstalledToolLease> {
+        self.0.lock().available().cloned()
+    }
+
+    pub(crate) fn snapshot_for_call(&self) -> Result<ActorRequestSnapshot, crate::ResidentToolError> {
+        let unavailable = |actor| crate::ResidentToolError::Invocation(
+            crate::KernelInvocationFailure::Rejected {
+                receipts: Vec::new(), actor,
+                detail: "actor's installed source is unavailable".into(), diagnostic: None,
+            },
+        );
+        match &*self.0.lock() {
+            InstalledToolsAvailability::Available(lease) => Ok(ActorRequestSnapshot::Bootstrap(lease.clone())),
+            InstalledToolsAvailability::Generation(generation) => Ok(ActorRequestSnapshot::Generation(generation.clone())),
+            InstalledToolsAvailability::Empty => Err(crate::ResidentToolError::Unavailable(
+                "actor has no installed endpoint snapshot".into(),
+            )),
+            InstalledToolsAvailability::SourceUnavailable { actor, .. } => Err(unavailable(*actor)),
+            InstalledToolsAvailability::GenerationUnavailable(generation) => Err(unavailable(generation.context.actor)),
+        }
+    }
+
+    pub(crate) fn publish(&self, lease: InstalledToolLease) {
+        *self.0.lock() = InstalledToolsAvailability::Available(lease);
+    }
+
+    pub(crate) fn current_tools(&self) -> Option<Arc<ResidentWorkbenchTools>> {
+        self.current()?.tools_arc()
+    }
+
     pub(crate) fn snapshot(&self) -> Option<ActorRequestSnapshot> {
         self.snapshot_for_call().ok()
     }
@@ -19457,7 +19798,7 @@ pub(crate) mod request_tests {
             assert_eq!(later.lease().tools().unwrap().install, 2);
             state.invalidate_source();
             assert!(matches!(
-                state.current_for_call(),
+                state.snapshot_for_call(),
                 Err(crate::ResidentToolError::Invocation(
                     crate::KernelInvocationFailure::Rejected { actor, receipts, .. }
                 )) if actor == context.actor && receipts.is_empty()
@@ -19492,7 +19833,7 @@ pub(crate) mod request_tests {
             }
             state.clear();
             assert!(matches!(
-                state.current_for_call(),
+                state.snapshot_for_call(),
                 Err(crate::ResidentToolError::Unavailable(_))
             ));
         })
