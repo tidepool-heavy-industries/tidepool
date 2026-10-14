@@ -1114,7 +1114,8 @@ fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscribe
              tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
              tidepool_runtime::activation_renderer_install=info,tidepool_extract_cmd::endpoint=debug,\
              exomonad_actor::request=info,tidepool_toolchain::module_candidates=debug,\
-             tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
+             tidepool_toolchain::artifacts=info,tidepool::artifact_inventory::ambiguity_trace=debug,\
+             exomonad_actor::workbench_phase=info,\
              exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
              exomonad_actor::resident_tools=info,exomonad_actor::resident_workbench=info,\
              exomonad::content=off,harness::runtime_cost=debug"
