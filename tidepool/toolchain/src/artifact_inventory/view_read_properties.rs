@@ -1106,3 +1106,83 @@ fn persistent_captures_share_payload_and_scope_owners() {
         "unique_payload_owners": LENGTH, "unique_scope_owners": LENGTH, "drop_graph_visits": 0})
     );
 }
+
+#[test]
+fn ordered_materialization_sources_share_direct_edges_through_linear_and_diamond_histories() {
+    for diamond in [false, true] {
+        for length in [1, 8, 32] {
+            let inventory = ArtifactInventory::default();
+            let mut latest = inventory.empty_view();
+            let mut captures = vec![latest.clone()];
+            let mut leases = Vec::new();
+            let mut caches = vec![Arc::downgrade(&latest.lease.materialization.cache)];
+            for _ in 0..length {
+                leases.push(Arc::downgrade(&latest.lease));
+                if diamond {
+                    let left =
+                        inventory.retain(vec![], vec![], vec![Arc::clone(&latest.lease)], vec![]);
+                    let right =
+                        inventory.retain(vec![], vec![], vec![Arc::clone(&latest.lease)], vec![]);
+                    caches.push(Arc::downgrade(&left.lease.materialization.cache));
+                    caches.push(Arc::downgrade(&right.lease.materialization.cache));
+                    latest = inventory.retain(
+                        vec![],
+                        vec![],
+                        vec![Arc::clone(&left.lease), Arc::clone(&right.lease)],
+                        vec![],
+                    );
+                } else {
+                    latest =
+                        inventory.retain(vec![], vec![], vec![Arc::clone(&latest.lease)], vec![]);
+                }
+                caches.push(Arc::downgrade(&latest.lease.materialization.cache));
+                captures.push(latest.clone());
+            }
+            let nodes = latest.lease.materialization_sources.len() + 1;
+            let direct_edges = latest.lease.materialization.parents.len()
+                + latest
+                    .lease
+                    .materialization_sources
+                    .values()
+                    .map(|source| source.parents.len())
+                    .sum::<usize>();
+            assert_eq!(nodes, 1 + length * if diamond { 3 } else { 1 });
+            assert_eq!(direct_edges, length * if diamond { 4 } else { 1 });
+            let mut expanded_source_references = 0;
+            for capture in &captures {
+                expanded_source_references += capture.lease.materialization_sources.len() + 1;
+                for (id, source) in &capture.lease.materialization_sources {
+                    let shared = &latest.lease.materialization_sources[id];
+                    assert!(Arc::ptr_eq(&source.cache, &shared.cache));
+                    assert!(Arc::ptr_eq(&source.parents, &shared.parents));
+                    assert!(source
+                        .parents
+                        .iter()
+                        .all(|parent| capture.lease.materialization_sources.contains_key(parent)));
+                }
+                assert!(capture
+                    .lease
+                    .materialization
+                    .parents
+                    .iter()
+                    .all(|parent| capture.lease.materialization_sources.contains_key(parent)));
+            }
+            drop(captures);
+            assert!(leases.iter().all(|lease| lease.upgrade().is_none()));
+            let proof = Arc::clone(latest.selection_snapshot());
+            drop(latest);
+            assert!(caches.iter().all(|cache| cache.upgrade().is_none()));
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "kind": "ordered_materialization_source_structure", "shape": if diamond { "diamond" } else { "linear" },
+                    "history_length": length, "retained_cache_nodes": nodes, "unique_direct_edges": direct_edges,
+                    "direct_edge_id_bytes_excludes_arc_and_map_nodes": direct_edges * std::mem::size_of::<MaterializationCacheId>(),
+                    "explicit_capture_source_references": expanded_source_references, "shared_direct_edge_arrays": true,
+                    "retained_parent_leases": 0, "cache_owners_after_last_view": 0,
+                    "proof_scope_count_after_drop": proof.scopes.len(),
+                })
+            );
+        }
+    }
+}

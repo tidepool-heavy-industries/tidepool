@@ -3821,9 +3821,9 @@ struct MaterializationCacheId(usize);
 #[derive(Clone)]
 struct MaterializationSource {
     cache: Arc<MaterializationCache>,
-    // Every referenced cache stays owned by the view's persistent source map.
-    // IDs describe subsumption without retaining leases or recursive owners.
-    ancestors: imbl::OrdSet<MaterializationCacheId>,
+    // Ordered direct edges preserve physical file-cache precedence. Every ID
+    // stays backed by the view's source map; none grants artifact authority.
+    parents: Arc<[MaterializationCacheId]>,
     fixed: imbl::Vector<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
 }
 
@@ -4046,37 +4046,52 @@ impl ViewLease {
         >,
         visited: &mut BTreeSet<MaterializationCacheId>,
     ) -> Result<(), CompileError> {
-        let mut sources = self.materialization_sources.iter().collect::<Vec<_>>();
-        sources.sort_by_key(|(id, source)| (std::cmp::Reverse(source.ancestors.len()), **id));
-        let mut covered = imbl::OrdSet::<MaterializationCacheId>::new();
-        // Observe descendants first: a completed source subsumes its ancestor
-        // rows, including ancestors which complete later, without locking them.
-        for (id, source) in sources {
-            if covered.contains(id) || !visited.insert(*id) {
-                continue;
-            }
-            let retained = lock_materialization_cache(&source.cache)?;
-            let owned = if retained.is_empty() {
-                source.fixed.iter().cloned().collect::<Vec<_>>()
-            } else {
-                covered.extend(source.ancestors.iter().copied());
-                retained.values().cloned().collect()
-            };
-            for materialization in &owned {
-                if !materializations
-                    .iter()
-                    .any(|existing| Arc::ptr_eq(existing, materialization))
-                {
-                    materializations.push(Arc::clone(materialization));
-                }
-            }
-        }
         for materialization in &self.materialization.fixed {
             if !materializations
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, materialization))
             {
                 materializations.push(Arc::clone(materialization));
+            }
+        }
+        let mut pending = self
+            .materialization
+            .parents
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let source = self
+                .materialization_sources
+                .get(&id)
+                .expect("owned cache parent");
+            let retained = lock_materialization_cache(&source.cache)?;
+            if retained.is_empty() {
+                for materialization in &source.fixed {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
+                }
+                pending.extend(source.parents.iter().rev().copied());
+            } else {
+                // This owner retains the files actually observed when it was
+                // completed. Later alternate keys can materialize from their
+                // independently retained payloads without borrowing this branch.
+                for materialization in retained.values() {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
+                }
             }
         }
         Ok(())
@@ -4462,11 +4477,6 @@ impl ArtifactView {
             .first()
             .map(|parent| parent.materialization_sources.clone())
             .unwrap_or_default();
-        let mut materialization_ancestors = lease
-            .parents
-            .first()
-            .map(|parent| parent.materialization.ancestors.clone())
-            .unwrap_or_default();
         for (index, parent) in lease.parents.iter().enumerate() {
             if index != 0 {
                 for (id, source) in &parent.materialization_sources {
@@ -4474,11 +4484,9 @@ impl ArtifactView {
                         materialization_sources.insert(*id, source.clone());
                     }
                 }
-                materialization_ancestors.extend(parent.materialization.ancestors.iter().copied());
             }
             materialization_sources
                 .insert(parent.materialization.id(), parent.materialization.clone());
-            materialization_ancestors.insert(parent.materialization.id());
         }
         let lease = Arc::new(ViewLease {
             admission_roots: lease.roots.into_iter().collect(),
@@ -4488,7 +4496,12 @@ impl ArtifactView {
             materialization_sources,
             materialization: MaterializationSource {
                 cache: Arc::new(lease.materialization),
-                ancestors: materialization_ancestors,
+                parents: lease
+                    .parents
+                    .iter()
+                    .map(|parent| parent.materialization.id())
+                    .collect::<Vec<_>>()
+                    .into(),
                 fixed: lease.materialization_parents.into(),
             },
         });
@@ -5747,7 +5760,7 @@ impl ArtifactView {
         {
             let lease = Arc::get_mut(&mut retained.lease).expect("new selection lease");
             lease.materialization_sources.clear();
-            lease.materialization.ancestors.clear();
+            lease.materialization.parents = Arc::from([]);
         }
         let mut materializations = Vec::new();
         if !retained.is_empty() {
@@ -7378,42 +7391,158 @@ mod tests {
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionClose,
         };
-        let view = ArtifactInventory::default().empty_view();
-        let metadata = view.metadata_snapshot();
-        let held = view.lease.materialization.cache.lock().unwrap();
-        let cancellation = CompilerTransactionCancellation::new();
-        let (entered, observed) = std::sync::mpsc::channel();
+        for inherited in [false, true] {
+            let producer = ArtifactInventory::default().empty_view();
+            let receiver = if inherited {
+                producer.inventory().retain(
+                    vec![],
+                    vec![],
+                    vec![Arc::clone(&producer.lease)],
+                    vec![],
+                )
+            } else {
+                producer.clone()
+            };
+            let metadata = receiver.metadata_snapshot();
+            let held = producer.lease.materialization.cache.lock().unwrap();
+            let cancellation = CompilerTransactionCancellation::new();
+            let (entered, observed) = std::sync::mpsc::channel();
+            let (finished, received) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                let worker_cancellation = cancellation.clone();
+                let receiver = &receiver;
+                let metadata = &metadata;
+                scope.spawn(move || {
+                    entered.send(()).unwrap();
+                    let result = with_compiler_transaction_cancellable(
+                        worker_cancellation,
+                        |_| {},
+                        || {
+                            receiver.retain_materialization(metadata, |_| {
+                                panic!("cancelled waiter cannot prepare")
+                            })
+                        },
+                    );
+                    finished.send(result).unwrap();
+                });
+                observed
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if inherited {
+                    // Acquiring the receiver's cache precedes waiting for the
+                    // inherited producer. Prove that boundary was reached.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        match receiver.lease.materialization.cache.try_lock() {
+                            Err(std::sync::TryLockError::WouldBlock) => break,
+                            Ok(_) if std::time::Instant::now() < deadline => {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                            }
+                            _ => panic!("waiter did not reach inherited cache"),
+                        }
+                    }
+                }
+                cancellation.cancel();
+                let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
+                assert!(held.is_empty());
+                drop(held);
+                let result = outcome.unwrap();
+                assert!(
+                    matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+                );
+                assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+                if inherited {
+                    assert!(receiver
+                        .lease
+                        .materialization
+                        .cache
+                        .try_lock()
+                        .unwrap()
+                        .is_empty());
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn completed_materialization_skips_busy_ancestor_cache() {
+        use crate::declaration_context::ExactDeclarationContext;
+        let producer = b"busy ancestor producer";
+        let producer_identity = CanonicalProducerIdentity::from_producer_bytes(producer);
+        let product = |module, version| {
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    module,
+                    vec![(0, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                ),
+                producer_identity.sha256(),
+            )
+        };
+        let ancestor = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    producer_identity.sha256(),
+                    &[product("Ancestor", 1)],
+                )
+                .unwrap(),
+        );
+        let descendant = Arc::new(
+            ancestor
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(
+                    producer_identity.sha256(),
+                    &[product("Descendant", 2)],
+                )
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let completed = descendant
+            .prepare_compilation(scratch.path(), producer)
+            .unwrap();
+        completed.validate_artifacts().unwrap();
+        let view = descendant.artifact_view();
+        let completed_owner = Arc::clone(
+            view.lease
+                .materialization
+                .cache
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap(),
+        );
+        let receiver =
+            view.inventory()
+                .retain(vec![], vec![], vec![Arc::clone(&view.lease)], vec![]);
+        let held = ancestor
+            .artifact_view()
+            .lease
+            .materialization
+            .cache
+            .lock()
+            .unwrap();
+        assert!(held.is_empty());
         let (finished, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            let worker_cancellation = cancellation.clone();
-            let view = &view;
-            let metadata = &metadata;
-            scope.spawn(move || {
-                entered.send(()).unwrap();
-                let result = with_compiler_transaction_cancellable(
-                    worker_cancellation,
-                    |_| {},
-                    || {
-                        view.retain_materialization(metadata, |_| {
-                            panic!("cancelled waiter cannot prepare")
-                        })
-                    },
-                );
-                finished.send(result).unwrap();
+            scope.spawn(|| {
+                let mut parents = Vec::new();
+                let result = receiver
+                    .lease
+                    .collect_inherited_materializations(&mut parents, &mut BTreeSet::new());
+                finished.send(result.map(|()| parents)).unwrap();
             });
-            observed
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            cancellation.cancel();
-            let result = received
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            assert!(
-                matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
-            );
-            assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+            let outcome = received.recv_timeout(std::time::Duration::from_secs(5));
             assert!(held.is_empty());
             drop(held);
+            let parents = outcome
+                .expect("completed descendant must not wait on its busy ancestor")
+                .unwrap();
+            assert_eq!(parents.len(), 1);
+            assert!(Arc::ptr_eq(&parents[0], &completed_owner));
         });
     }
 
