@@ -750,13 +750,14 @@ fn selected_merge_preserves_acquired_catalog_origins_in_exact_scope() {
             let merged = first.merge_selected(&incoming, &projection).unwrap();
             let descriptor = &merged.descriptors()[0];
             assert!(!merged.original_input_origins(descriptor.id).is_empty());
-            let context =
+            let context = Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     descriptor.producer_sha256,
                     &merged,
                     projection,
                 )
-                .unwrap();
+                .unwrap(),
+            );
             let request = context
                 .prepare_compilation(
                     &fixture._root.path().join("merged-scope"),
