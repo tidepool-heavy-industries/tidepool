@@ -1060,7 +1060,8 @@ impl ExomonadSourceReload {
         let helper = self
             .prepared_helper_revision()?
             .ok_or("source owner has no completed deployment helper revision")?;
-        self.compose_graph("run", helper, revision)
+        let (_, prompts) = self.capture_prompts(true)?;
+        self.compose_graph("run", helper, revision, self.entry_storage.clone(), prompts)
     }
 
     fn prepared_helper_revision(&self) -> Result<Option<RetainedRevision>> {
@@ -1100,6 +1101,8 @@ impl ExomonadSourceReload {
         helper_branch: &str,
         helper: RetainedRevision,
         run: RetainedRevision,
+        entries: exomonad_actor::SourceEntryStorage,
+        prompts: generation::PromptReference,
     ) -> Result<exomonad_actor::CheckpointSourceLayer> {
         let mut identities = vec![
             format!("helpers:{}", helper.identity),
@@ -1115,8 +1118,8 @@ impl ExomonadSourceReload {
             identities,
             include_paths,
             manifests,
-            self.entry_storage.clone(),
-            None,
+            entries,
+            prompts,
             helper_branch,
         )
     }
@@ -1126,11 +1129,17 @@ impl ExomonadSourceReload {
         helper_branch: &str,
     ) -> Result<exomonad_actor::CheckpointSourceLayer> {
         self.layer.ensure_active(&self.frozen)?;
+        let helper = self
+            .helper_layer(helper_branch)
+            .checkpoint_revision(self.frozen.identity())?;
+        let run = self.layer.checkpoint_revision(self.frozen.identity())?;
+        let (_, prompts) = self.capture_prompts(true)?;
         self.compose_graph(
             helper_branch,
-            self.helper_layer(helper_branch)
-                .checkpoint_revision(self.frozen.identity())?,
-            self.layer.checkpoint_revision(self.frozen.identity())?,
+            helper,
+            run,
+            self.entry_storage.clone(),
+            prompts,
         )
     }
 

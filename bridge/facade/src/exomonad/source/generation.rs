@@ -103,7 +103,10 @@ impl SourceGraphReference {
 }
 
 impl ExomonadSourceReload {
-    fn capture_prompts(&self, frozen: bool) -> Result<(CapturedPromptFiles, PromptReference)> {
+    pub(super) fn capture_prompts(
+        &self,
+        frozen: bool,
+    ) -> Result<(CapturedPromptFiles, PromptReference)> {
         let config = self.frozen.config()?;
         let base = self.workspace.join(".exomonad");
         let mut selected = BTreeMap::new();
@@ -225,16 +228,12 @@ impl ExomonadSourceReload {
         include_paths: Vec<PathBuf>,
         manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
         entries: exomonad_actor::SourceEntryStorage,
-        prompts: Option<PromptReference>,
+        prompts: PromptReference,
         helper_branch: &str,
     ) -> Result<CheckpointSourceLayer> {
         if include_paths.len() != manifests.len() {
             return Err("source graph has incomplete ordered root evidence".into());
         }
-        let prompts = match prompts {
-            Some(prompts) => prompts,
-            None => self.capture_prompts(true)?.1,
-        };
         let revision = source_revision(self.frozen.identity(), &manifests);
         let reference = SourceGraphReference {
             version: 2,
@@ -605,31 +604,18 @@ impl ExomonadSourceReload {
             1,
         )
         .map_err(unavailable)?;
-        let mut paths = retained_helper.paths;
-        paths.extend(retained_run.paths);
-        let mut manifests = retained_helper.manifests.to_vec();
-        manifests.extend(retained_run.manifests.iter().cloned());
-        let mut identities = vec![
-            format!("helpers:{}", helper.revision.identity),
-            format!("run:{}", run.revision.identity),
-        ];
-        self.append_workspace_resources(&mut identities, &mut paths, &mut manifests)
-            .map_err(unavailable)?;
-        self.append_shared_roots(&mut paths, &mut manifests)
-            .map_err(unavailable)?;
         let (prompts, prompt_reference) = self.capture_prompts(false).map_err(unavailable)?;
         let entries = exomonad_actor::SourceEntryStorage::FreshCompilation {
             directory: self.fresh_entry_storage.directory().to_owned(),
             preparation: uuid::Uuid::new_v4(),
         };
         let source = self
-            .issue_graph(
-                identities,
-                paths,
-                manifests,
-                entries,
-                Some(prompt_reference),
+            .compose_graph(
                 &helper_branch,
+                retained_helper,
+                retained_run,
+                entries,
+                prompt_reference,
             )
             .map_err(unavailable)?;
         let composer = self
