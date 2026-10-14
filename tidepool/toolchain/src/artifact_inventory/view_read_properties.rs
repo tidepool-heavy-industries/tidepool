@@ -184,7 +184,7 @@ struct ConstructionCoverage {
     eager_reads: usize,
     delayed_first_reads: usize,
     sparse_reads: usize,
-    reclaimed_slot_reuses: usize,
+    independent_later_bindings: usize,
 }
 
 fn construction_history(
@@ -234,7 +234,7 @@ fn construction_history(
         check_constructed_projection(&merged, catalog, &merged_roots)?;
     }
     // The merged output has not served any production consumer. It can stay
-    // cold while its parents retire and an unrelated graph slot is reclaimed.
+    // cold while its parents retire and an unrelated binding is issued.
     let cold = merged.reads.read_projection.get().is_none();
     if read_schedule == &[false; 5] {
         prop_assert!(
@@ -273,7 +273,7 @@ fn construction_history(
         retired,
         "a later unrelated binding has independent identity"
     );
-    coverage.reclaimed_slot_reuses += 1;
+    coverage.independent_later_bindings += 1;
     if read_schedule[4] {
         check_constructed_projection(&peer, catalog, &roots)?;
     }

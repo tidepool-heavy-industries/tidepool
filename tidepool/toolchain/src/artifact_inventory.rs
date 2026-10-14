@@ -2361,7 +2361,7 @@ impl ArtifactInventory {
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
     ) -> ArtifactView {
-        let mut state = self.0.lock().expect("inventory lock");
+        let state = self.0.lock().expect("inventory lock");
         let selection = selection_snapshot_for_lease(
             &state,
             &BTreeMap::new(),
@@ -9404,7 +9404,7 @@ mod tests {
                     .contains_key(&unrelated_values.descriptor.id));
                 assert!(!admitted
                     .lease
-                    .roots
+                    .admission_roots
                     .iter()
                     .any(|node| node.artifact() == unrelated.descriptor.id));
                 assert!(admitted.artifact_ids().contains(&unrelated.descriptor.id));
@@ -14158,7 +14158,7 @@ mod tests {
         drop(second);
         drop(view);
         assert_eq!(inventory.node_count(), 0);
-        // Reclamation removes the immutable ID registry entries with the graph nodes.
+        // A later offer independently reacquires payload ownership under its immutable proof.
         let replacement = inventory
             .admit(&empty, vec![entry("Original", &[])])
             .unwrap();
@@ -14182,7 +14182,9 @@ mod tests {
             .collect::<Vec<_>>();
         supplied.extend([native, unused]);
         let broad = inventory.admit(&inventory.empty_view(), supplied).unwrap();
+        let unused_owner = Arc::downgrade(&broad.lease.payloads[&unused_id]);
         let selected = broad.select_roots(vec![id]).unwrap();
+        let selected_owner = Arc::downgrade(&selected.lease.payloads[&id]);
         assert!(selected.reads.read_projection.get().is_none());
         let before = inventory.metrics();
         assert!(selected
@@ -14211,9 +14213,10 @@ mod tests {
         let after = inventory.metrics();
         assert_eq!(after.graph_visits, before.graph_visits);
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
-        assert!(inventory.0.lock().unwrap().payloads[&id]
-            .source_admission_witness()
-            .is_none());
+        assert_eq!(
+            selected.lease.payloads[&id].source_admission_witness(),
+            Some([1; 32])
+        );
         assert!(selected
             .selection_snapshot()
             .scopes
@@ -14223,28 +14226,26 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| node.artifact() == unused_id)));
-        assert!(inventory
-            .0
-            .lock()
-            .unwrap()
-            .payloads
-            .contains_key(&unused_id));
+        assert!(unused_owner.upgrade().is_some());
+        assert!(!selected.lease.payloads.contains_key(&unused_id));
         assert!(selected
             .entries_for_artifacts(&BTreeSet::from([unused_id]))
             .is_err());
         assert!(selected
             .entries_for_artifacts(&BTreeSet::from([ArtifactId([0xee; 32])]))
             .is_err());
+        let proof = Arc::clone(selected.selection_snapshot());
+        drop(broad_entries);
         drop(broad);
-        assert!(!inventory
-            .0
-            .lock()
-            .unwrap()
-            .payloads
-            .contains_key(&unused_id));
+        assert!(unused_owner.upgrade().is_none());
+        assert!(selected_owner.upgrade().is_some());
         assert!(selected
             .entries_for_artifacts(&BTreeSet::from([unused_id]))
             .is_err());
+        drop(selected_entries);
+        drop(selected);
+        assert!(selected_owner.upgrade().is_none());
+        assert!(!proof.scopes.is_empty());
     }
 
     #[test]
