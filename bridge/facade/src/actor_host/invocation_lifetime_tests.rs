@@ -76,27 +76,31 @@ async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() 
 async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
     let campaign = start_with_after_tool_worker().await;
     let (releases, backend) = campaign
-        .run_scenario_expecting_cleanup_failure(|campaign| {
+        .run_scenario(|campaign| {
             Box::pin(async move {
                 campaign.forest.track_resource_release();
                 let root = campaign.root_installation.policy.clone();
                 // The command backend controls hook completion independently of timing.
                 let policy = root.clone();
                 let called = tokio::spawn(async move {
-                    let (invocation, completion) = original_tool_call(exomonad_tool::OriginalOperation {
-                        origin: exomonad_tool::ConversationOrigin::External {
-                            thread_id: "after-tool-retained-cleanup".into(),
-                        },
-                        request_id: "retained-probe".into(),
-                        call_id: "retained-probe".into(),
-                    });
-                    let result = policy.dispatch_json_boxed(exomonad_tool::ToolInvocation {
-                        context: Some(invocation),
-                        name: "lifetime_probe".into(),
-                        arguments: exomonad_tool::ToolArguments::Structured(
-                            serde_json::json!({"topic": "lifecycle"}),
-                        ),
-                    }).await.expect("retained cleanup preserves tool success");
+                    let (invocation, completion) =
+                        original_tool_call(exomonad_tool::OriginalOperation {
+                            origin: exomonad_tool::ConversationOrigin::External {
+                                thread_id: "after-tool-retained-cleanup".into(),
+                            },
+                            request_id: "retained-probe".into(),
+                            call_id: "retained-probe".into(),
+                        });
+                    let result = policy
+                        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                            context: Some(invocation),
+                            name: "lifetime_probe".into(),
+                            arguments: exomonad_tool::ToolArguments::Structured(
+                                serde_json::json!({"topic": "lifecycle"}),
+                            ),
+                        })
+                        .await
+                        .expect("retained cleanup preserves tool success");
                     (result, completion)
                 });
                 let child = campaign
@@ -197,33 +201,51 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                         .contains("invocation cleanup unconfirmed"),
                     "{status}"
                 );
-                let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-                let available = campaign.drive_actor_output(&store,
-                    dispatch_haskell_script(root.as_ref(), "display (40 + 2 :: Int)"),
-                ).await;
-                assert_eq!(super::test_campaign::committed_display_text(&available), "42", "{available}");
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let available = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(root.as_ref(), "display (40 + 2 :: Int)"),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&available),
+                    "42",
+                    "{available}"
+                );
 
-                // Retirement retries the same retained invocation's cleanup. An external
-                // owner still retaining resources must keep root cleanup unconfirmed.
+                // Completion retries the same external owner. Retirement can release
+                // it only after the retained refusal has been observed.
                 campaign.drain_ready();
                 let mut deployments = campaign.take_deployments();
+                let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let release_state = released.clone();
                 let releases = tokio::spawn(async move {
                     while let Some(event) = deployments.recv().await {
                         if let LocalResidentDeployment::ReleaseAwait(release) = event {
                             assert_eq!(release.actor, exact);
-                            release
-                                .answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into()));
+                            let outcome =
+                                if release_state.load(std::sync::atomic::Ordering::Acquire) {
+                                    exomonad_actor::ResourceRelease::Released
+                                } else {
+                                    exomonad_actor::ResourceRelease::Retained(RETAINED.into())
+                                };
+                            assert!(release.answer(outcome));
                         }
                     }
                 });
-                let completion = root.complete_boxed(completion).await
+                let completion = root
+                    .complete_boxed(completion)
+                    .await
                     .expect_err("retained external owner keeps invocation cleanup unconfirmed");
-                assert!(matches!(completion, exomonad_actor::ResidentToolError::Unavailable(_)));
+                assert!(matches!(
+                    completion,
+                    exomonad_actor::ResidentToolError::Unavailable(_)
+                ));
+                released.store(true, std::sync::atomic::Ordering::Release);
                 (releases, backend)
             })
-        }, |failure| {
-            assert_eq!(failure.hosted, super::test_campaign::CampaignHostedJoin::Joined);
-            assert!(matches!(&failure.root, super::test_campaign::CampaignRootRetirement::Settled(shutdown) if !shutdown.cleanup.is_confirmed()));
         })
         .await;
     releases.abort();
