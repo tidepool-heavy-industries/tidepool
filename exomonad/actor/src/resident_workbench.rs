@@ -11756,29 +11756,18 @@ where
             .await
     }
 
-    pub(crate) async fn prepare_root_program(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
-    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
-        self.prepare_root_program_inner(session_id, compiled, None)
-            .await
-    }
     pub(crate) async fn prepare_root_program_tracked(
         &self,
         session_id: tidepool_repr::SessionId,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
-        publisher: crate::local_actor::run_control::RootPlacementPublisher,
-    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
-        self.prepare_root_program_inner(session_id, compiled, Some(publisher))
-            .await
-    }
-    pub(crate) async fn prepare_root_program_inner(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
-        publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
-    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
+        mint: crate::local_actor::run_control::RootPlacementMint,
+    ) -> Result<
+        (
+            crate::local_actor::run_control::PublishedRootPlacement,
+            ResidentOutcome,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         let owner = CompilerCloseOwner::current()?;
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
@@ -11788,16 +11777,16 @@ where
                         resource_scope: RealmId::fresh(),
                         lexical_scope: session.mint_isolated_scope(),
                     };
-                    if let Some(publisher) = &publisher {
-                        if let Err(error) = publisher.publish(placement) {
+                    let publication = match mint.publish(placement) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let detail = error.to_string();
                             session.close_realm(placement.resource_scope);
                             session.retire_scope(placement.lexical_scope);
-                            publisher.release(placement);
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                error.to_string(),
-                            ));
+                            let _ = error.into_record().release();
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
                         }
-                    }
+                    };
                     let prepared = (|| {
                         session
                             .set_actor_execution(
@@ -11820,13 +11809,11 @@ where
                         Err(error) => {
                             session.close_realm(placement.resource_scope);
                             session.retire_scope(placement.lexical_scope);
-                            if let Some(publisher) = &publisher {
-                                publisher.release(placement);
-                            }
+                            let _ = publication.release();
                             return Err(error);
                         }
                     };
-                    Ok((placement, outcome))
+                    Ok((publication, outcome))
                 })
             })
             .await
@@ -11863,45 +11850,57 @@ where
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn provision_root_scope(
         &self,
         session_id: tidepool_repr::SessionId,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.provision_root_scope_inner(session_id, None, None)
             .await
+            .map(|(placement, _)| placement)
     }
     pub(crate) async fn provision_root_scope_tracked(
         &self,
         session_id: tidepool_repr::SessionId,
-        publisher: crate::local_actor::run_control::RootPlacementPublisher,
-    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
-        self.provision_root_scope_inner(session_id, Some(publisher), None)
+        mint: crate::local_actor::run_control::RootPlacementMint,
+    ) -> Result<crate::local_actor::run_control::PublishedRootPlacement, ResidentActorWorkbenchError>
+    {
+        self.provision_root_scope_inner(session_id, Some(mint), None)
             .await
+            .map(|(_, publication)| publication.expect("tracked root owns its publication"))
     }
     #[cfg(test)]
     pub(crate) async fn provision_root_scope_paused_for_test(
         &self,
         session_id: tidepool_repr::SessionId,
-        publisher: crate::local_actor::run_control::RootPlacementPublisher,
+        mint: crate::local_actor::run_control::RootPlacementMint,
         entered: tokio::sync::oneshot::Sender<()>,
         release: tokio::sync::oneshot::Receiver<()>,
-    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+    ) -> Result<crate::local_actor::run_control::PublishedRootPlacement, ResidentActorWorkbenchError>
+    {
         self.provision_root_scope_inner(
             session_id,
-            Some(publisher),
+            Some(mint),
             Some(Box::new(move || {
                 let _ = entered.send(());
                 let _ = release.blocking_recv();
             })),
         )
         .await
+        .map(|(_, publication)| publication.expect("tracked root owns its publication"))
     }
-    pub(crate) async fn provision_root_scope_inner(
+    async fn provision_root_scope_inner(
         &self,
         session_id: tidepool_repr::SessionId,
-        publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
+        mint: Option<crate::local_actor::run_control::RootPlacementMint>,
         before_mint: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+    ) -> Result<
+        (
+            crate::ActorPlacement,
+            Option<crate::local_actor::run_control::PublishedRootPlacement>,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
                 if let Some(before_mint) = before_mint {
@@ -11912,17 +11911,20 @@ where
                     resource_scope: RealmId::fresh(),
                     lexical_scope: session.mint_isolated_scope(),
                 };
-                if let Some(publisher) = &publisher {
-                    if let Err(error) = publisher.publish(placement) {
-                        session.close_realm(placement.resource_scope);
-                        session.retire_scope(placement.lexical_scope);
-                        publisher.release(placement);
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            error.to_string(),
-                        ));
-                    }
-                }
-                Ok(placement)
+                let publication = match mint {
+                    Some(mint) => match mint.publish(placement) {
+                        Ok(record) => Some(record),
+                        Err(error) => {
+                            let detail = error.to_string();
+                            session.close_realm(placement.resource_scope);
+                            session.retire_scope(placement.lexical_scope);
+                            let _ = error.into_record().release();
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
+                        }
+                    },
+                    None => None,
+                };
+                Ok((placement, publication))
             })
             .await
     }

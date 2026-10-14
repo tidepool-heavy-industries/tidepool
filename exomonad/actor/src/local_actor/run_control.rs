@@ -13,9 +13,12 @@ pub(crate) use startup::{
     RootStartupAdmission, RootStartupRecoveryAuthority, StartupPredecessorAuthority,
 };
 mod transfers;
-use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
+#[cfg(test)]
+pub(crate) use preparation::RootPlacementPublicationError;
+use preparation::{IssuedRootPlacement, PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
-    RootAdmissionOutcome, RootOperation, RootOperationResult, RootPlacementPublisher,
+    PublishedRootPlacement, RootAdmissionOutcome, RootOperation, RootOperationResult,
+    RootPlacementMint,
 };
 use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{
@@ -703,10 +706,7 @@ pub(super) enum RunControlMessage {
         id: u64,
         reply: oneshot::Sender<Result<(), DirectoryError>>,
     },
-    PlacementPrepared {
-        id: u64,
-        placement: crate::ActorPlacement,
-    },
+    PlacementPrepared(Arc<IssuedRootPlacement>),
     PlacementReleased {
         id: u64,
         placement: crate::ActorPlacement,
@@ -1675,9 +1675,9 @@ impl Actor for RunControl {
                 };
                 let _ = reply.send(result);
             }
-            RunControlMessage::PlacementPrepared { id, placement } => {
-                if let Some(record) = state.preparations.get_mut(&id) {
-                    record.placement = Some(placement);
+            RunControlMessage::PlacementPrepared(issued) => {
+                if let Some(record) = state.preparations.get_mut(&issued.id()) {
+                    record.placement.get_or_insert(issued.placement());
                 }
             }
             RunControlMessage::PlacementReleased { id, placement } => {

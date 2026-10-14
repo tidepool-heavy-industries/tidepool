@@ -89,6 +89,15 @@ it does not submit a physical compiler request. A stop
 that loses the publication commit claim waits for settlement instead of revoking
 completed output.
 
+Root preparation issues one non-Clone mint before native allocation; allocating
+entry points require that mint and consume it to publish the exact placement.
+Adopting an already-prepared placement is a separate consuming transition. Consume
+the publication record on actor handoff or confirmed native removal. Only the
+consuming issuer constructs placement facts for control and supervisor messages;
+sharing immutable facts does not duplicate cleanup authority. The supervisor
+retains abandoned cleanup through producer death and a refused control notification.
+Enqueueing a message or dropping a producer record does not confirm native cleanup.
+
 Fork inheritance is a snapshot, not a live link to later parent turns. Keep
 source seed, inherited scope, candidate commit, integration head, and recipient
 acknowledgement distinct. `fork_workspace.rs` owns fork workspace preparation.

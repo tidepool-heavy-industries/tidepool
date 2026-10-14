@@ -14289,10 +14289,11 @@ where
                     })
                 }));
                 let result = async {
-                    let (placement, outcome) = environment
+                    let (publication, outcome) = environment
                         .runner
-                        .prepare_root_program_tracked(session, compiled, publisher)
+                        .prepare_root_program_tracked(session, compiled, publisher.into_mint())
                         .await?;
+                    let placement = publication.placement();
                     let current = |actor: ActorRef| ActorRef {
                         id: actor.id,
                         incarnation: incarnation,
@@ -14325,20 +14326,23 @@ where
                     )
                     .await
                     {
-                        Ok((actor, task)) => Ok(
-                            crate::local_actor::run_control::RootAdmissionOutcome::Actor(
-                                actor, task,
-                            ),
-                        ),
+                        Ok((actor, task)) => {
+                            publication.transferred();
+                            Ok(
+                                crate::local_actor::run_control::RootAdmissionOutcome::Actor(
+                                    actor, task,
+                                ),
+                            )
+                        }
                         Err(error) => {
                             match crate::local_actor::startup_cleanup(&error) {
                                 Some(cleanup) if cleanup.is_confirmed() => {
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                                 Some(_) => {}
                                 None => {
                                     environment.runner.retire_root_placement(placement).await?;
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
@@ -14465,10 +14469,11 @@ where
                     })
                 }));
                 let result = async {
-                    let (placement, outcome) = environment
+                    let (publication, outcome) = environment
                         .runner
-                        .prepare_root_program_tracked(session, compiled, publisher)
+                        .prepare_root_program_tracked(session, compiled, publisher.into_mint())
                         .await?;
+                    let placement = publication.placement();
                     let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
                     let mut behavior =
                         ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
@@ -14483,20 +14488,23 @@ where
                     )
                     .await
                     {
-                        Ok((actor, task)) => Ok(
-                            crate::local_actor::run_control::RootAdmissionOutcome::Actor(
-                                actor, task,
-                            ),
-                        ),
+                        Ok((actor, task)) => {
+                            publication.transferred();
+                            Ok(
+                                crate::local_actor::run_control::RootAdmissionOutcome::Actor(
+                                    actor, task,
+                                ),
+                            )
+                        }
                         Err(error) => {
                             match crate::local_actor::startup_cleanup(&error) {
                                 Some(cleanup) if cleanup.is_confirmed() => {
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                                 Some(_) => {}
                                 None => {
                                     environment.runner.retire_root_placement(placement).await?;
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
@@ -14605,10 +14613,11 @@ where
                     })
                 }));
                 let result = async {
-                    let placement = environment
+                    let publication = environment
                         .runner
-                        .provision_root_scope_tracked(session, publisher)
+                        .provision_root_scope_tracked(session, publisher.into_mint())
                         .await?;
+                    let placement = publication.placement();
                     let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
                     let mut behavior = ResidentKernelBehavior::with_boot(
                         descriptor,
@@ -14625,18 +14634,23 @@ where
                     )
                     .await
                     {
-                        Ok((actor, _task)) => Ok(
-                            crate::local_actor::run_control::RootAdmissionOutcome::Workbench(actor),
-                        ),
+                        Ok((actor, _task)) => {
+                            publication.transferred();
+                            Ok(
+                                crate::local_actor::run_control::RootAdmissionOutcome::Workbench(
+                                    actor,
+                                ),
+                            )
+                        }
                         Err(error) => {
                             match crate::local_actor::startup_cleanup(&error) {
                                 Some(cleanup) if cleanup.is_confirmed() => {
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                                 Some(_) => {}
                                 None => {
                                     environment.runner.retire_root_placement(placement).await?;
-                                    let _ = ticket.placement_released(placement);
+                                    let _ = publication.release();
                                 }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
@@ -14786,25 +14800,52 @@ where
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
                 let runner = environment.runner.clone();
-                let publisher = ticket.placement_publisher(Arc::new(move |placement| {
-                    let runner = runner.clone();
-                    Box::pin(async move {
-                        match runner
-                            .retire_root_placement_wait(
-                                placement,
-                                Some(std::time::Duration::from_secs(30)),
-                            )
-                            .await
-                        {
-                            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
-                            Err(error) => {
-                                crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                let publication = ticket.adopt_placement(
+                    placement,
+                    Arc::new(move |placement| {
+                        let runner = runner.clone();
+                        Box::pin(async move {
+                            match runner
+                                .retire_root_placement_wait(
+                                    placement,
+                                    Some(std::time::Duration::from_secs(30)),
+                                )
+                                .await
+                            {
+                                Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                                Err(error) => {
+                                    crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                                }
+                            }
+                        })
+                    }),
+                );
+                let publication = match publication {
+                    Ok(record) => record,
+                    Err(error) => {
+                        let detail = error.to_string();
+                        match environment.runner.retire_root_placement(placement).await {
+                            Ok(()) => {
+                                let _ = error.into_record().release();
+                                return (
+                                    Err(std::io::Error::other(detail).into()),
+                                    crate::CleanupComponentOutcome::Confirmed,
+                                );
+                            }
+                            Err(cleanup) => {
+                                // Keep the exact publication record in the returned
+                                // typed error when local removal is unconfirmed.
+                                return (
+                                    Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+                                    crate::CleanupComponentOutcome::Unconfirmed(
+                                        cleanup.to_string(),
+                                    ),
+                                );
                             }
                         }
-                    })
-                }));
+                    }
+                };
                 let result: crate::local_actor::run_control::RootOperationResult = async {
-                    publisher.publish(placement)?;
                     let permit = directory
                         .authorize_root_startup(&reservation, intent.clone(), journal, None)
                         .await?;
@@ -14844,7 +14885,9 @@ where
                     .and_then(crate::local_actor::startup_cleanup)
                     .is_some_and(|cleanup| cleanup.is_confirmed())
                 {
-                    let _ = ticket.placement_released(placement);
+                    let _ = publication.release();
+                } else if result.is_ok() {
+                    publication.transferred();
                 }
                 (result, crate::CleanupComponentOutcome::Confirmed)
             })
@@ -14971,7 +15014,7 @@ where
         let directory = self.directory.clone();
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
-                ticket.placement_prepared(descriptor.placement());
+                let _ = ticket.placement_prepared(descriptor.placement());
                 let mut behavior =
                     ResidentKernelBehavior::prepared(descriptor, environment, outcome);
                 behavior.launch_worktrees = launch_worktrees;

@@ -81,14 +81,37 @@ pub(crate) type RootOperation = Box<
         + Send,
 >;
 
+/// Immutable placement facts issued through consumed preparation authority.
+/// Sharing these facts does not duplicate mint or cleanup authority.
+pub(super) struct IssuedRootPlacement {
+    id: u64,
+    placement: crate::ActorPlacement,
+}
+impl IssuedRootPlacement {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+    pub(super) fn placement(&self) -> crate::ActorPlacement {
+        self.placement
+    }
+}
+
+pub(super) struct NativeRootPlacement {
+    issued: Arc<IssuedRootPlacement>,
+    cleanup: Arc<
+        dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+            + Send
+            + Sync,
+    >,
+}
+
 /// The native placement issuer publishes facts against this admitted operation.
 pub(crate) struct RootPreparationTicket {
     pub(crate) id: u64,
     owner: RactorRef<RunControlMessage>,
     supervisor: RactorRef<PreparationMessage>,
 }
-/// Immutable placement facts are published by the native mint operation.
-#[derive(Clone)]
+/// Single-use publication authority for one admitted native placement.
 pub(crate) struct RootPlacementPublisher {
     id: u64,
     owner: RactorRef<RunControlMessage>,
@@ -99,8 +122,158 @@ pub(crate) struct RootPlacementPublisher {
             + Sync,
     >,
 }
+
+/// Single-use authority acquired before entering native allocation.
+#[must_use = "consume this mint to publish its exact native placement"]
+pub(crate) struct RootPlacementMint {
+    publisher: RootPlacementPublisher,
+}
+
+/// Exact published facts retained until native cleanup or actor handoff.
+/// The supervisor owns abandoned cleanup independently of this producer record.
+#[must_use = "retain native custody until actor handoff or confirmed removal"]
+pub(crate) struct PublishedRootPlacement {
+    publisher: RootPlacementPublisher,
+    placement: crate::ActorPlacement,
+}
+
+pub(crate) enum RootPlacementPublicationError {
+    SupervisorUnavailable(PublishedRootPlacement),
+    ControlUnavailable(PublishedRootPlacement),
+}
+impl RootPlacementPublicationError {
+    pub(crate) fn into_record(self) -> PublishedRootPlacement {
+        match self {
+            Self::SupervisorUnavailable(record) | Self::ControlUnavailable(record) => record,
+        }
+    }
+}
+impl std::fmt::Debug for RootPlacementPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SupervisorUnavailable(record) => f
+                .debug_tuple("SupervisorUnavailable")
+                .field(&record.placement)
+                .finish(),
+            Self::ControlUnavailable(record) => f
+                .debug_tuple("ControlUnavailable")
+                .field(&record.placement)
+                .finish(),
+        }
+    }
+}
+impl std::fmt::Display for RootPlacementPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SupervisorUnavailable(_) => {
+                f.write_str("root placement cleanup handoff was refused")
+            }
+            Self::ControlUnavailable(_) => f.write_str(
+                "root placement cleanup was queued but observation publication was refused",
+            ),
+        }
+    }
+}
+impl std::error::Error for RootPlacementPublicationError {}
+
 impl RootPlacementPublisher {
+    pub(crate) fn into_mint(self) -> RootPlacementMint {
+        RootPlacementMint { publisher: self }
+    }
+
     #[cfg(test)]
+    pub(crate) fn with_control_for_test(mut self, control: &RunControlClient) -> Self {
+        self.owner = control.owner.clone();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observer_for_test(&self) -> RootPreparationObserver {
+        RootPreparationObserver {
+            id: self.id,
+            supervisor: self.supervisor.clone(),
+        }
+    }
+
+    fn publish(
+        self,
+        placement: crate::ActorPlacement,
+    ) -> Result<PublishedRootPlacement, RootPlacementPublicationError> {
+        let record = PublishedRootPlacement {
+            publisher: self,
+            placement,
+        };
+        let issued = Arc::new(IssuedRootPlacement {
+            id: record.publisher.id,
+            placement,
+        });
+        if record
+            .publisher
+            .supervisor
+            .send_message(PreparationMessage::NativePlacement(NativeRootPlacement {
+                issued: issued.clone(),
+                cleanup: record.publisher.cleanup.clone(),
+            }))
+            .is_err()
+        {
+            return Err(RootPlacementPublicationError::SupervisorUnavailable(record));
+        }
+        if record
+            .publisher
+            .owner
+            .send_message(RunControlMessage::PlacementPrepared(issued))
+            .is_err()
+        {
+            return Err(RootPlacementPublicationError::ControlUnavailable(record));
+        }
+        Ok(record)
+    }
+}
+impl RootPlacementMint {
+    pub(crate) fn publish(
+        self,
+        placement: crate::ActorPlacement,
+    ) -> Result<PublishedRootPlacement, RootPlacementPublicationError> {
+        self.publisher.publish(placement)
+    }
+}
+impl PublishedRootPlacement {
+    pub(crate) fn placement(&self) -> crate::ActorPlacement {
+        self.placement
+    }
+
+    /// Consume producer authority after actor admission. Supervisor fallback
+    /// remains retained until the produced actor reaches that owner.
+    pub(crate) fn transferred(self) {}
+
+    /// Called only after exact native removal is confirmed, never by Drop.
+    pub(crate) fn release(self) -> Result<(), DirectoryError> {
+        let supervisor =
+            self.publisher
+                .supervisor
+                .send_message(PreparationMessage::NativePlacementReleased {
+                    id: self.publisher.id,
+                    placement: self.placement,
+                });
+        let control = self
+            .publisher
+            .owner
+            .send_message(RunControlMessage::PlacementReleased {
+                id: self.publisher.id,
+                placement: self.placement,
+            });
+        supervisor.map_err(|_| DirectoryError::Unavailable)?;
+        control.map_err(|_| DirectoryError::Unavailable)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct RootPreparationObserver {
+    id: u64,
+    supervisor: RactorRef<PreparationMessage>,
+}
+#[cfg(test)]
+impl RootPreparationObserver {
     pub(crate) async fn kill_producer_for_test(&self) -> Result<(), DirectoryError> {
         let (reply, receiver) = oneshot::channel();
         self.supervisor
@@ -108,41 +281,11 @@ impl RootPlacementPublisher {
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
     }
-    pub(crate) fn publish(&self, placement: crate::ActorPlacement) -> Result<(), DirectoryError> {
-        self.supervisor
-            .send_message(PreparationMessage::NativePlacement {
-                id: self.id,
-                custody: ProducedCustody::Placement {
-                    placement,
-                    cleanup: self.cleanup.clone(),
-                },
-            })
-            .map_err(|_| DirectoryError::Unavailable)?;
-        self.owner
-            .send_message(RunControlMessage::PlacementPrepared {
-                id: self.id,
-                placement,
-            })
-            .map_err(|_| DirectoryError::Unavailable)
-    }
-    pub(crate) fn release(&self, placement: crate::ActorPlacement) {
-        let _ = self
-            .supervisor
-            .send_message(PreparationMessage::NativePlacementReleased {
-                id: self.id,
-                placement,
-            });
-        let _ = self
-            .owner
-            .send_message(RunControlMessage::PlacementReleased {
-                id: self.id,
-                placement,
-            });
-    }
 }
+
 impl RootPreparationTicket {
     pub(crate) fn placement_publisher(
-        &self,
+        self,
         cleanup: Arc<
             dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
                 + Send
@@ -151,37 +294,37 @@ impl RootPreparationTicket {
     ) -> RootPlacementPublisher {
         RootPlacementPublisher {
             id: self.id,
-            owner: self.owner.clone(),
-            supervisor: self.supervisor.clone(),
+            owner: self.owner,
+            supervisor: self.supervisor,
             cleanup,
         }
     }
-    pub(crate) fn placement_prepared(
-        &self,
+
+    /// Adopt an already-prepared placement without issuing another native mint.
+    pub(crate) fn adopt_placement(
+        self,
         placement: crate::ActorPlacement,
-    ) -> Result<(), DirectoryError> {
-        self.owner
-            .send_message(RunControlMessage::PlacementPrepared {
-                id: self.id,
-                placement,
-            })
-            .map_err(|_| DirectoryError::Unavailable)
+        cleanup: Arc<
+            dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<PublishedRootPlacement, RootPlacementPublicationError> {
+        self.placement_publisher(cleanup).publish(placement)
     }
-    pub(crate) fn placement_released(
-        &self,
+
+    /// Observation of separately owned prepared-root admission; no mint authority.
+    pub(crate) fn placement_prepared(
+        self,
         placement: crate::ActorPlacement,
     ) -> Result<(), DirectoryError> {
-        let _ = self
-            .supervisor
-            .send_message(PreparationMessage::NativePlacementReleased {
-                id: self.id,
-                placement,
-            });
         self.owner
-            .send_message(RunControlMessage::PlacementReleased {
-                id: self.id,
-                placement,
-            })
+            .send_message(RunControlMessage::PlacementPrepared(Arc::new(
+                IssuedRootPlacement {
+                    id: self.id,
+                    placement,
+                },
+            )))
             .map_err(|_| DirectoryError::Unavailable)
     }
 }
@@ -207,10 +350,7 @@ pub(super) enum PreparationMessage {
         id: u64,
         reply: oneshot::Sender<()>,
     },
-    NativePlacement {
-        id: u64,
-        custody: ProducedCustody,
-    },
+    NativePlacement(NativeRootPlacement),
     NativePlacementReleased {
         id: u64,
         placement: crate::ActorPlacement,
@@ -330,19 +470,23 @@ impl Actor for PreparationSupervisor {
                 for worker in state.workers.values() { if matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id) { worker.cell.kill(); } }
                 let _ = reply.send(());
             }
-            PreparationMessage::NativePlacement { id, custody } => {
-                let mut reverify = Vec::new();
-                for (identity, worker) in state.workers.iter_mut() {
-                    if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind {
-                        if *issued == id {
-                            *native = Some(custody.clone());
-                            if worker.terminal && !worker.reported { reverify.push(*identity); }
+            PreparationMessage::NativePlacement(custody) => {
+                let id = custody.issued.id;
+                let placement = custody.issued.placement;
+                // Only the consuming mint can construct this message. Never
+                // replace retained cleanup on a repeated identical delivery.
+                if let Some((identity, worker)) = state.workers.iter_mut().find(|(_, worker)|
+                    matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id)) {
+                    if let WorkerKind::Root { native, .. } = &mut worker.kind {
+                        if native.is_none() {
+                            *native = Some(ProducedCustody::Placement { placement, cleanup: custody.cleanup });
                         }
                     }
+                    // An admitted blocking mint can publish after producer death.
+                    if worker.terminal && !worker.reported {
+                        let _ = myself.send_message(PreparationMessage::VerifyTerminal { worker: *identity });
+                    }
                 }
-                // An admitted blocking mint can publish after producer death.
-                // Its retained native capability must still reach cleanup.
-                for worker in reverify { let _ = myself.send_message(PreparationMessage::VerifyTerminal { worker }); }
             }
             PreparationMessage::NativePlacementReleased { id, placement } => {
                 for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id && matches!(native, Some(ProducedCustody::Placement { placement: exact, .. }) if *exact == placement) { *native = None; } } }
