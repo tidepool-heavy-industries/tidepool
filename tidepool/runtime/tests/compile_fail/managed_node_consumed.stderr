@@ -1,0 +1,2 @@
+error[E0599]: no method named `clone` found for struct `ManagedNode` in the current scope
+ --> tests/compile_fail/managed_node_consumed.rs:3:37

@@ -874,12 +874,11 @@ mod shared_constructor_rows {
         machine
             .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B builds its Unit");
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let root = builder
-            .constructor(DataConId(900), &[])
-            .expect("a shared Unit builds");
-        let unit = builder
-            .finish(RealmId::ROOT, root)
+        let unit = machine
+            .managed_builder(|mut builder| {
+                let root = builder.constructor(DataConId(900), [])?;
+                builder.finish(RealmId::ROOT, root)
+            })
             .expect("the shared Unit is retained");
         let before = machine.residency().enter_rows;
 

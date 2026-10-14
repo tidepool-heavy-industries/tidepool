@@ -1093,6 +1093,31 @@ rust_compile_fail(
 )
 
 rust_compile_fail(
+    name = "compile_fail_managed_node_consumed",
+    source = "tests/compile_fail/managed_node_consumed.rs",
+    control = "tests/compile_pass/managed_node_consumed.rs",
+    expected = "tests/compile_fail/managed_node_consumed.stderr",
+    dependencies = {
+        "tidepool_codegen": "//tidepool/codegen:tidepool_codegen",
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_managed_node_cross_builder",
+    source = "tests/compile_fail/managed_node_cross_builder.rs",
+    control = "tests/compile_pass/managed_node_cross_builder.rs",
+    expected = "tests/compile_fail/managed_node_cross_builder.stderr",
+    dependencies = {
+        "tidepool_codegen": "//tidepool/codegen:tidepool_codegen",
+        "tidepool_repr": "//tidepool/repr:tidepool_repr",
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_prepared_install_consumes_pending",
     source = "tests/compile_fail/prepared_install_consumes_pending.rs",
     control = "tests/compile_pass/prepared_install_consumes_pending.rs",

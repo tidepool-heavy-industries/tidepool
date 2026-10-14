@@ -226,10 +226,6 @@ pub struct PreparedMachine<'code> {
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
-    /// The next incremental managed-construction owner. Nodes carry this
-    /// identity so a completed node from an ended builder cannot alias the
-    /// same root index in a later builder.
-    next_builder: u64,
     /// Programs a caller holds live regardless of reachability
     /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
     pins: BTreeSet<ProgramId>,
@@ -332,42 +328,44 @@ impl PreparedCompileSnapshot {
     }
 }
 
-/// One completed object owned by an active [`ManagedBuilder`]. The index is
-/// meaningful only to that builder and never escapes as a heap address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ManagedNode {
+/// One completed object owned by this construction scope. The invariant brand
+/// prevents transfer to another builder; ownership prevents reuse after consuming.
+#[derive(Debug)]
+pub struct ManagedNode<'build> {
     node: super::construction::ConstructionNode,
+    brand: std::marker::PhantomData<fn(&'build mut ()) -> &'build mut ()>,
 }
 
 /// One logical constructor field for incremental managed construction.
-#[derive(Clone, Copy, Debug)]
-pub enum ManagedField {
-    /// Reusable child reference. Use this for a DAG edge whose source remains
-    /// available to later fields or parents.
-    Node(ManagedNode),
-    /// Transfer a completed tree child into this parent. The child remains
-    /// rooted through capacity collection and publication, then becomes
-    /// invalid and stops contributing a temporary collector root.
-    Consume(ManagedNode),
+#[derive(Debug)]
+pub enum ManagedField<'node, 'build> {
+    /// Transfer a completed child into this parent. Constructor refusal also
+    /// releases its temporary root; no input ownership is returned.
+    Node(ManagedNode<'build>),
+    /// A reusable DAG edge. The source stays rooted and cannot be consumed
+    /// while this borrow is live.
+    Borrow(&'node ManagedNode<'build>),
     Scalar([u8; 16]),
     Handle(PreparedHandle),
 }
 
 /// Incremental descriptor-authenticated construction under fixed temporary
 /// roots. Each completed object is rooted before another collection can run.
-pub struct ManagedBuilder<'machine, 'code> {
+/// Obtain a fresh scope through [`PreparedMachine::managed_builder`].
+pub struct ManagedBuilder<'build, 'machine, 'code> {
     machine: &'machine mut PreparedMachine<'code>,
     core: super::construction::ConstructionCore,
     sites: HashMap<super::construction::ConstructionNode, SiteDependencies>,
+    brand: std::marker::PhantomData<fn(&'build mut ()) -> &'build mut ()>,
 }
 
-impl Drop for ManagedBuilder<'_, '_> {
+impl Drop for ManagedBuilder<'_, '_, '_> {
     fn drop(&mut self) {
         self.core.release(&self.machine.machine);
     }
 }
 
-impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
+impl<'build, 'machine, 'code> ManagedBuilder<'build, 'machine, 'code> {
     fn new(machine: &'machine mut PreparedMachine<'code>) -> Result<Self, ExecutionError> {
         machine.ensure_handle_access()?;
         machine
@@ -380,20 +378,15 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 crate::host_fns::bad_pointer(),
             ));
         }
-        let owner = machine.next_builder;
-        machine.next_builder = machine
-            .next_builder
-            .checked_add(1)
-            .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
-        let core = super::construction::ConstructionCore::new(owner);
         Ok(Self {
             machine,
-            core,
+            core: super::construction::ConstructionCore::new(0),
             sites: HashMap::new(),
+            brand: std::marker::PhantomData,
         })
     }
 
-    pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode, ExecutionError> {
+    pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode<'build>, ExecutionError> {
         let descriptor = Arc::clone(
             &self
                 .machine
@@ -430,144 +423,153 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                     super::answer::AnswerBuildError::Storage(error).into()
                 }
             })?;
-        Ok(ManagedNode { node })
+        Ok(ManagedNode {
+            node,
+            brand: std::marker::PhantomData,
+        })
     }
 
-    pub fn constructor(
+    pub fn constructor<'node>(
         &mut self,
         host_id: DataConId,
-        fields: &[ManagedField],
-    ) -> Result<ManagedNode, ExecutionError> {
-        let descriptor = Arc::clone(
-            self.machine
-                .interner
-                .by_host(host_id)
-                .map(|(_, descriptor)| descriptor)
-                .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?,
-        );
-        let expected = descriptor.payload().logical_to_stored().len();
-        if fields.len() != expected {
-            return Err(super::answer::AnswerBuildError::FieldCount {
-                host_id,
-                expected,
-                actual: fields.len(),
-            }
-            .into());
-        }
-        if descriptor.allocation_alignment() as usize > 8 {
-            return Err(super::answer::AnswerBuildError::Alignment {
-                host_id,
-                required: descriptor.allocation_alignment(),
-            }
-            .into());
-        }
-        let machine = &self.machine.machine;
-        let old_space = &self.machine.old_space;
-        let handles = &self.machine.handles;
-        let mut consumed = Vec::new();
-        consumed
-            .try_reserve_exact(fields.len())
-            .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
-        for field in fields {
-            if let ManagedField::Consume(node) = field {
-                if consumed.contains(&node.node) {
-                    return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
+        fields: impl Into<Vec<ManagedField<'node, 'build>>>,
+    ) -> Result<ManagedNode<'build>, ExecutionError>
+    where
+        'build: 'node,
+    {
+        let fields = fields.into();
+        let result = (|| {
+            let descriptor = Arc::clone(
+                self.machine
+                    .interner
+                    .by_host(host_id)
+                    .map(|(_, descriptor)| descriptor)
+                    .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?,
+            );
+            let expected = descriptor.payload().logical_to_stored().len();
+            if fields.len() != expected {
+                return Err(super::answer::AnswerBuildError::FieldCount {
+                    host_id,
+                    expected,
+                    actual: fields.len(),
                 }
-                self.core.word(node.node).map_err(|error| match error {
-                    super::construction::NodeAccessError::Foreign => {
-                        super::answer::AnswerBuildError::ForeignNode.into()
+                .into());
+            }
+            if descriptor.allocation_alignment() as usize > 8 {
+                return Err(super::answer::AnswerBuildError::Alignment {
+                    host_id,
+                    required: descriptor.allocation_alignment(),
+                }
+                .into());
+            }
+            let machine = &self.machine.machine;
+            let old_space = &self.machine.old_space;
+            let handles = &self.machine.handles;
+            let mut sites = SiteDependencies::new();
+            for field in &fields {
+                match field {
+                    ManagedField::Node(node) => {
+                        if let Some(retained) = self.sites.get(&node.node) {
+                            sites.extend(retained);
+                        }
                     }
-                    super::construction::NodeAccessError::Invalid => {
-                        runtime_error(machine, crate::host_fns::bad_pointer())
+                    ManagedField::Borrow(node) => {
+                        if let Some(retained) = self.sites.get(&node.node) {
+                            sites.extend(retained);
+                        }
+                    }
+                    ManagedField::Handle(handle) => {
+                        if let Some(entry) = handles.handle(handle.raw) {
+                            sites.extend(&entry.sites);
+                        }
+                    }
+                    ManagedField::Scalar(_) => {}
+                }
+            }
+            let node = self
+                .core
+                .constructor(
+                    machine,
+                    &mut self.machine.vmctx,
+                    &descriptor,
+                    fields.len(),
+                    &[],
+                    |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
+                    |core, values| {
+                        for (index, field) in fields.iter().enumerate() {
+                            values[index] = match field {
+                                ManagedField::Node(node) => core
+                                    .word(node.node)
+                                    .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                    .map_err(|_| {
+                                        runtime_error(machine, crate::host_fns::bad_pointer())
+                                    })?,
+                                ManagedField::Borrow(node) => core
+                                    .word(node.node)
+                                    .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                    .map_err(|_| {
+                                        runtime_error(machine, crate::host_fns::bad_pointer())
+                                    })?,
+                                ManagedField::Scalar(bits) => DescriptorValue::Bits(*bits),
+                                ManagedField::Handle(handle) => handles
+                                    .handle(handle.raw)
+                                    .map(|entry| unsafe { entry.slot.current() } as usize)
+                                    .filter(|word| *word != 0)
+                                    .map(|word| DescriptorValue::Managed(word as *mut u8))
+                                    .ok_or_else(|| {
+                                        ExecutionError::from(
+                                            super::answer::AnswerBuildError::UnknownHandle,
+                                        )
+                                    })?,
+                            };
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(|error| match error {
+                    super::construction::ConstructionError::Runtime(cause) => {
+                        runtime_error(machine, cause)
+                    }
+                    super::construction::ConstructionError::Operation(error) => error,
+                    super::construction::ConstructionError::TooLarge(extent) => {
+                        super::answer::AnswerBuildError::TooLarge(extent).into()
+                    }
+                    super::construction::ConstructionError::Marshal(error) => {
+                        super::answer::AnswerBuildError::Field {
+                            host_id,
+                            index: match &error {
+                                DescriptorMarshalError::Representation { index, .. }
+                                | DescriptorMarshalError::ManagedReference { index } => *index,
+                                _ => 0,
+                            },
+                            error,
+                        }
+                        .into()
+                    }
+                    super::construction::ConstructionError::Storage(error) => {
+                        super::answer::AnswerBuildError::Storage(error).into()
                     }
                 })?;
-                consumed.push(node.node);
-            }
-        }
-        let mut sites = SiteDependencies::new();
+            self.sites.insert(node, sites);
+            Ok(ManagedNode {
+                node,
+                brand: std::marker::PhantomData,
+            })
+        })();
+        // Both publication and refusal settle the inputs this operation owns.
+        // Borrowed DAG edges keep their roots until their owner is consumed or
+        // the scope exits. No collection occurs between publication and release.
         for field in fields {
-            match field {
-                ManagedField::Node(node) | ManagedField::Consume(node) => {
-                    if let Some(retained) = self.sites.get(&node.node) {
-                        sites.extend(retained);
-                    }
-                }
-                ManagedField::Handle(handle) => {
-                    if let Some(entry) = handles.handle(handle.raw) {
-                        sites.extend(&entry.sites);
-                    }
-                }
-                ManagedField::Scalar(_) => {}
+            if let ManagedField::Node(node) = field {
+                self.core
+                    .consume(&self.machine.machine, node.node)
+                    .map_err(|_| {
+                        runtime_error(&self.machine.machine, crate::host_fns::bad_pointer())
+                    })?;
+                self.sites.remove(&node.node);
             }
         }
-        let node = self
-            .core
-            .constructor(
-                machine,
-                &mut self.machine.vmctx,
-                &descriptor,
-                fields.len(),
-                &consumed,
-                |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
-                |core, values| {
-                    for (index, field) in fields.iter().enumerate() {
-                        values[index] = match field {
-                            ManagedField::Node(node) | ManagedField::Consume(node) => core
-                                .word(node.node)
-                                .map(|word| DescriptorValue::Managed(word as *mut u8))
-                                .map_err(|error| match error {
-                                    super::construction::NodeAccessError::Foreign => {
-                                        super::answer::AnswerBuildError::ForeignNode.into()
-                                    }
-                                    super::construction::NodeAccessError::Invalid => {
-                                        runtime_error(machine, crate::host_fns::bad_pointer())
-                                    }
-                                })?,
-                            ManagedField::Scalar(bits) => DescriptorValue::Bits(*bits),
-                            ManagedField::Handle(handle) => handles
-                                .handle(handle.raw)
-                                .map(|entry| unsafe { entry.slot.current() } as usize)
-                                .filter(|word| *word != 0)
-                                .map(|word| DescriptorValue::Managed(word as *mut u8))
-                                .ok_or_else(|| {
-                                    ExecutionError::from(
-                                        super::answer::AnswerBuildError::UnknownHandle,
-                                    )
-                                })?,
-                        };
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|error| match error {
-                super::construction::ConstructionError::Runtime(cause) => {
-                    runtime_error(machine, cause)
-                }
-                super::construction::ConstructionError::Operation(error) => error,
-                super::construction::ConstructionError::TooLarge(extent) => {
-                    super::answer::AnswerBuildError::TooLarge(extent).into()
-                }
-                super::construction::ConstructionError::Marshal(error) => {
-                    super::answer::AnswerBuildError::Field {
-                        host_id,
-                        index: match &error {
-                            DescriptorMarshalError::Representation { index, .. }
-                            | DescriptorMarshalError::ManagedReference { index } => *index,
-                            _ => 0,
-                        },
-                        error,
-                    }
-                    .into()
-                }
-                super::construction::ConstructionError::Storage(error) => {
-                    super::answer::AnswerBuildError::Storage(error).into()
-                }
-            })?;
-        for consumed in consumed {
-            self.sites.remove(&consumed);
-        }
-        self.sites.insert(node, sites);
-        Ok(ManagedNode { node })
+        result
     }
 
     /// The worker representation for one authenticated field. Structural
@@ -603,17 +605,13 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
     pub fn finish(
         self,
         realm: RealmId,
-        root: ManagedNode,
+        root: ManagedNode<'build>,
     ) -> Result<PreparedHandle, ExecutionError> {
         let sites = self.sites.get(&root.node).cloned().unwrap_or_default();
-        let source = self.core.slot(root.node).map_err(|error| match error {
-            super::construction::NodeAccessError::Foreign => {
-                super::answer::AnswerBuildError::ForeignNode.into()
-            }
-            super::construction::NodeAccessError::Invalid => {
-                runtime_error(&self.machine.machine, crate::host_fns::bad_pointer())
-            }
-        })?;
+        let source = self
+            .core
+            .slot(root.node)
+            .map_err(|_| runtime_error(&self.machine.machine, crate::host_fns::bad_pointer()))?;
         let source = source.cast::<*mut u8>();
         unsafe {
             self.machine
@@ -855,7 +853,6 @@ impl<'code> PreparedMachine<'code> {
         Ok(Self {
             programs: BTreeMap::new(),
             next_program: 0,
-            next_builder: 0,
             pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
             handles: ResourceLedger::default(),
@@ -2826,10 +2823,17 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
-    /// Start one incremental managed construction operation. Dropping the
-    /// builder publishes no handle and releases all temporary root ownership.
-    pub fn managed_builder(&mut self) -> Result<ManagedBuilder<'_, 'code>, ExecutionError> {
-        ManagedBuilder::new(self)
+    /// Run an incremental construction in a fresh, invariant scope. Nodes
+    /// cannot escape or cross scopes. Dropping the builder publishes no handle
+    /// and releases all temporary roots; `finish` publishes an owned handle.
+    pub fn managed_builder<'machine, R, E>(
+        &'machine mut self,
+        build: impl for<'build> FnOnce(ManagedBuilder<'build, 'machine, 'code>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<ExecutionError>,
+    {
+        build(ManagedBuilder::new(self)?)
     }
 
     /// Borrow the stable collector-updated cell for a live exact handle.
@@ -4834,9 +4838,12 @@ mod tests {
         let mut corrupt = Box::new(invalid as *mut u8);
         let (mut machine, _) = machine();
         machine.machine.register_persistent_root(&mut *corrupt);
-        let mut builder = machine.managed_builder().unwrap();
-        let unit = builder.constructor(DataConId(900), &[]).unwrap();
-        let error = builder.finish(RealmId::ROOT, unit).unwrap_err();
+        let error = machine
+            .managed_builder(|mut builder| {
+                let unit = builder.constructor(DataConId(900), [])?;
+                builder.finish(RealmId::ROOT, unit)
+            })
+            .unwrap_err();
         let ExecutionError::Runtime(failure) = error else {
             panic!("runtime failure")
         };
@@ -5137,9 +5144,12 @@ mod tests {
             foreign.retain_handle_value(source, RealmId::ROOT),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
-        let mut builder = machine.managed_builder().unwrap();
-        let bytes = builder.bytes(b"retained bytes").unwrap();
-        let bytes = builder.finish(RealmId::ROOT, bytes).unwrap();
+        let bytes = machine
+            .managed_builder(|mut builder| {
+                let bytes = builder.bytes(b"retained bytes")?;
+                builder.finish(RealmId::ROOT, bytes)
+            })
+            .unwrap();
         // The generic host builder publishes lifted roots; native ByteArray#
         // results carry the unlifted representation in this same ledger.
         let root = machine
@@ -5861,17 +5871,18 @@ mod tests {
         let options = PreparedMachineOptions { nursery_bytes: 256 };
         let (mut source, _) = PreparedMachine::new(boxed_shape_program(930, 931), options).unwrap();
         let depth = 3000;
-        let mut builder = source.managed_builder().unwrap();
-        let mut node = builder.constructor(DataConId(930), &[]).unwrap();
-        for _ in 0..depth {
-            node = builder
-                .constructor(
-                    DataConId(932),
-                    &[ManagedField::Node(node), ManagedField::Node(node)],
-                )
-                .unwrap();
-        }
-        let value = builder.finish(RealmId::ROOT, node).unwrap();
+        let value = source
+            .managed_builder(|mut builder| {
+                let mut node = builder.constructor(DataConId(930), [])?;
+                for _ in 0..depth {
+                    node = builder.constructor(
+                        DataConId(932),
+                        [ManagedField::Borrow(&node), ManagedField::Borrow(&node)],
+                    )?;
+                }
+                builder.finish(RealmId::ROOT, node)
+            })
+            .unwrap();
         let parcel = source.export_parcel(value).unwrap();
         // One Unit (16 bytes) and one Pair (24 bytes) per authored level,
         // despite exponentially many paths through the shared graph.
@@ -6188,15 +6199,16 @@ mod tests {
             PreparedMachineOptions { nursery_bytes: 128 },
         )
         .unwrap();
-        let mut builder = source.managed_builder().unwrap();
-        let child = builder.constructor(DataConId(930), &[]).unwrap();
-        let pair = builder
-            .constructor(
-                DataConId(932),
-                &[ManagedField::Node(child), ManagedField::Node(child)],
-            )
+        let value = source
+            .managed_builder(|mut builder| {
+                let child = builder.constructor(DataConId(930), [])?;
+                let pair = builder.constructor(
+                    DataConId(932),
+                    [ManagedField::Borrow(&child), ManagedField::Borrow(&child)],
+                )?;
+                builder.finish(RealmId::ROOT, pair)
+            })
             .unwrap();
-        let value = builder.finish(RealmId::ROOT, pair).unwrap();
         let pointer = source.handle_current_pointer(value).unwrap();
         let address = tidepool_heap::managed_reference::untag(pointer);
         // Fault injection in an exclusively borrowed quiescent, exact Pair
@@ -6610,11 +6622,13 @@ mod tests {
         .expect("source installs C importing A");
         let entry = source.retain_top(caller, ValueId(0)).expect("source entry");
         let root = if copied_heap {
-            let mut builder = source.managed_builder().expect("copied wrapper builder");
-            let wrapper = builder
-                .constructor(DataConId(7_960), &[ManagedField::Handle(entry)])
-                .expect("copied wrapper retains both native dependencies");
-            builder.finish(RealmId::ROOT, wrapper).expect("copied root")
+            source
+                .managed_builder(|mut builder| {
+                    let wrapper =
+                        builder.constructor(DataConId(7_960), [ManagedField::Handle(entry)])?;
+                    builder.finish(RealmId::ROOT, wrapper)
+                })
+                .expect("copied root")
         } else {
             entry
         };
@@ -10651,10 +10665,12 @@ mod tests {
                 .collect_major(final_machine.quiesce().unwrap())
                 .unwrap();
             assert_eq!(final_machine.handle_count(), 0);
-            assert!(retired.programs.iter().any(|program| third
-                .programs
-                .iter()
-                .any(|(imported, _)| imported == program)));
+            assert!(retired.programs.iter().any(|program| {
+                third
+                    .programs
+                    .iter()
+                    .any(|(imported, _)| imported == program)
+            }));
             assert_eq!(final_machine.residency().root_cells, 0);
         }
     }
@@ -10682,14 +10698,15 @@ mod tests {
                 ImportBindings::new(),
             )
             .unwrap();
-        let mut builder = machine.managed_builder().unwrap();
-        let _unused = builder
-            .constructor(DataConId(931), &[ManagedField::Handle(second)])
+        let wrapper = machine
+            .managed_builder(|mut builder| {
+                let _unused =
+                    builder.constructor(DataConId(931), [ManagedField::Handle(second)])?;
+                let selected =
+                    builder.constructor(DataConId(931), [ManagedField::Handle(first)])?;
+                builder.finish(RealmId::ROOT, selected)
+            })
             .unwrap();
-        let selected = builder
-            .constructor(DataConId(931), &[ManagedField::Handle(first)])
-            .unwrap();
-        let wrapper = builder.finish(RealmId::ROOT, selected).unwrap();
         let PreparedOuter::Constructor { fields, .. } =
             machine.inspect_outer(wrapper, RealmId::ROOT).unwrap();
         let [PreparedResult::Managed(selected)] = fields.as_slice() else {
@@ -10747,18 +10764,22 @@ mod tests {
         }
         let second_parcel = receiver.export_parcel(imported.value).unwrap();
         assert_eq!(second_parcel.images().len(), 3);
-        assert!(second_parcel.images().iter().any(|image| image
-            .image
-            .definition_facts()
-            .sites
-            .iter()
-            .any(|site| site.site == 551)));
-        assert!(!second_parcel.images().iter().any(|image| image
-            .image
-            .definition_facts()
-            .sites
-            .iter()
-            .any(|site| site.site == 552)));
+        assert!(second_parcel.images().iter().any(|image| {
+            image
+                .image
+                .definition_facts()
+                .sites
+                .iter()
+                .any(|site| site.site == 551)
+        }));
+        assert!(!second_parcel.images().iter().any(|image| {
+            image
+                .image
+                .definition_facts()
+                .sites
+                .iter()
+                .any(|site| site.site == 552)
+        }));
         assert!(receiver.release(imported.value));
         receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
         assert_eq!(receiver.residency().root_cells, 0);
@@ -11382,32 +11403,35 @@ mod tests {
         let roots_before = machine.total_persistent_roots();
         let cursor_before = machine.vmctx.alloc_ptr;
 
-        {
-            let mut builder = machine.managed_builder().expect("managed builder");
-            assert!(matches!(
-                builder.constructor(DataConId(4242), &[]),
-                Err(ExecutionError::Answer(
-                    AnswerBuildError::UnknownConstructor(DataConId(4242))
-                ))
-            ));
-            assert!(matches!(
-                builder.constructor(DataConId(900), &[ManagedField::Scalar([0; 16])]),
-                Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
-                    expected: 0,
-                    actual: 1,
-                    ..
-                }))
-            ));
-        }
+        machine
+            .managed_builder(|mut builder| {
+                assert!(matches!(
+                    builder.constructor(DataConId(4242), []),
+                    Err(ExecutionError::Answer(
+                        AnswerBuildError::UnknownConstructor(DataConId(4242))
+                    ))
+                ));
+                assert!(matches!(
+                    builder.constructor(DataConId(900), [ManagedField::Scalar([0; 16])]),
+                    Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
+                        expected: 0,
+                        actual: 1,
+                        ..
+                    }))
+                ));
+                Ok::<_, ExecutionError>(())
+            })
+            .expect("managed construction");
         assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.total_persistent_roots(), roots_before);
 
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let unit = builder
-            .constructor(DataConId(900), &[])
-            .expect("the CAF program's Unit constructor builds");
-        let handle = builder.finish(realm, unit).expect("Unit is published");
+        let handle = machine
+            .managed_builder(|mut builder| {
+                let unit = builder.constructor(DataConId(900), [])?;
+                builder.finish(realm, unit)
+            })
+            .expect("Unit is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -11433,42 +11457,6 @@ mod tests {
         ));
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
-        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-    }
-
-    /// A managed node is meaningful only to the builder that minted it. A
-    /// later builder can reuse the same root-vector index, so accepting an
-    /// earlier node would silently publish or embed the wrong object.
-    #[test]
-    fn a_managed_node_cannot_cross_builder_ownership() {
-        use crate::prepared_program::AnswerBuildError;
-
-        let (mut machine, _) = machine();
-        let stale = {
-            let mut builder = machine.managed_builder().expect("first builder");
-            builder
-                .constructor(DataConId(900), &[])
-                .expect("first builder constructs Unit")
-        };
-
-        let mut builder = machine.managed_builder().expect("second builder");
-        let fresh = builder
-            .constructor(DataConId(900), &[])
-            .expect("second builder constructs Unit at the same local index");
-        assert_ne!(stale, fresh);
-        assert!(matches!(
-            builder.finish(RealmId::ROOT, stale),
-            Err(ExecutionError::Answer(AnswerBuildError::ForeignNode))
-        ));
-
-        let mut builder = machine.managed_builder().expect("third builder");
-        let unit = builder
-            .constructor(DataConId(900), &[])
-            .expect("third builder constructs Unit");
-        let handle = builder
-            .finish(RealmId::ROOT, unit)
-            .expect("the rejected cross-builder node leaves the machine reusable");
-        assert!(machine.release(handle));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
@@ -11530,11 +11518,12 @@ mod tests {
 
         let mut bits = [0u8; 16];
         bits[..8].copy_from_slice(&42_i64.to_ne_bytes());
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let good = builder
-            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
-            .expect("the Field constructor builds with its Int(64) field");
-        let handle = builder.finish(realm, good).expect("Field is published");
+        let handle = machine
+            .managed_builder(|mut builder| {
+                let good = builder.constructor(DataConId(910), [ManagedField::Scalar(bits)])?;
+                builder.finish(realm, good)
+            })
+            .expect("Field is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -11551,19 +11540,29 @@ mod tests {
         let handles_after_good = machine.handle_count();
         let roots_after_good = machine.total_persistent_roots();
 
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let inner = builder
-            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
-            .expect("inner Field builds");
-        assert!(matches!(
-            builder.constructor(DataConId(910), &[ManagedField::Node(inner)]),
-            Err(ExecutionError::Answer(AnswerBuildError::Field {
-                host_id: DataConId(910),
-                index: 0,
-                ..
-            }))
-        ));
-        drop(builder);
+        machine
+            .managed_builder(|mut builder| {
+                let inner = builder.constructor(DataConId(910), [ManagedField::Scalar(bits)])?;
+                let owned = builder.constructor(DataConId(910), [ManagedField::Scalar(bits)])?;
+                assert!(builder
+                    .constructor(
+                        DataConId(4242),
+                        [ManagedField::Node(owned), ManagedField::Borrow(&inner)]
+                    )
+                    .is_err());
+                assert_eq!(builder.temporary_root_metrics().1, 1);
+                assert!(matches!(
+                    builder.constructor(DataConId(910), [ManagedField::Node(inner)]),
+                    Err(ExecutionError::Answer(AnswerBuildError::Field {
+                        host_id: DataConId(910),
+                        index: 0,
+                        ..
+                    }))
+                ));
+                assert_eq!(builder.temporary_root_metrics().1, 0);
+                Ok::<_, ExecutionError>(())
+            })
+            .expect("managed construction");
         assert!(machine.vmctx.alloc_ptr > cursor_after_good);
         assert_eq!(machine.handle_count(), handles_after_good);
         assert_eq!(machine.total_persistent_roots(), roots_after_good);
@@ -11680,27 +11679,28 @@ mod tests {
         // A failing later field leaves the initialized byte wrapper
         // unreachable. It publishes no result root; normal collection owns
         // reclamation rather than pretending to roll the nursery cursor back.
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let bytes = builder.bytes(&text).expect("byte wrapper builds");
-        let unit = builder
-            .constructor(DataConId(920), &[])
-            .expect("Unit builds");
-        assert!(matches!(
-            builder.constructor(
-                DataConId(921),
-                &[
-                    ManagedField::Node(bytes),
-                    ManagedField::Scalar(int_bits(0)),
-                    ManagedField::Node(unit),
-                ],
-            ),
-            Err(ExecutionError::Answer(AnswerBuildError::Field {
-                host_id: DataConId(921),
-                index: 2,
-                ..
-            }))
-        ));
-        drop(builder);
+        machine
+            .managed_builder(|mut builder| {
+                let bytes = builder.bytes(&text)?;
+                let unit = builder.constructor(DataConId(920), [])?;
+                assert!(matches!(
+                    builder.constructor(
+                        DataConId(921),
+                        [
+                            ManagedField::Borrow(&bytes),
+                            ManagedField::Scalar(int_bits(0)),
+                            ManagedField::Borrow(&unit),
+                        ],
+                    ),
+                    Err(ExecutionError::Answer(AnswerBuildError::Field {
+                        host_id: DataConId(921),
+                        index: 2,
+                        ..
+                    }))
+                ));
+                Ok::<_, ExecutionError>(())
+            })
+            .expect("managed construction");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects + 1
@@ -11726,19 +11726,20 @@ mod tests {
             ledger_before.live_objects
         );
 
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let bytes = builder.bytes(&text).expect("byte wrapper builds");
-        let root = builder
-            .constructor(
-                DataConId(921),
-                &[
-                    ManagedField::Node(bytes),
-                    ManagedField::Scalar(int_bits(0)),
-                    ManagedField::Scalar(int_bits(text.len() as i64)),
-                ],
-            )
-            .expect("the Text-shaped constructor builds over its byte array");
-        let handle = builder.finish(realm, root).expect("Text is published");
+        let handle = machine
+            .managed_builder(|mut builder| {
+                let bytes = builder.bytes(&text)?;
+                let root = builder.constructor(
+                    DataConId(921),
+                    [
+                        ManagedField::Borrow(&bytes),
+                        ManagedField::Scalar(int_bits(0)),
+                        ManagedField::Scalar(int_bits(text.len() as i64)),
+                    ],
+                )?;
+                builder.finish(realm, root)
+            })
+            .expect("Text is published");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects + 1
@@ -11944,12 +11945,11 @@ mod tests {
             previous = handle;
             // One heap value retained per turn, the previous turn's released:
             // without compaction its promotion arena would accumulate.
-            let mut builder = machine.managed_builder().expect("managed builder");
-            let unit = builder
-                .constructor(DataConId(900), &[])
-                .expect("a Unit value builds");
-            let answer = builder
-                .finish(RealmId::ROOT, unit)
+            let answer = machine
+                .managed_builder(|mut builder| {
+                    let unit = builder.constructor(DataConId(900), [])?;
+                    builder.finish(RealmId::ROOT, unit)
+                })
                 .expect("the Unit value is retained");
             if let Some(stale) = answer_handle.replace(answer) {
                 assert!(machine.release(stale));
@@ -12339,12 +12339,13 @@ mod tests {
         unit_id: u64,
         box_id: u64,
     ) -> Result<PreparedHandle, ExecutionError> {
-        let mut builder = machine.managed_builder()?;
-        let mut node = builder.constructor(DataConId(unit_id), &[])?;
-        for _ in 0..depth {
-            node = builder.constructor(DataConId(box_id), &[ManagedField::Consume(node)])?;
-        }
-        builder.finish(realm, node)
+        machine.managed_builder(|mut builder| {
+            let mut node = builder.constructor(DataConId(unit_id), [])?;
+            for _ in 0..depth {
+                node = builder.constructor(DataConId(box_id), [ManagedField::Node(node)])?;
+            }
+            builder.finish(realm, node)
+        })
     }
 
     #[test]
@@ -12354,62 +12355,19 @@ mod tests {
             PreparedMachineOptions { nursery_bytes: 256 },
         )
         .expect("prepared machine");
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let mut node = builder.constructor(DataConId(930), &[]).expect("leaf");
-        for _ in 0..200 {
-            node = builder
-                .constructor(DataConId(931), &[ManagedField::Consume(node)])
-                .expect("parent");
-        }
-        let (chunks, active) = builder.temporary_root_metrics();
-        assert_eq!(active, 1, "consumed children leave the active root set");
-        assert_eq!(chunks, 1, "one stable chunk serves the whole tree");
-        drop(builder);
+        machine
+            .managed_builder(|mut builder| {
+                let mut node = builder.constructor(DataConId(930), [])?;
+                for _ in 0..200 {
+                    node = builder.constructor(DataConId(931), [ManagedField::Node(node)])?;
+                }
+                let (chunks, active) = builder.temporary_root_metrics();
+                assert_eq!(active, 1, "consumed children leave the active root set");
+                assert_eq!(chunks, 1, "one stable chunk serves the whole tree");
+                Ok::<_, ExecutionError>(())
+            })
+            .expect("managed construction");
         assert_eq!(machine.machine.rust_roots_len(), 0);
-    }
-
-    #[test]
-    fn duplicate_consuming_field_rejects_before_parent_publication() {
-        let (mut machine, _) = PreparedMachine::new(
-            boxed_shape_program(930, 931),
-            PreparedMachineOptions { nursery_bytes: 256 },
-        )
-        .expect("prepared machine");
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let child = builder.constructor(DataConId(930), &[]).expect("leaf");
-        let roots_before = builder.temporary_root_metrics();
-        assert!(builder
-            .constructor(
-                DataConId(932),
-                &[ManagedField::Consume(child), ManagedField::Consume(child)],
-            )
-            .is_err());
-        assert_eq!(builder.temporary_root_metrics(), roots_before);
-        assert!(
-            builder.core.word(child.node).is_ok(),
-            "failed parent preserves child"
-        );
-    }
-
-    #[test]
-    fn consumed_node_does_not_alias_a_reused_root_slot() {
-        let (mut machine, _) = PreparedMachine::new(
-            boxed_shape_program(930, 931),
-            PreparedMachineOptions { nursery_bytes: 256 },
-        )
-        .expect("prepared machine");
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let child = builder.constructor(DataConId(930), &[]).expect("child");
-        let _parent = builder
-            .constructor(DataConId(931), &[ManagedField::Consume(child)])
-            .expect("parent consumes child");
-        let replacement = builder
-            .constructor(DataConId(930), &[])
-            .expect("the consumed root slot is reusable");
-        assert!(builder
-            .constructor(DataConId(931), &[ManagedField::Node(child)])
-            .is_err());
-        assert!(builder.core.word(replacement.node).is_ok());
     }
 
     /// The nesting depth of an observed `boxed` value, `None` for any other
@@ -12464,17 +12422,20 @@ mod tests {
         assert!(machine.release(stale));
         let handles_before = machine.handle_count();
 
-        let mut builder = machine.managed_builder().expect("managed builder");
-        assert!(matches!(
-            builder.constructor(DataConId(931), &[ManagedField::Handle(stale)]),
-            Err(ExecutionError::Answer(AnswerBuildError::UnknownHandle))
-        ));
-        assert_eq!(
-            builder.temporary_root_metrics().1,
-            0,
-            "failed publication releases its temporary root"
-        );
-        drop(builder);
+        machine
+            .managed_builder(|mut builder| {
+                assert!(matches!(
+                    builder.constructor(DataConId(931), [ManagedField::Handle(stale)]),
+                    Err(ExecutionError::Answer(AnswerBuildError::UnknownHandle))
+                ));
+                assert_eq!(
+                    builder.temporary_root_metrics().1,
+                    0,
+                    "failed publication releases its temporary root"
+                );
+                Ok::<_, ExecutionError>(())
+            })
+            .expect("managed construction");
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
@@ -12651,12 +12612,11 @@ mod tests {
         };
         let f = *f;
         // A released host value is old-space garbage for compaction.
-        let mut builder = machine.managed_builder().expect("managed builder");
-        let ready = builder
-            .constructor(DataConId(1_301), &[])
-            .expect("a Ready value builds");
-        let garbage = builder
-            .finish(realm, ready)
+        let garbage = machine
+            .managed_builder(|mut builder| {
+                let ready = builder.constructor(DataConId(1_301), [])?;
+                builder.finish(realm, ready)
+            })
             .expect("the Ready value is retained");
         assert!(machine.release(garbage));
         let address = |machine: &PreparedMachine<'_>, handle| {

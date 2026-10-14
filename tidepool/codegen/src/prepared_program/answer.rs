@@ -33,14 +33,14 @@ pub enum AnswerBuildError {
     TooLarge(usize),
     /// Generated code packs objects at word alignment; a descriptor asking
     /// for more cannot be laid out in the span the builder reserves.
-    #[error("constructor {host_id:?} requires {required}-byte alignment, above the nursery's word alignment")]
+    #[error(
+        "constructor {host_id:?} requires {required}-byte alignment, above the nursery's word alignment"
+    )]
     Alignment { host_id: DataConId, required: u32 },
     /// A borrowed handle field named a handle no longer live in this engine's
     /// ledger (already released, or minted under another engine).
     #[error("a managed construction field's borrowed handle is not live")]
     UnknownHandle,
-    #[error("a managed construction node belongs to another builder")]
-    ForeignNode,
 }
 
 /// Semantic nesting bound for a structurally decoded host response.

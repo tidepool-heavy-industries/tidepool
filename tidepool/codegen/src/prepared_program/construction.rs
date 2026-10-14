@@ -332,9 +332,6 @@ impl ConstructionCore {
     }
 
     pub(super) fn word(&self, node: ConstructionNode) -> Result<usize, NodeAccessError> {
-        if node.owner != self.owner {
-            return Err(NodeAccessError::Foreign);
-        }
         let (root, slot) = self.root(node)?;
         root.words
             .read(slot)
@@ -343,9 +340,6 @@ impl ConstructionCore {
     }
 
     pub(super) fn slot(&self, node: ConstructionNode) -> Result<*mut u64, NodeAccessError> {
-        if node.owner != self.owner {
-            return Err(NodeAccessError::Foreign);
-        }
         let (root, slot) = self.root(node)?;
         root.words
             .slot_address(slot)

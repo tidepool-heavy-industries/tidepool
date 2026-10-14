@@ -954,6 +954,8 @@ def compile_fail_cases(package, library):
         "machine_lease_double_borrow": (),
         "root_borrow_release": ("tidepool-codegen",),
         "root_borrow_collection": ("tidepool-codegen",),
+        "managed_node_cross_builder": ("tidepool-codegen", "tidepool-repr"),
+        "managed_node_consumed": ("tidepool-codegen",),
         "prepared_install_consumes_pending": (),
         "prepared_install_crossed_image": ("frunk", "tidepool-mcp"),
     }

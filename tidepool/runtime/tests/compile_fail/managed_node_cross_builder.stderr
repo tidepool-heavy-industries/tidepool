@@ -1,0 +1,2 @@
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/compile_fail/managed_node_cross_builder.rs:6:9

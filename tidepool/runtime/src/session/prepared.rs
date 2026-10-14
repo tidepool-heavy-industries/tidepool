@@ -1986,10 +1986,10 @@ enum StructuralExpected {
     JsonBoxedInt,
 }
 
-struct StructuralFrame {
+struct StructuralFrame<'build> {
     host_id: DataConId,
     expected: Vec<StructuralExpected>,
-    fields: Vec<ManagedField>,
+    fields: Vec<ManagedField<'build, 'build>>,
     counts_depth: bool,
 }
 
@@ -2009,19 +2009,19 @@ impl std::fmt::Display for ReplyTarget {
     }
 }
 
-struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
+struct StructuralAnswerVisitor<'build, 'facts, 'builder, 'machine, 'code> {
     site: ReplyTarget,
     root: TypeCursor,
     budget: TypeWorkBudget,
     facts: &'facts ProgramFacts,
-    builder: &'builder mut ManagedBuilder<'machine, 'code>,
-    frames: Vec<StructuralFrame>,
-    result: Option<ManagedNode>,
+    builder: &'builder mut ManagedBuilder<'build, 'machine, 'code>,
+    frames: Vec<StructuralFrame<'build>>,
+    result: Option<ManagedNode<'build>>,
     failure: Option<PreparedRuntimeError>,
     depth: usize,
 }
 
-impl StructuralAnswerVisitor<'_, '_, '_, '_> {
+impl<'build> StructuralAnswerVisitor<'build, '_, '_, '_, '_> {
     fn json_value_shape(
         &mut self,
         host_id: DataConId,
@@ -2076,7 +2076,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
         }
     }
 
-    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+    fn attach(&mut self, field: ManagedField<'build, 'build>) -> Result<(), BridgeError> {
         if let Some(frame) = self.frames.last_mut() {
             frame.fields.push(field);
             Ok(())
@@ -2312,7 +2312,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
     }
 }
 
-impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
+impl<'build> HaskellVisitor for StructuralAnswerVisitor<'build, '_, '_, '_, '_> {
     fn expected_field_rep(&self) -> Option<RuntimeRep> {
         let frame = self.frames.last()?;
         self.builder
@@ -2363,16 +2363,9 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
         if frame.fields.len() != frame.expected.len() {
             return Err(self.shape("a constructor ended before all fields were emitted"));
         }
-        let mut fields = frame.fields;
-        for field in &mut fields {
-            *field = match *field {
-                ManagedField::Node(node) => ManagedField::Consume(node),
-                field => field,
-            };
-        }
         let node = self
             .builder
-            .constructor(frame.host_id, &fields)
+            .constructor(frame.host_id, frame.fields)
             .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
         self.attach(ManagedField::Node(node))
     }
@@ -2423,14 +2416,14 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
     }
 }
 
-fn build_structural_node(
+fn build_structural_node<'build>(
     response: &dyn tidepool_bridge::ToHaskell,
     table: &DataConTable,
     site: ReplyTarget,
     root: TypeNodeId,
     facts: &ProgramFacts,
-    builder: &mut ManagedBuilder<'_, '_>,
-) -> Result<ManagedNode, PreparedRuntimeError> {
+    builder: &mut ManagedBuilder<'build, '_, '_>,
+) -> Result<ManagedNode<'build>, PreparedRuntimeError> {
     // A structural reply belongs to the parked site's owner, not to the
     // accumulated session table. Attach that owner's admitted JSON roles for
     // this visit only: `serde_json::Value` then cannot borrow another
@@ -2475,7 +2468,7 @@ fn build_structural_node(
     reason = "internal helper with one call site; the parameters are the disjoint framed-answer \
               build context (payload, target constructor, and lookup tables), not a natural struct"
 )]
-fn build_framed_structural_node(
+fn build_framed_structural_node<'build>(
     prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
     handle: PreparedHandle,
     constructor: DataConId,
@@ -2485,8 +2478,8 @@ fn build_framed_structural_node(
     root: TypeCursor,
     budget: TypeWorkBudget,
     facts: &ProgramFacts,
-    builder: &mut ManagedBuilder<'_, '_>,
-) -> Result<ManagedNode, PreparedRuntimeError> {
+    builder: &mut ManagedBuilder<'build, '_, '_>,
+) -> Result<ManagedNode<'build>, PreparedRuntimeError> {
     let response_table = table.with_json_layout(facts.json_layout());
     let fields = Vec::with_capacity(field_cursors.len());
     let mut visitor = StructuralAnswerVisitor {
@@ -2544,19 +2537,19 @@ fn build_framed_structural_node(
 /// `HaskellValue` tree: every completed child is immediately handed to the
 /// machine's one managed builder. The builder authenticates constructor
 /// descriptors and field representations before it allocates.
-struct ManagedMountVisitor<'builder, 'machine, 'code> {
-    builder: &'builder mut ManagedBuilder<'machine, 'code>,
-    frames: Vec<MountFrame>,
-    root: Option<ManagedNode>,
+struct ManagedMountVisitor<'build, 'builder, 'machine, 'code> {
+    builder: &'builder mut ManagedBuilder<'build, 'machine, 'code>,
+    frames: Vec<MountFrame<'build>>,
+    root: Option<ManagedNode<'build>>,
 }
 
-struct MountFrame {
+struct MountFrame<'build> {
     host_id: DataConId,
     expected: usize,
-    fields: Vec<ManagedField>,
+    fields: Vec<ManagedField<'build, 'build>>,
 }
 
-impl ManagedMountVisitor<'_, '_, '_> {
+impl<'build> ManagedMountVisitor<'build, '_, '_, '_> {
     fn rejected(expected: impl Into<String>, got: impl Into<String>) -> BridgeError {
         BridgeError::TypeMismatch {
             expected: expected.into(),
@@ -2564,7 +2557,7 @@ impl ManagedMountVisitor<'_, '_, '_> {
         }
     }
 
-    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+    fn attach(&mut self, field: ManagedField<'build, 'build>) -> Result<(), BridgeError> {
         if let Some(frame) = self.frames.last_mut() {
             if frame.fields.len() == frame.expected {
                 return Err(Self::rejected(
@@ -2600,7 +2593,7 @@ impl ManagedMountVisitor<'_, '_, '_> {
         Ok(word.to_ne_bytes())
     }
 
-    fn finish(self) -> Result<ManagedNode, BridgeError> {
+    fn finish(self) -> Result<ManagedNode<'build>, BridgeError> {
         if !self.frames.is_empty() {
             return Err(Self::rejected(
                 "closed visitor constructors",
@@ -2612,7 +2605,7 @@ impl ManagedMountVisitor<'_, '_, '_> {
     }
 }
 
-impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
+impl<'build> HaskellVisitor for ManagedMountVisitor<'build, '_, '_, '_> {
     fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
         self.frames.push(MountFrame {
             host_id: id,
@@ -2636,17 +2629,9 @@ impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
                 got: frame.fields.len(),
             });
         }
-        let fields = frame
-            .fields
-            .into_iter()
-            .map(|field| match field {
-                ManagedField::Node(node) => ManagedField::Consume(node),
-                field => field,
-            })
-            .collect::<Vec<_>>();
         let node = self
             .builder
-            .constructor(frame.host_id, &fields)
+            .constructor(frame.host_id, frame.fields)
             .map_err(|error| BridgeError::InternalError(error.to_string()))?;
         self.attach(ManagedField::Node(node))
     }
@@ -3310,11 +3295,11 @@ fn resolve_prepared_import<'a>(
     bindings.get(id)
 }
 
-fn build_host_text_node(
-    builder: &mut ManagedBuilder<'_, '_>,
+fn build_host_text_node<'build>(
+    builder: &mut ManagedBuilder<'build, '_, '_>,
     text: &str,
     text_id: DataConId,
-) -> Result<ManagedNode, PreparedRuntimeError> {
+) -> Result<ManagedNode<'build>, PreparedRuntimeError> {
     let length = i64::try_from(text.len()).map_err(|_| PreparedRuntimeError::HostMount {
         detail: "host Text exceeds the worker Int length range".into(),
     })?;
@@ -3328,8 +3313,8 @@ fn build_host_text_node(
     builder
         .constructor(
             text_id,
-            &[
-                ManagedField::Consume(bytes),
+            [
+                ManagedField::Node(bytes),
                 ManagedField::Scalar(zero),
                 ManagedField::Scalar(len),
             ],
@@ -3393,30 +3378,28 @@ impl PreparedEngine {
         value: &dyn tidepool_bridge::ToHaskell,
         table: &DataConTable,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = {
-            let mut visitor = ManagedMountVisitor {
-                builder: &mut builder,
-                frames: Vec::new(),
-                root: None,
-            };
-            value
-                .visit(table, &mut visitor)
-                .map_err(|error| PreparedRuntimeError::HostMount {
-                    detail: error.to_string(),
+        self.machine.managed_builder(|mut builder| {
+            let root = {
+                let mut visitor = ManagedMountVisitor {
+                    builder: &mut builder,
+                    frames: Vec::new(),
+                    root: None,
+                };
+                value.visit(table, &mut visitor).map_err(|error| {
+                    PreparedRuntimeError::HostMount {
+                        detail: error.to_string(),
+                    }
                 })?;
-            visitor
-                .finish()
-                .map_err(|error| PreparedRuntimeError::HostMount {
-                    detail: error.to_string(),
-                })?
-        };
-        builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)
+                visitor
+                    .finish()
+                    .map_err(|error| PreparedRuntimeError::HostMount {
+                        detail: error.to_string(),
+                    })?
+            };
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })
     }
 
     /// Stream a host JSON document into the resident heap. The caller supplies
@@ -3428,30 +3411,28 @@ impl PreparedEngine {
         value: &serde_json::Value,
         layout: &JsonLayout<DataConId>,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = {
-            let mut visitor = ManagedMountVisitor {
-                builder: &mut builder,
-                frames: Vec::new(),
-                root: None,
+        self.machine.managed_builder(|mut builder| {
+            let root = {
+                let mut visitor = ManagedMountVisitor {
+                    builder: &mut builder,
+                    frames: Vec::new(),
+                    root: None,
+                };
+                tidepool_bridge::json_builder::visit_json(value, layout, &mut visitor).map_err(
+                    |error| PreparedRuntimeError::HostMount {
+                        detail: error.to_string(),
+                    },
+                )?;
+                visitor
+                    .finish()
+                    .map_err(|error| PreparedRuntimeError::HostMount {
+                        detail: error.to_string(),
+                    })?
             };
-            tidepool_bridge::json_builder::visit_json(value, layout, &mut visitor).map_err(
-                |error| PreparedRuntimeError::HostMount {
-                    detail: error.to_string(),
-                },
-            )?;
-            visitor
-                .finish()
-                .map_err(|error| PreparedRuntimeError::HostMount {
-                    detail: error.to_string(),
-                })?
-        };
-        builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })
     }
 
     /// Build Text with the physical constructor already admitted by HostCarrier.
@@ -3461,14 +3442,12 @@ impl PreparedEngine {
         text: &str,
         text_id: DataConId,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = build_host_text_node(&mut builder, text, text_id)?;
-        builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)
+        self.machine.managed_builder(|mut builder| {
+            let root = build_host_text_node(&mut builder, text, text_id)?;
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })
     }
 
     pub(super) fn build_host_job_exact(
@@ -3478,17 +3457,15 @@ impl PreparedEngine {
         job_id: DataConId,
         text_id: DataConId,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let text = build_host_text_node(&mut builder, text, text_id)?;
-        let root = builder
-            .constructor(job_id, &[ManagedField::Consume(text)])
-            .map_err(PreparedRuntimeError::Run)?;
-        builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)
+        self.machine.managed_builder(|mut builder| {
+            let text = build_host_text_node(&mut builder, text, text_id)?;
+            let root = builder
+                .constructor(job_id, [ManagedField::Node(text)])
+                .map_err(PreparedRuntimeError::Run)?;
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })
     }
 
     /// Share `registry` with this engine's machine: every later install
@@ -5946,24 +5923,23 @@ impl PreparedEngine {
         if machine.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let mut builder = machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = build_framed_structural_node(
-            prefix,
-            handle,
-            constructor,
-            fields,
-            table,
-            site,
-            root,
-            budget,
-            owner,
-            &mut builder,
-        )?;
-        let built = builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)?;
+        let built = machine.managed_builder(|mut builder| {
+            let root = build_framed_structural_node(
+                prefix,
+                handle,
+                constructor,
+                fields,
+                table,
+                site,
+                root,
+                budget,
+                owner,
+                &mut builder,
+            )?;
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })?;
         self.resume_parked(id, built)
     }
 
@@ -6015,28 +5991,29 @@ impl PreparedEngine {
         if self.machine.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let mut field = ManagedField::Handle(handle);
-        let mut root = None;
-        for &constructor in constructors {
-            let node = builder
-                .constructor(constructor, &[field])
-                .map_err(PreparedRuntimeError::Run)?;
-            root = Some(node);
-            field = ManagedField::Consume(node);
-        }
-        let built = builder
-            .finish(
-                realm,
-                root.ok_or(PreparedRuntimeError::AnswerShape {
-                    site,
-                    detail: "the nested constructor path produced no root",
-                })?,
-            )
-            .map_err(PreparedRuntimeError::Run)?;
+        let built = self.machine.managed_builder(|mut builder| {
+            let mut field = ManagedField::Handle(handle);
+            for &constructor in constructors {
+                let node = builder
+                    .constructor(constructor, [field])
+                    .map_err(PreparedRuntimeError::Run)?;
+                field = ManagedField::Node(node);
+            }
+            builder
+                .finish(
+                    realm,
+                    match field {
+                        ManagedField::Node(root) => root,
+                        _ => {
+                            return Err(PreparedRuntimeError::AnswerShape {
+                                site,
+                                detail: "the nested constructor path produced no root",
+                            })
+                        }
+                    },
+                )
+                .map_err(PreparedRuntimeError::Run)
+        })?;
         self.resume_parked(id, built)
     }
 
@@ -6086,13 +6063,12 @@ impl PreparedEngine {
         let owner = programs.get(&owner_id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownProgram(owner_id),
         ))?;
-        let mut builder = machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = build_structural_node(response, table, site, wire, owner, &mut builder)?;
-        let answer = builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)?;
+        let answer = machine.managed_builder(|mut builder| {
+            let root = build_structural_node(response, table, site, wire, owner, &mut builder)?;
+            builder
+                .finish(realm, root)
+                .map_err(PreparedRuntimeError::Run)
+        })?;
         self.resume_parked(id, answer)
     }
 
@@ -11295,7 +11271,7 @@ pub(super) mod tests {
         let table = table.with_json_layout(Some(layout));
         let payload = serde_json::json!({
             "nested": [[{"key": "value", "n": serde_json::Value::Number("1000000000000000000000000000001".parse().expect("large JSON number"))}], [true, null]],
-            "large": (0..128).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),
+            "large": (0..1024).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),
         });
 
         let initial_handles = engine.handle_count();
@@ -11353,9 +11329,13 @@ pub(super) mod tests {
         let realm = RealmId::fresh();
         let mut parked = Vec::new();
         for _ in 0..2 {
-            let mut builder = engine.machine.managed_builder().unwrap();
-            let root = builder.constructor(DataConId(105), &[]).unwrap();
-            let continuation = builder.finish(realm, root).unwrap();
+            let continuation = engine
+                .machine
+                .managed_builder(|mut builder| {
+                    let root = builder.constructor(DataConId(105), [])?;
+                    builder.finish(realm, root)
+                })
+                .unwrap();
             parked.push(
                 engine
                     .machine
@@ -11424,18 +11404,13 @@ pub(super) mod tests {
             "the accumulated session table deliberately has no JSON authority"
         );
 
-        let continuation = {
-            let mut builder = engine
-                .machine
-                .managed_builder()
-                .expect("JSON reply fixture opens a managed builder");
-            let root = builder
-                .constructor(DataConId(105), &[])
-                .expect("fixture Null constructor is declared");
-            builder
-                .finish(RealmId::ROOT, root)
-                .expect("fixture continuation is retained")
-        };
+        let continuation = engine
+            .machine
+            .managed_builder(|mut builder| {
+                let root = builder.constructor(DataConId(105), [])?;
+                builder.finish(RealmId::ROOT, root)
+            })
+            .expect("fixture continuation is retained");
         let id = engine
             .machine
             .park(
@@ -11483,13 +11458,13 @@ pub(super) mod tests {
             owner: ProgramId,
             site: u64,
         ) -> ContinuationId {
-            let continuation = {
-                let mut builder = engine.machine.managed_builder().expect("reply builder");
-                let root = builder.constructor(DataConId(105), &[]).expect("Null");
-                builder
-                    .finish(RealmId::ROOT, root)
-                    .expect("rooted continuation")
-            };
+            let continuation = engine
+                .machine
+                .managed_builder(|mut builder| {
+                    let root = builder.constructor(DataConId(105), [])?;
+                    builder.finish(RealmId::ROOT, root)
+                })
+                .expect("rooted continuation");
             engine
                 .machine
                 .park(
@@ -11694,15 +11669,12 @@ pub(super) mod tests {
             PreparedEngine::bootstrap(json_mount_program()).expect("bootstrap framed fixture");
         let table = json_mount_table();
         let make_null = |engine: &mut PreparedEngine| {
-            let mut builder = engine
+            engine
                 .machine
-                .managed_builder()
-                .expect("framed fixture opens a managed builder");
-            let root = builder
-                .constructor(DataConId(105), &[])
-                .expect("fixture Null constructor is declared");
-            builder
-                .finish(RealmId::ROOT, root)
+                .managed_builder(|mut builder| {
+                    let root = builder.constructor(DataConId(105), [])?;
+                    builder.finish(RealmId::ROOT, root)
+                })
                 .expect("fixture value is retained")
         };
         let continuation = make_null(&mut engine);
@@ -13019,17 +12991,20 @@ pub(super) mod tests {
         assert_eq!(engine.parked_count(), 1);
         assert_eq!(engine.persistent_roots_count(), roots);
         let (programs, machine) = (&engine.programs, &mut engine.machine);
-        let mut builder = machine.managed_builder().unwrap();
-        let node = build_structural_node(
-            &HaskellValue::Con(DataConId(78), vec![]),
-            &table,
-            ReplyTarget::Static(DataConId(77)),
-            TypeNodeId(0),
-            &programs[&owner],
-            &mut builder,
-        )
-        .unwrap();
-        let value = builder.finish(RealmId::ROOT, node).unwrap();
+        let value = machine
+            .managed_builder(|mut builder| {
+                let node = build_structural_node(
+                    &HaskellValue::Con(DataConId(78), vec![]),
+                    &table,
+                    ReplyTarget::Static(DataConId(77)),
+                    TypeNodeId(0),
+                    &programs[&owner],
+                    &mut builder,
+                )
+                .unwrap();
+                builder.finish(RealmId::ROOT, node)
+            })
+            .unwrap();
         assert!(engine.release(value));
         engine.abort_parked(id).unwrap();
     }
@@ -13143,32 +13118,35 @@ pub(super) mod tests {
                 &mut TypeWorkBudget::new(GraphLimits::default().max_work),
             )
             .unwrap();
-        let mut builder = machine.managed_builder().unwrap();
-        let mut visitor = StructuralAnswerVisitor {
-            site: ReplyTarget::Static(DataConId(903)),
-            root,
-            budget: TypeWorkBudget::new(0),
-            facts,
-            builder: &mut builder,
-            frames: vec![],
-            result: None,
-            failure: None,
-            depth: 0,
-        };
-        assert!(visitor.begin_constructor(DataConId(105), 0).is_err());
-        assert!(matches!(
-            visitor.failure,
-            Some(PreparedRuntimeError::AnswerTypeEvidence {
-                source: TypeGraphError::TraversalWork,
-                ..
+        machine
+            .managed_builder(|mut builder| {
+                let mut visitor = StructuralAnswerVisitor {
+                    site: ReplyTarget::Static(DataConId(903)),
+                    root,
+                    budget: TypeWorkBudget::new(0),
+                    facts,
+                    builder: &mut builder,
+                    frames: vec![],
+                    result: None,
+                    failure: None,
+                    depth: 0,
+                };
+                assert!(visitor.begin_constructor(DataConId(105), 0).is_err());
+                assert!(matches!(
+                    visitor.failure,
+                    Some(PreparedRuntimeError::AnswerTypeEvidence {
+                        source: TypeGraphError::TraversalWork,
+                        ..
+                    })
+                ));
+                assert!(visitor.result.is_none());
+                let failure = visitor.failure.as_ref().unwrap();
+                assert_eq!(failure.kind(), PreparedFailureKind::Rejected);
+                assert_eq!(failure.stage(), PreparedFailureStage::Run);
+                drop(visitor);
+                Ok::<_, ExecutionError>(())
             })
-        ));
-        assert!(visitor.result.is_none());
-        let failure = visitor.failure.as_ref().unwrap();
-        assert_eq!(failure.kind(), PreparedFailureKind::Rejected);
-        assert_eq!(failure.stage(), PreparedFailureStage::Run);
-        drop(visitor);
-        drop(builder);
+            .expect("managed construction");
         assert_eq!(engine.persistent_roots_count(), roots);
         assert_eq!(engine.parked_count(), 1);
         assert_eq!(
