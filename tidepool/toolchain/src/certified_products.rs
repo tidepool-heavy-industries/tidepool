@@ -5930,7 +5930,11 @@ fn validate_selected_originals_with_validation(
         home_modules.insert((owner.unit.clone(), owner.module.clone()));
     }
     let mut originals = BTreeMap::new();
-    for key in selected {
+    let mut pending = selected.iter().copied().collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        if originals.contains_key(&key) {
+            continue;
+        }
         let product = available
             .get(&key.artifact)
             .ok_or(CertificationError::Mismatch("selected original artifact"))?;
@@ -5947,10 +5951,32 @@ fn validate_selected_originals_with_validation(
         let group = witness
             .group(key.original_ordinal)
             .ok_or(CertificationError::Mismatch("selected original group"))?;
-        if originals.insert(*key, (group, witness)).is_some() {
-            return Err(CertificationError::Mismatch(
-                "duplicate selected original ordinal",
-            ));
+        originals.insert(key, (group, witness));
+        if native_use == OriginalNativeUse::Availability {
+            // A private offer authenticates its dependency bodies without
+            // selecting them for execution or extending the advertised census.
+            for import in group.imports() {
+                if let PendingImportOwner::Source {
+                    owner,
+                    original_ordinal,
+                    binder,
+                } = import
+                {
+                    let artifact = native_ids.get(owner).ok_or_else(|| {
+                        source_closure_mismatch(
+                            "available_original_carrier",
+                            Some(owner),
+                            *original_ordinal,
+                            binder,
+                            None,
+                        )
+                    })?;
+                    pending.push(NativeGroupKey {
+                        artifact: *artifact,
+                        original_ordinal: *original_ordinal,
+                    });
+                }
+            }
         }
     }
     let mut inherited = BTreeSet::new();
