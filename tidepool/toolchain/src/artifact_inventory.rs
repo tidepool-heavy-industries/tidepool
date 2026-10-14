@@ -7471,11 +7471,12 @@ mod tests {
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(producer);
         let product = |module, version| {
             crate::certified_products::fixture_finalized_product(
-                crate::certified_products::tests::original_groups_fixture(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
                     module,
                     vec![(0, vec![])],
                     version,
                     &BTreeMap::new(),
+                    format!("{module} interface").into_bytes(),
                 ),
                 producer_identity.sha256(),
             )
