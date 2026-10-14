@@ -1,5 +1,209 @@
 use super::*;
 
+/// A retained source capture with a real native value, issued through the same
+/// source boundary as a bootstrap installation's compilation authority.
+struct NativeSourceCapture {
+    _value: Arc<crate::owned_result::OwnedResultSnapshot>,
+}
+
+impl crate::RetainedSourceLayer for NativeSourceCapture {
+    fn identities(&self) -> &[String] {
+        &[]
+    }
+
+    fn include_paths(&self) -> &[std::path::PathBuf] {
+        &[]
+    }
+
+    fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+        tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+    }
+}
+
+#[tokio::test]
+async fn confirmed_resident_retirement_releases_current_source_while_observers_survive() {
+    resident_retirement_source_lifetime(RetirementSourceCase::Observation).await;
+}
+
+#[tokio::test]
+async fn issued_request_keeps_native_source_after_confirmed_resident_retirement() {
+    resident_retirement_source_lifetime(RetirementSourceCase::IssuedRequest).await;
+}
+
+#[tokio::test]
+async fn failed_resident_retirement_preserves_current_source_and_failure_evidence() {
+    resident_retirement_source_lifetime(RetirementSourceCase::Failure).await;
+}
+
+enum RetirementSourceCase {
+    Observation,
+    IssuedRequest,
+    Failure,
+}
+
+async fn resident_retirement_source_lifetime(case: RetirementSourceCase) {
+    use crate::request::{test_support, RequestRegistry};
+
+    let baseline = test_support::outstanding_custody();
+    let registry = RequestRegistry::default();
+    let issuer = ActorRef::first(crate::ActorId(9200));
+    let target = ActorRef::first(crate::ActorId(9201));
+    let request = registry.reserve_native(issuer, target);
+    registry.mark_queued(issuer, target, request).unwrap();
+    registry.present(target, request).unwrap();
+    let claim = registry.begin_reply(target, request).unwrap();
+    let value = test_support::snapshot(&claim);
+    let native_value = Arc::downgrade(&value);
+    let session = value.session();
+    drop(claim);
+    drop(registry);
+    let source =
+        crate::SourceLayerIssuer::default().issue(Arc::new(NativeSourceCapture { _value: value }));
+
+    let (owner, executor) = opened().await;
+    let placement = crate::ActorPlacement {
+        session,
+        resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+        lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+    };
+    let descriptor = crate::ActorDescriptor::new("retained installation", placement);
+    let context = descriptor.session_context(owner.identity());
+    let runner = crate::ResidentActorRunner::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+        Arc::new(crate::ActorMachineRegistry::new()),
+        crate::ActorWorkbenchSource::new("", Vec::new()),
+    );
+    owner
+        .configure_resident(
+            context,
+            descriptor,
+            None,
+            Arc::new(runner),
+            None,
+            Some("retained caller seed".into()),
+        )
+        .await
+        .unwrap();
+    let installed = Arc::new(crate::resident_workbench::InstalledToolsState::default());
+    let lease = crate::InstalledToolLease::new(owner.identity(), source, None);
+    installed.publish(lease.clone());
+    owner.bootstrap_policy_installed(Some(lease));
+    let barrier = owner.transaction().await.unwrap();
+    drop(barrier);
+    let mut observation = owner.observations_for_test();
+    assert!(observation
+        .borrow()
+        .resident
+        .as_ref()
+        .unwrap()
+        .installed_policy
+        .is_some());
+    let endpoint = crate::ResidentInteractivePolicy::local_with_installation(
+        // The fixture executor deliberately handles no tool operations. Its
+        // native source witness is forced through the existing native owner.
+        crate::LocalActorRef::with_identity_admission(
+            executor.clone(),
+            owner.retained_terminal().clone(),
+            owner.identity(),
+            owner.clone(),
+        ),
+        Vec::new(),
+        installed.clone(),
+    );
+    let issued = matches!(case, RetirementSourceCase::IssuedRequest).then(|| {
+        use crate::ResidentToolEndpoint;
+        endpoint.snapshot_for_request().unwrap()
+    });
+    drop(endpoint);
+    // Production stopped() clears this shared selection before sending the
+    // lifecycle retirement event; only issued requests may retain the lease.
+    installed.clear();
+    drop(installed);
+    if matches!(case, RetirementSourceCase::Failure) {
+        owner
+            .fault_next_resident_worker_for_test(resident::ResidentWorkerFault::Retirement)
+            .await
+            .unwrap();
+    }
+    owner.close().await.unwrap();
+    executor.stop(None);
+    executor
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    owner.retire_resident(crate::ActorTerminal {
+        kind: crate::ActorExitKind::Completed,
+        summary: "confirmed selected-installation retirement".into(),
+        diagnostic: None,
+    });
+    owner.executor_retired();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = {
+                let observed = observation.borrow_and_update();
+                match case {
+                    RetirementSourceCase::Failure => matches!(
+                        observed.resident.as_ref().unwrap().settlement,
+                        resident::ResidentSettlement::NeedsAttention(_)
+                    ),
+                    _ => observed.phase == LifecyclePhase::Retired,
+                }
+            };
+            if settled {
+                break;
+            }
+            observation.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let observed = observation.borrow();
+        let resident = observed.resident.as_ref().unwrap();
+        assert_eq!(
+            resident.installed_policy.is_some(),
+            matches!(case, RetirementSourceCase::Failure)
+        );
+        assert_eq!(resident.descriptor.display_label(), "retained installation");
+        assert_eq!(
+            resident.fresh_context_seed.as_deref(),
+            Some("retained caller seed")
+        );
+    }
+    if let Some(issued) = issued {
+        let retained = native_value
+            .upgrade()
+            .expect("issued request retains its exact source");
+        assert_eq!(test_support::force(&retained), 41);
+        drop(retained);
+        drop(issued);
+    }
+    if matches!(case, RetirementSourceCase::Failure) {
+        let retained = native_value
+            .upgrade()
+            .expect("unconfirmed retirement keeps current source");
+        assert_eq!(test_support::force(&retained), 41);
+        drop(retained);
+        assert!(matches!(
+            observation.borrow().resident.as_ref().unwrap().settlement,
+            resident::ResidentSettlement::NeedsAttention(_)
+        ));
+        owner.address.stop(None);
+        owner
+            .address
+            .get_cell()
+            .wait(Some(std::time::Duration::from_secs(5)))
+            .await
+            .unwrap();
+    }
+    assert!(
+        native_value.upgrade().is_none(),
+        "observation retains no executable source"
+    );
+    assert_eq!(test_support::outstanding_custody(), baseline);
+    owner.address.stop(None);
+}
+
 struct Executor;
 impl Actor for Executor {
     type Msg = KernelMessage;

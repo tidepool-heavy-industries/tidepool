@@ -213,6 +213,7 @@ pub(crate) enum ProviderInitialTestStage {
 pub(crate) enum ResidentWorkerFault {
     OwnerObservation,
     ProviderJournal,
+    Retirement,
 }
 
 #[cfg(test)]
@@ -607,6 +608,7 @@ pub(super) fn handle(
                     ResidentWorkerFault::ProviderJournal => {
                         WorkerKind::ProviderInitial(provider_initial::StageKind::Journal)
                     }
+                    ResidentWorkerFault::Retirement => WorkerKind::Retirement,
                 });
                 Ok(())
             } else {
@@ -1135,7 +1137,13 @@ fn complete(
             let _ = reply.send(result);
         }
         (Pending::Retirement, Completion::Retirement(result)) => match result {
-            Ok(()) => resident.retirement_recorded = true,
+            Ok(()) => {
+                resident.retirement_recorded = true;
+                // The terminal owner retains evidence, not its current executable
+                // installation. Independently issued requests keep their own leases.
+                resident.current.installed_policy = None;
+                resident.current.generation = None;
+            }
             Err(error) => resident.current.settlement = ResidentSettlement::NeedsAttention(error),
         },
         _ => unreachable!("resident completion kind differs from its issued pending operation"),
