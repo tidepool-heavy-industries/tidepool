@@ -158,8 +158,9 @@ suspends on the existing job. The same Haskell continuation resumes, including
 later statements, and both return completed results including nonzero exits.
 This contract also applies to tool bodies and record-actor handlers. A handler
 remains serialized while suspended: do not wait for its own mailbox to advance.
-`Cmd.observe (Cmd.Observation 250 8192) job` returns the current status normally
-after a bounded wait. It never detaches or cancels the job.
+`Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 250)) 8192) job` returns the
+current status normally after a bounded wait. Use `Cmd.UntilFinished` for an
+explicit completion wait. Observation never detaches or cancels the job.
 
 `Cmd.start` and `Cmd.tryStart` create invocation-owned work. Scope exit cancels
 unfinished owned jobs and retains outcome and cleanup. Await them in the same

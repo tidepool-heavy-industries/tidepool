@@ -101,12 +101,12 @@ watchSlowCommand owner context job thresholdMilliseconds diagnosticCharacters re
                 else do
                   R.modify' (\state -> state { slowChecked = True })
                   observed <- Cmd.quiet $ Cmd.observe
-                    (Cmd.Observation thresholdMilliseconds 0) job
+                    (Cmd.Observation (Cmd.For (Cmd.milliseconds (fromIntegral thresholdMilliseconds))) 0) job
                   case observed of
                     Cmd.CommandFinished result ->
                       R.modify' (\state -> state { slowCompletion = Just result })
                     _ -> do
-                      latest <- Cmd.quiet $ Cmd.observe (Cmd.Observation 0 0) job
+                      latest <- Cmd.quiet $ Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 0) job
                       case latest of
                         Cmd.CommandFinished result ->
                           R.modify' (\state -> state { slowCompletion = Just result })
@@ -115,7 +115,7 @@ watchSlowCommand owner context job thresholdMilliseconds diagnosticCharacters re
                           stderrPage <- Cmd.tryPage job Cmd.Stderr Cmd.OutputBeginning
                           diagnosis <- raise (render (SlowObservation job latest stdoutPage stderrPage))
                           let diagnostic = Text.take diagnosticCharacters diagnosis
-                          beforeNotice <- Cmd.quiet $ Cmd.observe (Cmd.Observation 0 0) job
+                          beforeNotice <- Cmd.quiet $ Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 0) job
                           case beforeNotice of
                             Cmd.CommandFinished result ->
                               R.modify' (\state -> state { slowCompletion = Just result })

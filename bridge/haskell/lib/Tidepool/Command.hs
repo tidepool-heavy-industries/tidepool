@@ -40,8 +40,14 @@ module Tidepool.Command
     run,
     await,
     Observation (..),
+    Wait (..),
+    Duration,
+    milliseconds,
+    seconds,
+    minutes,
     PresentedObservation (..),
     observe,
+    tryObserve,
     observeCompletion,
     observeWith,
     quiet,
@@ -96,6 +102,7 @@ import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
 import Tidepool.Agent.Watch.Internal (Await (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), Watches (..), requireObserved)
 import qualified Tidepool.Agent.Watch.Internal as Watch (Observation (..))
 import Tidepool.Command.Types
+import Tidepool.Duration (Duration, milliseconds, seconds, minutes, toMilliseconds)
 import Tidepool.Effects.Core
   ( CommandCleanup (..),
     CommandError (..),
@@ -130,8 +137,13 @@ data RunResult
   = Finished {completedJob :: Job, commandResult :: CommandResult, capturedOutput :: Either CommandError CommandOutput}
   deriving (Eq, Show)
 
--- | Bounded observation, independent of the lifetime of the process.
-data Observation = Observation {waitMilliseconds :: Int, outputBytes :: Int}
+-- | Observe for a finite duration, or until the command finishes.
+data Wait = For Duration | UntilFinished
+  deriving (Eq, Show)
+
+-- | Observation policy, independent of the lifetime of the process.
+-- A zero output budget is valid when metadata has consumed the allowance.
+data Observation = Observation {observationWait :: Wait, outputBytes :: Int}
   deriving (Eq, Show)
 
 -- | One immutable view taken after an observation wait.  A custom command
@@ -282,20 +294,36 @@ await retained@(Job key) = do
   observation <- send (CommandWaitWith key) >>= checked
   pure (Finished retained (observedCommandResult observation) (observedCommandOutput observation))
 
--- | Wait briefly and display newly available output, retaining the same job.
--- An observation deadline returns the live status normally.
+-- | Wait and display newly available output, retaining the same job.
+-- A finite observation deadline returns the live status normally.
 observe :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
-observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- send (CommandAwaitWith key milliseconds) >>= checked
+observe Observation {observationWait = wait, outputBytes = bytes} retained@(Job key) = do
+  current <- tryObserve wait retained >>= checked
   presentStatus key bytes False current
 
--- | Observe an owned job for a bounded interval and request a completion
+-- | Observe status without presentation, retaining a refusal as data. Invalid
+-- duration scaling is refused before any wait is sent to the command service.
+tryObserve :: (Member Commands effects) => Wait -> Job -> Eff effects (Either CommandError CommandStatus)
+tryObserve = observeStatus CommandAwaitWith
+
+observeStatus :: (Member Commands effects) => (Text -> Int -> Commands (Either CommandError CommandStatus)) -> Wait -> Job -> Eff effects (Either CommandError CommandStatus)
+observeStatus request wait (Job key) = case waitMilliseconds wait of
+  Left issue -> pure (Left issue)
+  Right milliseconds -> send (request key milliseconds)
+
+waitMilliseconds :: Wait -> Either CommandError Int
+waitMilliseconds UntilFinished = Right (-1)
+waitMilliseconds (For duration) = case toMilliseconds duration of
+  Nothing -> Left (CommandInvalid "observation duration exceeds the runtime millisecond range")
+  Just milliseconds -> Right milliseconds
+
+-- | Observe an owned job and request a completion
 -- notice if it is still running. The notice does not detach the job: await it
 -- or explicitly 'detach' before leaving its invocation. Foreign observers can
 -- use 'observe' or 'awaitFinished' with a watch.
 observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
-observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- send (CommandAwaitAndNotifyWith key milliseconds) >>= checked
+observeCompletion Observation {observationWait = wait, outputBytes = bytes} retained@(Job key) = do
+  current <- observeStatus CommandAwaitAndNotifyWith wait retained >>= checked
   presentStatus key bytes True current
 
 presentStatus :: (Member Commands effects) => Text -> Int -> Bool -> CommandStatus -> Eff effects CommandStatus
@@ -324,8 +352,8 @@ observeWith ::
   Job ->
   (PresentedObservation -> Eff effects a) ->
   Eff effects (CommandStatus, a)
-observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
-  current <- send (CommandAwaitWith key milliseconds) >>= checked
+observeWith options@Observation {observationWait = wait} retained prepare = do
+  current <- tryObserve wait retained >>= checked
   presentObserved options retained prepare current
 
 presentObserved ::

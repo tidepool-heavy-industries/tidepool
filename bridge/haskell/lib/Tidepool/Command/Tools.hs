@@ -53,6 +53,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Aeson.Value (ToJSON (..))
 import qualified Tidepool.Command as Cmd
 import Tidepool.Command.Types (Job (..))
+import qualified Tidepool.Duration as Duration
 import Tidepool.Effects.Core (Commands (..))
 import Tidepool.Inspection (Display (..), DisplayTree (..), WorkbenchDisplay (..))
 
@@ -276,7 +277,7 @@ observation :: Int -> Maybe Int -> Maybe Int -> Either CommandOptionError Cmd.Ob
 observation defaultWait wait limit
   | milliseconds < 0 || milliseconds > 300000 = Left (InvalidYieldTime milliseconds)
   | requested <= 0 = Left (InvalidOutputBytes requested)
-  | otherwise = Right (Cmd.Observation milliseconds bytes)
+  | otherwise = Right (Cmd.Observation (Cmd.For (Duration.milliseconds (fromIntegral milliseconds))) bytes)
   where
     milliseconds = fromMaybe defaultWait wait
     requested = fromMaybe 32768 limit
@@ -371,7 +372,7 @@ executeWith presenter
             | otherwise -> case wait of
                 Nothing -> do
                   binding <- Cmd.retainJobBinding retained
-                  let blockingOptions = options {Cmd.waitMilliseconds = -1}
+                  let blockingOptions = options {Cmd.observationWait = Cmd.UntilFinished}
                   boundedResult (Cmd.outputBytes options) . attachBinding key binding <$> presenter (Just script) purpose focus (budgetForBinding blockingOptions binding) retained
                 Just _ -> do
                   binding <- Cmd.retainJobBinding retained
@@ -427,7 +428,7 @@ cancelRetainedWith :: (Member Cmd.Commands effects) => ObservationPresenter effe
 cancelRetainedWith _presenter CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
     Left rejection -> pure (rejected OpCancelCommand (renderOptionError rejection) NoSideEffect)
-    Right (Cmd.Observation {waitMilliseconds = waitMilliseconds, outputBytes = budget}) -> do
+    Right options@Cmd.Observation {outputBytes = budget} -> do
       receipt <- send (CommandCancelWith key)
       case receipt of
         Left Cmd.CommandJobNotFound ->
@@ -442,7 +443,7 @@ cancelRetainedWith _presenter CancelCommand {session_id = key, yield_time_ms = w
         Right () -> do
           -- Cancellation is already accepted. A later wait/status failure must
           -- not turn that irreversible acknowledgment into a failed tool call.
-          status <- send (CommandAwaitWith key waitMilliseconds)
+          status <- Cmd.tryObserve (Cmd.observationWait options) (Job key)
           let (currentState, succeeded, outcome, cleanup) = case status of
                 Right current -> (Just (commandState current), statusSuccess current, statusOutcome current, statusCleanup current)
                 Left _ -> (Nothing, Nothing, Nothing, Nothing)

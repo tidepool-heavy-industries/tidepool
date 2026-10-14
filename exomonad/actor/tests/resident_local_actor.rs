@@ -1057,11 +1057,11 @@ async fn resident_await_watch_case(case: WatchCase) {
     );
     let command_observation = match case {
         WatchCase::PrimaryCommandAwaitCancellation => {
-            Some("Cmd.observe (Cmd.Observation (-1) 0) job")
+            Some("Cmd.observe (Cmd.Observation Cmd.UntilFinished 0) job")
         }
         WatchCase::PrimaryCommandForegroundCancellation => Some("Cmd.await job"),
         WatchCase::PrimaryCommandNotifyCancellation => {
-            Some("Cmd.observeCompletion (Cmd.Observation (-1) 0) job")
+            Some("Cmd.observeCompletion (Cmd.Observation Cmd.UntilFinished 0) job")
         }
         _ => None,
     };

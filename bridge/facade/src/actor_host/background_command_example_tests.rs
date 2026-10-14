@@ -45,7 +45,11 @@ async fn completion_case(
 
     // This later cell waits for the existing job without reading its output.
     // The watcher then returns the compact view and the original full capture.
-    let status = committed(campaign, "Cmd.observe (Cmd.Observation 30000 0) job").await;
+    let status = committed(
+        campaign,
+        "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 30000)) 0) job",
+    )
+    .await;
     assert!(
         status
             .to_string()

@@ -856,21 +856,21 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
     // The inherited job is the same handle, but presentation state belongs to
     // each caller. The first observer cannot consume the owner's first page.
     let observed =
-        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 1000 65536) job").await;
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 1000)) 65536) job").await;
     assert_eq!(observed["status"], "committed", "{observed}");
     assert!(observed.to_string().contains("first-line"), "{observed}");
     let repeated =
-        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 65536) job").await;
     assert_eq!(repeated["status"], "committed", "{repeated}");
     assert!(!repeated.to_string().contains("first-line"), "{repeated}");
-    let owner_first = committed(campaign, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    let owner_first = committed(campaign, "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 65536) job").await;
     assert!(
         owner_first.to_string().contains("first-line"),
         "{owner_first}"
     );
 
     *backend.stdout.lock() = "first-line\nsecond-line\n".into();
-    let owner_next = committed(campaign, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+    let owner_next = committed(campaign, "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 65536) job").await;
     assert!(
         owner_next.to_string().contains("second-line"),
         "{owner_next}"
@@ -880,7 +880,7 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         "{owner_next}"
     );
     let observer_next =
-        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation 0 65536) job").await;
+        dispatch_haskell_script(observer, "Cmd.observe (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 65536) job").await;
     assert_eq!(observer_next["status"], "committed", "{observer_next}");
     assert!(
         observer_next.to_string().contains("second-line"),
@@ -2980,7 +2980,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 
     let foreign = super::tests::dispatch_haskell_script_result(
         child.policy.as_ref(),
-        "Cmd.observeCompletion (Cmd.Observation 0 1024) job",
+        "Cmd.observeCompletion (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 1024) job",
     )
     .await;
     let rendered = match foreign {
@@ -2996,7 +2996,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
     let waiting = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
-            "Cmd.observeCompletion (Cmd.Observation 30000 1024) job",
+            "Cmd.observeCompletion (Cmd.Observation (Cmd.For (Cmd.milliseconds 30000)) 1024) job",
         )
         .await
     });

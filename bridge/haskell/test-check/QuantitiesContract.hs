@@ -7,7 +7,7 @@ import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 import Tidepool.Test.Runner
 
-data Expectation = Executed | Rejected String
+data Expectation = Executed | Rejected [String]
 
 checkFixture :: String -> Expectation -> IO ()
 checkFixture fixture expectation = do
@@ -21,10 +21,9 @@ checkFixture fixture expectation = do
              , "-outputdir", output, "test-check/quantities/" ++ fixture ++ ".hs" ]) ""
   writeFile (output ++ "/compile.log") (out ++ err)
   case expectation of
-    Rejected effect -> unless
-      (status /= ExitSuccess && effect `isInfixOf` (out ++ err)
-       && "is not a member of the type-level list" `isInfixOf` (out ++ err))
-      (error (fixture ++ " did not refuse at the effect boundary\n" ++ out ++ err))
+    Rejected diagnostics -> unless
+      (status /= ExitSuccess && all (`isInfixOf` (out ++ err)) diagnostics)
+      (error (fixture ++ " did not refuse at the expected type boundary\n" ++ out ++ err))
     _ -> do
       unless (status == ExitSuccess) (error (fixture ++ " did not compile\n" ++ out ++ err))
       case expectation of
@@ -38,6 +37,7 @@ quantitiesTests :: [TestTree]
 quantitiesTests =
   [ testCase "spawn quantities and duration magnitude boundaries" $ checkFixture "Quantities" Executed
   , testCase "generated actor profile installs scope and sleep" $ checkFixture "DefaultScopeSleep" Executed
-  , testCase "pure installed profile refuses resource scopes" $ checkFixture "NarrowScopeRefusal" (Rejected "ResourceScopes")
-  , testCase "pure installed profile refuses sleep" $ checkFixture "NarrowSleepRefusal" (Rejected "Sleep")
+  , testCase "pure installed profile refuses resource scopes" $ checkFixture "NarrowScopeRefusal" (Rejected ["ResourceScopes", "is not a member of the type-level list"])
+  , testCase "pure installed profile refuses sleep" $ checkFixture "NarrowSleepRefusal" (Rejected ["Sleep", "is not a member of the type-level list"])
+  , testCase "command observation units cannot be swapped" $ checkFixture "SwappedCommandObservation" (Rejected ["Couldn't match expected type", "Cmd.Wait", "Int"])
   ]

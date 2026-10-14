@@ -8,6 +8,7 @@ module Tidepool.Duration
   , milliseconds
   , seconds
   , minutes
+  , toMilliseconds
   ) where
 
 import Numeric.Natural (Natural)
@@ -30,6 +31,15 @@ magnitude :: Duration -> Integer
 magnitude (DurationMilliseconds value) = toInteger value
 magnitude (DurationSeconds value) = toInteger value * 1000
 magnitude (DurationMinutes value) = toInteger value * 60000
+
+-- | Convert to the runtime's millisecond representation without overflowing
+-- while scaling a valid seconds or minutes count.
+toMilliseconds :: Duration -> Maybe Int
+toMilliseconds duration
+  | value > toInteger (maxBound :: Int) = Nothing
+  | otherwise = Just (fromInteger value)
+  where
+    value = magnitude duration
 
 milliseconds :: Natural -> Duration
 milliseconds = DurationMilliseconds . bounded

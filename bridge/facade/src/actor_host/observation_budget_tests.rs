@@ -228,7 +228,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
 
     let preview = dispatch_haskell_script(
         policy.as_ref(),
-        "import qualified Tidepool.Command as Cmd\nobserved <- Cmd.observeWith (Cmd.Observation 0 32768) job1 (\\_ -> pure \"\")",
+        "import qualified Tidepool.Command as Cmd\nobserved <- Cmd.observeWith (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 32768) job1 (\\_ -> pure \"\")",
     )
     .await;
     assert_eq!(preview["status"], "committed", "{preview}");

@@ -18,6 +18,7 @@ import Tidepool.Aeson.Schema (JsonSchema (..))
 import Tidepool.Aeson.Value (ToJSON (..))
 import qualified Tidepool.Command as Cmd
 import qualified Tidepool.Command.Tools as Tools
+import qualified Tidepool.Duration as Duration
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Effects.Core (Commands (..))
 import Tidepool.Test.Runner
@@ -193,7 +194,7 @@ tests =
         check "fetched prefix within the display budget remains incomplete" uncroppedPrefixIncomplete
     , testCase "yield route detaches a still-running job" $
         check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
-    ]
+    ] ++ observationTests
   where
     isPresentation Presented = True
     isPresentation _ = False
@@ -211,6 +212,44 @@ utf8Bytes = T.foldl' (\bytes character -> bytes + width character) 0
       | ord character < 0x800 = 2
       | ord character < 0x10000 = 3
       | otherwise = 4
+
+observationTests :: [TestTree]
+observationTests =
+  [ testCase "dimensional observation preserves zero and each unit on the wire" $
+      mapM_ (\(duration, milliseconds) ->
+        let (_, events) = observe (Cmd.For duration)
+        in check "dimensional wait changed on the wire"
+          (events == [Awaited "job-immediate" milliseconds]))
+        [ (Duration.milliseconds 0, 0)
+        , (Duration.milliseconds 250, 250)
+        , (Duration.seconds 1, 1000)
+        , (Duration.minutes 1, 60000)
+        , (Duration.milliseconds (fromIntegral (maxBound :: Int)), maxBound)
+        ]
+  , testCase "completion observation preserves the existing minus-one wire value" $
+      let (status, events) = observe Cmd.UntilFinished
+      in check "explicit completion wait changed"
+        (status == Right finishedStatus && events == [Awaited "job-immediate" (-1)])
+  , testCase "scaled duration overflow refuses before any command wait" $
+      mapM_ (\duration ->
+        let (status, events) = observe (Cmd.For duration)
+        in check "overflowed observation was sent or lost its refusal"
+          (status == Left (Cmd.CommandInvalid "observation duration exceeds the runtime millisecond range") && null events))
+        [ Duration.seconds (fromIntegral (maxBound :: Int))
+        , Duration.minutes (fromIntegral (maxBound :: Int))
+        ]
+  , testCase "observation retains a zero output remainder" $
+      let ((status, budget), events) = runCommands $ do
+            retained <- Cmd.start (Cmd.bashCommand "true")
+            Cmd.observeWith (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 0) retained
+              (pure . Cmd.presentedByteBudget)
+      in check "zero metadata remainder changed"
+        (status == Cmd.CommandRunning && budget == 0 && events == [Awaited "job-immediate" 0])
+  ]
+  where
+    observe wait = runCommands $ do
+      retained <- Cmd.start (Cmd.bashCommand "true")
+      Cmd.tryObserve wait retained
 
 main :: IO ()
 main = runTests tests
