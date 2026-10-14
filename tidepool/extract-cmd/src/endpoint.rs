@@ -2881,7 +2881,10 @@ mod tests {
                     },
                 );
                 prop_assert_eq!(settled.action(), &Ok(42));
-                prop_assert_eq!(observed.borrow().as_ref(), Some(settled.close()));
+                {
+                    let observed_close = observed.borrow();
+                    prop_assert_eq!(observed_close.as_ref(), Some(settled.close()));
+                }
                 let uncertain = history
                     .iter()
                     .filter(|step| {
