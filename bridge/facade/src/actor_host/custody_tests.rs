@@ -408,10 +408,10 @@ pub(super) async fn inherited_response_scenario(
         .await;
     let producer_session = campaign.forest.actor_session(producer.actor.identity()).await.unwrap().unwrap();
     assert_eq!(producer_session != root_session, dedicated, "actual producer placement");
+    let observation_owner = campaign.forest.clone();
     let mut producer_teardown = if dedicated {
         Some(
-            campaign
-                .forest
+            observation_owner
                 .observe_session_removal(producer_session)
                 .expect("dedicated producer's exact session epoch is admitted"),
         )

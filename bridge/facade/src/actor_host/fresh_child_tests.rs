@@ -29,8 +29,8 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
         let successor_session = campaign.forest.actor_session(successor.actor).await.unwrap().unwrap();
         assert_ne!(successor_session, root_session);
         assert_ne!(successor_session, predecessor_session, "replacement owns a fresh machine");
-        let mut successor_teardown = campaign
-            .forest
+        let observation_owner = campaign.forest.clone();
+        let mut successor_teardown = observation_owner
             .observe_session_removal(successor_session)
             .expect("successor's exact session epoch is admitted");
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
@@ -84,8 +84,8 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
             .find(|node| node.label == "ordered-source-collector").unwrap();
         let collector_session = campaign.forest.actor_session(collector.actor).await.unwrap().unwrap();
         assert_ne!(collector_session, root_session, "source observation crosses actual machines");
-        let mut collector_teardown = campaign
-            .forest
+        let observation_owner = campaign.forest.clone();
+        let mut collector_teardown = observation_owner
             .observe_session_removal(collector_session)
             .expect("collector's exact session epoch is admitted");
         let published = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
@@ -208,8 +208,8 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     child_session, root_session,
                     "callable response crosses actual machines"
                 );
-                let mut child_teardown = campaign
-                    .forest
+                let observation_owner = campaign.forest.clone();
+                let mut child_teardown = observation_owner
                     .observe_session_removal(child_session)
                     .expect("callable child's exact session epoch is admitted");
                 assert_eq!(setup["status"], "committed", "{setup}");
@@ -539,8 +539,8 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         child_session, root_session,
         "the explicit fresh-context launch must own its own machine"
     );
-    let mut child_teardown = campaign
-        .forest
+    let observation_owner = campaign.forest.clone();
+    let mut child_teardown = observation_owner
         .observe_session_removal(child_session)
         .expect("fresh child's exact session epoch is admitted");
 
