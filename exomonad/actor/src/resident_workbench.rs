@@ -3474,12 +3474,19 @@ where
             "request receiver registration escaped its actor realm".into(),
         ));
     }
-    if !session
-        .parked_program_provenance(hole)
+    let provenance = session.parked_program_provenance(hole);
+    if !provenance
+        .as_ref()
         .is_some_and(|provenance| provenance.has_completion_site(site))
     {
+        let issued = provenance
+            .as_ref()
+            .map(|provenance| provenance.completion_site_ids());
+        let observed = provenance
+            .as_ref()
+            .and_then(|provenance| provenance.site(site));
         return Err(ResidentActorWorkbenchError::ActorProtocol(
-            format!("request receiver registration has no compiler-issued completion site: requested {site}"),
+            format!("request receiver registration has no compiler-issued completion site: requested {site}; issued {issued:?}; observation {observed:?}"),
         ));
     }
     session

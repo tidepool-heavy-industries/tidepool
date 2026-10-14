@@ -105,6 +105,7 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                     )
                     .await;
                 let exact = child.actor.identity();
+                campaign.acknowledge_native_spawn(&child);
                 assert_eq!(child.creator, Some(campaign.actor.identity()));
                 assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
                 assert!(child.actor.terminal().get().is_none());
@@ -290,6 +291,7 @@ async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
                         },
                     )
                     .await;
+                campaign.acknowledge_native_spawn(&child);
                 let request = backend_request(campaign).await;
                 let backend = TestCommands::new();
                 request.supply(Ok(backend.clone()));
