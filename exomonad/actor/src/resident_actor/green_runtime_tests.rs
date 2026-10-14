@@ -339,7 +339,7 @@ async fn compiled_concurrent_forms_reverse_settlement_preserves_original_heap_cl
 
 #[tokio::test]
 async fn compiled_green_traversable_preserves_shape_and_order_after_reverse_settlement() {
-    let fixture = Fixture::new(753, Scenario::Reverse);
+    let fixture = Fixture::new(753, Scenario::Reverse).await;
     let actor = fixture.parent().await;
     assert_true(
         fixture
