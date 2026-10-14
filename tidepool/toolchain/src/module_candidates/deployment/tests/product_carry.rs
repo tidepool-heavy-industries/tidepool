@@ -704,6 +704,84 @@ fn cancelled_acquisition_preserves_explicit_owner_and_followup_can_acquire() {
 }
 
 #[test]
+fn selected_merge_preserves_acquired_catalog_origins_in_exact_scope() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
+    for acquired_first in [false, true] {
+        for cross_inventory in [false, true] {
+            let fixture = Fixture::new();
+            let package = Arc::new(fixture.load().unwrap());
+            let selected = borrow_catalog(&package).unwrap();
+            let acquired = selected.by_owner[&("u".into(), "Library".into())]
+                .original_module_interface
+                .clone();
+            let bare = package.records[0]
+                .module_interface_proof
+                .as_ref()
+                .unwrap()
+                .clone();
+            assert_eq!(acquired, bare);
+            let inventory = ArtifactInventory::default();
+            let other_inventory = if cross_inventory {
+                ArtifactInventory::default()
+            } else {
+                inventory.clone()
+            };
+            let first = inventory
+                .admit(
+                    &inventory.empty_view(),
+                    vec![ArtifactEntry::canonical(if acquired_first {
+                        acquired.clone()
+                    } else {
+                        bare.clone()
+                    })],
+                )
+                .unwrap();
+            let incoming = other_inventory
+                .admit(
+                    &other_inventory.empty_view(),
+                    vec![ArtifactEntry::canonical(if acquired_first {
+                        bare
+                    } else {
+                        acquired
+                    })],
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_interface_view(&incoming).unwrap();
+            let merged = first.merge_selected(&incoming, &projection).unwrap();
+            let descriptor = &merged.descriptors()[0];
+            assert!(!merged.original_input_origins(descriptor.id).is_empty());
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    descriptor.producer_sha256,
+                    &merged,
+                    projection,
+                )
+                .unwrap();
+            let request = context
+                .prepare_compilation(
+                    &fixture._root.path().join("merged-scope"),
+                    &fixture.authority.producer_identity,
+                )
+                .unwrap();
+            let scope: ciborium::value::Value =
+                ciborium::de::from_reader(fs::read(&request.manifest).unwrap().as_slice()).unwrap();
+            let paths = scope.as_array().unwrap()[10].as_array().unwrap()[2]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|image| image.as_array().unwrap()[4].as_array().unwrap())
+                .flat_map(|part| part.as_array().unwrap()[4].as_array().unwrap())
+                .map(|path| PathBuf::from(path.as_text().unwrap()))
+                .collect::<BTreeSet<_>>();
+            assert!(
+                paths.iter().any(|path| path.starts_with(&fixture.output)),
+                "selected merges must retain catalog origins through the production scope encoder"
+            );
+        }
+    }
+}
+
+#[test]
 fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
     use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
     for acquired_first in [false, true] {

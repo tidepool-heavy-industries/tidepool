@@ -5948,17 +5948,25 @@ impl ArtifactView {
                 namespace.insert(id, binding);
             }
         }
+        let mut issuing_payloads = BTreeMap::new();
+        for (id, incoming) in &other.lease.payloads {
+            if let Some(previous) = self.lease.payloads.get(id) {
+                let merged = ArtifactEntry::merge_catalog_input_custody(previous, incoming)?;
+                if !Arc::ptr_eq(previous, &merged) {
+                    issuing_payloads.insert(*id, merged);
+                }
+            }
+        }
         let entries = namespace
             .keys()
             .map(|id| {
                 (
                     *id,
                     Arc::clone(
-                        other
-                            .lease
-                            .payloads
+                        issuing_payloads
                             .get(id)
                             .or_else(|| self.lease.payloads.get(id))
+                            .or_else(|| other.lease.payloads.get(id))
                             .expect("selected payload owner"),
                     ),
                 )
@@ -5975,7 +5983,7 @@ impl ArtifactView {
             inventory: self.lease.inventory.clone(),
 
             parents,
-            issuing_payloads: BTreeMap::new(),
+            issuing_payloads,
             materialization_parents: vec![],
             materialization: Mutex::new(BTreeMap::new()),
         }))
