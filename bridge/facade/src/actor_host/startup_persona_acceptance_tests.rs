@@ -421,6 +421,66 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn persona_quickstart_displays_lookup_and_rejects_native_io() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "AgentSpec.agentSpec", |_, _| {});
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        host.input("Inspect the callable guide").await.unwrap();
+        let mut pending = VecDeque::new();
+        let root = harness::model::AgentPath("/root".into());
+        let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let source = include_str!("fixtures/api-guide/persona-lookup-display.hs");
+        assert!(round.request.instructions.contains(source),
+            "the actual Persona provider instructions must publish the executable emitter example");
+        let operation = round.operation("persona-lookup-display");
+        round.sync_call_named("persona-lookup-display", "haskell", source);
+        round = host.while_operation_succeeds(&operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+        let text = retained_committed_display_text(
+            &host.runtime.store(),
+            &harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: host.context.actor.identity().id.0,
+                incarnation: host.context.actor.identity().incarnation.0,
+            },
+            &round.settled_output("persona-lookup-display"),
+        );
+        assert!(text.contains("api-guide"), "lookup must emit its discovered guide: {text}");
+        for (call, source, diagnostic) in [
+            ("persona-native-io", "import qualified Data.Text as T\nimport qualified Prelude as P\nlet r = topics\nP.putStrLn (T.unpack (LookupTools.renderBatch r))\n", "native IO actions cannot run in notebook cells"),
+            ("persona-wrong-effect-row", "pure () :: Eff '[] ()\n", "Couldn't match type"),
+        ] {
+            let operation = round.operation(call);
+            round.sync_call_named(call, "haskell", source);
+            round = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+            super::test_campaign::require_ghc_compile_rejection(
+                &round.settled_output(call), &[diagnostic]).unwrap();
+        }
+        let operation = round.operation("persona-display-text-control");
+        round.sync_call_named("persona-display-text-control", "haskell", "display (\"lookup remains usable\" :: Text)\n");
+        round = host.while_operation_succeeds(&operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+        assert_eq!(retained_committed_display_text(
+            &host.runtime.store(),
+            &harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: host.context.actor.identity().id.0,
+                incarnation: host.context.actor.identity().incarnation.0,
+            },
+            &round.settled_output("persona-display-text-control"),
+        ), "lookup remains usable");
+        round.finish();
+    })).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn persona_web_selection_retains_native_judgment_and_empty_control() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);

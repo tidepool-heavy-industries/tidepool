@@ -1366,6 +1366,8 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
+    let preamble =
+        insert_preamble_imports(&preamble, "qualified Prelude as TidepoolWorkbenchPrelude");
     let preamble = insert_preamble_imports(
         &preamble,
         "qualified Data.Type.Equality as TidepoolWorkbenchEquality",
@@ -1385,6 +1387,9 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
          default Monad (Eff {effect_stack})\n\
          class TidepoolCellPure value\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value\n\
+         instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
+           ('TidepoolWorkbenchTypeError.Text \"native IO actions cannot run in notebook cells; use display value for output or an available Tidepool effect\") \
+           => TidepoolCellPure (TidepoolWorkbenchPrelude.IO value)\n\
          instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
            ('TidepoolWorkbenchTypeError.Text \"an Eff action must use the current workbench effect row\") \
            => TidepoolCellPure (Eff effects value)\n\

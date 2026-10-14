@@ -67,6 +67,7 @@
     "bridge/facade/src/actor_host/fixtures/api-guide/command.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",
+    "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/request.hs",

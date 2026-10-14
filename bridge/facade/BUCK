@@ -1028,6 +1028,7 @@ rust_filegroup(
         "src/actor_host/fixtures/api-guide/command.hs": "bridge/facade/src/actor_host/fixtures/api-guide/command.hs",
         "src/actor_host/fixtures/api-guide/human-forms.hs": "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
         "src/actor_host/fixtures/api-guide/lookup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",
+        "src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
         "src/actor_host/fixtures/api-guide/reflect.hs": "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs",
         "src/actor_host/fixtures/api-guide/request-setup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs",
         "src/actor_host/fixtures/api-guide/request.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request.hs",
@@ -2816,6 +2817,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/api-guide/command.hs": "src/actor_host/fixtures/api-guide/command.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs": "src/actor_host/fixtures/api-guide/human-forms.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs": "src/actor_host/fixtures/api-guide/lookup.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs": "src/actor_host/fixtures/api-guide/reflect.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs": "src/actor_host/fixtures/api-guide/request-setup.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/request.hs": "src/actor_host/fixtures/api-guide/request.hs",
@@ -3413,6 +3415,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f6c6f6f6b75702e6873",
     src = "src/actor_host/fixtures/api-guide/lookup.hs",
     out = "lookup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f706572736f6e612d6c6f6f6b75702d646973706c61792e6873",
+    src = "src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
+    out = "persona-lookup-display.hs",
     visibility = ["PUBLIC"],
 )
 

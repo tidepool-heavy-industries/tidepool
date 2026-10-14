@@ -4,6 +4,11 @@ Use the memory already supplied at arrival when answering what you remember.
 No startup inventory is required. The notebook is synchronous; bind evidence
 before displaying a selection. A failed read is not an empty memory.
 
+`display value` emits bounded structured output; `display text` emits a `Text`
+value. A bare expression only binds an observation for later use. Use `display`
+to read a result now, and the available Tidepool effects for actions. Native
+`Prelude` IO actions such as `putStrLn` do not run in notebook cells.
+
 ## Files and active code
 
 File paths start at your ordinary workspace root. `.exomonad` is an ordinary
@@ -76,8 +81,15 @@ activate authored text. Read `.exomonad/Persona/Orientation.hs` and
 ## Exact discovery
 
 `doc <topic>` is query text, not Haskell syntax. In this notebook use
-`LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])` and inspect the
-result, or `LookupTools.renderBatch` after importing `Tidepool.Lookup.Tools`.
+`LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])`, then display the
+result. `LookupTools.renderBatch` formats it as text:
+
+```haskell source=persona-lookup-display
+import qualified Tidepool.Lookup.Tools as LookupTools
+topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
+display (LookupTools.renderBatch topics)
+```
+
 Lookup names such as `Files.readFile` or `Persona.Web.search` for their declarations.
 
 | Question | Lookup query |

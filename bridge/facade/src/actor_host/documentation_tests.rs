@@ -15,6 +15,7 @@ enum PublishedExample {
     Command,
     Lookup,
     Reflect,
+    PersonaLookupDisplay,
 }
 
 impl PublishedExample {
@@ -25,6 +26,7 @@ impl PublishedExample {
             Self::Command => "command",
             Self::Lookup => "lookup",
             Self::Reflect => "reflect",
+            Self::PersonaLookupDisplay => "persona-lookup-display",
         }
     }
 
@@ -35,6 +37,9 @@ impl PublishedExample {
             Self::Command => include_str!("fixtures/api-guide/command.hs"),
             Self::Lookup => include_str!("fixtures/api-guide/lookup.hs"),
             Self::Reflect => include_str!("fixtures/api-guide/reflect.hs"),
+            Self::PersonaLookupDisplay => {
+                include_str!("fixtures/api-guide/persona-lookup-display.hs")
+            }
         }
     }
 }
@@ -84,6 +89,10 @@ fn published_notebook_sources_match_authored_fixtures() {
     assert_published_sources(
         include_str!("../../../../exomonad/prompts/docs/reflect.md"),
         &[PublishedExample::Reflect],
+    );
+    assert_published_sources(
+        include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/api-guide.md"),
+        &[PublishedExample::PersonaLookupDisplay],
     );
 }
 

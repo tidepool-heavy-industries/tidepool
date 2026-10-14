@@ -2279,7 +2279,10 @@ fn assemble_expression_module_with_result(
 ) -> String {
     let mut out = if matches!(lift, ExpressionLift::Pure) {
         insert_preamble_imports(
-            &with_resume_import(preamble_with_imports),
+            &insert_preamble_imports(
+                &with_resume_import(preamble_with_imports),
+                "qualified Prelude as TidepoolWorkbenchPrelude",
+            ),
             "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
         )
     } else {
@@ -2293,6 +2296,9 @@ fn assemble_expression_module_with_result(
         out.push_str(concat!(
             "\nclass TidepoolPureWorkbenchValue value\n",
             "instance {-# OVERLAPPABLE #-} TidepoolPureWorkbenchValue value\n",
+            "instance {-# OVERLAPPING #-} TidepoolWorkbenchTypeError.Unsatisfiable ",
+            "('TidepoolWorkbenchTypeError.Text \"native IO actions cannot run in notebook cells; use display value for output or an available Tidepool effect\") ",
+            "=> TidepoolPureWorkbenchValue (TidepoolWorkbenchPrelude.IO value)\n",
             "instance {-# OVERLAPPING #-} TidepoolWorkbenchTypeError.Unsatisfiable ",
             "('TidepoolWorkbenchTypeError.Text \"an Eff action must typecheck in the current workbench effect row\") ",
             "=> TidepoolPureWorkbenchValue (Eff effects value)\n",
@@ -9226,7 +9232,8 @@ mod tests {
         );
         for (cell, lift) in [
             ("1 :: Int\n", ExpressionLift::Pure),
-            ("(pure (1 :: Int) :: IO Int)\n", ExpressionLift::Pure),
+            ("Just (pure (1 :: Int) :: IO Int)\n", ExpressionLift::Pure),
+            ("(\\n -> pure n) :: Int -> IO Int\n", ExpressionLift::Pure),
             ("pure (1 :: Int)\n", ExpressionLift::Effectful),
             (
                 "pure (pure (1 :: Int) :: Eff '[] Int)\n",
@@ -9280,6 +9287,66 @@ mod tests {
                     plan.type_display
                 );
             }
+        }
+    }
+
+    #[test]
+    fn whole_cell_check_rejects_native_io_observations_by_type() {
+        let extract = required_cell_test_worker();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let template = super::super::workbench::resident_cell_check_template(
+            &runtime_eff_cell_preamble(),
+            EFF_ROW,
+            "",
+        );
+        for cell in [
+            "import qualified Prelude as P\nP.putStrLn \"output\"\n",
+            "pure (1 :: Int) :: IO Int\n",
+            "type NativeAction = IO\n(pure (1 :: Int) :: NativeAction Int)\n",
+            "let action = pure (1 :: Int) :: IO Int\naction\n",
+        ] {
+            let refusal = tidepool_testing::with_settlement(|settlement| {
+                check_cell(
+                    CellCheckRequest {
+                        exact_context: None,
+                        session_id: None,
+                        cell_text: cell,
+                        template: &template,
+                        include: &include,
+                        session_root: root.path(),
+                        inject_modules: &[],
+                        compile_generation: 0,
+                        compile_view_evidence: "",
+                    },
+                    settlement,
+                )
+            })
+            .expect_err("native IO observation must fail whole-cell typechecking");
+            let CompileError::Diagnostics(diagnostics) = &refusal.error else {
+                panic!(
+                    "expected GHC type diagnostic for {cell:?}, got {:?}",
+                    refusal.error
+                );
+            };
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == crate::diag::DiagnosticSeverity::Error
+                        && diagnostic
+                            .message
+                            .contains("native IO actions cannot run in notebook cells")
+                        && diagnostic.message.contains("display value")
+                }),
+                "{cell:?}: {diagnostics:?}"
+            );
         }
     }
 
@@ -9872,6 +9939,65 @@ mod tests {
             1,
             "the selected alternative preserves the authored expression exactly once"
         );
+    }
+
+    #[test]
+    fn run_turn_pure_expression_refuses_native_io_before_preparation() {
+        tidepool_testing::eval_harness::require_extract();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let session_root = TempDir::new().unwrap();
+        let mut preamble = insert_preamble_imports(effects.preamble(), "qualified Prelude as P");
+        preamble.push_str("type NativeAction = P.IO\n");
+        let templates = [TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_opaque_expression_module(
+                &preamble,
+                "__result",
+                effects.row(),
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        }];
+        for expression in [
+            "P.putStrLn \"output\"",
+            "(P.pure (1 :: Int) :: NativeAction Int)",
+        ] {
+            let refusal = tidepool_testing::with_settlement(|settlement| {
+                run_turn(
+                    TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: expression,
+                        templates: &templates,
+                        include: &effects.include_path_refs(),
+                        session_root: session_root.path(),
+                        inject_modules: &[],
+                        gen: 0,
+                        verdict: Some(TurnClassification {
+                            kind: TurnKind::Expr,
+                            binders: Vec::new(),
+                            items: Vec::new(),
+                        }),
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+            })
+            .expect_err("pure expression entry point must refuse native IO by type");
+            let CompileError::Diagnostics(diagnostics) = &refusal.error else {
+                panic!("expected GHC type diagnostic, got {:?}", refusal.error);
+            };
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == crate::diag::DiagnosticSeverity::Error
+                        && diagnostic
+                            .message
+                            .contains("native IO actions cannot run in notebook cells")
+                }),
+                "{expression}: {diagnostics:?}"
+            );
+        }
     }
 
     /// Ordered templates cannot recover a missing configured compiler endpoint.

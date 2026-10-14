@@ -195,6 +195,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/api-guide/command.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f636f6d6d616e642e6873",
         "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f68756d616e2d666f726d732e6873",
         "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f6c6f6f6b75702e6873",
+        "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f706572736f6e612d6c6f6f6b75702d646973706c61792e6873",
         "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f7265666c6563742e6873",
         "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f726571756573742d73657475702e6873",
         "bridge/facade/src/actor_host/fixtures/api-guide/request.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f726571756573742e6873",
