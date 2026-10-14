@@ -538,10 +538,10 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
         .unwrap();
     let (binders, compiled, reservation) = compile_checked_binding(
         &mut resident, &recipe,
-        "let receiverInstaller :: Int -> Eff '[Core.AgentTools] ()\n    receiverInstaller _ = Agents.installRequestReceiver",
+        "let receiverInstaller :: Int -> Eff '[Core.AgentTools] ()\n    receiverInstaller _ = Agents.installRequestReceiver\n    receiverInstallerUnit :: ()\n    receiverInstallerUnit = ()",
         execution.clone(),
     );
-    assert_eq!(binders.len(), 1);
+    assert_eq!(binders.len(), 2);
     let outcome = tidepool_testing::with_settlement(|settlement| {
         resident.run_projected_bind_with_sites(
             "receiverInstaller",
