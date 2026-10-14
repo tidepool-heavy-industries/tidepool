@@ -8,6 +8,7 @@ module Tidepool.ConstructorIdentity
   ) where
 
 import Control.Exception (Exception)
+import Control.Monad (when)
 import Data.Bits ((.|.), shiftL)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
@@ -19,13 +20,16 @@ import GHC.Core.TyCon (TyCon, tyConName, isPromotedDataCon_maybe)
 import GHC.Core.DataCon (DataCon, dataConName, dataConTyCon, dataConWorkId)
 import GHC.Driver.Env (HscEnv, hsc_HPT, hscEPS)
 import GHC.Types.Name (nameModule_maybe, nameOccName, isWiredInName)
-import GHC.Types.Name.Occurrence (isDataOcc)
+import GHC.Types.Name.Occurrence (isDataOcc, mkTcOcc)
 import GHC.Unit.Home.ModInfo (eltsHpt, hm_iface)
 import GHC.Unit.External (ExternalPackageState(eps_PIT))
 import GHC.Unit.Module.Env (moduleEnvToList)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_final_exts, mi_hash_fn)
-import GHC.Unit.Types (Module)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_final_exts, mi_hash_fn, mi_iface_hash)
+import GHC.Unit.Module.Name (moduleNameString)
+import GHC.Unit.Types (Module, moduleName)
 import GHC.Utils.Fingerprint (Fingerprint(..))
+import System.Environment (lookupEnv)
+import System.IO (hPutStrLn, stderr)
 import Tidepool.Identity (nameSymbolIdentity, qualifiedName, varId)
 import Tidepool.ExecutionSchema (SymbolIdentity(..), TypeIdentity(..), TypeVersion(..), ConstructorIdentity(..))
 import Tidepool.ExecutionEncode (encodeConstructorIdentity)
@@ -39,6 +43,18 @@ captureIdentityResolver env defining = do
   external <- hscEPS env
   let home = [(mi_module iface,iface) | info <- eltsHpt (hsc_HPT env), let iface = hm_iface info]
       explicit = [(mi_module iface,iface) | iface <- maybe [] pure defining]
+  trace <- lookupEnv "TIDEPOOL_MEMO_TRACE"
+  when (trace == Just "1") $ mapM_ (\(owner, iface) ->
+    when (moduleNameString (moduleName owner) == "Tidepool.Effects.Core") $
+      hPutStrLn stderr $ "nominal-interface-custody defining="
+        ++ show (moduleNameString . moduleName . mi_module <$> defining)
+        ++ " owner=" ++ show owner
+        ++ " iface=" ++ show (mi_iface_hash (mi_final_exts iface))
+        ++ " declarations=" ++ show
+          [(name, mi_hash_fn (mi_final_exts iface) (mkTcOcc name))
+          | name <- ["Worktree", "WorktreeSpec", "WorktreeError", "WorkspaceHandle",
+              "WorktreeHandle", "WorktreeId", "WorktreeSummary", "SubmissionObservation",
+              "BranchName", "GitOid", "MergeRequest", "MergeOutcome"]]) home
   pure (IdentityResolver (Map.map pure (Map.fromList (moduleEnvToList (eps_PIT external) ++ home ++ explicit))))
 
 unionIdentityResolvers :: [IdentityResolver] -> IdentityResolver
