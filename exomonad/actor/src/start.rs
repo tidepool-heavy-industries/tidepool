@@ -604,7 +604,8 @@ mod tests {
     #[test]
     fn generated_actor_key_bridge_decodes_every_active_nominal_key() {
         use super::ActorEffectKeyWire;
-        use tidepool_repr::{DataCon, DataConId};
+        use tidepool_bridge::{FromHaskell, HaskellValue};
+        use tidepool_repr::{DataCon, DataConId, DataConTable};
         for (index, wire) in ActorEffectKeyWire::ALL.iter().copied().enumerate() {
             let key = crate::ActorEffectKey::from(wire);
             assert_eq!(key, crate::ActorEffectKey::ALL[index]);
