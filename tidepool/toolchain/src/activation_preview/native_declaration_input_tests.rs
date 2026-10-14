@@ -657,6 +657,11 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
     let canonical = original_context(&[(true, true, true)]);
     let original = original_context_with_roles(&[(true, true, true)], true);
     assert_eq!(
+        offered_native_owners(&original).len(),
+        1,
+        "repeated availability of the same issued original retains one owner"
+    );
+    assert_eq!(
         offered_native_owners(&original),
         offered_native_owners(&canonical),
         "an original role retains its selected canonical type evidence"
