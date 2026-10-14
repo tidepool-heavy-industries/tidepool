@@ -18228,19 +18228,26 @@ pub(crate) mod request_tests {
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
         with_test_compiler_owner(
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(false),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(None),
         ).await;
     }
 
     #[tokio::test]
     async fn quoted_source_original_survives_coherent_generation_replacement() {
         with_test_compiler_owner(
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(true),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(Some(crate::ActorPersistencePolicy::Durable)),
+        ).await;
+    }
+
+    #[tokio::test]
+    async fn quoted_source_original_survives_ephemeral_generation_replacement() {
+        with_test_compiler_owner(
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(Some(crate::ActorPersistencePolicy::Ephemeral)),
         ).await;
     }
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
-        generation_replacement: bool,
+        generation_replacement: Option<crate::ActorPersistencePolicy>,
     ) {
         let mut recovery = None;
         let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
@@ -18326,7 +18333,7 @@ pub(crate) mod request_tests {
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
-        let warmed = if generation_replacement {
+        let warmed = if generation_replacement.is_some() {
             source
                 .prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -18361,7 +18368,7 @@ pub(crate) mod request_tests {
                 },
             )
             .unwrap();
-        if !generation_replacement {
+        if generation_replacement.is_none() {
             assert_published_source_scope_histories(Arc::clone(&public_selection));
         }
         let warm_view = workbench
@@ -18374,7 +18381,7 @@ pub(crate) mod request_tests {
             .await
             .unwrap();
         assert!(warm_view.exact_declaration_context().is_none());
-        let first = Arc::new(if generation_replacement {
+        let first = Arc::new(if generation_replacement.is_some() {
             workbench
                 .install_tools_action(
                     context.clone(),
@@ -18538,7 +18545,7 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
-        let second = Arc::new(if generation_replacement {
+        let second = Arc::new(if generation_replacement.is_some() {
             workbench
                 .install_tools_action(
                     context.clone(),
@@ -18607,11 +18614,11 @@ pub(crate) mod request_tests {
             completed_executions
         );
         assert_eq!(first.declarations, second.declarations);
-        if generation_replacement {
+        if generation_replacement.is_some() {
             // Replacement publishes its own issued source base without inheriting the notebook.
             let descriptor = crate::ActorDescriptor::new("quoted replacement", context.placement)
                 .with_actor_path(tidepool_repr::ActorPath::parse("root/quoted-original").unwrap())
-                .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+                .with_persistence_policy(generation_replacement.unwrap());
             let state = Arc::new(InstalledToolsState::default());
             let installation = InstalledToolLease::new(
                 context.actor,
@@ -18864,7 +18871,11 @@ pub(crate) mod request_tests {
             private
                 .publish_completed_cell_with_commit_for_test(
                     private_context,
-                    tidepool_runtime::session::PublicManifestCommit::Durable,
+                    if replacement.durable.is_some() {
+                        tidepool_runtime::session::PublicManifestCommit::Durable
+                    } else {
+                        tidepool_runtime::session::PublicManifestCommit::Ephemeral
+                    },
                 )
                 .await
                 .unwrap();
@@ -18906,31 +18917,33 @@ pub(crate) mod request_tests {
             completed_executions,
             "first replacement import must consume the issued original without quotation replay"
         );
-            let recovered_view = {
-                let mut lib = tidepool_runtime::session::SessionLib::open(
-                    tidepool_repr::SessionId(8_143),
-                    session_root.path(),
-                    tidepool_runtime::session::ModuleEnv::standalone_default(),
-                )
-                .unwrap()
-                .with_validation_include(roots.clone());
-                tidepool_testing::with_settlement(|settlement| {
-                    recovery.reopen().attach_root(&mut lib, settlement)
-                });
-                let mut recovered = tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
-                let scope = recovered
-                    .recover_public_scope(&replacement.durable.as_ref().unwrap().owner)
+            if replacement.durable.is_some() {
+                let recovered_view = {
+                    let mut lib = tidepool_runtime::session::SessionLib::open(
+                        tidepool_repr::SessionId(8_143),
+                        session_root.path(),
+                        tidepool_runtime::session::ModuleEnv::standalone_default(),
+                    )
+                    .unwrap()
+                    .with_validation_include(roots.clone());
+                    tidepool_testing::with_settlement(|settlement| {
+                        recovery.reopen().attach_root(&mut lib, settlement)
+                    });
+                    let mut recovered =
+                        tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
+                    let scope = recovered
+                        .recover_public_scope(&replacement.durable.as_ref().unwrap().owner)
+                        .unwrap();
+                    recovered.compile_view_in(scope).unwrap()
+                };
+                let current_view = workbench
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        Ok(session.compile_view_in(next_scope).unwrap())
+                    })
+                    .await
                     .unwrap();
-                recovered.compile_view_in(scope).unwrap()
-            };
-            let current_view = workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    Ok(session.compile_view_in(next_scope).unwrap())
-                })
-                .await
-                .unwrap();
-            assert_eq!(
+                assert_eq!(
                 recovered_view
                     .exact_declaration_context()
                     .unwrap()
@@ -18941,6 +18954,7 @@ pub(crate) mod request_tests {
                     .semantic_sha256(),
                 "replacement context and its artifacts remain resolvable after rebase and restart"
             );
+            }
             state.clear();
 
             return;
