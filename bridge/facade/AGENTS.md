@@ -38,6 +38,11 @@ retains read-only Store evidence. Check late-operation refusal after executor
 shutdown, then release execution-owning handles before awaiting the physical
 release receipt. Keep read-only observers alive when testing evidence survival;
 do not weaken the receipt or discard the evidence to make teardown pass.
+Actor retirement, registry removal and final machine release are distinct
+observations. On a cleanup timeout, trace the actual remaining request, capture
+or value owner and its release contract before moving assertions or extending
+deadlines. Enable the owning lifecycle traces first; missing filtered events
+cannot establish that cleanup was never attempted.
 
 Notification tests assert exact message multiplicity, FIFO order and durable
 delivery phases. Provider batching may include several admitted notifications

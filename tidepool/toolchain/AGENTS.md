@@ -21,6 +21,10 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   native dependencies through exact artifact/group edges, including historical
   children, rather than flattening custody into a module map. History tests
   must carry certification through the production consumer that needs selection.
+  A native group can retain an exact issued carrier without an Original entry
+  in the compiler namespace. Test that case alongside explicit namespace choices
+  and genuinely competing group carriers. A broader artifact lookup must not
+  discard an existing exact selection or silently override an explicit choice.
   Retaining a complete native carrier must preserve its available exact child
   carriers for unselected bodies. Keep that byte custody separate from source
   roots, compiler input roles and executable group demand. Exact custody seeds

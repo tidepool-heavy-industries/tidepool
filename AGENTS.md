@@ -80,6 +80,12 @@ Most changes touch one of three layers, and it helps to know which:
   evidence through exact references rather than embedding complete snapshots
   at every consumer. Preserve typed failure distinctions, including missing
   versus inaccessible storage; a failed observation does not establish absence.
+- Keep a value coupled to the metadata required to interpret it, through return
+  values, storage and presentation. Audit downstream consumers when admission
+  enriches metadata; correct execution with an older rendering table is still
+  incorrect. Prefer one complete result over parallel raw and enriched APIs.
+  Preserve typed error causes across actor replies; render them at the reporting
+  boundary rather than stringify and reclassify them between owners.
 - Use types for control flow. If a string has a closed or partly closed set of
   meanings, represent it with an enum (an `Other(String)` case is fine).
   Rendered error text and labels must not secretly drive behavior.
@@ -121,7 +127,11 @@ competing explanations with a controlled change. Search for analogous consumers
 once the mechanism is established, and name the missing relationship when an
 analogy does not apply. A quiet search establishes only what its inputs and
 observations could reveal. Separate a product finding, a broken investigative
-procedure and unresolved uncertainty. Follow [property testing](docs/property-testing.md),
+procedure and unresolved uncertainty. Check the failing history against the
+pre-change implementation before calling it a regression; record an unknown
+origin explicitly. Verify that relevant events were enabled and retained before
+using their absence as evidence that a path did not execute.
+Follow [property testing](docs/property-testing.md),
 [compiler profiling](docs/compiler-profiling.md), or [workflow audits](docs/rsi-loop.md)
 for the evidence needed by that method.
 
@@ -295,6 +305,9 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   For shared snapshots, cover both repeated identical references and distinct
   snapshots with overlapping contents. Check structural growth and restored
   sharing alongside semantic round trips through the production writer/reader.
+  Compare retained snapshots with independently saved model contents, not with
+  values just read from that same snapshot. Include interrupted construction and
+  unpublished reservations; allocation ceilings are not published inventories.
 - Construct behavioral fixtures through the owning production APIs. Build the
   ordered history through ordinary request, update and admission calls; issue
   claims and captures at the same points as production. Use the real issuer for
@@ -324,6 +337,9 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   APIs, before describing a parcel as integration-ready. Formatting, metadata
   checks and source review do not replace compilation. Compile joined changes
   incrementally rather than deferring the first compile to release assembly.
+  An owner library build does not compile downstream test callers. Name any
+  uncompiled consumer explicitly in the handoff instead of calling the change
+  integration-ready.
 - Keep the ordinary feedback path cheap: use the selected fast-development
   profile, with unoptimized first-party tests and optimized dependencies or
   explicitly justified hot libraries. Optimization belongs to profile and
@@ -341,7 +357,11 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   editing a fixture does not rebuild production libraries or browser assets.
   Reuse immutable build products, never shared mutable test state.
 - Run a small representative history through the joined production path early,
-  using its declared compiler and runtime resources. Component passes and a
+  using its declared compiler and runtime resources. For a changed boundary,
+  follow the same issued facts through publication, reuse, recovery and final
+  observation where applicable. Test through the public consumer, not only a
+  new private helper. Integrate and replay that history before accumulating
+  further dependent changes. Component passes and a
   shrinking defect list do not establish release readiness. Final acceptance
   belongs to the exact integrated bundle. Separate implementation, qualification
   and deployment in estimates, and state the unresolved uncertainty rather than
