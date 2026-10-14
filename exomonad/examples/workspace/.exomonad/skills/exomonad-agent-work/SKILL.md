@@ -15,7 +15,7 @@ does not identify an actor, workspace, or group.
 A successful spawn returns an idle `AgentRef`. Spawn does not start inference.
 The first typed request or a human message activates it. The compiled workspace
 recipe in [luna-agent-start.hs](../../checks/luna-agent-start.hs) uses the actual
-`workspaceAgentSpec`, selects the Luna model alias, and issues two typed Text
+`workspaceAgentSpec`, selects the configured `Luna` model, and issues two typed Text
 requests. After both requests are issued, the authored cell can continue with
 other work or end; [luna-agent-settlement.hs](../../checks/luna-agent-settlement.hs)
 joins their typed settlements applicatively and keeps each branch's

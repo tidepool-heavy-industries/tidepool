@@ -84,7 +84,7 @@ actorReuse = do
 
 requestRoundTrip :: Member RecipeCheck effects => CheckActor -> Eff effects Activation
 requestRoundTrip owner = do
-  void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
+  void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
   void $ turn owner "Right pending <- request @Text worker input defaultRequestOptions"
   worker <- activation
   check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")

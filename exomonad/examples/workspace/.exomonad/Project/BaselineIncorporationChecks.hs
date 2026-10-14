@@ -31,7 +31,7 @@ episode = do
     , "let amendment = PlanAmendment before after [\"plans/baseline.md\"] \"accept baseline\" [\"incorporation\"] [\"plan check\"]"
     , "let decision = AcceptedDecision question after \"Adopt the accepted baseline\" [\"plan check\"]"
     , "let change = BaselineChange before after amendment decision"
-    , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
+    , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
     ])
   void $ turn owner "opened <- openBaselineEpisode me\nlet workerInput = BaselineAssignment ownerTask \"worker\" opened\nRight (worker, workerProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent workerInput defaultRequestOptions"
   worker <- activation
@@ -41,7 +41,7 @@ episode = do
   assertCell (checkActor worker) "the worker receives the exact baseline task and owner label"
     ("baselineOwnerLabel current == \"worker\" && taskSource assigned == " <> gitOidLiteral before
       <> " && taskName assigned == \"baseline-change\" && planPath assigned == \".exomonad/WORKBENCH.md\" && obligation assigned == \"Incorporate the accepted baseline\" && ownedPaths assigned == [\"plans/baseline.md\"] && acceptance assigned == \"report exact source and named checks\"")
-  void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
+  void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
   lateWorker <- activation
   void $ turn (checkActor lateWorker) "respond (Blocked \"already settled\" [] :: Outcome Candidate)"
 

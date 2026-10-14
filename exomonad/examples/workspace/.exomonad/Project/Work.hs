@@ -123,7 +123,7 @@ implement
 implement work = do
   spawned <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree currentCheckout)
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+      { spawnModel = Just Luna, spawnEffort = Just Medium
       , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))
@@ -198,7 +198,7 @@ requestReview name input = do
   spawned <- spawnSubagent (FreshCtx (reviewContext input))
     (ForkWorktree (atRef (GitRef (renderGitOid (candidateCommit (reviewInput input))))))
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+      { spawnModel = Just Luna, spawnEffort = Just Medium
       , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just name })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))

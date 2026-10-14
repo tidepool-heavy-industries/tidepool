@@ -96,7 +96,7 @@ admitCandidatesWithLifetime lifetime work = do
     spawn context (workspace, task) = do
       ready <- spawnSubagent (ForkCtx context) workspace
         ((defaultSpawnOptions workspaceAgentSpec)
-          { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+          { spawnModel = Just Luna, spawnEffort = Just Medium
           , spawnInstructions = Just (taskContext task), spawnLabel = Just (taskName task)
           , spawnLifetime = lifetime })
       pure (task, ready)
