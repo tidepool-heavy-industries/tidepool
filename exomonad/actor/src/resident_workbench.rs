@@ -23620,15 +23620,16 @@ pub(crate) mod request_tests {
         };
         struct ProducerFixture {
             compiled: CompiledTurn,
+            original: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
             source: String,
             templates: Vec<tidepool_runtime::session::TurnTemplate>,
             include: Vec<PathBuf>,
             generation: u64,
             _root: tempfile::TempDir,
         }
-        // These ordinary programs issue no persistent binding or library-local
-        // prefix. Share only their compiler-issued immutable code; every replay
-        // below admits its receiver and executes its requests in a fresh session.
+        // The fresh receiver imports the producer's issued original closure.
+        // Sharing immutable code alone would allow a later compiler transaction
+        // to select a different nominal interface for the receiver.
         static FUNCTION_PRODUCER: std::sync::OnceLock<ProducerFixture> = std::sync::OnceLock::new();
         static RENDERER_PRODUCER: std::sync::OnceLock<ProducerFixture> = std::sync::OnceLock::new();
         let producer_fixture = if renderer_values {
@@ -23666,8 +23667,21 @@ pub(crate) mod request_tests {
                 bound.is_empty(),
                 "request producer creates no persistent binding"
             );
+            let original = compiled
+                .published_source_original_selection(
+                    compiled
+                        .original_compile_input()
+                        .unwrap()
+                        .original_input_identity(),
+                    &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                        unit: "main".into(),
+                        module: "Tidepool.Agent.Ref.Internal".into(),
+                    },
+                )
+                .unwrap();
             ProducerFixture {
                 compiled,
+                original,
                 source: producer_text.clone(),
                 templates: templates.clone(),
                 include: source.base_include.to_vec(),
@@ -23685,6 +23699,13 @@ pub(crate) mod request_tests {
             .all(|(left, right)| left.kind == right.kind && left.source == right.source));
         assert_eq!(producer_fixture.templates.len(), templates.len());
         let producer = &producer_fixture.compiled;
+        let original = session
+            .stage_published_source_originals_in(
+                context.placement.lexical_scope,
+                Arc::clone(&producer_fixture.original),
+            )
+            .unwrap();
+        session.publish_source_originals(original).unwrap();
         eprintln!(
             "activation fixture producer preparation: {:?}",
             producer_started.elapsed()
