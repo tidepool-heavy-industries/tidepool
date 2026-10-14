@@ -553,7 +553,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     })
     .unwrap();
     assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
-    publish_checked_fixture(&mut resident, &execution, 1);
+    publish_checked_fixture(&mut resident, &execution, binders.len());
     resident.set_run_context(SessionRunContext::ROOT).unwrap();
     resident.retire_scope(execution.private_scope());
     let installer = resident
