@@ -311,6 +311,124 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
 }
 
 #[test]
+fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let helper = product("TypeOnlyHelper", 73);
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
+    let authored = crate::certified_products::fixture_native_declaration_product(
+        original_groups_fixture_with_interface(
+            &module,
+            vec![(7, vec![source_import(&helper, 7)]), (9001, vec![])],
+            74,
+            &BTreeMap::new(),
+            b"issued authored interface".to_vec(),
+        ),
+        producer.sha256(),
+        1,
+    );
+    let recovered = recovered_witness_fixtures(&[authored, helper]);
+    let entries = recovered
+        .iter()
+        .map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    let owners = entries
+        .iter()
+        .map(|entry| entry.descriptor.owner.clone())
+        .collect::<Vec<_>>();
+    let narrowed = full.interface_projection(&owners).unwrap();
+    let projection = CompilerInputProjection::from_interface_view(&narrowed).unwrap();
+    let context = Arc::new(ExactDeclarationContext {
+        producer: producer.sha256(),
+        inventory: narrowed,
+        compiler_projection: projection,
+        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let before = context.as_ref().clone();
+    assert!(context.inventory.selected_native_groups().is_empty());
+    let authored_id = entries
+        .iter()
+        .find(|entry| entry.descriptor.owner.module == module)
+        .unwrap()
+        .descriptor
+        .id;
+    let helper_id = entries
+        .iter()
+        .find(|entry| entry.descriptor.owner.module == "TypeOnlyHelper")
+        .unwrap()
+        .descriptor
+        .id;
+    let canonical = ArtifactEntry::canonical(
+        recovered
+            .iter()
+            .find(|row| row.product.owner().module == module)
+            .unwrap()
+            .product
+            .module_interface()
+            .unwrap()
+            .clone(),
+    )
+    .descriptor
+    .id;
+    let proof = crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
+        authored_id,
+        canonical,
+        &context.inventory,
+    )
+    .unwrap()
+    .expect("complete authored census was issued before demotion");
+    let groups = &proof.selection.graph_selection().native_groups;
+    assert!(groups
+        .iter()
+        .any(|group| group.binding.artifact == helper_id && group.original_ordinal == 7));
+    assert!(
+        !groups
+            .iter()
+            .any(|group| group.binding.artifact == helper_id && group.original_ordinal == 9001),
+        "unrelated helper body is outside the authored closure"
+    );
+    let input =
+        OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
+            .expect("private offer preserves its already-issued exact dependency closure")
+            .expect("authored body is privately reusable");
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context.clone())
+        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
+        .unwrap();
+    let rows = wire_groups(&request);
+    assert_eq!(rows[&module], vec![7, 9001]);
+    assert_eq!(rows["TypeOnlyHelper"], vec![7]);
+    assert!(request
+        .compiler_inputs()
+        .metadata
+        .selected_native_groups
+        .is_empty());
+    let helper_owner = crate::declaration_join::ExactModuleIdentity {
+        unit: "main".into(),
+        module: "TypeOnlyHelper".into(),
+    };
+    assert!(
+        request
+            .compiler_inputs()
+            .projection
+            .snapshot_roles()
+            .get(&helper_owner)
+            .unwrap()
+            .original()
+            .is_none(),
+        "dependency body custody does not grant an original namespace role"
+    );
+    assert_eq!(context.as_ref(), &before);
+}
+
+#[test]
 fn selected_authored_availability_refuses_source_original_spelling_with_full_groups() {
     let native = product("Tidepool.Session.Lib.G1", 23);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
