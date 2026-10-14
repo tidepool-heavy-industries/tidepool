@@ -106,38 +106,6 @@ impl ResolvedSpec {
     }
 }
 
-/// How the currently installed handlers were obtained. Filesystem reload is
-/// valid only for a spec installed from a prepared source revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SpecOrigin {
-    SourcePrepared(ResolvedSpec),
-    ExplicitLive,
-}
-
-impl SpecOrigin {
-    pub(crate) fn describe(&self) -> String {
-        match self {
-            Self::SourcePrepared(resolved) => resolved.describe(),
-            Self::ExplicitLive => "origin=explicit live spec".into(),
-        }
-    }
-
-    pub(crate) fn checked_module(&self) -> Option<String> {
-        self.resolved()?.checked_module()
-    }
-
-    pub(crate) fn resolved(&self) -> Option<&ResolvedSpec> {
-        match self {
-            Self::SourcePrepared(resolved) => Some(resolved),
-            Self::ExplicitLive => None,
-        }
-    }
-
-    pub(crate) fn is_explicit(&self) -> bool {
-        matches!(self, Self::ExplicitLive)
-    }
-}
-
 /// Resolve one actor's spec, stopping at the first rule that answers.
 ///
 /// `layer` is the exact include graph this actor compiles against, private
@@ -306,22 +274,6 @@ mod tests {
         assert_eq!(nothing.rule, SpecRule::BuiltinDefault);
         assert_eq!(nothing.entry, None);
         assert_eq!(nothing.checked_module(), None);
-    }
-
-    #[test]
-    fn origin_distinguishes_prepared_source_from_explicit_live_specs() {
-        let prepared =
-            SpecOrigin::SourcePrepared(resolve(Vec::new(), Some("Project.Spec.agentSpec")));
-        assert!(!prepared.is_explicit());
-        assert_eq!(prepared.checked_module().as_deref(), Some("Project.Spec"));
-        assert!(prepared.resolved().is_some());
-        assert!(prepared.describe().contains("workspace spec key"));
-
-        let explicit = SpecOrigin::ExplicitLive;
-        assert!(explicit.is_explicit());
-        assert_eq!(explicit.checked_module(), None);
-        assert_eq!(explicit.resolved(), None);
-        assert!(explicit.describe().contains("explicit live spec"));
     }
 
     /// With no include roots, the configured name still determines the rule.

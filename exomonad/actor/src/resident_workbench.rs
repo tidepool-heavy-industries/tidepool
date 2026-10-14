@@ -1248,21 +1248,10 @@ pub(crate) struct ResidentWorkbenchTools {
     pub(crate) after_tool: Option<crate::tool_contract::AfterToolEntry>,
     pub(crate) initial_context: Option<crate::tool_contract::InitialContextEntry>,
     dispatcher_effects: tidepool_runtime::session::HaskellTypeSource,
-    /// How the spec was found, and where. Reported in status and in every
-    /// reload receipt.
-    pub(crate) origin: crate::agent_spec::SpecOrigin,
     /// Which install this record is, counting from one within this actor
     /// incarnation. A completed call names it, so a receipt says which record
     /// served the call and not merely which record is active now.
     pub(crate) install: u64,
-    /// The source revision this record was built from, when the actor has a
-    /// layer of its own to name one.
-    ///
-    /// This says which installed record served a call and what revision that
-    /// record was compiled against. It does NOT say that every function
-    /// reachable through the call belongs to one revision, which would be a
-    /// different and possibly false claim.
-    pub(crate) revision: Option<String>,
 }
 
 /// A public application's receiver retains its source domain independently of tool reloads.
@@ -2307,14 +2296,32 @@ impl ResidentWorkbenchTools {
             .collect()
     }
 
+    /// The installer revision, not the revision of every reachable closure.
+    pub(crate) fn revision(&self) -> Option<&str> {
+        self.code
+            .prepared()
+            .map(|prepared| prepared.source_revision.as_str())
+    }
+
+    pub(crate) fn resolved_spec(&self) -> Option<&crate::agent_spec::ResolvedSpec> {
+        self.code.prepared().map(|prepared| &prepared.resolved)
+    }
+
+    pub(crate) fn origin_description(&self) -> String {
+        match self.resolved_spec() {
+            Some(resolved) => resolved.describe(),
+            None => "origin=explicit live spec".into(),
+        }
+    }
+
     /// The provenance a completed call records: this record, and the revision
     /// it was built from.
     pub(crate) fn provenance(&self) -> String {
         format!(
             "install={} revision={} {}",
             self.install,
-            self.revision.as_deref().unwrap_or("(run)"),
-            self.origin.describe()
+            self.revision().unwrap_or("(run)"),
+            self.origin_description()
         )
     }
 }
@@ -6253,15 +6260,6 @@ where
     ) -> Result<PreparedToolInstallation, ResidentActorWorkbenchError> {
         let installation = crate::agent_spec::installation_expression("", &admitted_base);
         let dispatcher_effects = installation.dispatcher_effect_row();
-        let (revision, origin) = match &code {
-            InstalledToolCode::SourcePrepared(prepared) => (
-                Some(prepared.source_revision.clone()),
-                crate::agent_spec::SpecOrigin::SourcePrepared(prepared.resolved.clone()),
-            ),
-            InstalledToolCode::ExplicitLive(_) => {
-                (None, crate::agent_spec::SpecOrigin::ExplicitLive)
-            }
-        };
         let public_original = code
             .prepared()
             .map(|prepared| {
@@ -6506,9 +6504,7 @@ where
                             after_tool: admitted.after_tool,
                             initial_context: admitted.initial_context,
                             dispatcher_effects: dispatcher_effects.clone(),
-                            origin,
                             install,
-                            revision,
                         },
                         receiver,
                     })
@@ -18641,6 +18637,21 @@ pub(crate) mod request_tests {
             &warmed.prepared,
             &first.code.prepared().expect("source-prepared installation")
         ));
+        assert_eq!(first.revision(), Some(warmed.source_revision()));
+        let resolved = first.resolved_spec().unwrap();
+        assert!(std::ptr::eq(resolved, &warmed.prepared.resolved));
+        assert_eq!(
+            resolved.checked_module().as_deref(),
+            Some("QuotedAgentSpec")
+        );
+        assert_eq!(
+            first.provenance(),
+            format!(
+                "install=1 revision={} {}",
+                warmed.source_revision(),
+                resolved.describe()
+            )
+        );
         let completed_executions =
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
         assert!(
@@ -19750,7 +19761,12 @@ pub(crate) mod request_tests {
             }).await.unwrap();
             assert_eq!(public_after, public_before, "a replacement candidate must preserve the public namespace");
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-            assert!(first.origin.is_explicit());
+            assert!(first.resolved_spec().is_none());
+            assert_eq!(first.revision(), None);
+            assert_eq!(
+                first.provenance(),
+                "install=1 revision=(run) origin=explicit live spec"
+            );
             let expected = InstalledToolLease::new(
                 context.actor,
                 crate::CheckpointSourceLayer::default(),
@@ -19951,7 +19967,7 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .expect("one registered receiver completes application preparation");
-            assert!(tools.origin.is_explicit());
+            assert!(tools.resolved_spec().is_none());
             let receiver_scope = receiver.scope.scope();
             let receiver_scope_lease = Arc::downgrade(&receiver.scope);
             drop(receiver);

@@ -217,7 +217,7 @@ where
                     operation,
                     actor,
                     spec_install: tools.install,
-                    spec_revision: tools.revision.clone(),
+                    spec_revision: tools.revision().map(str::to_owned),
                     spec_entry: tools
                         .origin
                         .resolved()

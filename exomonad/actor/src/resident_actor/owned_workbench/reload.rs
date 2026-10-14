@@ -228,7 +228,7 @@ where
         let tools = generation.installation.tools().ok_or_else(|| {
             SourceError::SourceUnavailable("actor has no source-defined tool installation".into())
         })?;
-        if tools.origin.is_explicit() {
+        if tools.resolved_spec().is_none() {
             return Err(SourceError::SourceUnavailable(
                 "explicit live AgentSpec implementations have no editable source-backed reload"
                     .into(),

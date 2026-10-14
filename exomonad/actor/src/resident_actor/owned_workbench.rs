@@ -87,7 +87,7 @@ impl WorkbenchCompilationAuthority {
                     Some(tools) => {
                         frame(b"installed-handler");
                         frame(&tools.install.to_le_bytes());
-                        match &tools.revision {
+                        match tools.revision() {
                             Some(revision) => {
                                 frame(b"revision");
                                 frame(revision.as_bytes());

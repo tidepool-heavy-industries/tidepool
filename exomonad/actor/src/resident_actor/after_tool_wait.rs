@@ -86,7 +86,7 @@ impl AfterToolFrame {
     }
 
     pub(super) fn revision(&self) -> &str {
-        self.handler.tools().revision.as_deref().unwrap_or("(run)")
+        self.handler.tools().revision().unwrap_or("(run)")
     }
 
     pub(super) fn entered(&self) -> tokio::time::Instant {
