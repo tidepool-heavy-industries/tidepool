@@ -169,11 +169,12 @@ fn nominal_artifacts(
     use tidepool_toolchain::artifact_inventory::ArtifactKind;
     let descriptors = compiled.source_artifacts();
     let mut modules = vec!["Tidepool.Effects.Core", "Tidepool.Agent.Contract"];
-    if effects.contains(&crate::ActorEffectKey::Replies) {
-        modules.push("Tidepool.Agent.Reply.Internal");
-    }
-    if effects.contains(&crate::ActorEffectKey::Watches) {
-        modules.push("Tidepool.Agent.Watch.Internal");
+    for effect in effects {
+        if let Some(identity) = effect.nominal_identity() {
+            if !modules.contains(&identity.module) {
+                modules.push(identity.module);
+            }
+        }
     }
     modules
         .into_iter()

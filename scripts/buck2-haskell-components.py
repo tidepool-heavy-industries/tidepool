@@ -14,6 +14,7 @@ PACKAGE = ROOT / "bridge/haskell"
 WORKSPACE = ROOT / "exomonad/examples/workspace/.exomonad"
 EFFECTS = {"Tidepool.Effects", "Tidepool.Effects.Core", "Tidepool.Effects.Authored"}
 PROTOCOL_MODULES = {
+    "Tidepool.Effects.Row",
     "Tidepool.Internal.ActorProfiles",
     "Tidepool.Internal.ModelControl",
 }
@@ -258,6 +259,8 @@ def native_catalog_cohort(roster):
             path, target = source(module, component.source_dirs)
             if module in EFFECTS:
                 relative = "effects/" + path
+            elif module in PROTOCOL_MODULES:
+                relative = "lib/" + path
             elif is_jev_core(module):
                 relative = "jev/core/" + path
             elif target.startswith(("lib/", "actors/")):

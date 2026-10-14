@@ -230,13 +230,15 @@ pub fn installation_expression(
         effects
             .iter()
             .map(|effect| {
-                let module = match effect {
-                    crate::ActorEffectKey::Replies => "Tidepool.Agent.Reply.Internal",
-                    crate::ActorEffectKey::Watches => "Tidepool.Agent.Watch.Internal",
-                    _ => "Tidepool.Effects.Core",
-                };
-                imports.extend_text(&format!("qualified {module}"));
-                format!("{module}.{}", effect.haskell_name())
+                match effect.nominal_identity() {
+                    Some(identity) => {
+                        imports.extend_text(&format!("qualified {}", identity.module));
+                        format!("{}.{}", identity.module, identity.name)
+                    }
+                    // Legacy wire keys have no nominal owner. Keeping the bare
+                    // spelling lets the compiler refuse an unsupported row.
+                    None => effect.haskell_name().to_owned(),
+                }
             })
             .collect::<Vec<_>>()
             .join(", ")

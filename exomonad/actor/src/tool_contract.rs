@@ -60,9 +60,15 @@ pub(crate) struct AfterToolEntry {
     pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct InitialContextEntry {
+    pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
+}
+
 pub(crate) struct AdmittedInstallation {
     pub(crate) endpoints: Vec<AdmittedEndpoint>,
     pub(crate) after_tool: Option<AfterToolEntry>,
+    pub(crate) initial_context: Option<InitialContextEntry>,
 }
 
 pub(crate) fn admit_installation(
@@ -132,12 +138,23 @@ pub(crate) fn admit_installation(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let after_tool = (!slots.is_empty()).then(|| AfterToolEntry {
-        execution_effects: dispatcher_effects.clone(),
-    });
+    let after_tool = slots
+        .iter()
+        .any(|slot| slot == "afterTool")
+        .then(|| AfterToolEntry {
+            execution_effects: dispatcher_effects.clone(),
+        });
+    let initial_context =
+        slots
+            .iter()
+            .any(|slot| slot == "initialContext")
+            .then(|| InitialContextEntry {
+                execution_effects: dispatcher_effects.clone(),
+            });
     Ok(AdmittedInstallation {
         endpoints,
         after_tool,
+        initial_context,
     })
 }
 
@@ -331,6 +348,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(installed.after_tool.unwrap().execution_effects, dispatcher);
+        for slots in [
+            vec![],
+            vec!["afterTool"],
+            vec!["initialContext"],
+            vec!["afterTool", "initialContext"],
+        ] {
+            let installed = admit_installation(
+                make(
+                    valid.clone(),
+                    slots.iter().map(|slot| (*slot).into()).collect(),
+                    slots
+                        .iter()
+                        .map(|slot| ((*slot).into(), vec![jev.into()]))
+                        .collect(),
+                ),
+                &[jev],
+                &support,
+                &dispatcher,
+            )
+            .unwrap();
+            assert_eq!(installed.after_tool.is_some(), slots.contains(&"afterTool"));
+            assert_eq!(
+                installed.initial_context.is_some(),
+                slots.contains(&"initialContext")
+            );
+            if let Some(initial) = installed.initial_context {
+                assert_eq!(initial.execution_effects, dispatcher);
+            }
+        }
+
         for invalid in [
             ToolDeclaration {
                 kind: ToolKind::Call,
@@ -391,6 +438,16 @@ mod tests {
             &[ActorEffectKey::Jev.into()]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn legacy_decoded_key_does_not_assert_interpreter_availability() {
+        let legacy: ToolEffectKey = serde_json::from_str("\"Forks\"").unwrap();
+        let selected = native(ToolScheduling::Async, vec![legacy]);
+        assert!(matches!(
+            validate(selected, &[ActorEffectKey::Forks], &[]),
+            Err(ToolContractError::Unsupported { effect, .. }) if effect == legacy
+        ));
     }
 
     #[test]

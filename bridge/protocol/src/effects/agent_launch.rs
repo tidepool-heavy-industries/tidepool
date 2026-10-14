@@ -418,54 +418,6 @@ fn context_types() -> Vec<TypeDef> {
             domain: None,
             doc: &["Reasoning effort selected before a context child's first inference."],
         },
-        TypeDef {
-            name: "ActorEffectKey",
-            wire_rust: None,
-            haskell_module: None,
-            shape: TypeShape::Sum {
-                variants: [
-                    "EffectResourceScopes",
-                    "EffectReplies",
-                    "EffectWatches",
-                    "EffectActorContext",
-                    "EffectAgentLaunch",
-                    "EffectAgentInspection",
-                    "EffectAgentControl",
-                    "EffectBoundWorktree",
-                    "EffectWorktreeRegistry",
-                    "EffectWorktreeAllocation",
-                    "EffectWorktreeIntegration",
-                    "EffectSleep",
-                    "EffectCommands",
-                    "EffectConsole",
-                    "EffectAskUser",
-                    "EffectGreen",
-                    "EffectNotifications",
-                    "EffectJev",
-                    "EffectModelCall",
-                    "EffectActor",
-                    "EffectReflect",
-                    "EffectLookup",
-                    "EffectRepoEvent",
-                    "EffectSource",
-                    "EffectJournal",
-    "EffectWeb",
-    "EffectFsRead",
-    "EffectFsWrite",
-
-                ]
-                .into_iter()
-                .map(|ctor| SumVariant {
-                    ctor,
-                    fields: VariantFields::Positional(Vec::new()),
-                    doc: &[],
-                })
-                .collect(),
-            },
-            json: JsonInstance::None,
-            derives: WireDerives(&[]),
-            domain: None,
-            doc: &["Stable nominal key for one generated model-facing effect."],
-        },
+        crate::actor_profiles::actor_key_definition(),
     ]
 }

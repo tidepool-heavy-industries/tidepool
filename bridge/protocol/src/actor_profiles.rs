@@ -1,109 +1,580 @@
-//! One general actor effect list; resource authority is issued by runtime owners.
-use crate::{gen::GeneratedFile, schema::TypeShape};
+//! Nominal effect catalogue and ordered profiles. Interpreter availability and
+//! concrete resource grants remain facts issued by runtime owners.
+use crate::{
+    gen::GeneratedFile,
+    schema::{
+        ExternalType, JsonInstance, SumVariant, TypeDef, TypeShape, VariantFields, WireDerives,
+    },
+};
 use std::collections::BTreeSet;
 
-const EFFECTS: &[&str] = &[
-    "Replies",
-    "Watches",
-    "ResourceScopes",
-    "ActorContext",
-    "AgentLaunch",
-    "AgentInspection",
-    "AgentControl",
-    "BoundWorktree",
-    "WorktreeRegistry",
-    "WorktreeAllocation",
-    "WorktreeIntegration",
-    "Sleep",
-    "Notifications",
-    "Jev",
-    "ModelCall",
-    "Commands",
-    "Console",
-    "AskUser",
-    "Green",
-    "Actor",
-    "Reflect",
-    "Lookup",
-    "Source",
-    "Journal",
-    "Web",
-    "FsRead",
-    "FsWrite",
-    "RepoEvent",
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectScope {
+    Delegable,
+    InvocationOnly,
+}
+
+/// A nominal declaration: defining module/type, key constructor, wire spelling,
+/// classification and independent stable orders for each existing projection.
+#[derive(Clone, Copy, Debug)]
+pub struct NominalEffect {
+    pub identity: ExternalType,
+    pub constructor: &'static str,
+    pub wire_name: &'static str,
+    pub scope: EffectScope,
+    pub default_order: Option<usize>,
+    pub rust_order: usize,
+    pub bridge_order: usize,
+}
+
+macro_rules! nominal {
+    ($name:ident, $constructor:ident, $default:expr, $rust:expr, $bridge:expr, $module:expr) => {
+        NominalEffect {
+            identity: ExternalType {
+                haskell_name: stringify!($name),
+                rust_wire: stringify!($name),
+                core_module: Some($module),
+            },
+            constructor: stringify!($constructor),
+            wire_name: stringify!($name),
+            scope: EffectScope::Delegable,
+            default_order: Some($default),
+            rust_order: $rust,
+            bridge_order: $bridge,
+        }
+    };
+}
+
+/// Catalogue order preserves the Haskell sum's existing constructor tags.
+pub const EFFECTS: &[NominalEffect] = &[
+    nominal!(ResourceScopes, EffectResourceScopes, 2, 1, 0, "Tidepool.Effects.Core"),
+    nominal!(Replies, EffectReplies, 0, 0, 1, "Tidepool.Agent.Reply.Internal"),
+    nominal!(Watches, EffectWatches, 1, 2, 2, "Tidepool.Agent.Watch.Internal"),
+    nominal!(ActorContext, EffectActorContext, 3, 4, 3, "Tidepool.Effects.Core"),
+    nominal!(AgentLaunch, EffectAgentLaunch, 4, 5, 4, "Tidepool.Effects.Core"),
+    nominal!(AgentInspection, EffectAgentInspection, 5, 6, 5, "Tidepool.Effects.Core"),
+    nominal!(AgentControl, EffectAgentControl, 6, 7, 6, "Tidepool.Effects.Core"),
+    nominal!(BoundWorktree, EffectBoundWorktree, 7, 8, 7, "Tidepool.Effects.Core"),
+    nominal!(WorktreeRegistry, EffectWorktreeRegistry, 8, 9, 8, "Tidepool.Effects.Core"),
+    nominal!(WorktreeAllocation, EffectWorktreeAllocation, 9, 10, 9, "Tidepool.Effects.Core"),
+    nominal!(WorktreeIntegration, EffectWorktreeIntegration, 10, 11, 10, "Tidepool.Effects.Core"),
+    nominal!(Sleep, EffectSleep, 11, 12, 11, "Tidepool.Effects.Core"),
+    nominal!(Commands, EffectCommands, 15, 16, 15, "Tidepool.Effects.Core"),
+    nominal!(Console, EffectConsole, 16, 17, 16, "Tidepool.Effects.Core"),
+    nominal!(AskUser, EffectAskUser, 17, 18, 17, "Tidepool.Effects.Core"),
+    nominal!(Green, EffectGreen, 18, 19, 18, "Tidepool.Effects.Core"),
+    nominal!(Notifications, EffectNotifications, 12, 13, 12, "Tidepool.Effects.Core"),
+    nominal!(Jev, EffectJev, 13, 14, 13, "Tidepool.Effects.Core"),
+    nominal!(ModelCall, EffectModelCall, 14, 15, 14, "Tidepool.Effects.Core"),
+    nominal!(Actor, EffectActor, 19, 20, 19, "Tidepool.Effects.Core"),
+    nominal!(Reflect, EffectReflect, 20, 21, 20, "Tidepool.Effects.Core"),
+    nominal!(Lookup, EffectLookup, 21, 22, 21, "Tidepool.Effects.Core"),
+    nominal!(RepoEvent, EffectRepoEvent, 27, 23, 22, "Tidepool.Effects.Core"),
+    nominal!(Source, EffectSource, 22, 28, 23, "Tidepool.Effects.Core"),
+    nominal!(Journal, EffectJournal, 23, 24, 24, "Tidepool.Effects.Core"),
+    nominal!(Web, EffectWeb, 24, 25, 25, "Tidepool.Effects.Core"),
+    nominal!(FsRead, EffectFsRead, 25, 26, 26, "Tidepool.Effects.Core"),
+    nominal!(FsWrite, EffectFsWrite, 26, 27, 27, "Tidepool.Effects.Core"),
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "ContextReadWrite",
+            rust_wire: "ContextReadWrite",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        constructor: "InvocationContextReadWrite",
+        wire_name: "ContextReadWrite",
+        scope: EffectScope::InvocationOnly,
+        default_order: None,
+        rust_order: 29,
+        bridge_order: 28,
+    },
 ];
 
-fn validate(effects: &[&str]) -> Result<(), String> {
-    let schema = crate::effects::agent_launch::agent_launch();
-    let definition = schema
-        .type_defs
+/// Forks was serialized as an actor key but never had a Haskell nominal type.
+/// Preserve decoding/re-encoding retained contracts; it has no witness, import,
+/// default membership or interpreter support. New code uses AgentLaunch.
+const LEGACY_ACTOR_KEYS: &[(&str, usize)] = &[("Forks", 3)];
+
+fn delegable(effects: &[NominalEffect]) -> impl Iterator<Item = &NominalEffect> {
+    effects
         .iter()
-        .find(|definition| definition.name == "ActorEffectKey")
-        .ok_or("ActorEffectKey has no schema owner")?;
-    let TypeShape::Sum { variants } = &definition.shape else {
-        return Err("ActorEffectKey must be a closed sum".into());
-    };
-    let keys = variants
+        .filter(|effect| effect.scope == EffectScope::Delegable)
+}
+
+fn defaults(effects: &[NominalEffect]) -> Vec<&NominalEffect> {
+    let mut selected = effects
         .iter()
-        .map(|variant| variant.ctor)
-        .collect::<BTreeSet<_>>();
-    let mut seen = BTreeSet::new();
+        .filter(|effect| effect.default_order.is_some())
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|effect| effect.default_order);
+    selected
+}
+
+fn validate(effects: &[NominalEffect]) -> Result<(), String> {
+    let declarations = crate::effects::all();
+    let mut names = BTreeSet::new();
+    let mut constructors = BTreeSet::new();
+    let mut wires = BTreeSet::new();
+    let mut orders = BTreeSet::new();
+    let mut ranks = BTreeSet::new();
+    let mut bridge_orders = BTreeSet::new();
     for effect in effects {
-        if !keys.contains(format!("Effect{effect}").as_str()) {
-            return Err(format!("unknown actor effect {effect}"));
+        if !names.insert(effect.identity.haskell_name)
+            || !constructors.insert(effect.constructor)
+            || !wires.insert(effect.wire_name)
+            || !orders.insert(effect.rust_order)
+            || !bridge_orders.insert(effect.bridge_order)
+        {
+            return Err(format!(
+                "duplicate nominal effect identity/order: {}",
+                effect.wire_name
+            ));
         }
-        if !seen.insert(effect) {
-            return Err(format!("duplicate actor effect {effect}"));
+        let module = effect
+            .identity
+            .core_module
+            .ok_or_else(|| format!("missing defining module: {}", effect.wire_name))?;
+        if module == "Tidepool.Effects.Core"
+            && !declarations.iter().any(|declaration| {
+                declaration.name == effect.identity.haskell_name
+                    && declaration.type_params.is_empty()
+            })
+        {
+            return Err(format!(
+                "no unary Core effect declares {}",
+                effect.identity.haskell_name
+            ));
+        }
+        if let Some(rank) = effect.default_order {
+            if effect.scope != EffectScope::Delegable || !ranks.insert(rank) {
+                return Err(format!(
+                    "invalid default profile member: {}",
+                    effect.wire_name
+                ));
+            }
+        }
+    }
+    if ranks.iter().copied().ne(0..ranks.len()) {
+        return Err("default profile order must be contiguous".into());
+    }
+    for (name, order) in LEGACY_ACTOR_KEYS {
+        if wires.contains(name) || !orders.insert(*order) {
+            return Err("legacy key collides with nominal catalogue".into());
         }
     }
     Ok(())
 }
 
-/// Haskell alias and native defaults come from the same declared list.
-#[must_use]
-pub fn generated_files() -> Vec<GeneratedFile> {
-    validate(EFFECTS).unwrap_or_else(|error| panic!("invalid default actor effects: {error}"));
-    let mut rust = crate::gen::header("//! ", "Default actor effects");
+/// The AgentLaunch schema consumes this sum, rather than owning another list.
+pub fn actor_key_definition() -> TypeDef {
+    actor_key_definition_for(EFFECTS)
+}
+
+fn actor_key_definition_for(effects: &[NominalEffect]) -> TypeDef {
+    TypeDef {
+        name: "ActorEffectKey",
+        wire_rust: None,
+        haskell_module: None,
+        shape: TypeShape::Sum {
+            variants: delegable(effects)
+                .map(|effect| SumVariant {
+                    ctor: effect.constructor,
+                    fields: VariantFields::Positional(Vec::new()),
+                    doc: &[],
+                })
+                .collect(),
+        },
+        json: JsonInstance::None,
+        derives: WireDerives(&[]),
+        domain: None,
+        doc: &["Stable nominal key for one generated model-facing effect."],
+    }
+}
+
+fn imports(effects: &[NominalEffect]) -> String {
+    let mut imports = BTreeSet::new();
+    for effect in effects {
+        imports.insert(effect.identity.core_import().expect("validated module"));
+    }
+    imports.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
+    let actor = delegable(effects).collect::<Vec<_>>();
+    let invocation = effects
+        .iter()
+        .filter(|effect| effect.scope == EffectScope::InvocationOnly)
+        .collect::<Vec<_>>();
+    let mut rust = crate::gen::header("//! ", "Nominal effect identities");
+    rust.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub struct HaskellEffectIdentity {\n    pub module: &'static str,\n    pub name: &'static str,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]\npub enum ActorEffectKey {\n");
+    let mut rust_keys = actor
+        .iter()
+        .map(|effect| {
+            (
+                effect.identity.rust_wire,
+                effect.wire_name,
+                effect.rust_order,
+            )
+        })
+        .chain(
+            LEGACY_ACTOR_KEYS
+                .iter()
+                .map(|(name, order)| (*name, *name, *order)),
+        )
+        .collect::<Vec<_>>();
+    rust_keys.sort_by_key(|(_, _, order)| *order);
+    for (name, wire, _) in &rust_keys {
+        rust.push_str(&format!("    #[serde(rename = \"{wire}\")]\n    {name},\n"));
+    }
+    rust.push_str("}\n\nimpl ActorEffectKey {\n    pub const ALL: &'static [Self] = &[\n");
+    for effect in &actor {
+        rust.push_str(&format!("        Self::{},\n", effect.identity.rust_wire));
+    }
     rust.push_str(
+        "    ];\n\n    pub const fn haskell_name(self) -> &'static str {\n        match self {\n",
+    );
+    for (name, _, _) in &rust_keys {
+        let nominal = effects
+            .iter()
+            .find(|effect| effect.identity.rust_wire == *name)
+            .map_or(*name, |effect| effect.identity.haskell_name);
+        rust.push_str(&format!("            Self::{name} => \"{nominal}\",\n"));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn wire_name(self) -> &'static str {\n        match self {\n");
+    for (name, wire, _) in &rust_keys {
+        rust.push_str(&format!("            Self::{name} => \"{wire}\",\n"));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn haskell_module(self) -> Option<&'static str> {\n        match self {\n");
+    for effect in &actor {
+        rust.push_str(&format!(
+            "            Self::{} => Some(\"{}\"),\n",
+            effect.identity.rust_wire,
+            effect.identity.core_module.unwrap()
+        ));
+    }
+    for (name, _) in LEGACY_ACTOR_KEYS {
+        rust.push_str(&format!("            Self::{name} => None,\n"));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn haskell_constructor(self) -> Option<&'static str> {\n        match self {\n");
+    for effect in &actor {
+        rust.push_str(&format!(
+            "            Self::{} => Some(\"{}\"),\n",
+            effect.identity.rust_wire, effect.constructor
+        ));
+    }
+    for (name, _) in LEGACY_ACTOR_KEYS {
+        rust.push_str(&format!("            Self::{name} => None,\n"));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n            }),\n            None => None,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum ToolEffectKey {\n    Actor(ActorEffectKey),\n");
+    for effect in &invocation {
+        rust.push_str(&format!("    {},\n", effect.identity.rust_wire));
+    }
+    rust.push_str("}\n\nimpl ToolEffectKey {\n    pub const ALL: &'static [Self] = &[\n");
+    for effect in &actor {
+        rust.push_str(&format!(
+            "        Self::Actor(ActorEffectKey::{}),\n",
+            effect.identity.rust_wire
+        ));
+    }
+    for effect in &invocation {
+        rust.push_str(&format!("        Self::{},\n", effect.identity.rust_wire));
+    }
+    rust.push_str("    ];\n\n    pub const fn haskell_name(self) -> &'static str {\n        match self {\n            Self::Actor(key) => key.haskell_name(),\n");
+    for effect in &invocation {
+        rust.push_str(&format!(
+            "            Self::{} => \"{}\",\n",
+            effect.identity.rust_wire, effect.identity.haskell_name
+        ));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn wire_name(self) -> &'static str {\n        match self {\n            Self::Actor(key) => key.wire_name(),\n");
+    for effect in &invocation {
+        rust.push_str(&format!(
+            "            Self::{} => \"{}\",\n",
+            effect.identity.rust_wire, effect.wire_name
+        ));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn haskell_module(self) -> Option<&'static str> {\n        match self {\n            Self::Actor(key) => key.haskell_module(),\n");
+    for effect in &invocation {
+        rust.push_str(&format!(
+            "            Self::{} => Some(\"{}\"),\n",
+            effect.identity.rust_wire,
+            effect.identity.core_module.unwrap()
+        ));
+    }
+    rust.push_str("        }\n    }\n\n    pub const fn nominal_identity(self) -> Option<HaskellEffectIdentity> {\n        match self.haskell_module() {\n            Some(module) => Some(HaskellEffectIdentity {\n                module,\n                name: self.haskell_name(),\n            }),\n            None => None,\n        }\n    }\n}\n\nimpl From<ActorEffectKey> for ToolEffectKey {\n    fn from(key: ActorEffectKey) -> Self {\n        Self::Actor(key)\n    }\n}\n\nimpl serde::Serialize for ToolEffectKey {\n    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {\n        serializer.serialize_str(self.wire_name())\n    }\n}\n\nimpl<'de> serde::Deserialize<'de> for ToolEffectKey {\n    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {\n        let name = <String as serde::Deserialize>::deserialize(deserializer)?;\n        match name.as_str() {\n");
+    for effect in &invocation {
+        rust.push_str(&format!(
+            "            \"{}\" => Ok(Self::{}),\n",
+            effect.wire_name, effect.identity.rust_wire
+        ));
+    }
+    rust.push_str("            _ => ActorEffectKey::deserialize(\n                serde::de::value::StrDeserializer::<D::Error>::new(&name),\n            )\n            .map(Self::Actor),\n        }\n    }\n}\n");
+    let mut bridge = crate::gen::header("//! ", "Nominal actor effect key bridge");
+    bridge.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ActorEffectKeyWire {\n");
+    let mut bridge_effects = actor.clone();
+    bridge_effects.sort_by_key(|effect| effect.bridge_order);
+    for effect in &bridge_effects {
+        bridge.push_str(&format!(
+            "    #[haskell(module = \"Tidepool.Effects.Core\")]\n    {},\n",
+            effect.constructor
+        ));
+    }
+    bridge.push_str("}\n\nimpl ActorEffectKeyWire {\n    pub const ALL: &'static [Self] = &[\n");
+    for effect in &actor {
+        bridge.push_str(&format!("        Self::{},\n", effect.constructor));
+    }
+    bridge.push_str("    ];\n\n    pub const fn haskell_constructor(self) -> &'static str {\n        match self {\n");
+    for effect in &bridge_effects {
+        bridge.push_str(&format!(
+            "            Self::{} => \"{}\",\n",
+            effect.constructor, effect.constructor
+        ));
+    }
+    bridge.push_str("        }\n    }\n}\n\nimpl From<ActorEffectKeyWire> for crate::ActorEffectKey {\n    fn from(value: ActorEffectKeyWire) -> Self {\n        match value {\n");
+    for effect in &bridge_effects {
+        bridge.push_str(&format!(
+            "            ActorEffectKeyWire::{} => Self::{},\n",
+            effect.constructor, effect.identity.rust_wire
+        ));
+    }
+    bridge.push_str("        }\n    }\n}\n");
+    let mut profiles = crate::gen::header("//! ", "Default actor effects");
+    profiles.push_str(
         "\nuse crate::ActorEffectKey;\n\npub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[\n",
     );
-    for effect in EFFECTS {
-        rust.push_str(&format!("    ActorEffectKey::{effect},\n"));
+    for effect in defaults(effects) {
+        profiles.push_str(&format!(
+            "    ActorEffectKey::{},\n",
+            effect.identity.rust_wire
+        ));
     }
-    rust.push_str("];\n");
-    let mut hs = "{-# LANGUAGE DataKinds #-}\n".to_owned();
-    hs.push_str(&crate::gen::header("-- ", "Default actor effects"));
-    hs.push_str("module Tidepool.Internal.ActorProfiles (ActorEffects) where\n\nimport Tidepool.Agent.Reply (Replies)\nimport Tidepool.Agent.Watch (Watches)\nimport Tidepool.Effects.Core\n  ( ");
+    profiles.push_str("];\n");
+    let mut hs = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE OverloadedStrings #-}\n{-# LANGUAGE ScopedTypeVariables #-}\n{-# LANGUAGE TypeApplications #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
+    hs.push_str(&crate::gen::header(
+        "-- ",
+        "Nominal effect identities and profiles",
+    ));
+    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName) ) where\n\nimport Data.Kind (Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
+    hs.push_str(&imports(effects));
+    hs.push_str("\n\ntype ActorEffects =\n  '[");
     hs.push_str(
-        &EFFECTS
+        &defaults(effects)
             .iter()
-            .filter(|effect| !matches!(**effect, "Replies" | "Watches"))
-            .copied()
+            .map(|effect| effect.identity.haskell_name)
             .collect::<Vec<_>>()
-            .join("\n  , "),
+            .join(", "),
     );
-    hs.push_str("\n  )\n\ntype ActorEffects =\n  '[");
-    hs.push_str(&EFFECTS.join(", "));
-    hs.push_str("]\n");
+    hs.push_str("]\n\ntype CatalogueEffects =\n  '[");
+    hs.push_str(
+        &actor
+            .iter()
+            .map(|effect| effect.identity.haskell_name)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    hs.push_str("]\n\ntype CatalogueToolEffects =\n  '[");
+    hs.push_str(
+        &effects
+            .iter()
+            .map(|effect| effect.identity.haskell_name)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    hs.push_str("]\n\ndata ToolEffectKey = ActorEffect ActorEffectKey");
+    for effect in &invocation {
+        hs.push_str(&format!(" | {}", effect.constructor));
+    }
+    hs.push_str("\n  deriving (Eq, Show)\n\nactorEffectName :: ActorEffectKey -> Text\nactorEffectName key = case key of\n");
+    for effect in &actor {
+        hs.push_str(&format!(
+            "  {} -> \"{}\"\n",
+            effect.constructor, effect.wire_name
+        ));
+    }
+    hs.push_str("\ntoolEffectName :: ToolEffectKey -> Text\ntoolEffectName key = case key of\n  ActorEffect actor -> actorEffectName actor\n");
+    for effect in &invocation {
+        hs.push_str(&format!(
+            "  {} -> \"{}\"\n",
+            effect.constructor, effect.wire_name
+        ));
+    }
+    hs.push_str("\nclass KnownToolEffect (effect :: Type -> Type) where\n  knownToolEffectName :: Proxy effect -> Text\n\ninstance {-# OVERLAPPABLE #-} KnownEffect effect => KnownToolEffect effect where\n  knownToolEffectName _ = case effectKeys (knownEffects @'[effect]) of\n    [key] -> actorEffectName key\n    _ -> error \"a singleton effect witness must name one effect\"\n");
+    for effect in &invocation {
+        hs.push_str(&format!("\ninstance {{-# OVERLAPPING #-}} KnownToolEffect {} where\n  knownToolEffectName _ = toolEffectName {}\n", effect.identity.haskell_name, effect.constructor));
+    }
+    let mut row = "{-# LANGUAGE DataKinds #-}\n{-# LANGUAGE FlexibleInstances #-}\n{-# LANGUAGE GADTs #-}\n{-# LANGUAGE KindSignatures #-}\n{-# LANGUAGE MultiParamTypeClasses #-}\n{-# LANGUAGE RoleAnnotations #-}\n{-# LANGUAGE TypeOperators #-}\n{-# LANGUAGE UndecidableInstances #-}\n".to_owned();
+    row.push_str(&crate::gen::header("-- ", "Effect row witnesses"));
+    row.push_str("module Tidepool.Effects.Row\n  ( EffectWitness, Effects, KnownEffect (effectWitness), KnownEffects (knownEffects)\n  , effectKeys, Subset\n  ) where\n\nimport Data.Kind (Type)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\n");
+    row.push_str(&imports(
+        &actor.iter().map(|effect| **effect).collect::<Vec<_>>(),
+    ));
+    row.push_str("\n\n");
+    row.push_str(ROW_WITNESS_INFRASTRUCTURE);
+    for effect in &actor {
+        row.push_str(&format!(
+            "instance KnownEffect {} where effectWitness = EffectWitness {}\n",
+            effect.identity.haskell_name, effect.constructor
+        ));
+    }
     vec![
         GeneratedFile {
-            path: "exomonad/tool/src/generated/public_profiles.rs".into(),
+            path: "exomonad/actor/src/generated/nominal_keys.rs".into(),
+            contents: bridge,
+        },
+        GeneratedFile {
+            path: "exomonad/tool/src/generated/effect_keys.rs".into(),
             contents: rust,
+        },
+        GeneratedFile {
+            path: "exomonad/tool/src/generated/public_profiles.rs".into(),
+            contents: profiles,
         },
         GeneratedFile {
             path: "bridge/haskell/lib/Tidepool/Internal/ActorProfiles.hs".into(),
             contents: hs,
         },
+        GeneratedFile {
+            path: "bridge/haskell/lib/Tidepool/Effects/Row.hs".into(),
+            contents: row,
+        },
     ]
 }
+
+#[must_use]
+pub fn generated_files() -> Vec<GeneratedFile> {
+    validate(EFFECTS).unwrap_or_else(|error| panic!("invalid nominal effect catalogue: {error}"));
+    render(EFFECTS)
+}
+
+const ROW_WITNESS_INFRASTRUCTURE: &str = r#"type role EffectWitness nominal
+
+data EffectWitness (effect :: Type -> Type) = EffectWitness ActorEffectKey
+
+data Effects (effects :: [Type -> Type]) where
+  ENil :: Effects '[]
+  ECons :: EffectWitness effect -> Effects effects -> Effects (effect ': effects)
+
+class KnownEffect (effect :: Type -> Type) where
+  effectWitness :: EffectWitness effect
+
+class KnownEffects (effects :: [Type -> Type]) where
+  knownEffects :: Effects effects
+
+instance KnownEffects '[] where
+  knownEffects = ENil
+
+instance (KnownEffect effect, KnownEffects effects) => KnownEffects (effect ': effects) where
+  knownEffects = ECons effectWitness knownEffects
+
+effectKeys :: Effects effects -> [ActorEffectKey]
+effectKeys ENil = []
+effectKeys (ECons (EffectWitness key) rest) = key : effectKeys rest
+
+class Contains (effect :: Type -> Type) (effects :: [Type -> Type])
+instance {-# OVERLAPPING #-} Contains effect (effect ': effects)
+instance {-# OVERLAPPABLE #-} Contains effect effects => Contains effect (other ': effects)
+
+class Subset (child :: [Type -> Type]) (parent :: [Type -> Type])
+instance Subset '[] parent
+instance (Contains effect parent, Subset effects parent) => Subset (effect ': effects) parent
+
+"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn default_actor_effects_reject_duplicates_and_unknown_members() {
+    fn catalogue_rejects_duplicates_unknown_core_and_invocation_defaults() {
         assert!(validate(EFFECTS).is_ok());
-        assert!(validate(&["Replies", "Replies"]).is_err());
-        assert!(validate(&["NotAnEffect"]).is_err());
+        let mut changed = EFFECTS.to_vec();
+        changed.push(changed[0]);
+        assert!(validate(&changed).is_err());
+        let mut changed = EFFECTS.to_vec();
+        changed[0].identity.haskell_name = "NotAnEffect";
+        assert!(validate(&changed).is_err());
+        let mut changed = EFFECTS.to_vec();
+        changed.last_mut().unwrap().default_order = Some(25);
+        assert!(validate(&changed).is_err());
+    }
+
+    #[test]
+    fn catalogue_mutations_reach_every_projection_without_another_table() {
+        let original = render(EFFECTS);
+        // A nominal external entry can be added without a second Core declaration.
+        let added = NominalEffect {
+            identity: ExternalType {
+                haskell_name: "Probe",
+                rust_wire: "Probe",
+                core_module: Some("Example.Probe"),
+            },
+            constructor: "EffectProbe",
+            wire_name: "ProbeWire",
+            scope: EffectScope::Delegable,
+            default_order: Some(defaults(EFFECTS).len()),
+            rust_order: 30,
+            bridge_order: 29,
+        };
+        let mut changed = EFFECTS.to_vec();
+        changed.push(added);
+        assert!(validate(&changed).is_ok());
+        for file in render(&changed) {
+            assert!(
+                file.contents.contains("Probe"),
+                "{} missed addition",
+                file.path
+            );
+        }
+        let TypeShape::Sum { variants } = actor_key_definition_for(&changed).shape else {
+            panic!()
+        };
+        assert_eq!(variants.last().unwrap().ctor, "EffectProbe");
+        changed.pop();
+        assert_eq!(
+            render(&changed)
+                .iter()
+                .map(|file| (&file.path, &file.contents))
+                .collect::<Vec<_>>(),
+            original
+                .iter()
+                .map(|file| (&file.path, &file.contents))
+                .collect::<Vec<_>>()
+        );
+        let target = &mut changed[1];
+        target.identity = ExternalType {
+            haskell_name: "RenamedReplies",
+            rust_wire: "RenamedReplies",
+            core_module: Some("Example.Renamed"),
+        };
+        target.constructor = "EffectRenamedReplies";
+        target.wire_name = "RenamedRepliesWire";
+        assert!(validate(&changed).is_ok());
+        for file in render(&changed) {
+            assert!(
+                file.contents.contains("RenamedReplies"),
+                "{} missed rename",
+                file.path
+            );
+            assert!(
+                !file.contents.contains("EffectReplies"),
+                "{} retained old key",
+                file.path
+            );
+        }
+        changed.remove(1);
+        for effect in &mut changed {
+            if let Some(rank) = &mut effect.default_order {
+                if *rank > 0 {
+                    *rank -= 1;
+                }
+            }
+        }
+        assert!(validate(&changed).is_ok());
+        for file in render(&changed) {
+            assert!(
+                !file.contents.contains("RenamedReplies"),
+                "{} retained removal",
+                file.path
+            );
+        }
     }
 }

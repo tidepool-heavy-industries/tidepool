@@ -195,10 +195,7 @@ where
         let lease = record.installed_policy;
         let tools = lease.as_ref().and_then(crate::InstalledToolLease::tools);
         let captured = record.descriptor.context_parent().is_some();
-        let change = if captured
-            || tools
-                .is_none_or(|tools| !tools.slots.iter().any(|slot| slot == INITIAL_CONTEXT_SLOT))
-        {
+        let change = if captured || tools.is_none_or(|tools| tools.initial_context.is_none()) {
             InitialContextEvent::Skip {
                 captured,
                 caller_seed: record.fresh_context_seed.clone(),

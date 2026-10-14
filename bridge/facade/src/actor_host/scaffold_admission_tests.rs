@@ -251,7 +251,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
             ActorEffectKey::Commands,
             ActorEffectKey::Lookup,
             ActorEffectKey::Replies,
-            ActorEffectKey::Forks,
+            ActorEffectKey::AgentLaunch,
             ActorEffectKey::Watches,
             ActorEffectKey::Console,
         ] {

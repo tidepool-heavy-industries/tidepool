@@ -1,11 +1,12 @@
 //! Transport-neutral model tool contracts shared by actor policies and their
 //! concrete host projections.
 
+#[path = "generated/effect_keys.rs"]
 mod effects;
 #[path = "generated/public_profiles.rs"]
 mod public_profiles;
 pub mod surface;
-pub use effects::{ActorEffectKey, ToolEffectKey};
+pub use effects::{ActorEffectKey, HaskellEffectIdentity, ToolEffectKey};
 pub use public_profiles::DEFAULT_ACTOR_EFFECTS;
 
 /// When this invocation must settle relative to the caller's next inference.
@@ -724,5 +725,35 @@ mod tests {
             serde_json::from_value::<ToolDeclaration>(wire).expect("decode declaration"),
             declaration
         );
+    }
+}
+
+#[cfg(test)]
+mod effect_catalogue_tests {
+    use super::*;
+
+    #[test]
+    fn every_nominal_key_roundtrips_exact_wire_and_module_identity() {
+        for key in ToolEffectKey::ALL {
+            let encoded = serde_json::to_string(key).unwrap();
+            assert_eq!(encoded, format!("\"{}\"", key.wire_name()));
+            let decoded: ToolEffectKey = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, *key);
+            let identity = key.nominal_identity().unwrap();
+            assert_eq!(identity.name, key.haskell_name());
+            assert_eq!(Some(identity.module), key.haskell_module());
+        }
+        for key in ActorEffectKey::ALL {
+            let decoded: ActorEffectKey =
+                serde_json::from_str(&serde_json::to_string(key).unwrap()).unwrap();
+            assert_eq!(decoded, *key);
+        }
+        let legacy: ToolEffectKey = serde_json::from_str("\"Forks\"").unwrap();
+        assert_eq!(legacy, ToolEffectKey::Actor(ActorEffectKey::Forks));
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), "\"Forks\"");
+        assert_eq!(legacy.nominal_identity(), None);
+        assert!(!ActorEffectKey::ALL.contains(&ActorEffectKey::Forks));
+        assert!(!DEFAULT_ACTOR_EFFECTS.contains(&ActorEffectKey::Forks));
+        assert!(serde_json::from_str::<ToolEffectKey>("\"NotAnEffect\"").is_err());
     }
 }

@@ -15,3 +15,12 @@ The production MCP composer exports Core/Authored/Effects through
 Validation includes schema checks, compiled Rust codecs, and the three real GHC
 consumer/codec tests in `bridge/mcp/tests/generated_surface_contracts.rs`.
 A refusal first establishes a valid compiled or decoded control.
+
+`actor_profiles.rs` owns nominal actor/tool effect keys, defining module/type
+identity, delegability and ordered default profiles. Its projections supply
+Rust and Haskell sums, reflection and row witnesses; runtime interpreter
+support and resource grants remain independently observed. External nominal
+entries use `ExternalType`, including handwritten Replies and Watches.
+The legacy Rust `Forks` spelling remains decodable/re-encodable for retained
+contracts, but has no nominal Haskell identity, witness, default membership or
+installed interpreter. Authored launch uses AgentLaunch.

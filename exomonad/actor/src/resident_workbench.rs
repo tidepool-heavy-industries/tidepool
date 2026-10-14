@@ -1246,6 +1246,8 @@ pub(crate) struct ResidentWorkbenchTools {
     _source_original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     code: InstalledToolCode,
     pub(crate) after_tool: Option<crate::tool_contract::AfterToolEntry>,
+    pub(crate) initial_context: Option<crate::tool_contract::InitialContextEntry>,
+    dispatcher_effects: HaskellTypeSource,
     /// How the spec was found, and where. Reported in status and in every
     /// reload receipt.
     pub(crate) origin: crate::agent_spec::SpecOrigin,
@@ -1412,7 +1414,7 @@ impl PersistedActorInstallation {
                 .and_then(|resolved| resolved.entry.clone()),
             effects: tools.dispatcher_effects.expression().to_owned(),
             declarations: tools.surface(),
-            slots: tools.slots.clone(),
+            slots: tools.slots(),
         })
     }
     fn verify(
@@ -1440,7 +1442,7 @@ impl PersistedActorInstallation {
                 "effect row",
             ));
         }
-        if self.declarations != actual.surface() {
+        if self.declarations != actual.declarations {
             return Err(ActorInstallationRecoveryError::InstallationMismatch(
                 "registered declarations",
             ));
@@ -1671,7 +1673,7 @@ impl InstalledToolLease {
         self.tools.clone()
     }
 
-    pub(crate) fn select(&self, name: &str) -> Option<InstalledToolSelection> {
+    fn select(&self, name: &str) -> Option<InstalledToolSelection> {
         let index = self
             .tools
             .as_ref()?
@@ -2253,6 +2255,18 @@ where
 pub(crate) use crate::tool_contract::{decode_installation, SpecInstallation};
 
 impl ResidentWorkbenchTools {
+    fn slots(&self) -> Vec<String> {
+        self.after_tool
+            .iter()
+            .map(|_| "afterTool".to_owned())
+            .chain(
+                self.initial_context
+                    .iter()
+                    .map(|_| "initialContext".to_owned()),
+            )
+            .collect()
+    }
+
     pub(crate) fn surface(&self) -> Vec<exomonad_tool::HostedTool> {
         self.endpoints
             .iter()
@@ -6450,6 +6464,8 @@ where
                             _source_original: source_original,
                             code,
                             after_tool: admitted.after_tool,
+                            initial_context: admitted.initial_context,
+                            dispatcher_effects: dispatcher_effects.clone(),
                             origin,
                             install,
                             revision,
@@ -6466,14 +6482,17 @@ where
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
     #[cfg(test)]
-    pub(crate) async fn begin_tool(
+    /// Exercise the authored Haskell named dispatcher with its actual issued root.
+    /// Production hosted calls enter only through an admitted endpoint selection.
+    #[cfg(test)]
+    async fn begin_named_haskell_dispatch_contract(
         &self,
         context: crate::ActorSessionContext,
         dispatch: Arc<RootCustody>,
         name: String,
         arguments: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-    self.begin_installed_entry(context, dispatch, 0, name, arguments)
+        self.begin_installed_entry(context, dispatch, 0, name, arguments)
             .await
     }
 
@@ -6526,7 +6545,7 @@ where
                     .run_rooted_entry_borrowed(
                         "hosted_tool",
                         &dispatch,
-                    entry,
+                        entry,
                         context.placement.resource_scope,
                         None,
                         settlement,
@@ -17670,7 +17689,7 @@ pub(crate) mod request_tests {
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
         let workbench = ResidentActorWorkbench::new(machines, source, None);
         let ResidentWorkbenchStep::Running { fragment, outcome } = workbench
-            .begin_tool(
+            .begin_named_haskell_dispatch_contract(
                 context.clone(),
                 Arc::new(dispatch),
                 "probe".into(),
@@ -17753,7 +17772,7 @@ pub(crate) mod request_tests {
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(machines, source, None);
         let step = workbench
-            .begin_tool(
+            .begin_named_haskell_dispatch_contract(
                 context.clone(),
                 Arc::new(dispatch),
                 "probe".into(),
@@ -18393,21 +18412,21 @@ pub(crate) mod request_tests {
             std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
         );
         let entry_storage = Arc::new(tempfile::tempdir().unwrap());
-        let generation_source =
-            crate::SourceLayerIssuer::default().issue(Arc::new(GenerationSource {
-                _owner: authored.clone(),
-                _entries: entry_storage.clone(),
-                entries: crate::SourceEntryStorage::FreshCompilation {
-                    directory: entry_storage.path().to_owned(),
-                    preparation: uuid::Uuid::new_v4(),
-                },
-                paths: roots.clone(),
-                identities: vec!["quoted original source".into()],
-                evidence: crate::SourceGenerationEvidence {
-                    reference: source_reference.clone(),
-                    configuration_digest: [0; 32],
-                },
-            }));
+        let source_issuer = crate::SourceLayerIssuer::default();
+        let generation_source = source_issuer.issue(Arc::new(GenerationSource {
+            _owner: authored.clone(),
+            _entries: entry_storage.clone(),
+            entries: crate::SourceEntryStorage::FreshCompilation {
+                directory: entry_storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            },
+            paths: roots.clone(),
+            identities: vec!["quoted original source".into()],
+            evidence: crate::SourceGenerationEvidence {
+                reference: source_reference.clone(),
+                configuration_digest: [0; 32],
+            },
+        }));
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None)
@@ -18694,7 +18713,7 @@ pub(crate) mod request_tests {
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
             completed_executions
         );
-    assert_eq!(first.surface(), second.surface());
+        assert_eq!(first.surface(), second.surface());
         if generation_replacement.is_some() {
             // Replacement publishes its own issued source base without inheriting the notebook.
             let descriptor = crate::ActorDescriptor::new("quoted replacement", context.placement)
@@ -18742,6 +18761,7 @@ pub(crate) mod request_tests {
                 ActorGenerationCommit::Published { generation, .. } => generation,
                 _ => panic!("initial generation must publish"),
             };
+            let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
             let (before, before_visibility) = workbench
                 .access
                 .with_machine(context.clone(), |session, context, _| {
@@ -18919,7 +18939,7 @@ pub(crate) mod request_tests {
             let replacement = match workbench
                 .commit_actor_generation(
                     context.clone(),
-                    descriptor,
+                    descriptor.clone(),
                     state.clone(),
                     ActorRequestSnapshot::Generation(initial.clone()),
                     prepared,
@@ -18935,7 +18955,40 @@ pub(crate) mod request_tests {
                 ActorGenerationCommit::Published { generation, .. } => generation,
                 _ => panic!("replacement must publish"),
             };
+            crate::resident_actor::pinned_endpoint_generation_tests::assert_pinned_preflight(
+                ResidentActorRunner::new(Arc::clone(&workbench.access.machines), source.clone()),
+                descriptor.clone(),
+                initial.clone(),
+                replacement.clone(),
+                pinned_endpoint.clone(),
+                source_issuer.clone(),
+            );
             assert_ne!(replacement.scope.scope(), initial.scope.scope());
+            assert!(Arc::ptr_eq(
+                pinned_endpoint.snapshot().generation().unwrap(),
+                &initial
+            ));
+            let current_endpoint = state.snapshot().unwrap().select("probe").unwrap();
+            assert!(Arc::ptr_eq(
+                current_endpoint.snapshot().generation().unwrap(),
+                &replacement
+            ));
+            assert_ne!(
+                pinned_endpoint
+                    .snapshot()
+                    .generation()
+                    .unwrap()
+                    .context
+                    .placement
+                    .lexical_scope,
+                current_endpoint
+                    .snapshot()
+                    .generation()
+                    .unwrap()
+                    .context
+                    .placement
+                    .lexical_scope,
+            );
             let (private, private_context) = ResidentActorWorkbench::new(
                 Arc::clone(&workbench.access.machines),
                 source.clone(),
@@ -19659,6 +19712,24 @@ pub(crate) mod request_tests {
             let state = InstalledToolsState::default();
             state.publish(expected.clone());
             let pinned = expected.select("probe").unwrap();
+            let pinned_last = expected.select("last_probe").unwrap();
+            assert_eq!(pinned.entry_index(), 3);
+            assert_eq!(pinned_last.entry_index(), 4);
+            let startup = workbench.begin_initial_context(
+                context.clone(), expected.tools().unwrap().dispatch.clone(),
+                serde_json::json!({"operation": "integration", "callerSeed": null}),
+            ).await.unwrap();
+            let startup = match startup {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
+                    .await.unwrap(),
+                other => other,
+            };
+            let ResidentWorkbenchStep::Committed { value: Some(seed), .. } = startup else {
+                panic!("initializer did not return its semantic context seed")
+            };
+            assert_eq!(seed["sections"][0]["label"], "captured initializer");
+            assert_eq!(seed["sections"][0]["body"], "retained notebook value");
             assert!(expected.select(crate::status_tool::STATUS_TOOL).is_none());
             assert!(pinned
                 .clone()
@@ -19693,7 +19764,9 @@ pub(crate) mod request_tests {
             assert_eq!(later.lease().tools().unwrap().install, 2);
             for (selected, expected_output) in [
                 (pinned, "retained notebook value"),
+                (pinned_last, "retained notebook value"),
                 (later, "replacement notebook value"),
+                (state.current().unwrap().select("last_probe").unwrap(), "replacement notebook value"),
             ] {
                 let call = selected
                     .admit(exomonad_tool::ToolArguments::Raw("input".into()))
@@ -19913,13 +19986,18 @@ pub(crate) mod request_tests {
                 .prepare_explicit_tools(context.clone(), 5, vec![], installer.clone())
                 .await
                 .expect("original retained installer remains callable after refusals");
+            let lease = InstalledToolLease::new(
+                context.actor,
+                crate::CheckpointSourceLayer::default(),
+                Some(Arc::new(tools)),
+            );
+            let call = lease
+                .select("probe")
+                .unwrap()
+                .admit(exomonad_tool::ToolArguments::Raw("input".into()))
+                .unwrap();
             let step = workbench
-                .begin_tool(
-                    context.clone(),
-                    tools.dispatch.clone(),
-                    "probe".into(),
-                    serde_json::json!("input"),
-                )
+                .begin_selected_tool(context.clone(), call.selected, serde_json::json!("input"))
                 .await
                 .unwrap();
             let step = match step {

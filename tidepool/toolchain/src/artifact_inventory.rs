@@ -338,7 +338,7 @@ impl IssuedTargetNativeSelection {
             .collect::<BTreeSet<_>>();
         let entries = ids
             .iter()
-            .map(|id| Arc::clone(&state.payloads[id]))
+            .map(|id| Arc::clone(&view.lease.payloads[id]))
             .collect::<Vec<_>>();
         let mut expected = certified_target_source_groups(&entries, imports)?;
         if let Some(entry) = entry {
@@ -606,7 +606,7 @@ impl NativeOriginalRequirement {
         else {
             return Ok(None);
         };
-        let Some(entry) = state.payloads.get(&original) else {
+        let Some(entry) = view.lease.payloads.get(&original) else {
             return Err(failure(
                 "private native original is outside retained custody",
             ));
@@ -633,9 +633,9 @@ impl NativeOriginalRequirement {
                     .namespace
                     .get(&original)
                     .is_some_and(|selected| selected != carrier)
-                || !state.graph.edges(state.indices[node]).any(|edge| {
-                    state.graph[edge.target()] == InventoryNodeKey::Artifact(canonical_binding)
-                        && *edge.weight() == ArtifactDependency::Interface
+                || !state.outgoing(*node).any(|(target, label)| {
+                    target == InventoryNodeKey::Artifact(canonical_binding)
+                        && *label == ArtifactDependency::Interface
                 })
             {
                 continue;
@@ -3276,16 +3276,11 @@ impl ArtifactInventory {
                 let choice_edges = choices
                     .iter()
                     .flat_map(|choice| {
-                        trace_state
-                            .graph
-                            .edges(trace_state.indices[&InventoryNodeKey::Group(*choice)])
-                            .map(move |edge| {
-                                (
-                                    InventoryNodeKey::Group(*choice),
-                                    trace_state.graph[edge.target()],
-                                    edge.weight().clone(),
-                                )
-                            })
+                        trace_state.outgoing(InventoryNodeKey::Group(*choice)).map(
+                            move |(target, label)| {
+                                (InventoryNodeKey::Group(*choice), target, label.clone())
+                            },
+                        )
                     })
                     .collect::<Vec<_>>();
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", reason = "admission_required_group_choices",
@@ -3971,12 +3966,12 @@ impl NativeSelectionIndex {
                 .entry(group.binding.artifact)
                 .or_default()
                 .insert(group.original_ordinal);
-            for edge in state.graph.edges(state.indices[key]) {
-                let InventoryNodeKey::Artifact(carrier) = state.graph[edge.target()] else {
+            for (target, label) in state.outgoing(*key) {
+                let InventoryNodeKey::Artifact(carrier) = target else {
                     continue;
                 };
                 if carrier.artifact != group.binding.artifact
-                    || *edge.weight() != ArtifactDependency::Interface
+                    || *label != ArtifactDependency::Interface
                 {
                     continue;
                 }
@@ -4279,20 +4274,15 @@ fn resolve_group_binding(
                 .iter()
                 .flat_map(|group| {
                     state
-                        .graph
-                        .edges(state.indices[&InventoryNodeKey::Group(*group)])
-                        .map(move |edge| {
-                            (
-                                InventoryNodeKey::Group(*group),
-                                state.graph[edge.target()],
-                                edge.weight().clone(),
-                            )
+                        .outgoing(InventoryNodeKey::Group(*group))
+                        .map(move |(target, label)| {
+                            (InventoryNodeKey::Group(*group), target, label.clone())
                         })
                 })
                 .collect::<Vec<_>>();
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                 reason = "resolve_group_binding_multiple_owned_groups", ?carrier, ordinal, ?groups, ?edges,
-                owner = ?state.payloads.get(&carrier.artifact).map(|entry| &entry.descriptor.owner),
+                owner = ?state.interned(&carrier.artifact).map(|entry| entry.descriptor.owner.clone()),
                 resolver_caller = %std::panic::Location::caller(),
                 "exact owned group resolver ambiguity");
         }
@@ -5402,7 +5392,7 @@ impl ArtifactView {
         let canonical_by_original = artifact_ids(owned)
             .into_iter()
             .filter_map(|id| {
-                let ArtifactPayload::Original(product) = &state.payloads[&id].payload else {
+                let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
                     return None;
                 };
                 Some((
@@ -5420,27 +5410,24 @@ impl ArtifactView {
                     return Vec::new();
                 };
                 state
-                    .graph
-                    .edges(state.indices[node])
-                    .filter_map(|edge| {
-                        let carrier_node = state.graph[edge.target()];
+                    .outgoing(*node)
+                    .filter_map(|(carrier_node, label)| {
                         let InventoryNodeKey::Artifact(carrier) = carrier_node else {
                             return None;
                         };
                         if carrier.artifact != group.binding.artifact
-                            || *edge.weight() != ArtifactDependency::Interface
+                            || *label != ArtifactDependency::Interface
                         {
                             return None;
                         }
                         let canonical = *canonical_by_original.get(&carrier.artifact)?;
                         state
-                            .graph
-                            .edges(state.indices[&carrier_node])
-                            .any(|pair| {
-                                *pair.weight() == ArtifactDependency::Interface
-                                    && matches!(state.graph[pair.target()], InventoryNodeKey::Artifact(binding)
+                            .outgoing(carrier_node)
+                            .any(|(target, dependency)| {
+                                *dependency == ArtifactDependency::Interface
+                                    && matches!(target, InventoryNodeKey::Artifact(binding)
                                         if binding.artifact == canonical)
-                                    && interface_nodes.contains(&state.graph[pair.target()])
+                                    && interface_nodes.contains(&target)
                             })
                             .then_some(carrier_node)
                     })
@@ -5459,11 +5446,11 @@ impl ArtifactView {
                 return false;
             };
             !selected_nodes.contains(node)
-                && state.graph.edges(state.indices[node]).any(|edge| {
-                    matches!(state.graph[edge.target()], InventoryNodeKey::Artifact(carrier)
+                && state.outgoing(*node).any(|(target, label)| {
+                    matches!(target, InventoryNodeKey::Artifact(carrier)
                         if carrier.artifact == group.binding.artifact)
-                        && *edge.weight() == ArtifactDependency::Interface
-                        && retained_nodes.contains(&state.graph[edge.target()])
+                        && *label == ArtifactDependency::Interface
+                        && retained_nodes.contains(&target)
                 })
         }));
         drop(state);
@@ -5587,11 +5574,10 @@ impl ArtifactView {
         if excluded.is_empty() {
             return Ok(self.clone());
         }
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let is_excluded_value = |node: &InventoryNodeKey| {
             excluded.contains(&node.artifact())
                 && matches!(
-                    state.payloads[&node.artifact()].payload,
+                    self.lease.payloads[&node.artifact()].payload,
                     ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                 )
         };
@@ -5608,7 +5594,6 @@ impl ArtifactView {
             .filter(|node| !is_excluded_value(node))
             .collect::<Vec<_>>();
         let namespace = self.namespace();
-        drop(state);
 
         let mut retained = self
             .lease

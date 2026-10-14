@@ -5,6 +5,9 @@
 //! the single driver between those boundaries; it does not recreate registry
 //! turn leases, parked-obligation maps, or a host-side scheduler.
 
+#[cfg(test)]
+pub(crate) mod pinned_endpoint_generation_tests;
+
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
@@ -65,7 +68,7 @@ mod tool_support;
 mod workbench_ledger;
 
 #[cfg(test)]
-pub(crate) use drain_wait::{DrainWaitEvent, wait_drain_event};
+pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
     ExecutionResourceOwners, PreparedWorkbenchGenerationOwner, WorkbenchCompilationAuthority,
     WorkbenchPublicOwner,
@@ -76,11 +79,11 @@ use display_settlement::{
     DisplayReceiptSubmission,
 };
 use invocation_work::{
-    InvocationWork, ensure_workbench_execution_id, retain_invocation_cleanup_summary,
+    ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
 };
 use status_rendering::{
-    RevisionIdentities, RosterSnapshot, render_bindings_section, render_job_line,
-    render_revisions_section, render_roster_changes, render_source_drift_section,
+    render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
+    render_source_drift_section, RevisionIdentities, RosterSnapshot,
 };
 use workbench_ledger::{WorkbenchBoundaryRecord, WorkbenchExecutions, WorkbenchReplayFailure};
 
@@ -89,13 +92,13 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellSourceSpan, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem,
-    WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
+    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
     WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
     WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer, truncate_preview_at_line,
+    WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -1396,11 +1399,9 @@ mod display_tests {
         assert_eq!(owner.slots[&slot].page_ordinal, 1);
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
-        assert!(
-            owner
-                .stage(actor, terminal_page(), None, false, 8192, None, None)
-                .is_err()
-        );
+        assert!(owner
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .is_err());
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
 
@@ -3338,11 +3339,9 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.invocation_work(),
 
             Self::Workbench(execution) => {
-                assert!(
-                    execution
-                        .invocation_work
-                        .matches(execution.context.actor, &execution.reservation_owner)
-                );
+                assert!(execution
+                    .invocation_work
+                    .matches(execution.context.actor, &execution.reservation_owner));
                 Some(execution.invocation_work.clone())
             }
             Self::Tool { work, .. } => Some(work.clone()),
@@ -3773,8 +3772,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-    let issued = invocation
-            .installed_tools
+        let issued = invocation
+            .selected_tool
+            .as_ref()
+            .map(|call| call.selected.snapshot().clone())
+            .or(invocation.installed_tools)
             .or_else(|| self.installed_tools.snapshot());
         let issued_generation = issued
             .as_ref()
@@ -3792,33 +3794,29 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(lease) => Some(lease.clone()),
             None => None,
         };
-    if let Some(generation) = &issued_generation {
+        if let Some(generation) = &issued_generation {
             context = generation.context.clone();
         }
         if invocation.initial_context {
-            let tools = installed_tools
+            let initial_context = installed_tools
                 .as_ref()
                 .and_then(crate::InstalledToolLease::tools)
-                .filter(|tools| {
-                    tools
-                        .slots
-                        .iter()
-                        .any(|slot| slot == crate::initial_context::INITIAL_CONTEXT_SLOT)
-                })
+                .and_then(|tools| tools.initial_context.as_ref())
                 .ok_or_else(|| KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor,
                     detail: "actor has no installed initial-context slot".into(),
                     diagnostic: None,
                 })?;
-            context.haskell_effects_alias = tools.dispatcher_effects.clone();
+            context.haskell_effects_alias = initial_context.execution_effects.clone();
         }
-        let current_builtin = invocation.selected_tool.is_none() && request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
-            )
-        });
+        let current_builtin = invocation.selected_tool.is_none()
+            && request.tool_call().is_some_and(|call| {
+                matches!(
+                    call.name.as_str(),
+                    crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
+                )
+            });
         if !self.policy_installed
             || !matches!(
                 self.standing,
@@ -10503,7 +10501,7 @@ where
                                     total: request.items.len(),
                                 },
                             );
-                        let request_start = if effects.initial_context {
+                            let request_start = if effects.initial_context {
                                 owned_workbench::WorkbenchUnitStartRequest::InitialContext {
                                     dispatch: Arc::clone(
                                         cursor.tool_dispatch.as_ref().expect("startup dispatcher"),
@@ -15525,9 +15523,10 @@ mod tests {
         }
     }
     use super::{
-        ChildExitObservations, checkpoint_capture_delivered, disposition_for_non_command_failure,
+        checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
+        ChildExitObservations,
     };
 
     #[test]
@@ -15656,45 +15655,37 @@ mod tests {
             incarnation: 1,
             watch_id: 9,
         };
-        assert!(
-            super::CheckpointPublication::Route(boundary.clone())
-                .hosted_boundary()
-                .is_none()
-        );
-        assert!(
-            super::CheckpointPublication::Workbench {
-                boundary: Some(boundary),
-                capture: None,
-            }
+        assert!(super::CheckpointPublication::Route(boundary.clone())
             .hosted_boundary()
-            .is_none()
-        );
+            .is_none());
+        assert!(super::CheckpointPublication::Workbench {
+            boundary: Some(boundary),
+            capture: None,
+        }
+        .hosted_boundary()
+        .is_none());
         let direct = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
             actor_id: 1,
             incarnation: 1,
             execution_id: WorkbenchExecutionId::from_digest([7; 16]),
         };
-        assert!(
-            super::CheckpointPublication::Workbench {
-                boundary: Some(direct),
-                capture: None
-            }
-            .hosted_boundary()
-            .is_none()
-        );
+        assert!(super::CheckpointPublication::Workbench {
+            boundary: Some(direct),
+            capture: None
+        }
+        .hosted_boundary()
+        .is_none());
         let hosted = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "request".into(),
             "call".into(),
         );
-        assert!(
-            super::CheckpointPublication::Workbench {
-                boundary: Some(hosted),
-                capture: None
-            }
-            .hosted_boundary()
-            .is_some()
-        );
+        assert!(super::CheckpointPublication::Workbench {
+            boundary: Some(hosted),
+            capture: None
+        }
+        .hosted_boundary()
+        .is_some());
     }
 
     #[tokio::test]
@@ -16139,11 +16130,9 @@ mod tests {
             response.results[2].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("awaitSettled :: Response result -> Await (Settlement result)")
-        );
+        assert!(response
+            .render_text()
+            .contains("awaitSettled :: Response result -> Await (Settlement result)"));
         let structured = serde_json::to_value(&response).unwrap();
         assert_eq!(
             structured["results"][0]["outcome"]["matches"][0]["availability"],
@@ -16202,11 +16191,9 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("investigate :: FilePath -> IO ()")
-        );
+        assert!(response
+            .render_text()
+            .contains("investigate :: FilePath -> IO ()"));
     }
 
     /// The defect this path exists for: `Cmd.CommandResult` is a qualified type
@@ -16444,11 +16431,9 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("readOutput :: Job -> IO Text")
-        );
+        assert!(response
+            .render_text()
+            .contains("readOutput :: Job -> IO Text"));
     }
 
     /// Queries answered locally consume no compiler result and a dotted
@@ -16850,11 +16835,9 @@ mod tests {
             response.items[3].kind,
             Some(WorkbenchCellItemKind::Expression)
         );
-        assert!(
-            response.items[2..]
-                .iter()
-                .all(|item| item.installed_bindings.is_empty())
-        );
+        assert!(response.items[2..]
+            .iter()
+            .all(|item| item.installed_bindings.is_empty()));
     }
 
     #[test]
@@ -17000,11 +16983,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(
-            receipt
-                .output
-                .contains("private bindings (discarded unless this cell publishes): commandJob")
-        );
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed
@@ -17043,11 +17024,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(
-            receipt
-                .output
-                .contains("private bindings (discarded unless this cell publishes): commandJob")
-        );
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed

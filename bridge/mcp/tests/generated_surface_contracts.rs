@@ -66,6 +66,7 @@ fn authored_private_constructor_and_forged_request_site_are_refused_after_valid_
     surface.control();
     for fixture in [
         "PrivateConstructor.hs",
+        "ForgedEffectWitness.hs",
         "ForgedRequestSite.hs",
         "ForgedWorkspaceHandle.hs",
         "ForgedContextCheckpoint.hs",
@@ -106,7 +107,7 @@ fn generated_model_control_codecs_execute_and_preserve_callback_value() {
 
 #[test]
 fn compiled_default_actor_row_matches_generated_rust_order() {
-    use exomonad_tool::DEFAULT_ACTOR_EFFECTS;
+    use exomonad_tool::{ActorEffectKey, ToolEffectKey, DEFAULT_ACTOR_EFFECTS};
 
     let surface = Surface::new();
     let compiled = surface.compile("ActorProfiles.hs", true);
@@ -125,15 +126,58 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
     );
     let reflected: Vec<Vec<String>> = serde_json::from_slice(&executed.stdout)
         .expect("the compiled fixture must emit the default row as a string array");
-    let expected: Vec<Vec<String>> = vec![std::iter::once("ActorEffects".to_owned())
-        .chain(
+    let named = |label: &str, values: Vec<String>| {
+        std::iter::once(label.to_owned())
+            .chain(values)
+            .collect::<Vec<_>>()
+    };
+    let actors = ActorEffectKey::ALL;
+    let tools = ToolEffectKey::ALL;
+    let nominal = |key: ToolEffectKey| {
+        let identity = key
+            .nominal_identity()
+            .expect("active catalogue keys have nominal owners");
+        format!("{}.{}", identity.module, identity.name)
+    };
+    let expected = vec![
+        named(
+            "ActorEffects",
             DEFAULT_ACTOR_EFFECTS
                 .iter()
-                .map(|key| format!("Effect{}", key.haskell_name())),
-        )
-        .collect()];
+                .map(|key| key.haskell_constructor().unwrap().to_owned())
+                .collect(),
+        ),
+        named(
+            "CatalogueConstructors",
+            actors
+                .iter()
+                .map(|key| key.haskell_constructor().unwrap().to_owned())
+                .collect(),
+        ),
+        named(
+            "CatalogueEffects",
+            actors
+                .iter()
+                .map(|key| key.wire_name().to_owned())
+                .collect(),
+        ),
+        named(
+            "Nominals",
+            actors
+                .iter()
+                .copied()
+                .map(ToolEffectKey::Actor)
+                .map(nominal)
+                .collect(),
+        ),
+        named(
+            "ToolEffects",
+            tools.iter().map(|key| key.wire_name().to_owned()).collect(),
+        ),
+        named("ToolNominals", tools.iter().copied().map(nominal).collect()),
+    ];
     assert_eq!(
         reflected, expected,
-        "compiled KnownEffects must preserve the default actor row's exact effect order"
+        "compiled witnesses, defining TyCons, names and ordered profiles must agree with the nominal catalogue"
     );
 }

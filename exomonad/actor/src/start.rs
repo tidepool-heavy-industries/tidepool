@@ -99,72 +99,7 @@ impl ActorEffectProfileWire {
     }
 }
 
-#[derive(tidepool_bridge_derive::FromHaskell)]
-pub enum ActorEffectKeyWire {
-    EffectResourceScopes,
-    EffectReplies,
-    EffectWatches,
-    EffectActorContext,
-    EffectAgentLaunch,
-    EffectAgentInspection,
-    EffectAgentControl,
-    EffectBoundWorktree,
-    EffectWorktreeRegistry,
-    EffectWorktreeAllocation,
-    EffectWorktreeIntegration,
-    EffectSleep,
-    EffectNotifications,
-    EffectJev,
-    EffectModelCall,
-    EffectCommands,
-    EffectConsole,
-    EffectAskUser,
-    EffectGreen,
-    EffectActor,
-    EffectReflect,
-    EffectLookup,
-    EffectRepoEvent,
-    EffectSource,
-    EffectJournal,
-    EffectWeb,
-    EffectFsRead,
-    EffectFsWrite,
-}
-
-impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
-    fn from(value: ActorEffectKeyWire) -> Self {
-        match value {
-            ActorEffectKeyWire::EffectResourceScopes => Self::ResourceScopes,
-            ActorEffectKeyWire::EffectReplies => Self::Replies,
-            ActorEffectKeyWire::EffectWatches => Self::Watches,
-            ActorEffectKeyWire::EffectActorContext => Self::ActorContext,
-            ActorEffectKeyWire::EffectAgentLaunch => Self::AgentLaunch,
-            ActorEffectKeyWire::EffectAgentInspection => Self::AgentInspection,
-            ActorEffectKeyWire::EffectAgentControl => Self::AgentControl,
-            ActorEffectKeyWire::EffectBoundWorktree => Self::BoundWorktree,
-            ActorEffectKeyWire::EffectWorktreeRegistry => Self::WorktreeRegistry,
-            ActorEffectKeyWire::EffectWorktreeAllocation => Self::WorktreeAllocation,
-            ActorEffectKeyWire::EffectWorktreeIntegration => Self::WorktreeIntegration,
-            ActorEffectKeyWire::EffectSleep => Self::Sleep,
-            ActorEffectKeyWire::EffectNotifications => Self::Notifications,
-            ActorEffectKeyWire::EffectJev => Self::Jev,
-            ActorEffectKeyWire::EffectModelCall => Self::ModelCall,
-            ActorEffectKeyWire::EffectCommands => Self::Commands,
-            ActorEffectKeyWire::EffectConsole => Self::Console,
-            ActorEffectKeyWire::EffectAskUser => Self::AskUser,
-            ActorEffectKeyWire::EffectGreen => Self::Green,
-            ActorEffectKeyWire::EffectActor => Self::Actor,
-            ActorEffectKeyWire::EffectReflect => Self::Reflect,
-            ActorEffectKeyWire::EffectLookup => Self::Lookup,
-            ActorEffectKeyWire::EffectRepoEvent => Self::RepoEvent,
-            ActorEffectKeyWire::EffectSource => Self::Source,
-            ActorEffectKeyWire::EffectJournal => Self::Journal,
-            ActorEffectKeyWire::EffectWeb => Self::Web,
-            ActorEffectKeyWire::EffectFsRead => Self::FsRead,
-            ActorEffectKeyWire::EffectFsWrite => Self::FsWrite,
-        }
-    }
-}
+pub use crate::nominal_keys::ActorEffectKeyWire;
 
 /// One parked parent continuation paired with exclusive ownership of its child
 /// entry. Its issuing session and compiler provenance travel with the value.
@@ -665,6 +600,51 @@ fn validate_head_incarnations(
 #[cfg(test)]
 mod tests {
     use tidepool_codegen::suspension::RealmId;
+
+    #[test]
+    fn generated_actor_key_bridge_decodes_every_active_nominal_key() {
+        use super::ActorEffectKeyWire;
+        use tidepool_repr::{DataCon, DataConId};
+        for (index, wire) in ActorEffectKeyWire::ALL.iter().copied().enumerate() {
+            let key = crate::ActorEffectKey::from(wire);
+            assert_eq!(key, crate::ActorEffectKey::ALL[index]);
+            assert_eq!(Some(wire.haskell_constructor()), key.haskell_constructor());
+            let name = wire.haskell_constructor();
+            let id = DataConId(index as u64 + 1);
+            let mut table = DataConTable::new();
+            let constructor = DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Tidepool.Effects.Core".into(),
+                    namespace: "constructor".into(),
+                    occurrence: name.into(),
+                    record_parent: None,
+                },
+                id,
+                name: name.into(),
+                tag: index as u32 + 1,
+                rep_arity: 0,
+                field_bangs: vec![],
+                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                type_name: "ActorEffectKey".into(),
+            };
+            table.insert_checked(constructor.clone()).unwrap();
+            let decoded =
+                ActorEffectKeyWire::from_value(&HaskellValue::Con(id, Vec::new()), &table).unwrap();
+            assert_eq!(crate::ActorEffectKey::from(decoded), key);
+            let foreign_id = DataConId(index as u64 + 10_000);
+            let mut foreign = constructor;
+            foreign.id = foreign_id;
+            foreign.identity.module = "Foreign.Keys".into();
+            foreign.qualified_name = Some(format!("Foreign.Keys.{name}"));
+            table.insert_checked(foreign).unwrap();
+            assert!(ActorEffectKeyWire::from_value(
+                &HaskellValue::Con(foreign_id, Vec::new()),
+                &table
+            )
+            .is_err());
+        }
+    }
 
     proptest::proptest! {
         #[test]

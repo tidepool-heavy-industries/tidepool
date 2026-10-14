@@ -21,8 +21,9 @@ import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
-import Tidepool.Effects.Core (ActorEffectKey (..), ContextReadWrite)
-import Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), Subset, effectKeys)
+import Tidepool.Effects.Core (ContextReadWrite)
+import qualified Tidepool.Internal.ActorProfiles as Catalogue
+import Tidepool.Effects.Row (Subset)
 
 type SyncEffects effects = ContextReadWrite ': effects
 
@@ -43,59 +44,17 @@ type family ValidToolProfile (schedule :: ToolSchedule) (effects :: [Type -> Typ
   ValidToolProfile 'Asynchronous effects = AsyncEffects effects
   ValidToolProfile 'BeforeNextInference effects = ()
 
-class KnownToolEffect (effect :: Type -> Type) where
-  toolEffectName :: Proxy effect -> Text
-
-instance {-# OVERLAPPABLE #-} KnownEffect effect => KnownToolEffect effect where
-  toolEffectName _ = case effectKeys (knownEffects @'[effect]) of
-    [key] -> actorEffectName key
-    _ -> error "a singleton effect witness must name one effect"
-
-instance {-# OVERLAPPING #-} KnownToolEffect ContextReadWrite where
-  toolEffectName _ = "ContextReadWrite"
-
 class KnownToolEffects (effects :: [Type -> Type]) where
   toolEffectNames :: Proxy effects -> [Text]
 
 instance KnownToolEffects '[] where
   toolEffectNames _ = []
 
-instance (KnownToolEffect effect, KnownToolEffects effects) => KnownToolEffects (effect ': effects) where
-  toolEffectNames _ = toolEffectName (Proxy @effect) : toolEffectNames (Proxy @effects)
+instance (Catalogue.KnownToolEffect effect, KnownToolEffects effects) => KnownToolEffects (effect ': effects) where
+  toolEffectNames _ = Catalogue.knownToolEffectName (Proxy @effect) : toolEffectNames (Proxy @effects)
 
 type family AsyncEffects (effects :: [Type -> Type]) :: Constraint where
   AsyncEffects '[] = ()
   AsyncEffects (ContextReadWrite ': effects) =
     TypeError ('Text "ContextReadWrite cannot be used by an asynchronous tool, model callback, or hook.")
   AsyncEffects (effect ': effects) = AsyncEffects effects
-
-actorEffectName :: ActorEffectKey -> Text
-actorEffectName key = case key of
-  EffectResourceScopes -> "ResourceScopes"
-  EffectReplies -> "Replies"
-  EffectWatches -> "Watches"
-  EffectActorContext -> "ActorContext"
-  EffectAgentLaunch -> "AgentLaunch"
-  EffectAgentInspection -> "AgentInspection"
-  EffectAgentControl -> "AgentControl"
-  EffectBoundWorktree -> "BoundWorktree"
-  EffectWorktreeRegistry -> "WorktreeRegistry"
-  EffectWorktreeAllocation -> "WorktreeAllocation"
-  EffectWorktreeIntegration -> "WorktreeIntegration"
-  EffectSleep -> "Sleep"
-  EffectCommands -> "Commands"
-  EffectConsole -> "Console"
-  EffectAskUser -> "AskUser"
-  EffectGreen -> "Green"
-  EffectNotifications -> "Notifications"
-  EffectJev -> "Jev"
-  EffectModelCall -> "ModelCall"
-  EffectActor -> "Actor"
-  EffectReflect -> "Reflect"
-  EffectLookup -> "Lookup"
-  EffectSource -> "Source"
-  EffectRepoEvent -> "RepoEvent"
-  EffectJournal -> "Journal"
-  EffectWeb -> "Web"
-  EffectFsRead -> "FsRead"
-  EffectFsWrite -> "FsWrite"

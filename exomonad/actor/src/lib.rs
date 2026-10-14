@@ -207,3 +207,6 @@ pub use wait::ActorWaitError;
 pub mod command_jobs;
 
 pub(crate) use runtime_observation::ProviderTurnLease;
+
+#[path = "generated/nominal_keys.rs"]
+mod nominal_keys;
