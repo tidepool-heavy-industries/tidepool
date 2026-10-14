@@ -1398,8 +1398,7 @@ impl PersistedActorInstallation {
             source_sha256: *source.sha256(),
             acquisition: acquisition.clone(),
             entry: tools
-                .origin
-                .resolved()
+                .resolved_spec()
                 .and_then(|resolved| resolved.entry.clone()),
             effects: tools.dispatcher_effects.expression().to_owned(),
             declarations: tools.surface(),

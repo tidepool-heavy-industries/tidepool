@@ -219,8 +219,7 @@ where
                     spec_install: tools.install,
                     spec_revision: tools.revision().map(str::to_owned),
                     spec_entry: tools
-                        .origin
-                        .resolved()
+                        .resolved_spec()
                         .and_then(|resolved| resolved.entry.clone()),
                     spec_source: source.iter().map(|byte| format!("{byte:02x}")).collect(),
                 },
