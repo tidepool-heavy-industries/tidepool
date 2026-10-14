@@ -506,6 +506,125 @@ fn config() -> Config {
     config
 }
 
+#[derive(Clone, Debug)]
+enum RemovalOp {
+    Observe,
+    Remove,
+    Reinsert(i16),
+    CheckoutRestore(i16),
+    StaleSettle(i16),
+    CancelObserver,
+}
+
+fn removal_op_strategy() -> impl Strategy<Value = RemovalOp> {
+    prop_oneof![
+        3 => Just(RemovalOp::Observe),
+        2 => Just(RemovalOp::Remove),
+        3 => (-4_i16..5).prop_map(RemovalOp::Reinsert),
+        3 => (-4_i16..5).prop_map(RemovalOp::CheckoutRestore),
+        2 => (-4_i16..5).prop_map(RemovalOp::StaleSettle),
+        1 => Just(RemovalOp::CancelObserver),
+    ]
+}
+
+fn replay_removal_history(ops: &[RemovalOp]) {
+    use super::{SessionRemovalWait, SlotKind};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let reg = SessionRegistry::<FakeMachine, Hole>::new();
+    let id = SessionId(900);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut model_epoch: Option<u64> = None;
+    let mut next_epoch = 0_u64;
+    let mut model_drops = 0_usize;
+    let mut observers = Vec::new();
+
+    for op in ops {
+        match op {
+            RemovalOp::Observe => {
+                if let Some(epoch) = model_epoch {
+                    observers.push((epoch, reg.observe_removal(id).unwrap()));
+                } else {
+                    assert!(reg.observe_removal(id).is_err());
+                }
+            }
+            RemovalOp::Remove => {
+                if reg.remove(id, "generated removal").is_some() {
+                    model_epoch = None;
+                    model_drops += 1;
+                }
+            }
+            RemovalOp::Reinsert(value) => {
+                if reg.insert_idle(id, machine(9, *value, &drops)).is_some() {
+                    model_drops += 1;
+                }
+                next_epoch += 1;
+                model_epoch = Some(next_epoch);
+            }
+            RemovalOp::CheckoutRestore(value) => {
+                if model_epoch.is_none() {
+                    drop(reg.insert_idle(id, machine(9, *value, &drops)));
+                    next_epoch += 1;
+                    model_epoch = Some(next_epoch);
+                }
+                if let Ok(checkout) = reg.checkout_run(id) {
+                    checkout.restore_suspended(Vec::new());
+                }
+            }
+            RemovalOp::StaleSettle(value) => {
+                if model_epoch.is_none() {
+                    drop(reg.insert_idle(id, machine(9, *value, &drops)));
+                    next_epoch += 1;
+                    model_epoch = Some(next_epoch);
+                }
+                if let Ok(checkout) = reg.checkout_run(id) {
+                    let (stale_machine, receipt) = checkout.into_parts();
+                    drop(reg.insert_idle(id, machine(9, *value, &drops)));
+                    next_epoch += 1;
+                    model_epoch = Some(next_epoch);
+                    reg.settle_suspended(receipt, stale_machine, Vec::new());
+                    model_drops += 1;
+                }
+            }
+            RemovalOp::CancelObserver => {
+                if let Some((_, observer)) = observers.pop() {
+                    drop(observer);
+                }
+            }
+        }
+
+        let current_kind = reg.kind(id);
+        assert_eq!(
+            current_kind,
+            model_epoch.map(|_| SlotKind::Idle),
+            "checkout and stale settlement histories retain the current registration"
+        );
+        assert_eq!(
+            drops.load(AtomicOrdering::SeqCst),
+            model_drops,
+            "observer creation and cancellation do not affect machine custody"
+        );
+        for (captured_epoch, observer) in &mut observers {
+            let expected = match model_epoch {
+                None => SessionRemovalWait::Removed,
+                Some(epoch) if epoch != *captured_epoch => SessionRemovalWait::Replaced {
+                    current_epoch: epoch,
+                },
+                Some(_) => SessionRemovalWait::TimedOut,
+            };
+            let actual = rt.block_on(observer.wait(std::time::Duration::ZERO));
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&expected),
+                "observer outcome follows the independent registration model"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Settlement {
     Suspended,
@@ -1243,6 +1362,26 @@ proptest! {
         prop_assert!(coverage.stale_remove_events >= 1, "{coverage:?}");
         prop_assert!(coverage.checkout_refusals.iter().sum::<usize>() <= ops.len());
         prop_assert!(coverage.tombstone_evictions <= ops.len());
+    }
+
+    #[test]
+    fn generated_removal_observer_histories_match_registration_model(
+        suffix in prop::collection::vec(removal_op_strategy(), 0..48),
+    ) {
+        let mut ops = vec![
+            RemovalOp::Reinsert(1),
+            RemovalOp::Observe,
+            RemovalOp::CheckoutRestore(2),
+            RemovalOp::CancelObserver,
+            RemovalOp::Observe,
+            RemovalOp::StaleSettle(3),
+            RemovalOp::Remove,
+            RemovalOp::Reinsert(4),
+            RemovalOp::Observe,
+            RemovalOp::Remove,
+        ];
+        ops.extend(suffix);
+        replay_removal_history(&ops);
     }
 }
 
