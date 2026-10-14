@@ -1092,7 +1092,7 @@ fn run_history(
             Action::Reconcile => {
                 let mut state = registry.state.lock();
                 if let Some(record) = state.requests.get_mut(&ids[key]) {
-                    if let Some(activation) = record.activation.as_mut() {
+                    if let Some(activation) = record.operation_mut().unwrap().activation.as_mut() {
                         activation.reconcile();
                         facts[key].native.reconcile();
                     }
@@ -1311,15 +1311,14 @@ fn run_history(
             } else {
                 let record = state.requests.get(&ids[key]).unwrap();
                 let expected = model.native.observed();
-                let actual_cache =
-                    record
-                        .activation
-                        .as_ref()
-                        .map_or(ExpectedCache::Absent, |activation| match activation {
-                            ActivationRecord::Pending(_) => ExpectedCache::Retained,
-                            ActivationRecord::Published => ExpectedCache::Published,
-                            ActivationRecord::Refused => ExpectedCache::Refused,
-                        });
+                let actual_cache = record.operation().unwrap().activation.as_ref().map_or(
+                    ExpectedCache::Absent,
+                    |activation| match activation {
+                        ActivationRecord::Pending(_) => ExpectedCache::Retained,
+                        ActivationRecord::Published => ExpectedCache::Published,
+                        ActivationRecord::Refused => ExpectedCache::Refused,
+                    },
+                );
                 prop_assert_eq!(
                     actual_cache,
                     model.native.cache(),
@@ -1328,7 +1327,9 @@ fn run_history(
                     operation,
                     key
                 );
-                if let Some(ActivationRecord::Pending(retained)) = &record.activation {
+                if let Some(ActivationRecord::Pending(retained)) =
+                    &record.operation().unwrap().activation
+                {
                     let cap = capabilities.iter().find(|cap| cap.request == key).unwrap();
                     prop_assert!(Arc::ptr_eq(retained, &cap.resources));
                     prop_assert_eq!(retained.observed_native_ready(), owner_ready);

@@ -30,11 +30,11 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if record.command_job.is_some() {
+        if record.command().is_some() {
             return Err(ReplyError::Unauthorized);
         }
         if let Some(reservation) = reservation {
-            if record.reservation_owner.as_ref() != Some(reservation)
+            if record.operation()?.reservation_owner.as_ref() != Some(reservation)
                 || !matches!(reservation, RequestReservationOwner::Workbench { .. })
             {
                 return Err(ReplyError::Unauthorized);
@@ -84,7 +84,7 @@ impl RequestRegistry {
             .filter_map(|(request, record)| {
                 (record.owner == owner
                     && &record.cleanup_owner == cleanup_owner
-                    && record.command_job.is_none())
+                    && record.command().is_none())
                 .then_some(*request)
             })
             .collect::<Vec<_>>();
@@ -100,7 +100,7 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if record.command_job.is_some() {
+        if record.command().is_some() {
             return Err(ReplyError::Unauthorized);
         }
         Ok(record.cleanup_owner.clone())
@@ -119,7 +119,7 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if record.command_job.is_some() || &record.cleanup_owner != expected {
+        if record.command().is_some() || &record.cleanup_owner != expected {
             return Err(ReplyError::Unauthorized);
         }
         record.cleanup_owner = destination;
@@ -134,11 +134,11 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        Ok(match record.target_state {
+        Ok(match record.target_state() {
             TargetState::Reserved | TargetState::Queued | TargetState::Presented => {
                 RequestCleanupState::Active
             }
-            TargetState::Settling => RequestCleanupState::ReplySettling,
+            TargetState::Settling { .. } => RequestCleanupState::ReplySettling,
             TargetState::CancellationRequested { reason, presented } => {
                 RequestCleanupState::CancellationRequested { reason, presented }
             }
@@ -183,6 +183,7 @@ mod tests {
             true,
             Some(invocation.clone()),
         );
+        crate::request::test_support::admit_destination(registry, owner, request);
         request
     }
 
@@ -393,6 +394,7 @@ mod tests {
             None,
             ResourceCleanupOwner::Run,
         );
+        crate::request::test_support::admit_destination(&registry, owner, request);
         registry.mark_queued(owner, target, request).unwrap();
         assert_eq!(registry.forget_terminal_actor_metadata(owner), Ok(vec![]));
         assert_eq!(
@@ -449,7 +451,6 @@ mod tests {
         let scope = invocation(1);
         let ready = reserve(&registry, owner, target, &scope);
         let detached = reserve(&registry, owner, target, &scope);
-        crate::request::test_support::admit_destination(&registry, owner, ready);
         registry.mark_queued(owner, target, ready).unwrap();
         registry.mark_queued(owner, target, detached).unwrap();
         registry

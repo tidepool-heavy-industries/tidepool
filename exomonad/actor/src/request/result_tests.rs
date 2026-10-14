@@ -23,15 +23,13 @@ fn stopped() -> ActorTerminal {
 }
 
 #[test]
-fn readiness_without_an_admitted_native_destination_is_refused() {
+fn queue_without_an_admitted_native_destination_is_refused() {
     let registry = RequestRegistry::default();
     let owner = actor(1);
     let target = actor(2);
     let request = registry.reserve_for_operation(owner, target, "unadmitted".into(), true, None);
-    registry.mark_queued(owner, target, request).unwrap();
-    registry.present(target, request).unwrap();
     assert_eq!(
-        registry.begin_reply(target, request),
+        registry.mark_queued(owner, target, request),
         Err(ReplyError::ReplyResultUnavailable)
     );
     assert!(matches!(
@@ -42,6 +40,18 @@ fn readiness_without_an_admitted_native_destination_is_refused() {
         registry.observe_response_result(owner, request),
         Err(ReplyError::ReplyResultUnavailable)
     ));
+    assert_eq!(registry.received_counts(target), (0, 0));
+    assert_eq!(registry.present(target, request), Err(ReplyError::Stale));
+    test_support::admit_destination(&registry, owner, request);
+    registry.mark_queued(owner, target, request).unwrap();
+    registry.present(target, request).unwrap();
+    let claim = registry.begin_reply(target, request).unwrap();
+    test_support::complete_reply(&registry, claim, None);
+    assert_eq!(
+        registry.observe_response(owner, request),
+        Ok(ResponseObservation::Ready)
+    );
+    assert_eq!(registry.received_counts(target).0, 1);
 }
 
 #[test]
@@ -188,8 +198,9 @@ fn cleanup_transfer_preserves_the_exact_issued_destination() {
     );
     test_support::admit_destination(&registry, owner, request);
     let original = registry.state.lock().requests[&request]
-        .result_destination
-        .clone()
+        .operation()
+        .unwrap()
+        .destination()
         .unwrap();
     registry
         .transfer_request_cleanup_owner(

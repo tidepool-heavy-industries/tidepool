@@ -114,6 +114,11 @@ steering into a silent queued replacement assignment. Preserve unavailable
 outcomes through `Await`/`Watch`: a wake is a reason to inspect the retained
 handle, not proof of successful work or acceptance.
 
+Retained requests preserve operation versus command completion as distinct kinds.
+Only operations own mailbox activation, updates, reply claims and result admission;
+queueing requires their admitted destination. Shared watches and owner observation
+remain in the same registry and can retain either kind after its source releases.
+
 Status and retained-output inspection contracts are summarized in
 [inspection-contract.md](inspection-contract.md).
 Wait and cancellation boundaries are summarized in

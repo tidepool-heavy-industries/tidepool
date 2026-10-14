@@ -72,7 +72,7 @@ impl RequestRegistry {
                 ReplyError::Unauthorized,
             ));
         }
-        match record.target_state {
+        match record.target_state() {
             TargetState::Presented => {}
             TargetState::CancellationRequested { .. }
             | TargetState::AcknowledgingCancellation(_) => {
@@ -87,7 +87,12 @@ impl RequestRegistry {
             }
             _ => return Err(ActivationPublicationRefusal::Request(ReplyError::Stale)),
         }
-        if record.activation.is_some() {
+        if record
+            .operation_mut()
+            .map_err(ActivationPublicationRefusal::Request)?
+            .activation
+            .is_some()
+        {
             return Err(ActivationPublicationRefusal::Request(
                 ReplyError::AlreadySettled,
             ));
@@ -102,7 +107,10 @@ impl RequestRegistry {
         let Some(claim) = claim else {
             return Ok(None);
         };
-        record.activation = Some(ActivationRecord::Pending(retained));
+        record
+            .operation_mut()
+            .map_err(ActivationPublicationRefusal::Request)?
+            .activation = Some(ActivationRecord::Pending(retained));
         Ok(Some((
             claim,
             RequestActivationPublication {
@@ -119,8 +127,10 @@ impl RequestActivationPublication {
         let mut state = self.registry.state.lock();
         if let Some(record) = state.requests.get_mut(&self.request) {
             if record.target == self.target {
-                if let Some(activation) = &mut record.activation {
-                    activation.reconcile();
+                if let Ok(operation) = record.operation_mut() {
+                    if let Some(activation) = &mut operation.activation {
+                        activation.reconcile();
+                    }
                 }
             }
         }
@@ -151,13 +161,16 @@ impl RequestActivationCompletion {
             .get_mut(&self.0.request)
             .ok_or(ReplyError::Stale)?;
         authorize_target(record, self.0.target)?;
-        if let Some(activation) = &mut record.activation {
+        if let Some(activation) = &mut record.operation_mut()?.activation {
             activation.reconcile();
         }
-        if !matches!(record.activation, Some(ActivationRecord::Published)) {
+        if !matches!(
+            record.operation_mut()?.activation,
+            Some(ActivationRecord::Published)
+        ) {
             return Err(ReplyError::Stale);
         }
-        match record.target_state {
+        match record.target_state() {
             TargetState::Presented => Ok(publish()),
             TargetState::CancellationRequested { .. }
             | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),

@@ -176,7 +176,7 @@ impl ActorSourceConnections {
             closed: false,
         };
         if kind == RequestSourceKind::Progress {
-            if let Some(current) = &record.progress {
+            if let Some(current) = record.progress() {
                 connection.send(SourceEvent::Progress(current.clone()));
             }
         }
@@ -311,7 +311,7 @@ impl RequestRegistry {
                 closed: false,
             };
             if *kind == RequestSourceKind::Progress {
-                if let Some(current) = &record.progress {
+                if let Some(current) = record.progress() {
                     connection.send(SourceEvent::Progress(current.clone()));
                 }
             }
@@ -345,7 +345,10 @@ impl RequestRecord {
     }
 
     pub(super) fn publish_source_progress(&mut self) {
-        let Some(snapshot) = &self.progress else {
+        let super::RequestKind::Operation(operation) = &self.kind else {
+            return;
+        };
+        let Some(snapshot) = &operation.progress else {
             return;
         };
         for source in &mut self.sources {
@@ -358,9 +361,9 @@ impl RequestRecord {
     pub(super) fn publish_source_closure(&mut self) {
         let progress_closed = self.owner_state != OwnerState::Observing
             || matches!(
-                self.target_state,
+                self.target_state(),
                 TargetState::Closed
-                    | TargetState::Settling
+                    | TargetState::Settling { .. }
                     | TargetState::AcknowledgingCancellation(_)
             );
         let settlement = match &self.owner_state {

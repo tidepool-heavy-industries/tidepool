@@ -132,13 +132,17 @@ impl RequestUpdateDelivery {
         {
             let mut state = self.registry.state.lock();
             let request = state.requests.get_mut(&self.id.request)?;
-            let update = request.updates.get_mut(self.id.sequence as usize - 1)?;
+            let presented = request.target_state() == TargetState::Presented
+                && request.owner_state == OwnerState::Observing;
+            let update = request
+                .operation_mut()
+                .ok()?
+                .updates
+                .get_mut(self.id.sequence as usize - 1)?;
             if !matches!(update.phase, UpdatePhase::Queued) {
                 return None;
             }
-            if !matches!(request.target_state, TargetState::Presented)
-                || !matches!(request.owner_state, OwnerState::Observing)
-            {
+            if !presented {
                 update.phase = UpdatePhase::TooLate;
                 return None;
             }
@@ -244,10 +248,11 @@ impl RequestUpdatePresentation {
         }
         let mut state = self.delivery.registry.state.lock();
         if let Some(request) = state.requests.get_mut(&self.delivery.id.request) {
-            if let Some(update) = request
-                .updates
-                .get_mut(self.delivery.id.sequence as usize - 1)
-            {
+            if let Some(update) = request.operation_mut().ok().and_then(|operation| {
+                operation
+                    .updates
+                    .get_mut(self.delivery.id.sequence as usize - 1)
+            }) {
                 // A retained native reconciler can settle while this lease
                 // still exists. Its definitive evidence survives late lease
                 // completion, including uncertainty from this guard's Drop.
@@ -295,12 +300,13 @@ impl RequestRegistry {
         // than accepted and abandoned. A caller that reads a success must be
         // able to act on it; learning otherwise from a later observation is
         // learning too late to steer.
-        match request.target_state {
+        match request.target_state() {
             TargetState::Presented if matches!(request.owner_state, OwnerState::Observing) => {}
             TargetState::Reserved | TargetState::Queued => return Err(ReplyError::Stale),
             _ => return Err(ReplyError::AlreadySettled),
         }
         if request
+            .operation()?
             .updates
             .iter()
             .any(|update| matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement())
@@ -309,9 +315,9 @@ impl RequestRegistry {
         }
         let update = RequestUpdateId {
             request: id,
-            sequence: request.updates.len() as u64 + 1,
+            sequence: request.operation()?.updates.len() as u64 + 1,
         };
-        request.updates.push(UpdateRecord {
+        request.operation_mut()?.updates.push(UpdateRecord {
             phase: UpdatePhase::Queued,
             correlation: None,
         });
@@ -331,10 +337,14 @@ impl RequestRegistry {
         let state = self.state.lock();
         let request = state.requests.get(&id.request).ok_or(ReplyError::Stale)?;
         let index = id.sequence.checked_sub(1).ok_or(ReplyError::Stale)? as usize;
-        let update = request.updates.get(index).ok_or(ReplyError::Stale)?;
+        let update = request
+            .operation()?
+            .updates
+            .get(index)
+            .ok_or(ReplyError::Stale)?;
         Ok(match &update.phase {
             UpdatePhase::Queued
-                if !matches!(request.target_state, TargetState::Presented)
+                if !matches!(request.target_state(), TargetState::Presented)
                     || !matches!(request.owner_state, OwnerState::Observing) =>
             {
                 RequestUpdateState::UpdateTooLate
@@ -371,6 +381,8 @@ impl RequestRegistry {
             .ok_or(ReplyError::Stale)
             .map_err(UpdateReconciliationError::Reply)? as usize;
         let update = request
+            .operation_mut()
+            .map_err(UpdateReconciliationError::Reply)?
             .updates
             .get_mut(index)
             .ok_or(ReplyError::Stale)
@@ -411,6 +423,8 @@ impl RequestRegistry {
             .ok_or(ReplyError::Stale)
             .map_err(UpdateReconciliationError::Reply)? as usize;
         let update = request
+            .operation_mut()
+            .map_err(UpdateReconciliationError::Reply)?
             .updates
             .get_mut(index)
             .ok_or(ReplyError::Stale)
@@ -464,24 +478,10 @@ mod tests {
     use crate::{ActorId, Incarnation};
 
     fn active() -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
-        active_with_native_destination(false)
-    }
-
-    fn active_native() -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
-        active_with_native_destination(true)
-    }
-
-    fn active_with_native_destination(
-        native: bool,
-    ) -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
         let registry = Arc::new(RequestRegistry::default());
         let owner = ActorRef::first(ActorId(1));
         let target = ActorRef::first(ActorId(2));
-        let request = if native {
-            registry.reserve_native(owner, target)
-        } else {
-            registry.reserve(owner, target)
-        };
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         (registry, owner, target, request)
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn presentation_is_single_claim_and_preserves_the_original_response() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "clickable tabs".into())
             .unwrap();
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn reply_winning_before_claim_makes_update_too_late() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -598,7 +598,7 @@ mod tests {
         // The exact situation a live lead hit: a child had already replied, the
         // lead sent a correction naming that child, and the send reported
         // success. It reached nobody, and only a separate observation said so.
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
         crate::request::test_support::complete_optional_reply(
             &registry,
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn failure_before_submission_releases_the_fence() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn racing_claim_and_reply_have_one_winner() {
         for _ in 0..32 {
-            let (registry, owner, target, request) = active_native();
+            let (registry, owner, target, request) = active();
             let (update, delivery) = registry
                 .update_request(owner, request, "tabs".into())
                 .unwrap();
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn late_evidence_reconciles_only_the_exact_durable_operation() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn authoritative_presentation_survives_a_late_lease_drop() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -877,7 +877,7 @@ mod tests {
 
     #[test]
     fn repeated_unconfirmed_evidence_keeps_the_fence_until_a_terminal_outcome() {
-        let (registry, owner, target, request) = active_native();
+        let (registry, owner, target, request) = active();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
