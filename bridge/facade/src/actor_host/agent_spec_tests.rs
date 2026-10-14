@@ -914,12 +914,21 @@ async fn a_pruned_result_says_it_is_a_selection_and_its_handle_answers_the_whole
 
                 // The handle is a binding in the same lexical scope the model's own cells
                 // run in, so the whole result is one cell away.
-                let cell = dispatch_haskell_script(policy, "toolResult1").await;
-                assert!(
-                    cell["items"][0]["output"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .contains("keptwhole"),
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let policy = campaign.root_installation.policy.clone();
+                let cell = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            "display (toolResult1 == \"keptwhole\")",
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&cell),
+                    "True",
                     "{cell}"
                 );
             })
@@ -996,9 +1005,20 @@ async fn a_slot_that_fails_preserves_tool_success_and_logs_only() {
                     );
                     assert!(status.contains("failed:"), "{status}");
                 }
-                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
-                assert_eq!(cell["status"], "committed", "{cell}");
-                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let policy = campaign.root_installation.policy.clone();
+                let cell = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(policy.as_ref(), "display (1 + 1 :: Int)"),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&cell),
+                    "2",
+                    "{cell}"
+                );
             })
         })
         .await;

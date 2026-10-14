@@ -85,8 +85,8 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                 let called = tokio::spawn(async move {
                     dispatch_structured_tool(
                         policy.as_ref(),
-                        "lifetimeProbe",
-                        serde_json::Value::Null,
+                        "lifetime_probe",
+                        serde_json::json!({"topic": "lifecycle"}),
                     )
                     .await
                 });
@@ -187,8 +187,11 @@ async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
                         .contains("invocation cleanup unconfirmed"),
                     "{status}"
                 );
-                let available = dispatch_haskell_script(root.as_ref(), "40 + 2 :: Int").await;
-                assert_eq!(available["items"][0]["output"], "42", "{available}");
+                let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let available = campaign.drive_actor_output(&store,
+                    dispatch_haskell_script(root.as_ref(), "display (40 + 2 :: Int)"),
+                ).await;
+                assert_eq!(super::test_campaign::committed_display_text(&available), "42", "{available}");
 
                 // Retirement retries the same retained invocation's cleanup. An external
                 // owner still retaining resources must keep root cleanup unconfirmed.
@@ -266,9 +269,9 @@ async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
                     policy
                         .dispatch_json_boxed(exomonad_tool::ToolInvocation {
                             context: Some(invocation),
-                            name: "lifetimeProbe".into(),
+                            name: "lifetime_probe".into(),
                             arguments: exomonad_tool::ToolArguments::Structured(
-                                serde_json::Value::Null,
+                                serde_json::json!({"topic": "lifecycle"}),
                             ),
                         })
                         .await
