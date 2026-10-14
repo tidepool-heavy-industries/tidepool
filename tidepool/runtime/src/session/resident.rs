@@ -644,7 +644,7 @@ impl ProgramProvenance {
         self.native_sites.has_completion_site(site) || self.fresh_completion_sites.contains(&site)
     }
 
-    /// Observe the exact issued completion authority without promoting site metadata.
+    /// Observe exact issued completion authority without promoting site metadata.
     #[must_use]
     pub fn completion_site_ids(&self) -> std::collections::BTreeSet<u64> {
         self.fresh_completion_sites
@@ -1264,6 +1264,17 @@ pub struct RootCustody {
 
 // Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
+
+/// Live receiver code captured from one authenticated parked registration.
+/// Only its originating session can execute it, in the captured resource scope.
+#[must_use = "request receiver entry must be run or deliberately dropped"]
+#[derive(Debug)]
+pub struct RequestReceiverEntry {
+    custody: RootCustody,
+    realm: RealmId,
+}
+
+static_assertions::assert_not_impl_any!(RequestReceiverEntry: Clone, Copy);
 
 /// The original live activation input and its compiler-issued request type.
 /// It is captured from one parked request boundary, never assembled from an
@@ -2257,6 +2268,21 @@ pub enum ResidentError {
     /// by numeric coincidence.
     #[error("root custody belongs to a different resident session")]
     ForeignCustody,
+    #[error("request receiver registration carried an invalid site id: {site}")]
+    InvalidRequestReceiverSite { site: i64 },
+    #[error("request receiver registration escaped its actor realm: expected {expected:?}, parked {actual:?}")]
+    RequestReceiverRealmMismatch {
+        expected: RealmId,
+        actual: Option<RealmId>,
+    },
+    #[error("request receiver registration has no compiler-issued completion site: requested {site}; issued {issued:?}; observation {observation:?}")]
+    UnissuedRequestReceiverSite {
+        site: u64,
+        issued: std::collections::BTreeSet<u64>,
+        observation: Option<Box<YieldSite>>,
+    },
+    #[error("request receiver registration has no live entry: {hole}")]
+    MissingRequestReceiverEntry { hole: String },
     #[error("activation site {site} lacks its original live input/type evidence")]
     InvalidActivationInput { site: u64 },
     #[error("activation site {site} lacks its original canonical input type witness")]
@@ -4773,6 +4799,49 @@ where
             Arc::clone(&self.custody_cleanup),
             provenance,
         )))
+    }
+
+    /// Authenticate registration and capture its live receiver in one checkout.
+    /// Refusal leaves the frame parked and creates no receiver root. Observed
+    /// site metadata alone never grants completion authority.
+    pub fn capture_request_receiver_entry(
+        &mut self,
+        hole: &ResidentHole,
+        site: i64,
+        realm: RealmId,
+    ) -> Result<RequestReceiverEntry, ResidentError> {
+        let site =
+            u64::try_from(site).map_err(|_| ResidentError::InvalidRequestReceiverSite { site })?;
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(|| ResidentError::WrongContinuation {
+                attempted: hole.cont_id().to_owned(),
+                pending: self.parked.iter().map(|entry| entry.name.clone()).collect(),
+            })?;
+        let id = entry.id;
+        let provenance = &entry.provenance;
+        let actual = self.state.parked_realm(id);
+        if actual != Some(realm) {
+            return Err(ResidentError::RequestReceiverRealmMismatch {
+                expected: realm,
+                actual,
+            });
+        }
+        if !provenance.has_completion_site(site) {
+            return Err(ResidentError::UnissuedRequestReceiverSite {
+                site,
+                issued: provenance.completion_site_ids(),
+                observation: provenance.site(site).cloned().map(Box::new),
+            });
+        }
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), realm)?
+            .ok_or_else(|| ResidentError::MissingRequestReceiverEntry {
+                hole: hole.cont_id().to_owned(),
+            })?;
+        Ok(RequestReceiverEntry { custody, realm })
     }
 
     /// Capture the live payload and its input type from the same original
@@ -7826,6 +7895,22 @@ where
             .run_rooted_entry_borrowed(name_hint, &entry, argument, realm, run_table, settlement)?;
         entry.into_transfer().commit();
         Ok(outcome)
+    }
+
+    /// Consume an authenticated receiver in its captured resource scope.
+    pub fn run_request_receiver_entry(
+        &mut self,
+        entry: RequestReceiverEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_rooted_entry(
+            "agent_request_receiver",
+            entry.custody,
+            0,
+            entry.realm,
+            None,
+            settlement,
+        )
     }
 
     /// Invoke retained code without transferring its root to the execution.

@@ -954,6 +954,7 @@ def compile_fail_cases(package, library):
         "compiler_settled_no_reassociation": (),
         "machine_lease_double_borrow": (),
         "root_borrow_release": ("tidepool-codegen",),
+        "request_receiver_from_root": ("frunk", "tidepool-codegen", "tidepool-mcp"),
         "root_borrow_collection": ("tidepool-codegen",),
         "managed_node_cross_builder": ("tidepool-codegen", "tidepool-repr"),
         "managed_node_consumed": ("tidepool-codegen",),

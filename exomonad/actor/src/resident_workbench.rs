@@ -58,9 +58,10 @@ use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
     run_inspections, BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType,
     HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult, WorkbenchRequest,
+    PendingPreparedInstall, PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
+    WorkbenchRequest,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -1256,7 +1257,7 @@ pub(crate) struct ResidentWorkbenchTools {
 
 /// A public application's receiver retains its source domain independently of tool reloads.
 pub(crate) struct PreparedRequestReceiver {
-    pub(crate) entry: RootCustody,
+    pub(crate) entry: RequestReceiverEntry,
     pub(crate) scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
 }
 
@@ -3458,50 +3459,6 @@ where
             Err(ResidentActorWorkbenchError::ActorProtocol(reason.into()))
         }
     }
-}
-
-fn capture_request_receiver_entry<H, O>(
-    session: &mut ResidentSession<H, O>,
-    hole: &ResidentHole,
-    site: i64,
-    actor_realm: RealmId,
-) -> Result<RootCustody, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let site = u64::try_from(site).map_err(|_| {
-        ResidentActorWorkbenchError::ActorProtocol(
-            "request receiver registration carried an invalid site id".into(),
-        )
-    })?;
-    if session.parked_realm(hole) != Some(actor_realm) {
-        return Err(ResidentActorWorkbenchError::ActorProtocol(
-            "request receiver registration escaped its actor realm".into(),
-        ));
-    }
-    let provenance = session.parked_program_provenance(hole);
-    if !provenance
-        .as_ref()
-        .is_some_and(|provenance| provenance.has_completion_site(site))
-    {
-        let issued = provenance
-            .as_ref()
-            .map(|provenance| provenance.completion_site_ids());
-        let observed = provenance
-            .as_ref()
-            .and_then(|provenance| provenance.site(site));
-        return Err(ResidentActorWorkbenchError::ActorProtocol(
-            format!("request receiver registration has no compiler-issued completion site: requested {site}; issued {issued:?}; observation {observed:?}"),
-        ));
-    }
-    session
-        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "request receiver registration has no live entry".into(),
-            )
-        })
 }
 
 fn require_tool_installation_completion<H, O>(
@@ -6475,7 +6432,7 @@ where
                                     "public spawn installer crossed an unexpected receiver registration boundary".into(),
                                 ));
                             };
-                            let entry = capture_request_receiver_entry(session, &hole, site, context.placement.resource_scope)?;
+                            let entry = session.capture_request_receiver_entry(&hole, site, context.placement.resource_scope)?;
                             let receiver = PreparedRequestReceiver { entry, scope: Arc::clone(&installation_scope) };
                             let settled = session.resume_classified(hole, (), settlement).map_err(classify_resumption)?;
                             resumption_registration.replace_in_checkout(session, &settled);
@@ -10291,6 +10248,20 @@ where
             .with_compiler_machine(context, move |session, _context, _, settlement| {
                 session
                     .run_rooted_entry("actor_program", entry, 0, realm, None, settlement)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn run_request_receiver_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: RequestReceiverEntry,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_compiler_machine(context, move |session, _, _, settlement| {
+                session
+                    .run_request_receiver_entry(entry, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await

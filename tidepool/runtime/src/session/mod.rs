@@ -145,9 +145,9 @@ pub use resident::{
     truncate_preview_at_line, ActivationDisplayOwners, CompiledActivationPreview,
     HostBindingPrototype, HostBindingType, HostCarrier, HostPayload, MountedActivationInput,
     PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
-    ProgramProvenanceError, ReadyPreparedInstall, ResidentContinuationEvent, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError, ResidentSession,
-    RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
+    ProgramProvenanceError, ReadyPreparedInstall, RequestReceiverEntry, ResidentContinuationEvent,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError,
+    ResidentSession, RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
     RuntimeActivationPreviewAdmission, RuntimeProgressPublication, RuntimeResultParcel,
     RuntimeResultPublication, SessionRunContext,
 };

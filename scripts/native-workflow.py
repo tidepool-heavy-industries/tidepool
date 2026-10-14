@@ -223,6 +223,7 @@ def main(argv=None):
             "//tidepool/runtime:compile_fail_prepared_install_crossed_image",
             "//tidepool/runtime:compile_fail_root_borrow_release",
             "//tidepool/runtime:compile_fail_root_borrow_collection",
+            "//tidepool/runtime:compile_fail_request_receiver_from_root",
             "//tidepool/runtime:compile_fail_managed_node_cross_builder",
             "//tidepool/runtime:compile_fail_managed_node_consumed",
         ))

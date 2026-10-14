@@ -8451,11 +8451,7 @@ where
             let outcome = self
                 .environment
                 .runner
-                .run_rooted_entry(
-                    context.clone(),
-                    receiver.entry,
-                    context.placement.resource_scope,
-                )
+                .run_request_receiver_entry(context.clone(), receiver.entry)
                 .await?;
             let boundary = self
                 .environment

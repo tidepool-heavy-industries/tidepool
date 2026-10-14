@@ -501,6 +501,199 @@ fn suspended(outcome: ResidentOutcome) -> ResidentHole {
     }
 }
 
+#[test]
+fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
+    let (root, recipe) = InputFixture::source_recipe(false);
+    let recipe = InputRecipe {
+        row: "'[Core.AgentTools]".into(),
+        preamble: recipe.preamble.clone(),
+        include: recipe.include.clone(),
+    };
+    let library = SessionLib::open(
+        SessionId(1789),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident
+        .set_actor_execution(
+            SessionRunContext::ROOT,
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let (binders, compiled, reservation) = compile_checked_binding(
+        &mut resident, &recipe,
+        "let receiverInstaller :: Int -> Eff '[Core.AgentTools] ()\n    receiverInstaller _ = Agents.installRequestReceiver",
+        execution.clone(),
+    );
+    assert_eq!(binders.len(), 1);
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        resident.run_projected_bind_with_sites(
+            "receiverInstaller",
+            compiled.code(),
+            &binders,
+            reservation.generation(),
+            settlement,
+        )
+    })
+    .unwrap();
+    assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
+    publish_checked_fixture(&mut resident, &execution, 1);
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.retire_scope(execution.private_scope());
+    let installer = resident
+        .retain_binding_custody("receiverInstaller")
+        .unwrap()
+        .unwrap();
+    let realm = RealmId::fresh();
+
+    // Keep real installed code and reply evidence, but carry public observations
+    // across the value-to-code boundary without its compiler-issued authority.
+    let mut observed = resident
+        .retain_binding_custody("receiverInstaller")
+        .unwrap()
+        .unwrap();
+    observed.provenance =
+        Arc::new(ProgramProvenance::from_sites(&installer.provenance.sites()).unwrap());
+    let observation_hole = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_rooted_entry_borrowed(
+                "observedReceiverInstaller",
+                &observed,
+                0,
+                realm,
+                None,
+                settlement,
+            )
+        })
+        .unwrap(),
+    );
+    let site = parked_site(&mut resident, &observation_hole);
+    let site_wire = i64::try_from(site).unwrap();
+    let handles = resident.value_handle_count();
+    let custody = resident.outstanding_custody();
+    assert!(
+        matches!(resident.capture_request_receiver_entry(&observation_hole, site_wire, realm),
+        Err(ResidentError::UnissuedRequestReceiverSite { site: rejected, issued, observation })
+            if rejected == site && issued.is_empty() && observation.is_some())
+    );
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.outstanding_custody(), custody);
+    assert_eq!(resident.parked_realm(&observation_hole), Some(realm));
+    resident
+        .abort(
+            observation_hole.cont_id(),
+            "observation-only refusal".into(),
+        )
+        .unwrap();
+    drop(observed);
+    resident.settle_dropped_custody();
+
+    let registration = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_rooted_entry_borrowed(
+                "issuedReceiverInstaller",
+                &installer,
+                0,
+                realm,
+                None,
+                settlement,
+            )
+        })
+        .unwrap(),
+    );
+    assert_eq!(parked_site(&mut resident, &registration), site);
+    assert!(
+        resident
+            .parked_program_provenance(&registration)
+            .unwrap()
+            .has_completion_site(site),
+        "the real typed compiler producer must issue registration authority"
+    );
+    let handles = resident.value_handle_count();
+    let custody = resident.outstanding_custody();
+    assert!(matches!(
+        resident.capture_request_receiver_entry(&registration, -1, realm),
+        Err(ResidentError::InvalidRequestReceiverSite { site: -1 })
+    ));
+    assert!(
+        matches!(resident.capture_request_receiver_entry(&registration, site_wire, RealmId::fresh()),
+        Err(ResidentError::RequestReceiverRealmMismatch { actual: Some(actual), .. }) if actual == realm)
+    );
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.outstanding_custody(), custody);
+    assert_eq!(resident.parked_realm(&registration), Some(realm));
+
+    let entry = resident
+        .capture_request_receiver_entry(&registration, site_wire, realm)
+        .unwrap();
+    assert_eq!(resident.outstanding_custody(), custody + 1);
+    drop(entry);
+    assert_eq!(resident.outstanding_custody(), custody);
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.parked_realm(&registration), Some(realm));
+
+    let entry = resident
+        .capture_request_receiver_entry(&registration, site_wire, realm)
+        .unwrap();
+    let mut foreign = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+    assert!(matches!(
+        tidepool_testing::with_settlement(|settlement| {
+            foreign.run_request_receiver_entry(entry, settlement)
+        }),
+        Err(ResidentError::ForeignCustody)
+    ));
+    assert_eq!(resident.outstanding_custody(), custody);
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.parked_realm(&registration), Some(realm));
+    assert_eq!(foreign.parked_count(), 0);
+
+    let entry = resident
+        .capture_request_receiver_entry(&registration, site_wire, realm)
+        .unwrap();
+    let settled = tidepool_testing::with_settlement(|settlement| {
+        resident.resume(registration.clone(), (), settlement)
+    })
+    .unwrap();
+    assert!(matches!(settled, ResidentOutcome::Completed { .. }));
+    let receiver = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_request_receiver_entry(entry, settlement)
+        })
+        .unwrap(),
+    );
+    assert_eq!(resident.parked_realm(&receiver), Some(realm));
+    assert!(resident
+        .parked_program_provenance(&receiver)
+        .unwrap()
+        .has_completion_site(site));
+    assert!(matches!(
+        resident.capture_request_receiver_entry(&registration, site_wire, realm),
+        Err(ResidentError::WrongContinuation { .. })
+    ));
+    resident
+        .abort(receiver.cont_id(), "receiver capture test completed".into())
+        .unwrap();
+    drop(installer);
+    assert_eq!(resident.outstanding_custody(), 0);
+    assert_eq!(resident.parked_count(), 0);
+}
+
 // These fixtures exercise the admitted branch of Replies' Either answers.
 // The unused error type supplies no value; native reply evidence validates
 // Right and its payload against the compiler-issued reply type.

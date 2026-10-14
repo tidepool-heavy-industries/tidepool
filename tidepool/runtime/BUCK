@@ -1142,6 +1142,20 @@ rust_compile_fail(
 )
 
 rust_compile_fail(
+    name = "compile_fail_request_receiver_from_root",
+    source = "tests/compile_fail/request_receiver_from_root.rs",
+    control = "tests/compile_pass/request_receiver_from_root.rs",
+    expected = "tests/compile_fail/request_receiver_from_root.stderr",
+    dependencies = {
+        "frunk": "//third-party/rust:frunk",
+        "tidepool_codegen": "//tidepool/codegen:tidepool_codegen",
+        "tidepool_mcp": "//bridge/mcp:tidepool_mcp",
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_root_borrow_collection",
     source = "tests/compile_fail/root_borrow_collection.rs",
     control = "tests/compile_pass/root_borrow_collection.rs",
