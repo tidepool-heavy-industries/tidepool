@@ -1213,6 +1213,25 @@ impl<'code> PreparedMachine<'code> {
         block: &RootWords,
         candidate_alloc_start: &mut Option<*mut u8>,
     ) -> Result<Arc<StaticRegion>, ExecutionError> {
+        if std::env::var_os("TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC").is_some() {
+            for (declaration, descriptor) in &compiled.interned_constructors {
+                if declaration.identity.symbol.occurrence == "RunRequest"
+                    || declaration.identity.family.symbol.occurrence == "AgentProtocol"
+                    || declaration.host_id == tidepool_repr::DataConId(18347625841861181856)
+                {
+                    let existing = self.interner.by_host(declaration.host_id);
+                    eprintln!(
+                        "constructor custody machine={:p} source={:?} declaration={:?} descriptor={:p} strong={} existing={:?}",
+                        self,
+                        compiled.certified_source,
+                        declaration,
+                        Arc::as_ptr(descriptor),
+                        Arc::strong_count(descriptor),
+                        existing.map(|(known, value)| (known, Arc::as_ptr(value), Arc::strong_count(value))),
+                    );
+                }
+            }
+        }
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
         // program; otherwise nothing is absorbed and nothing else happens.

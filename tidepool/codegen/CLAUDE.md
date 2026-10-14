@@ -4,6 +4,11 @@ This crate validates prepared execution programs, lowers them to Cranelift, and 
 
 ## Cost diagnostics
 
+`TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC=1` retains the complete request
+constructor declaration and descriptor address at native installation, including
+the machine's existing declaration and the compiled source owner. It observes
+the existing ownership check without changing descriptor admission.
+
 `TIDEPOOL_CODEGEN_DETAIL=1` adds native category and top-binding-inclusive
 defining-module counts, blocks, emitted bytes, and native compilation time to
 the `tidepool_codegen::prepared_compile` trace. Category and definition rows

@@ -23496,6 +23496,39 @@ pub(crate) mod request_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn activation_fixture_interleaving_distinguishes_initialization_from_reset() {
+        with_test_compiler_owner(async {
+            let construct = |phase| {
+                eprintln!("activation fixture interleaving phase={phase} begin");
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    drop(activation_session_fixture(|_| {}));
+                }));
+                eprintln!(
+                    "activation fixture interleaving phase={phase} completed={}",
+                    outcome.is_ok(),
+                );
+                outcome
+            };
+            assert!(construct("before-result-initialization").is_ok());
+            eprintln!("result fixture first genuine initialization begin");
+            crate::request::test_support::fresh_history();
+            eprintln!("result fixture first genuine initialization complete");
+            let after_initialization = construct("after-result-initialization");
+            eprintln!("result fixture reset-only begin");
+            crate::request::test_support::fresh_history();
+            eprintln!("result fixture reset-only complete");
+            let after_reset = construct("after-result-reset");
+            assert!(
+                after_initialization.is_ok() && after_reset.is_ok(),
+                "activation fixture interleaving: initialization={}, reset={}",
+                after_initialization.is_ok(),
+                after_reset.is_ok(),
+            );
+        })
+        .await;
+    }
+
     pub(crate) fn activation_session_fixture(
         configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
     ) -> ActivationSessionFixture {
