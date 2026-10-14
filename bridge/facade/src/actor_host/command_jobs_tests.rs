@@ -1991,28 +1991,30 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                 let result = running.await.unwrap();
                 assert_eq!(result["status"], "committed", "{result}");
                 let text = |index: usize| result["items"][index]["output"].as_str().unwrap();
-                // A bound command statement summarizes instead of presenting output.
-                assert!(text(0).contains("exit 0 · stdout 6 bytes"), "{result}");
-                assert!(!text(0).contains("stdout ·"), "{result}");
-                assert!(!text(1).contains("stdout ·"), "{result}");
-                assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
-                // The finished-command status/next block renders exactly once, not once
-                // from an implicit command presentation and again from ordinary value display.
-                assert_eq!(
-                    text(2).matches("next: inspect outcome and output").count(),
-                    1,
-                    "status block renders once: {result}"
-                );
-                assert!(text(3).contains("Right \"result\""), "{result}");
-                assert!(
-                    !text(4).contains("stdout ·"),
-                    "bound await presented output: {result}"
-                );
+                for index in 0..8 {
+                    assert_eq!(
+                        result["items"][index]["installedBindings"]
+                            .as_array()
+                            .expect("every command value retains one binding")
+                            .len(),
+                        1,
+                        "{result}"
+                    );
+                    if index != 6 {
+                        assert!(!text(index).contains("stdout ·"), "{result}");
+                        assert!(
+                            !text(index).contains("next: inspect outcome and output"),
+                            "a value-only operation presented command status: {result}"
+                        );
+                    }
+                }
+                assert_eq!(result["items"][0]["installedBindings"][0], "normal");
+                assert_eq!(result["items"][1]["installedBindings"][0], "silent");
+                assert_eq!(result["items"][4]["installedBindings"][0], "again");
                 assert!(
                     !text(4).contains("retained as"),
                     "await minted a presentation binding: {result}"
                 );
-                assert!(text(5).contains("Right \"result\""), "{result}");
                 assert_eq!(
                     text(6).matches("stdout ·").count(),
                     1,
@@ -2023,9 +2025,20 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                     1,
                     "observation status block renders once: {result}"
                 );
-                assert!(
-                    text(7).contains("result"),
-                    "explicit page output was consumed: {result}"
+                let captured = result["items"][7]["installedBindings"][0]
+                    .as_str()
+                    .expect("the explicit output read retains its observation");
+                let retained = committed(
+                    campaign,
+                    &format!(
+                        "display (Cmd.stdout normal == Right \"result\" && Cmd.stdout silent == Right \"result\" && Cmd.stdout again == Right \"result\" && case {captured} () of Right output -> Cmd.outputText (Cmd.commandStdout output) == \"result\"; Left _ -> False)"
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&retained),
+                    "True",
+                    "bound results and the explicit output page remain readable"
                 );
                 assert_eq!(backend.specs.lock().len(), 3);
             })
