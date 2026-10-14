@@ -4048,7 +4048,7 @@ impl ViewLease {
     ) -> Result<(), CompileError> {
         let mut sources = self.materialization_sources.iter().collect::<Vec<_>>();
         sources.sort_by_key(|(id, source)| (std::cmp::Reverse(source.ancestors.len()), **id));
-        let mut covered = imbl::OrdSet::new();
+        let mut covered = imbl::OrdSet::<MaterializationCacheId>::new();
         // Observe descendants first: a completed source subsumes its ancestor
         // rows, including ancestors which complete later, without locking them.
         for (id, source) in sources {
