@@ -10752,6 +10752,139 @@ mod tests {
     }
 
     #[test]
+    fn late_private_key_capture_keeps_selected_files_after_ancestor_retirement() {
+        let (ancestor, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let gamma = crate::certified_products::fixture_finalized_product(
+            support_product("Gamma"),
+            ancestor.producer,
+        );
+        let descendant = Arc::new(
+            ancestor
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(ancestor.producer, &[gamma])
+                .unwrap(),
+        );
+        let completed = descendant
+            .prepare_compilation(&scratch.path().join("descendant"), &producer)
+            .unwrap();
+        let delta = crate::certified_products::fixture_finalized_product(
+            support_product("LatePrivate"),
+            ancestor.producer,
+        );
+        let producer_identity = CanonicalProducerIdentity::from_producer_bytes(&producer);
+        let private = OriginalCompilerInputs::from_native_availability(
+            &ancestor,
+            producer_identity,
+            std::slice::from_ref(&delta),
+        )
+        .unwrap();
+        let late = ancestor
+            .prepare_compilation_with_scaffold(
+                &scratch.path().join("late-private"),
+                &producer,
+                None,
+                &ProtectedScaffoldRequirements::default(),
+                Some(private),
+            )
+            .unwrap();
+        let late_file = late
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "LatePrivate")
+            .unwrap()
+            .interface
+            .clone();
+        let epsilon = crate::certified_products::fixture_finalized_product(
+            support_product("Epsilon"),
+            descendant.producer,
+        );
+        let next = Arc::new(
+            descendant
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(descendant.producer, &[epsilon])
+                .unwrap(),
+        );
+        let private =
+            OriginalCompilerInputs::from_native_availability(&next, producer_identity, &[delta])
+                .unwrap();
+        let request = next
+            .prepare_compilation_with_scaffold(
+                &scratch.path().join("next-private"),
+                &producer,
+                None,
+                &ProtectedScaffoldRequirements::default(),
+                Some(private),
+            )
+            .unwrap();
+        request.validate_artifacts().unwrap();
+        assert_ne!(
+            completed.compiler_inputs().metadata.materialization_key(),
+            request.compiler_inputs().metadata.materialization_key()
+        );
+        let selected =
+            &request.compiler_inputs().metadata.entries[&identity("fixture", "LatePrivate")];
+        let id = selected.descriptor.id;
+        let file = request
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "LatePrivate")
+            .unwrap()
+            .interface
+            .clone();
+        assert_eq!(file.sha256, late_file.sha256);
+        assert_eq!(
+            std::fs::read(&file.path).unwrap(),
+            std::fs::read(&late_file.path).unwrap()
+        );
+        let mut captured = next.as_ref().clone();
+        captured.inventory = request
+            .compiler_inputs()
+            .artifacts
+            .select_roots(vec![id])
+            .unwrap();
+        captured.compiler_projection = request
+            .compiler_inputs()
+            .projection
+            .within_view(&captured.inventory);
+        captured.lexical = crate::exact_context::ExactLexicalSnapshot::default();
+        captured.normalize().unwrap();
+        let captured = Arc::new(captured);
+        let selected_owner =
+            Arc::downgrade(&captured.compiler_metadata_snapshot().unwrap().artifacts[&id]);
+        let proof = Arc::clone(captured.inventory.selection_snapshot());
+        drop(request);
+        drop(late);
+        drop(completed);
+        drop(next);
+        drop(descendant);
+        drop(ancestor);
+        assert!(
+            file.path.exists(),
+            "detached selection owns its selected file"
+        );
+        if file.path != late_file.path {
+            assert!(
+                !late_file.path.exists(),
+                "unselected late source files retire"
+            );
+        }
+        let restored = captured
+            .prepare_compilation(&scratch.path().join("detached"), &producer)
+            .unwrap();
+        restored.validate_artifacts().unwrap();
+        assert_eq!(restored.artifacts.len(), 1);
+        assert_eq!(restored.artifacts[0].interface.path, file.path);
+        drop(restored);
+        drop(captured);
+        assert!(!file.path.exists());
+        assert!(selected_owner.upgrade().is_none());
+        assert!(!proof.scopes.is_empty());
+    }
+
+    #[test]
     fn completed_descendant_subsumes_late_ancestor_materialization() {
         let (ancestor, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
