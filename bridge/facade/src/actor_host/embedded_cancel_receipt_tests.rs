@@ -547,3 +547,153 @@ async fn cancelled_prefix_with_order(order: Option<CancellationOrder>) {
         })
         .await;
 }
+struct DiagnosticFailureOffline;
+impl harness::transport::Auth for DiagnosticFailureOffline {
+    fn access(&self) -> Result<String, harness::transport::TransportError> {
+        panic!("offline diagnostic transport cannot request credentials")
+    }
+}
+
+#[derive(Clone)]
+struct DiagnosticFailureTransport {
+    requests: Arc<AtomicU64>,
+    native_call: mpsc::UnboundedSender<RequestId>,
+    fail: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl harness::engine::ResponsesTransport for DiagnosticFailureTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::ChatGptPlan,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        match self.requests.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                self.native_call.send(request.request_id().clone()).unwrap();
+                Ok(harness::transport::ResponsesTurn {
+                    response_id: "native-before-diagnostic".into(),
+                    items: vec![Item(
+                        json!({"type":"custom_tool_call", "call_id":"diagnostic-pending-cell", "name":"haskell", "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_cancelled_prefix.hs"), "async":true}),
+                    )],
+                    usage: Default::default(),
+                })
+            }
+            1 => {
+                self.fail.notified().await;
+                Err(harness::transport::TransportError::ProviderStreamFailure {
+                    event: harness::transport::ProviderStreamFailureEvent::Error,
+                    diagnostic: Some(harness::transport::HttpDiagnostic {
+                        code: Some("invalid_tools".into()),
+                        message: Some("unsupported tool schema".into()),
+                        ..Default::default()
+                    }),
+                })
+            }
+            other => panic!("failure history unexpectedly retried provider request {other}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_diagnostic_and_block_write_refusal_retain_native_cleanup_cause() {
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let actor = campaign.actor.identity();
+        let race = Arc::new(CancellationRace {
+            order: CancellationOrder::OwnerFirst,
+            abandon_dispatch: Default::default(), native_entry: Default::default(), fallback_finished: Default::default(),
+            native_causes: Default::default(), intents: Default::default(),
+        });
+        let mut installation = campaign.root_installation.clone();
+        installation.policy = Arc::new(AbandonedDispatchEndpoint { inner: installation.policy.clone(), race: race.clone() });
+        let files = tempfile::tempdir().unwrap();
+        let secret = files.path().join("session-secret");
+        std::fs::write(&secret, "diagnostic-history-secret-is-long-enough").unwrap();
+        let auth = files.path().join("chatgpt-auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        let settings = crate::exomonad::EmbeddedLaunchConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https, public_origin: None,
+            asset_root: super::super::test_campaign::hosted_browser_assets(),
+            browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret, session_secret_file: Some(secret),
+            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan, credential_file: auth,
+            context_capacity_tokens: 200_000, concurrent_jobs: 2,
+        };
+        let mut service = campaign.prepare_engine_component_service(&settings).await.unwrap();
+        let embedded = super::super::embedded_service::attach_actor(
+            &service, super::super::provider_attachment::ProviderAttachment::admit(campaign.forest.clone(), actor).await.unwrap(),
+            campaign.session_root.path(), AgentPath("/root".into()), None, installation,
+            Some("exercise diagnostic persistence and native cleanup".into()),
+        ).await.unwrap();
+        let conversation = embedded.conversation.clone();
+        let identity = conversation.identity().clone();
+        let sql = rusqlite::Connection::open(campaign.session_root.path().join("harness/store.sqlite")).unwrap();
+        sql.execute_batch("CREATE TRIGGER diagnostic_block_fault BEFORE UPDATE ON embedded_inference WHEN json_extract(NEW.state,'$.state')='blocked' BEGIN SELECT RAISE(ABORT,'diagnostic block write refused'); END;").unwrap();
+        // block_tx uses an upsert; cover its insertion branch independently too.
+        sql.execute_batch("CREATE TRIGGER diagnostic_block_insert_fault BEFORE INSERT ON embedded_inference WHEN json_extract(NEW.state,'$.state')='blocked' BEGIN SELECT RAISE(ABORT,'diagnostic block write refused'); END;").unwrap();
+        let (native_call, mut native_calls) = mpsc::unbounded_channel();
+        let transport = DiagnosticFailureTransport { requests: Arc::new(AtomicU64::new(0)), native_call, fail: Arc::new(tokio::sync::Notify::new()) };
+        let engine_transport = transport.clone();
+        let (lifecycle, _) = watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+        let runtime = service.runtime.clone();
+        let mut running = tokio::spawn(async move {
+            super::super::embedded_service::drive_conversation_with_transport::<DiagnosticFailureOffline, _>(
+                embedded.driver, runtime, &settings, "offline-diagnostic".into(), harness::model::Effort::Low,
+                "native diagnostic failure history".into(), embedded.cancellation_rx, lifecycle, actor, engine_transport,
+            ).await
+        });
+        let request = tokio::time::timeout(Duration::from_secs(30), native_calls.recv()).await.unwrap().unwrap();
+        let backend = TestCommands::completed("diagnostic-prefix");
+        loop {
+            let deployment = campaign.next_deployment("diagnostic prefix backend", Duration::from_secs(120), |event| match event {
+                exomonad_actor::LocalResidentDeployment::CommandBackend(request) => Ok(request), other => Err(other),
+            }).await;
+            match deployment.purpose {
+                exomonad_actor::command_jobs::CommandBackendPurpose::Command => { deployment.supply(Ok(backend.clone())); break; }
+                exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => deployment.supply(Ok(TestCommands::completed("/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n"))),
+            }
+        }
+        let operation = OperationId { origin: ConversationIdentity::Embedded { run: identity.run.clone(), actor: identity.actor.clone(), incarnation: identity.incarnation.clone() }, request, call: CallId("diagnostic-pending-cell".into()) };
+        let context = ToolInvocationContext::original(original_operation(&identity, &operation).unwrap());
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while campaign.actor.hosted_workbench_waiting(&context).is_none() { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.expect("native cell reaches sleep before provider failure");
+        assert_eq!(backend.executions(), 1);
+        transport.fail.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(60), &mut running).await.expect("driver joins native cleanup").unwrap().unwrap_err();
+        let super::super::embedded_service::EmbeddedDriverError::Round(report) = error else { panic!("actual Harness failure report required: {error:?}") };
+        assert!(matches!(report.primary_error(), Some(harness::engine::EngineError::Transport(harness::transport::TransportError::ProviderStreamFailure { diagnostic: Some(diagnostic), .. })) if diagnostic.code.as_deref() == Some("invalid_tools") && diagnostic.message.as_deref() == Some("unsupported tool schema")));
+        assert!(report.secondary_failures().iter().any(|failure| failure.stage() == harness::engine::RoundFailureStage::InferenceBlockRecording && failure.source().to_string().contains("diagnostic block write refused")));
+        let assessment = report.assessment();
+        assert_eq!(assessment.execution(), harness::engine::RoundExecution::Failed);
+        assert_eq!(assessment.cleanup(), harness::engine::RoundCleanup::Confirmed);
+        assert!(assessment.outstanding_operations().is_empty());
+        assert!(assessment.inference_obligations().iter().any(|obligation| matches!(obligation, harness::engine::InferenceObligation::PreserveUnsettled { .. })));
+        assert!(!assessment.inference_obligations().iter().any(|obligation| matches!(obligation, harness::engine::InferenceObligation::RecoverBlock { .. })));
+        assert!(!race.native_causes.lock().unwrap().is_empty());
+        assert!(race.native_causes.lock().unwrap().iter().all(|cause| *cause == exomonad_actor::WorkbenchCancellationCause::ProviderFailureCleanup));
+        let native = campaign.root_installation.policy.retained_operation(context).unwrap().terminal();
+        assert!(matches!(native, exomonad_actor::HostedOperationTerminal::Settled(WorkbenchCancellationOutcome::Cancelled { .. })), "{native:?}");
+        let claims = service.runtime.store().claims_for_operation(&operation).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
+        assert!(matches!(service.runtime.store().embedded_inference_state(&identity).unwrap(), harness::embedding::HostInferenceState::Running));
+        assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+        sql.execute_batch("DROP TRIGGER diagnostic_block_fault; DROP TRIGGER diagnostic_block_insert_fault;").unwrap();
+        service.shutdown().await.unwrap();
+    })).await;
+}
