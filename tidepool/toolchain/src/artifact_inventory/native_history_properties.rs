@@ -1655,7 +1655,7 @@ struct ColdNativeCoverage {
     completed: usize,
     eager_reads: usize,
     delayed_reads: usize,
-    slot_reuses: usize,
+    retirement_replacements: usize,
     recoveries: usize,
     cross_scope_carriers: usize,
 }
@@ -1766,18 +1766,11 @@ fn cold_native_history(
     let cold_projection = projection.reads.read_projection.get().is_none();
     let cold_merged = merged.reads.read_projection.get().is_none();
     // Detached metadata copies retain payload observations, but never a view
-    // lease or its derived read cache. Keep them alive beyond final reclamation.
+    // lease or its derived read cache. Keep them alive beyond final view retirement.
     let metadata = parent.metadata_snapshot();
     let mut expected_metadata = catalog.supplied_ids(false);
     expected_metadata.insert(retired.descriptor.id);
-    let retired_slot = {
-        let state = inventory.0.lock().unwrap();
-        let slots = state.indices.iter().filter_map(|(node, slot)| {
-            matches!(node, InventoryNodeKey::Artifact(binding) if binding.artifact == retired.descriptor.id).then_some(*slot)
-        }).collect::<Vec<_>>();
-        prop_assert_eq!(slots.len(), 1, "one unrelated admitted row must retire");
-        slots[0]
-    };
+    let retired_binding = parent.namespace()[&retired.descriptor.id];
     drop(parent);
     drop(left);
     drop(right);
@@ -1803,17 +1796,15 @@ fn cold_native_history(
         .unwrap();
     {
         let state = inventory.0.lock().unwrap();
-        let slots = state.indices.iter().filter_map(|(node, slot)| {
-            matches!(node, InventoryNodeKey::Artifact(binding) if binding.artifact == replacement.descriptor.id).then_some(*slot)
-        }).collect::<Vec<_>>();
-        prop_assert_eq!(slots.len(), 1);
-        prop_assert_eq!(
-            slots[0],
-            retired_slot,
-            "the history must actually reuse the retired slot"
+        prop_assert!(!state
+            .live_nodes()
+            .contains(&InventoryNodeKey::Artifact(retired_binding)));
+        prop_assert_ne!(
+            unrelated.namespace()[&replacement.descriptor.id],
+            retired_binding
         );
     }
-    coverage.slot_reuses += 1;
+    coverage.retirement_replacements += 1;
     prop_assert_eq!(
         projection.reads.read_projection.get().is_none(),
         cold_projection
@@ -1858,8 +1849,7 @@ fn cold_native_history(
     prop_assert_eq!(recovery_inventory.node_count(), 0);
     for owner in [&inventory, &recovery_inventory] {
         let state = owner.0.lock().unwrap();
-        prop_assert!(state.payloads.is_empty());
-        prop_assert!(state.roots.is_empty());
+        prop_assert!(state.live_nodes().is_empty());
     }
     prop_assert_eq!(
         metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
@@ -1980,7 +1970,7 @@ fn cold_native_history_support_covers_read_and_lease_partitions() {
         cold_later_group_history(&catalog, eager, &mut coverage).unwrap();
     }
     assert!(coverage.eager_reads > 0 && coverage.delayed_reads > 0);
-    assert_eq!(coverage.slot_reuses, 5);
+    assert_eq!(coverage.retirement_replacements, 5);
     assert_eq!(coverage.recoveries, 5);
     assert_eq!(coverage.cross_scope_carriers, 2);
     eprintln!("cold native deterministic support: {coverage:?}");
@@ -2592,7 +2582,7 @@ proptest! {
 }
 
 #[test]
-fn native_selection_index_duplicate_edges_do_not_create_ambiguity() {
+fn duplicate_carrier_edge_recovery_refuses_without_changing_issued_resolution() {
     let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
     let inventory = ArtifactInventory::default();
     let empty = inventory.empty_view();
@@ -2603,30 +2593,50 @@ fn native_selection_index_duplicate_edges_do_not_create_ambiguity() {
             &catalog.selection(&catalog.group_closure(&root_groups(0))),
         )
         .unwrap();
-    let mut state = inventory.0.lock().expect("inventory lock");
-    let projection = view.read_projection(&state);
-    let (group, carrier, source, target) = projection
-        .nodes
-        .iter()
-        .find_map(|key| {
-            let InventoryNodeKey::Group(group) = key else {
-                return None;
-            };
-            state.graph.edges(state.indices[key]).find_map(|edge| {
-                let InventoryNodeKey::Artifact(carrier) = state.graph[edge.target()] else {
+    let graph = view.capture_graph_selection();
+    let mut edges = view.binding_dependencies();
+    let (group, carrier, duplicate) = {
+        let state = inventory.0.lock().expect("inventory lock");
+        let projection = view.read_projection(&state);
+        let (group, carrier) = projection
+            .nodes
+            .iter()
+            .find_map(|key| {
+                let InventoryNodeKey::Group(group) = key else {
                     return None;
                 };
-                (*edge.weight() == ArtifactDependency::Interface
-                    && carrier.artifact == group.binding.artifact)
-                    .then_some((*group, carrier, state.indices[key], edge.target()))
+                state.outgoing(*key).find_map(|(target, label)| {
+                    let InventoryNodeKey::Artifact(carrier) = target else {
+                        return None;
+                    };
+                    (*label == ArtifactDependency::Interface
+                        && carrier.artifact == group.binding.artifact)
+                        .then_some((*group, carrier))
+                })
             })
-        })
-        .expect("production admission issued a group and exact carrier");
-    // Adversarial duplicate row tests the same-group any(edge) contract; it
-    // neither creates another group nor changes its carrier.
-    state
-        .graph
-        .add_edge(source, target, ArtifactDependency::Interface);
+            .expect("production admission issued a group and exact carrier");
+        let duplicate = edges
+            .iter()
+            .find(|(source, target, label)| {
+                *source == InventoryNodeKey::Group(group)
+                    && *target == InventoryNodeKey::Artifact(carrier)
+                    && *label == ArtifactDependency::Interface
+            })
+            .unwrap()
+            .clone();
+        (group, carrier, duplicate)
+    };
+    // Immutable issued scopes cannot contain duplicate rows. Corrupt recovery
+    // input must refuse before publishing an owner or affecting the live issuer.
+    edges.push(duplicate);
+    let recovery = ArtifactInventory::default();
+    assert!(recovery
+        .recover_selection(&recovery.empty_view(), view.entries(), &graph, &edges)
+        .is_err());
+    assert_eq!(recovery.node_count(), 0);
+    assert!(recovery.0.lock().unwrap().selection_plans.is_empty());
+    let state = inventory.0.lock().expect("inventory lock");
+    let projection = view.read_projection(&state);
     let index = NativeSelectionIndex::build(&state, &projection.nodes);
     assert_eq!(
         index.resolve(carrier, group.original_ordinal).unwrap(),
@@ -2636,6 +2646,8 @@ fn native_selection_index_duplicate_edges_do_not_create_ambiguity() {
         resolve_group_binding(&state, &projection.nodes, carrier, group.original_ordinal).unwrap(),
         group
     );
+    drop(state);
+    assert_eq!(view.capture_graph_selection(), graph);
 }
 
 #[test]

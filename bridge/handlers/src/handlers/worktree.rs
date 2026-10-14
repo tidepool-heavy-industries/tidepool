@@ -1877,13 +1877,16 @@ mod tests {
             }
             table
                 .insert_checked(tidepool_repr::DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: "Fixture".into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.to_owned(),
+                            record_parent: None,
+                        },
+                        "FixtureWorktreeResponse",
+                    ),
                     id: tidepool_repr::DataConId(20_000 + offset as u64),
                     name: name.into(),
                     tag: 1,

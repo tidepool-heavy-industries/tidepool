@@ -324,6 +324,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             &BTreeMap::new(),
             b"TypeOnlyHelper".to_vec(),
             &BTreeMap::new(),
+            &[],
         ),
         producer.sha256(),
     );
@@ -337,6 +338,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             &BTreeMap::new(),
             b"issued authored interface".to_vec(),
             &BTreeMap::new(),
+            &[],
         ),
         producer.sha256(),
         1,

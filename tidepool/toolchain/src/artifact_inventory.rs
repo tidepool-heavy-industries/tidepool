@@ -6681,7 +6681,7 @@ mod tests {
             .native_groups
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let before = inventory.metrics().installed_binding_rows;
+        let before = inventory.metrics().issued_scope_nodes;
         for _ in 0..repetitions {
             let target = inventory
                 .admit_bound_target(
@@ -6695,7 +6695,7 @@ mod tests {
             assert!(target
                 .artifacts
                 .lease
-                .roots
+                .admission_roots
                 .iter()
                 .all(|node| !matches!(node, InventoryNodeKey::Group(_))));
             assert_eq!(
@@ -6709,7 +6709,7 @@ mod tests {
                 target.artifacts.selected_native_groups(),
                 prefix.selected_native_groups()
             );
-            assert_eq!(inventory.metrics().installed_binding_rows, before);
+            assert_eq!(inventory.metrics().issued_scope_nodes, before);
             prefix = target.artifacts;
         }
         if retain_source {
@@ -6857,7 +6857,7 @@ mod tests {
                     "exact selected child closures survive"
                 );
             }
-            let before_retention = inventory.metrics().installed_binding_rows;
+            let before_retention = inventory.metrics().issued_scope_nodes;
             let value = prefix
                 .interface_projection(&[native.descriptor.owner.clone()])
                 .unwrap();
@@ -6872,7 +6872,7 @@ mod tests {
                     .native_groups,
                 prefix.capture_graph_selection().native_groups
             );
-            assert_eq!(inventory.metrics().installed_binding_rows, before_retention);
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_retention);
             assert_eq!(
                 retained.compiler_artifacts.namespace()[&id],
                 prefix.namespace()[&id]
@@ -6911,14 +6911,11 @@ mod tests {
                 owner: hidden.descriptor.owner.clone(),
                 imports: vec![],
             });
-            let rows_before_refusal = inventory.metrics().installed_binding_rows;
+            let rows_before_refusal = inventory.metrics().issued_scope_nodes;
             assert!(missing_role_context
                 .retain_value_source_surface(&value_with_hidden, &unsupported)
                 .is_err());
-            assert_eq!(
-                inventory.metrics().installed_binding_rows,
-                rows_before_refusal
-            );
+            assert_eq!(inventory.metrics().issued_scope_nodes, rows_before_refusal);
         }
     }
 
@@ -8600,6 +8597,7 @@ mod tests {
             packages,
             vec![0x42],
             &BTreeMap::new(),
+            &[],
         );
         let requirements = requirements
             .iter()

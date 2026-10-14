@@ -94,13 +94,16 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                 continue;
             }
             t.insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: (parsed.name).clone(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: parsed.name.clone(),
+                        record_parent: None,
+                    },
+                    decl.name,
+                ),
                 id: DataConId(next_id),
                 name: parsed.name,
                 tag: 1,
@@ -193,13 +196,16 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
             continue;
         }
         t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Tuple".into(),
-                namespace: "constructor".into(),
-                occurrence: name.to_owned(),
-                record_parent: None,
-            },
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Tuple".into(),
+                    namespace: "constructor".into(),
+                    occurrence: name.to_owned(),
+                    record_parent: None,
+                },
+                "FixtureResponse",
+            ),
             id: DataConId(next_id),
             name: name.into(),
             tag: 1,
