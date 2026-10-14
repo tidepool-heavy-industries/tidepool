@@ -18,8 +18,8 @@ pub fn console_decl() -> crate::EffectDecl {
         type_defs: &[],
         extra_imports: &[],
         helpers: &[
-            "-- | Emit a line of console output.\nsay :: forall effs. Member Console effs => Text -> Eff effs ()\nsay = send . Print",
-            "-- @substrate-helper@\ndisplayViewRaw :: forall effs. Member Console effs => Value -> Eff effs ()\ndisplayViewRaw view = send (DisplayViewWith view)",
+            crate::effect_defs::helper_decl!(@ Some("say"), Public, { raw ["-- | Emit a line of console output.\nsay :: forall effs. Member Console effs => Text -> Eff effs ()\nsay = send . Print"] }),
+            crate::effect_defs::helper_decl!(@ Some("displayViewRaw"), Substrate, { raw ["displayViewRaw :: forall effs. Member Console effs => Value -> Eff effs ()\ndisplayViewRaw view = send (DisplayViewWith view)"] }),
         ],
         type_params: &[],
         default_row_args: &[],

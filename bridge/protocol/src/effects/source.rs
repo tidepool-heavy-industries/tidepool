@@ -228,12 +228,12 @@ pub fn source() -> Effect {
             },
         ],
         helpers: vec![
-            Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), substrate: false,
+            Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), visibility: crate::schema::HelperVisibility::Public,
                 doc: &["Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
             Helper {
                 name: "reloadSource",
                 ctor: Some("SourceReloadWith"),
-                substrate: false,
+                visibility: crate::schema::HelperVisibility::Public,
                 doc: &[
                     "Capture and validate edited source and prompts, then publish one coherent generation.",
                     "The list selects additional modules to check. Changed configuration starts a fresh",
@@ -245,7 +245,7 @@ pub fn source() -> Effect {
             Helper {
                 name: "sourceStatus",
                 ctor: Some("SourceStatusWith"),
-                substrate: false,
+                visibility: crate::schema::HelperVisibility::Public,
                 doc: &[
                     "The revision this request captured, and the revision your",
                     "own source roots hold right now. Compare `revisionIdentity`s to tell whether an",

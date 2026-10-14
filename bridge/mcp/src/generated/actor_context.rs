@@ -20,7 +20,7 @@ pub fn actor_context_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            "-- | Inspect the current actor's exact identity and effective policy.\nactorContext :: forall effs. Member ActorContext effs => Eff effs ActorContextInfo\nactorContext = send ActorContextWith",
+            crate::effect_defs::helper_decl!(@ Some("actorContext"), Public, { raw ["-- | Inspect the current actor's exact identity and effective policy.\nactorContext :: forall effs. Member ActorContext effs => Eff effs ActorContextInfo\nactorContext = send ActorContextWith"] }),
         ],
         type_params: &[],
         default_row_args: &[],

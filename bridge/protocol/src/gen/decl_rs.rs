@@ -218,10 +218,20 @@ fn body(e: &Effect) -> String {
         "        extra_imports: {},\n",
         slice_literal(&imports, "        ")
     ));
-    out.push_str(&format!(
-        "        helpers: {},\n",
-        slice_literal(&e.helper_texts(), "        ")
-    ));
+    if e.helpers.is_empty() {
+        out.push_str("        helpers: &[],\n");
+    } else {
+        out.push_str("        helpers: &[\n");
+        for helper in &e.helpers {
+            out.push_str(&format!(
+                "            crate::effect_defs::helper_decl!(@ Some({}), {:?}, {{ raw [{}] }}),\n",
+                rust_string_literal(helper.name),
+                helper.visibility,
+                rust_string_literal(&helper.render(e)),
+            ));
+        }
+        out.push_str("        ],\n");
+    }
     let tps: Vec<String> = e
         .type_params
         .iter()

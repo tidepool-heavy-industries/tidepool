@@ -21,9 +21,9 @@ pub fn exec_decl() -> crate::EffectDecl {
             "import qualified Tidepool.Cargo as Cargo",
         ],
         helpers: &[
-            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,\n-- and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero\n-- EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:\n-- `Right p <- run cmd`.\nrun :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run",
-            "runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)",
-            "runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)\nrunArgv = send . RunArgv",
+            crate::effect_defs::helper_decl!(@ Some("run"), Public, { raw ["-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,\n-- and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero\n-- EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:\n-- `Right p <- run cmd`.\nrun :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run"] }),
+            crate::effect_defs::helper_decl!(@ Some("runIn"), Public, { raw ["runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)"] }),
+            crate::effect_defs::helper_decl!(@ Some("runArgv"), Public, { raw ["runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)\nrunArgv = send . RunArgv"] }),
         ],
         type_params: &[],
         default_row_args: &[],

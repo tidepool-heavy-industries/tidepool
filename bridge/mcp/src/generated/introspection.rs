@@ -29,8 +29,8 @@ pub fn introspection_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            "-- | Inspect a name and return its structured declaration.\ninfo :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)\ninfo = send . IntrospectionInfoWith",
-            "-- | Inspect a name's canonical type.\ntypeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)\ntypeOf = send . IntrospectionTypeOfWith",
+            crate::effect_defs::helper_decl!(@ Some("info"), Public, { raw ["-- | Inspect a name and return its structured declaration.\ninfo :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)\ninfo = send . IntrospectionInfoWith"] }),
+            crate::effect_defs::helper_decl!(@ Some("typeOf"), Public, { raw ["-- | Inspect a name's canonical type.\ntypeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)\ntypeOf = send . IntrospectionTypeOfWith"] }),
         ],
         type_params: &[],
         default_row_args: &[],

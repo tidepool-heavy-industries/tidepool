@@ -689,7 +689,12 @@ data Console a where
         assert!(!type_defs.contains("data Schema"));
         assert!(!type_defs.contains("data Q a"));
         assert!(decl.extra_imports.contains(&"import Tidepool.Form.Schema"));
-        let helpers = decl.helpers.join("\n");
+        let helpers = decl
+            .helpers
+            .iter()
+            .map(|helper| helper.source)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(helpers
             .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
         assert!(helpers.contains("askRaw prompt payload = send (AskWith prompt payload)"));

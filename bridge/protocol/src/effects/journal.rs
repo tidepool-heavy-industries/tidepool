@@ -98,7 +98,7 @@ pub fn journal() -> Effect {
             Helper {
                 name: "record",
                 ctor: Some("RecordStep"),
-                substrate: false,
+                visibility: crate::schema::HelperVisibility::Public,
                 doc: &[
                     "Append one durable journal entry. `kind` and `key` are",
                     "caller-chosen labels; `payload` is an opaque JSON value. Flushed",
@@ -109,7 +109,7 @@ pub fn journal() -> Effect {
             Helper {
                 name: "trace",
                 ctor: Some("TraceStep"),
-                substrate: false,
+                visibility: crate::schema::HelperVisibility::Public,
                 doc: &[
                     "Append one observability entry to the run's sibling TRACE stream: \
                 decision narration and telemetry. `stage` \

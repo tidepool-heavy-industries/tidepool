@@ -14,8 +14,8 @@ pub fn journal_decl() -> crate::EffectDecl {
         type_defs: &[],
         extra_imports: &[],
         helpers: &[
-            "-- | Append one durable journal entry. `kind` and `key` are\n-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n-- immediately; append-only — never rewritten or compacted.\nrecord :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\nrecord kind key payload = send (RecordStep kind key payload)",
-            "-- | Append one observability entry to the run's sibling TRACE stream: decision narration and telemetry. `stage` names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); `key` is the branch or unit it concerns; `payload` is an opaque JSON value whose shape may evolve freely. The handler stamps a timestamp on every line, so trace timestamps can be correlated with journal entries.\ntrace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\ntrace stage key payload = send (TraceStep stage key payload)",
+            crate::effect_defs::helper_decl!(@ Some("record"), Public, { raw ["-- | Append one durable journal entry. `kind` and `key` are\n-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n-- immediately; append-only — never rewritten or compacted.\nrecord :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\nrecord kind key payload = send (RecordStep kind key payload)"] }),
+            crate::effect_defs::helper_decl!(@ Some("trace"), Public, { raw ["-- | Append one observability entry to the run's sibling TRACE stream: decision narration and telemetry. `stage` names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); `key` is the branch or unit it concerns; `payload` is an opaque JSON value whose shape may evolve freely. The handler stamps a timestamp on every line, so trace timestamps can be correlated with journal entries.\ntrace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\ntrace stage key payload = send (TraceStep stage key payload)"] }),
         ],
         type_params: &[],
         default_row_args: &[],

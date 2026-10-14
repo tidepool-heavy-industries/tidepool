@@ -47,6 +47,23 @@ impl Surface {
         }
         command.arg(self.fixtures.join(fixture)).output().unwrap()
     }
+    fn execute(&self, fixture: &str) -> std::process::Output {
+        let compiled = self.compile(fixture, true);
+        assert!(
+            compiled.status.success(),
+            "{fixture} compilation: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = Command::new(self.scratch.path().join("codec"))
+            .output()
+            .unwrap();
+        assert!(
+            executed.status.success(),
+            "{fixture}: {}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        executed
+    }
     fn control(&self) {
         let compiled = self.compile("SurfaceConsumer.hs", false);
         assert!(
@@ -88,21 +105,7 @@ fn authored_private_constructor_and_forged_request_site_are_refused_after_valid_
 }
 #[test]
 fn generated_model_control_codecs_execute_and_preserve_callback_value() {
-    let surface = Surface::new();
-    let compiled = surface.compile("ModelCodec.hs", true);
-    assert!(
-        compiled.status.success(),
-        "model codec compilation: {}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    let executed = Command::new(surface.scratch.path().join("codec"))
-        .output()
-        .unwrap();
-    assert!(
-        executed.status.success(),
-        "model codecs: {}",
-        String::from_utf8_lossy(&executed.stderr)
-    );
+    Surface::new().execute("ModelCodec.hs");
 }
 
 #[test]
@@ -110,20 +113,7 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
     use exomonad_tool::{ActorEffectKey, ToolEffectKey, DEFAULT_ACTOR_EFFECTS};
 
     let surface = Surface::new();
-    let compiled = surface.compile("ActorProfiles.hs", true);
-    assert!(
-        compiled.status.success(),
-        "public actor row compilation: {}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    let executed = Command::new(surface.scratch.path().join("codec"))
-        .output()
-        .unwrap();
-    assert!(
-        executed.status.success(),
-        "public actor row reflection: {}",
-        String::from_utf8_lossy(&executed.stderr)
-    );
+    let executed = surface.execute("ActorProfiles.hs");
     let reflected: Vec<Vec<String>> = serde_json::from_slice(&executed.stdout)
         .expect("the compiled fixture must emit the default row as a string array");
     let named = |label: &str, values: Vec<String>| {
@@ -180,4 +170,9 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
         reflected, expected,
         "compiled witnesses, defining TyCons, names and ordered profiles must agree with the nominal catalogue"
     );
+}
+
+#[test]
+fn generated_and_handwritten_substrate_helpers_preserve_semantics() {
+    Surface::new().execute("HelperSemantics.hs");
 }

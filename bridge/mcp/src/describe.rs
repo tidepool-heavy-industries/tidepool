@@ -1,19 +1,6 @@
-//! Derive human-facing effect documentation from [`EffectDecl`] — the single
-//! source consumed by resident interaction surfaces:
-//!
-//! 1. the repl `session_run` tool description (`tidepool-repl`'s
-//!    `build_tool_description`), and
-//! 2. the repl `:browse` meta-command (`tidepool-repl`'s `browse_effects`).
-//!
-//! HAZARD: do not hand-roll a fourth per-effect enumeration or sig parser in
-//! a new surface — these consumers previously each maintained (or
-//! reimplemented) their own and drifted from each other. The per-effect
-//! enumerations DERIVE from the decls, and the sig/first-sentence parsers
-//! live here once. Only the framing prose around the enumeration stays
-//! hand-written per surface (for example, the repl points at `:browse`).
+//! Derive authored vocabulary documentation from [`EffectDecl`] metadata.
 
-use crate::effect_decls::EffectDecl;
-use crate::effect_defs::substrate_marker;
+use crate::effect_decls::{EffectDecl, HelperDecl, HelperVisibility};
 
 #[must_use]
 pub fn has_curated_authored_surface(type_name: &str) -> bool {
@@ -64,33 +51,20 @@ pub fn authored_type_definitions(decl: &EffectDecl) -> Vec<&str> {
 
 /// The canonical model-visible helper-source slice for one effect.
 #[must_use]
-pub fn authored_helpers(decl: &EffectDecl) -> Vec<&str> {
+pub fn authored_helpers(decl: &EffectDecl) -> Vec<HelperDecl> {
     decl.helpers
         .iter()
         .copied()
         .filter(|helper| {
-            helper_name(helper)
-                .as_deref()
+            helper
+                .name
                 .is_none_or(|name| !authored_name_is_hidden(decl.type_name, name))
         })
         .collect()
 }
 
-/// Signatures derived from [`authored_helpers`], for compact model-facing
-/// indexes such as `:browse` and the vocabulary resource.
-#[must_use]
-pub fn authored_helper_signatures(decl: &EffectDecl) -> Vec<String> {
-    authored_helpers(decl)
-        .into_iter()
-        .filter_map(helper_sig)
-        .collect()
-}
-
-/// The one-line summary of an effect's (often multi-sentence) `description`: the
-/// leading sentence, or the whole (trimmed) string when there is no sentence
-/// break. This is what `:browse` (bare) and the derived index show — the full
-/// multi-sentence `description` is reserved for `:browse <Effect>` and the
-/// `tidepool://effect/{name}` resource.
+/// The leading sentence used by compact indexes; the declaration retains
+/// the complete description for detailed inspection.
 pub fn first_sentence(desc: &str) -> &str {
     let d = desc.trim();
     match d.find(". ") {
@@ -100,81 +74,13 @@ pub fn first_sentence(desc: &str) -> &str {
     }
 }
 
-/// The signature line of an effect helper. Helper strings are
-/// `"[-- comment…\n]sig-line\ndefinition"`; the signature is the first
-/// non-comment line that carries a `::` (e.g. `run :: Text -> M Proc`). Falls
-/// back to the first non-comment line when no `::` is present.
-pub fn helper_sig(helper: &str) -> Option<String> {
-    let mut fallback = None;
-    for line in helper.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with("--") {
-            continue;
-        }
-        if t.contains("::") {
-            return Some(t.to_string());
-        }
-        fallback.get_or_insert(t.to_string());
-    }
-    fallback
-}
-
-/// The verb NAME of a helper string — the identifier before `::`, e.g.
-/// `run :: Text -> M Proc` → `run`. `None` when the helper carries no
-/// name-bearing signature (a bare operator section, say).
-pub fn helper_name(helper: &str) -> Option<String> {
-    let sig = helper_sig(helper)?;
-    let head = sig.split_once("::")?.0.trim();
-    if head.is_empty() {
-        None
-    } else {
-        Some(head.to_string())
-    }
-}
-
-/// Is `helper`'s rendered text tagged substrate — an implementation detail
-/// the extract layer needs (schema-building internals, private suspension
-/// helpers, Green's raw thread primitives)
-/// rather than a verb a
-/// model should reach for directly?
-///
-/// Structural, not a hand-maintained (effect, helper name) allowlist: a
-/// helper is substrate iff `effect_defs.rs`'s `helper_text!` macro rendered
-/// it via the `raw substrate [...]` form, which prepends
-/// [`substrate_marker!`] as the helper's first line — the single choke
-/// point every effect definition already routes through, so a newly added
-/// substrate helper is tagged at its own definition site instead of
-/// requiring a second edit here. This checks the rendered TEXT rather than
-/// adding a visibility field to [`EffectDecl`] itself: that struct is a
-/// plain `Copy` type constructed as a bare struct literal in several crates
-/// this lane does not own (e.g. `tidepool-repl`'s `session.rs` test
-/// fixtures) — a new field would force an edit in every one of them (none
-/// of which use `..Default::default()`), which the macro-side convention
-/// avoids entirely. Consulted only by the derived INDEX below;
-/// the full per-effect resource (`tidepool://effect/{name}`,
-/// `:browse <Effect>`) still lists every helper verbatim — a model that
-/// asks for that depth gets it.
-fn helper_is_substrate(helper: &str) -> bool {
-    helper.trim_start().starts_with(substrate_marker!())
-}
-
-/// One derived entry for an effect in a tool-description index: the effect name,
-/// its one-line (first-sentence) description, and the names of the PUBLIC helper
-/// verbs it exposes — the recommended callable surface, derived from the decl so
-/// a new public helper auto-appears (substrate helpers, see
-/// [`helper_is_substrate`], are excluded here but still fully documented at
-/// `tidepool://effect/{name}`). Rendered as a header line plus an indented verb
-/// list:
-///
-/// ```text
-///   Console: Print text output.
-///       verbs: say
-/// ```
+/// An effect's summary and named public helpers. Substrate and unnamed
+/// fragments remain available as source in the declaration.
 pub fn describe_effect(decl: &EffectDecl) -> String {
-    let verbs: Vec<String> = authored_helpers(decl)
+    let verbs: Vec<&str> = authored_helpers(decl)
         .into_iter()
-        .filter(|h| !helper_is_substrate(h))
-        .filter_map(helper_name)
+        .filter(|h| h.visibility == HelperVisibility::Public)
+        .filter_map(|helper| helper.name)
         .collect();
     let mut s = format!("  {}: {}", decl.type_name, first_sentence(decl.description));
     if !verbs.is_empty() {
@@ -213,30 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn helper_sig_skips_comments_and_finds_signature() {
-        assert_eq!(
-            helper_sig("-- | doc line\nrun :: Text -> M Proc\nrun cmd = undefined").as_deref(),
-            Some("run :: Text -> M Proc")
-        );
-        assert_eq!(
-            helper_sig("kvSet :: Text -> Value -> M ()\nkvSet k v = undefined").as_deref(),
-            Some("kvSet :: Text -> Value -> M ()")
-        );
-    }
-
-    #[test]
-    fn helper_name_is_the_identifier_before_the_arrow() {
-        assert_eq!(
-            helper_name("-- | doc\nrun :: Text -> M Proc\nrun cmd = undefined").as_deref(),
-            Some("run")
-        );
-        assert_eq!(
-            helper_name("grepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob = undefined").as_deref(),
-            Some("grepGlob")
-        );
-    }
-
-    #[test]
     fn authored_effect_view_applies_one_curation_policy_to_every_name_class() {
         let actor = crate::actor_decl();
         assert!(authored_constructors(&actor).is_empty());
@@ -249,12 +131,7 @@ mod tests {
         assert_eq!(authored_helpers(&console), console.helpers);
     }
 
-    /// Snapshot-guard: the derived index names every effect and lists at least
-    /// one of each effect's PUBLIC helper verbs. Effects declaring only private
-    /// helpers are exempt; their public verbs live in the Haskell stdlib, not
-    /// in `EffectDecl::helpers`). Adding a new public helper to a `*_decl()`
-    /// therefore auto-appears in both servers' tool descriptions with no
-    /// hand-edit; a substrate helper never does.
+    /// Every declaration and its first named public helper appears in the index.
     #[test]
     fn derived_index_covers_every_decl_and_a_helper_verb() {
         let decls = standard_decls();
@@ -265,17 +142,14 @@ mod tests {
                 "index must name effect {}: {index}",
                 d.type_name
             );
-            // At least one PUBLIC helper verb name for the effect must appear
-            // (spot the first PUBLIC helper's name — proof the verb
-            // enumeration derives and substrate is excluded).
             let public_name = d
                 .helpers
                 .iter()
-                .filter(|h| !helper_is_substrate(h))
-                .find_map(|h| helper_name(h));
+                .filter(|h| h.visibility == HelperVisibility::Public)
+                .find_map(|h| h.name);
             if let Some(name) = public_name {
                 assert!(
-                    index.contains(&name),
+                    index.contains(name),
                     "index must list a helper verb ({name}) for effect {}: {index}",
                     d.type_name
                 );
@@ -283,19 +157,29 @@ mod tests {
         }
     }
 
-    /// Recommended-surface indexing excludes private substrate helpers.
     #[test]
-    fn derived_index_excludes_substrate_helpers() {
-        let decls = standard_decls();
-        let index = describe_effects_index(&decls);
-        for name in ["isOpt", "innerSchema", "schemaToValue"] {
-            assert!(
-                !index.contains(name),
-                "index must not advertise substrate helper {name}: {index}"
-            );
+    fn helper_metadata_drives_index_without_hiding_detailed_source() {
+        let console = crate::console_decl();
+        let entropy = crate::entropy_decl();
+        for (decl, substrate) in [(console, "displayViewRaw"), (entropy, "entropySeed")] {
+            let index = describe_effect(&decl);
+            assert!(!index.contains(substrate));
+            let detailed = authored_helpers(&decl);
+            let helper = detailed
+                .iter()
+                .find(|helper| helper.name == Some(substrate))
+                .unwrap();
+            assert_eq!(helper.visibility, HelperVisibility::Substrate);
+            assert!(helper.source.contains(substrate));
         }
-        // The model-facing verbs stay listed.
-        assert!(index.contains("ask"), "index must still list ask: {index}");
+        assert!(describe_effect(&console).contains("verbs: say"));
+        const UNNAMED: HelperDecl = crate::effect_defs::helper_decl!({ unnamed raw ["apparentName :: Int", "apparentName = 1"] });
+        let decl = EffectDecl {
+            helpers: &[UNNAMED],
+            ..console
+        };
+        assert!(!describe_effect(&decl).contains("apparentName"));
+        assert_eq!(authored_helpers(&decl)[0].source, UNNAMED.source);
     }
 
     /// Opt-in Green declarations must also hide raw substrate helpers.

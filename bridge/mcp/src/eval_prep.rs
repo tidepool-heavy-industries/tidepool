@@ -216,7 +216,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     // executable authority remains narrow in the per-incarnation row.
     for eff in &effects {
         for h in eff.helpers {
-            out.push_str(h);
+            out.push_str(h.source);
             out.push('\n');
         }
     }

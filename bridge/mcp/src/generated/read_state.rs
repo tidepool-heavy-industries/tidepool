@@ -13,7 +13,7 @@ pub fn readstate_decl() -> crate::EffectDecl {
         type_defs: &[],
         extra_imports: &[],
         helpers: &[
-            "getStateJson :: forall effs. Member ReadState effs => Eff effs Value\ngetStateJson = send ReadStateWith",
+            crate::effect_defs::helper_decl!(@ Some("getStateJson"), Public, { raw ["getStateJson :: forall effs. Member ReadState effs => Eff effs Value\ngetStateJson = send ReadStateWith"] }),
         ],
         type_params: &[],
         default_row_args: &[],

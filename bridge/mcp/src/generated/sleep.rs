@@ -15,7 +15,7 @@ pub fn sleep_decl() -> crate::EffectDecl {
             "import Tidepool.Duration (Duration, milliseconds, seconds, minutes)",
         ],
         helpers: &[
-            "-- | Suspend this evaluation for at least the requested monotonic duration.\nsleep :: forall effs. Member Sleep effs => Duration -> Eff effs ()\nsleep = send . SleepWith",
+            crate::effect_defs::helper_decl!(@ Some("sleep"), Public, { raw ["-- | Suspend this evaluation for at least the requested monotonic duration.\nsleep :: forall effs. Member Sleep effs => Duration -> Eff effs ()\nsleep = send . SleepWith"] }),
         ],
         type_params: &[],
         default_row_args: &[],

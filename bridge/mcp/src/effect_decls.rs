@@ -10,6 +10,17 @@
 // Effect metadata — lives next to the handler, discovered via trait
 // ---------------------------------------------------------------------------
 
+pub use tidepool_protocol::schema::HelperVisibility;
+
+/// One helper's identity, index visibility, and compilable Haskell source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperDecl {
+    /// Absent for an intentionally unnamed source fragment.
+    pub name: Option<&'static str>,
+    pub visibility: HelperVisibility,
+    pub source: &'static str,
+}
+
 /// Static metadata describing a Haskell effect type.
 ///
 /// Each effect handler that wants to participate in the MCP templating system
@@ -48,8 +59,7 @@ pub struct EffectDecl {
     /// Empty for every effect that needs nothing beyond the fixed surface.
     pub extra_imports: &'static [&'static str],
     /// Row-polymorphic curried helper definitions emitted with the vocabulary.
-    /// Each string is one or more lines of Haskell (signature + definition).
-    pub helpers: &'static [&'static str],
+    pub helpers: &'static [HelperDecl],
     /// Type parameters the GADT head carries before its result parameter,
     /// e.g. `["api"]` for `ActorLocal api a`. A row entry applies these
     /// parameters, so `Member (ActorLocal Maybe) effs` admits that protocol.

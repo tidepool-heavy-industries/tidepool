@@ -47,7 +47,7 @@ pub fn actor_context() -> Effect {
         helpers: vec![Helper {
             name: "actorContext",
             ctor: Some("ActorContextWith"),
-            substrate: false,
+            visibility: crate::schema::HelperVisibility::Public,
             doc: &["Inspect the current actor's exact identity and effective policy."],
             body: HelperBody::Nullary,
         }],

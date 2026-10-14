@@ -38,7 +38,17 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
         eff.extra_imports.to_vec(),
         "extra_imports"
     );
-    assert_eq!(helpers.to_vec(), eff.helper_texts(), "helpers");
+    assert_eq!(
+        helpers
+            .iter()
+            .map(|h| (h.name, h.visibility, h.source.to_owned()))
+            .collect::<Vec<_>>(),
+        eff.helpers
+            .iter()
+            .map(|h| (Some(h.name), h.visibility, h.render(eff)))
+            .collect::<Vec<_>>(),
+        "helpers"
+    );
     let rendered_type_params: Vec<_> = eff.type_params.iter().map(|param| param.render()).collect();
     assert_eq!(
         type_params

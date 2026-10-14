@@ -43,7 +43,7 @@ pub fn lookup() -> Effect {
         helpers: vec![Helper {
             name: "lookupRaw",
             ctor: Some("LookupRaw"),
-            substrate: false,
+            visibility: crate::schema::HelperVisibility::Public,
             doc: &["Execute structured lookups without presentation or enrichment."],
             body: HelperBody::Pointfree,
         }],

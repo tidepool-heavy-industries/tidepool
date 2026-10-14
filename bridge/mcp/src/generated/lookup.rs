@@ -27,7 +27,7 @@ pub fn lookup_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            "-- | Execute structured lookups without presentation or enrichment.\nlookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch\nlookupRaw = send . LookupRaw",
+            crate::effect_defs::helper_decl!(@ Some("lookupRaw"), Public, { raw ["-- | Execute structured lookups without presentation or enrichment.\nlookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch\nlookupRaw = send . LookupRaw"] }),
         ],
         type_params: &[],
         default_row_args: &[],

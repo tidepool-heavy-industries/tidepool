@@ -42,10 +42,10 @@
 //!   { name <verb>, sig "<type>", doc [<line>, ...], body pointfree <Ctor> },
 //!   { name <verb>, sig "<type>", doc [<line>, ...], body nullary <Ctor> },
 //!   { name <verb>, sig "<type>", doc [<line>, ...], body applied <Ctor>(a, b) },
-//!   { raw [<haskell line>, ...] },        escape hatch: arbitrary helper Haskell
-//!   { raw substrate [<haskell line>, ...] }, same, but tagged substrate — an
-//!                                        implementation detail excluded from the
-//!                                        derived model-facing index (describe.rs)
+//!   { name <verb>, raw [<haskell line>, ...] },
+//!   { name <verb>, raw substrate [<haskell line>, ...] },
+//!   { unnamed raw [<haskell line>, ...] },
+//!   // Substrate and unnamed fragments are omitted from the callable index.
 //! ],
 //! ```
 //!
@@ -95,32 +95,12 @@
 //! needs laziness. This is why Exec/Http/Git/Llm (scalar/`Value`/record
 //! results) are fine to tag.
 
-/// The sentinel [`crate::describe::helper_is_substrate`] checks for,
-/// verbatim, as a helper's rendered text's first line. Emitted only by
-/// `helper_text!`'s `raw substrate [...]` form (below) — the single place
-/// that decides whether a helper is substrate, replacing a hand-maintained
-/// per-(effect, helper-name) allowlist that lived in `describe.rs` and had
-/// to be updated by hand every time a new substrate helper was added
-/// elsewhere. A plain Haskell line comment: inert in the compiled module,
-/// and already skipped by `helper_sig`/`helper_name` (both ignore
-/// `--`-prefixed lines), so marking a helper substrate changes nothing
-/// about whether it compiles or is callable — only whether the derived
-/// model-facing index lists it. Defined as a macro (not a `const`) because
-/// it is spliced into other macros' `concat!` calls, which require literal
-/// tokens.
-macro_rules! substrate_marker {
-    () => {
-        "-- @substrate-helper@"
-    };
-}
-pub(crate) use substrate_marker;
-
 /// Render one helper entry of a definition to its Haskell source string.
 ///
 /// Kept separate from [`effect_decl_projection!`] so each `{ ... }` helper
 /// group (captured as a single `tt`) can be re-matched against the per-form
 /// arms. All output is assembled with `concat!` — the decl builder stays a
-/// `&'static str` table exactly like the hand-written ones.
+/// `&'static str` source inside the helper metadata.
 macro_rules! helper_text {
     // Point-free thin wrapper over a unary constructor: `v = send . Ctor`.
     ({ name $n:ident, sig $sig:literal,
@@ -153,20 +133,36 @@ macro_rules! helper_text {
             stringify!($ctor), $(" ", stringify!($a),)+ ")"
         )
     };
-    // Escape hatch, SUBSTRATE: identical to `raw` below, but the rendered
-    // text carries `substrate_marker!()` as its first line — an
-    // implementation detail a model should not call directly (the typed
-    // wrapper's own doc names it). Still fully compiled and importable;
-    // only `describe.rs`'s derived model-facing index excludes it.
-    ({ raw substrate [$l0:literal $(, $l:literal)* $(,)?] $(,)? }) => {
-        concat!($crate::effect_defs::substrate_marker!(), "\n", $l0 $(, "\n", $l)*)
-    };
     // Escape hatch: arbitrary Haskell, newline-joined.
     ({ raw [$l0:literal $(, $l:literal)* $(,)?] $(,)? }) => {
         concat!($l0 $(, "\n", $l)*)
     };
 }
 pub(crate) use helper_text;
+
+/// Project helper identity and visibility alongside its source.
+macro_rules! helper_decl {
+    (@ $name:expr, $visibility:ident, $source:tt) => {
+        $crate::HelperDecl {
+            name: $name,
+            visibility: $crate::HelperVisibility::$visibility,
+            source: $crate::effect_defs::helper_text!($source),
+        }
+    };
+    ({ name $n:ident, raw substrate $lines:tt }) => {
+        $crate::effect_defs::helper_decl!(@ Some(stringify!($n)), Substrate, { raw $lines })
+    };
+    ({ name $n:ident, raw $lines:tt }) => {
+        $crate::effect_defs::helper_decl!(@ Some(stringify!($n)), Public, { raw $lines })
+    };
+    ({ unnamed raw $lines:tt }) => {
+        $crate::effect_defs::helper_decl!(@ None, Public, { raw $lines })
+    };
+    ({ name $n:ident, $($rest:tt)* }) => {
+        $crate::effect_defs::helper_decl!(@ Some(stringify!($n)), Public, { name $n, $($rest)* })
+    };
+}
+pub(crate) use helper_decl;
 
 /// Render one GADT constructor signature string. An `errors`-tagged verb wraps
 /// its result in `Either <ErrEnum>` (the #335 typed-failure surface); a plain
@@ -439,7 +435,7 @@ macro_rules! effect_decl_projection {
                 // ride along normally.
                 type_defs: &[ $($td,)* ],
                 extra_imports: crate::effect_defs::extra_imports_for!($eff),
-                helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
+                helpers: &[ $( crate::effect_defs::helper_decl!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],
             }
@@ -514,7 +510,7 @@ macro_rules! effect_decl_projection {
                     $( crate::effect_defs::error_decl_text!($errname $(, $evariant)*) )?
                 ],
                 extra_imports: crate::effect_defs::extra_imports_for!($eff),
-                helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
+                helpers: &[ $( crate::effect_defs::helper_decl!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],
             }
@@ -549,7 +545,7 @@ macro_rules! time_effect_def {
                   ret "Int" },
             ],
             helpers [
-                { raw ["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).",
+                { name getCurrentTime, raw ["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).",
                        "getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime",
                        "getCurrentTime = UTCTime <$> send TimeNow"] },
             ],
@@ -593,7 +589,7 @@ macro_rules! entropy_effect_def {
                   ret "Int" },
             ],
             helpers [
-                { raw substrate ["entropySeed :: forall effs. Member Entropy effs => Eff effs Int",
+                { name entropySeed, raw substrate ["entropySeed :: forall effs. Member Entropy effs => Eff effs Int",
                        "entropySeed = send EntropySeed"] },
             ],
         }
@@ -865,7 +861,7 @@ macro_rules! ask_effect_def {
                   ret "Value" },
             ],
             helpers [
-                { raw substrate ["askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value",
+                { name askRaw, raw substrate ["askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value",
                        "askRaw prompt payload = send (AskWith prompt payload)"] },
             ],
         }
@@ -924,14 +920,14 @@ macro_rules! llm_effect_def {
                 // `askRaw`/`ask` (see `ask_effect_def!`'s doc for the full
                 // rationale, and `Tidepool.Llm`'s module doc for why `llm`
                 // is NOT in `Tidepool.Form.Schema` alongside `ask`).
-                { raw substrate ["llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)",
+                { name llmRaw, raw substrate ["llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)",
                        "llmRaw prompt payload = send (LlmStructured prompt payload)"] },
                 // Pure tally utilities (no LLM/Ask): build a frequency list while
                 // preserving first-seen order. Kept for .tidepool/lib verbs.
-                { raw ["findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]",
+                { name findTally, raw ["findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]",
                        "findTally _ [] = Nothing",
                        "findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }"] },
-                { raw ["tallyList :: Eq a => [a] -> [(a, Int)]",
+                { name tallyList, raw ["tallyList :: Eq a => [a] -> [(a, Int)]",
                        "tallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []"] },
             ],
         }
@@ -1127,17 +1123,17 @@ macro_rules! fs_read_effect_def {
                   ret "(Maybe Text)", errors FsError },
             ],
             helpers [
-                { raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)\nreadFile = send . FsRead"] },
-                { raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
-                { raw ["-- | TOTAL existence predicate (System.Directory semantics): False for a\n-- missing path, a directory, or a path outside the sandbox — never throws.\ndoesFileExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool\ndoesFileExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isFile)"] },
-                { raw ["-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.\ndoesDirectoryExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
-                { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
-                { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
-                { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])\nglob = send . FsGlob"] },
-                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: forall effs. Member FsRead effs => Text -> FilePath -> Eff effs (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
-                { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: forall effs. Member FsRead effs => Text -> Eff effs [FileRead]\nreadGlob = send . FsReadGlob"] },
-                { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else length (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
-                { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
+                { name readFile, raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)\nreadFile = send . FsRead"] },
+                { name listDirectory, raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
+                { name doesFileExist, raw ["-- | TOTAL existence predicate (System.Directory semantics): False for a\n-- missing path, a directory, or a path outside the sandbox — never throws.\ndoesFileExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool\ndoesFileExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isFile)"] },
+                { name doesDirectoryExist, raw ["-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.\ndoesDirectoryExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
+                { name getFileSize, raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
+                { name fsMeta, raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
+                { name glob, raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])\nglob = send . FsGlob"] },
+                { name grepGlob, raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: forall effs. Member FsRead effs => Text -> FilePath -> Eff effs (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
+                { name readGlob, raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: forall effs. Member FsRead effs => Text -> Eff effs [FileRead]\nreadGlob = send . FsReadGlob"] },
+                { name planUpdate, raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else length (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
+                { name fileHash, raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
             ],
         }
     };
@@ -1174,14 +1170,14 @@ macro_rules! fs_write_effect_def {
                   ret "(Either (Maybe Text) ())", errors FsError },
             ],
             helpers [
-                { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
-                { raw ["-- | Append to a file (reads then writes). Failure is TYPED (#335): a read\n-- or write failure comes back as `Left (FsError)` DATA, nothing partially\n-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.\nappendFile :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Eff effs (Either FsError ())\nappendFile p t = do\n  er <- readFile p\n  case er of\n    Left e -> pure (Left e)\n    Right old -> writeFile p (old <> t)"] },
-                { raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n        Right src ->\n          case length (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> T.pack (show n) <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
-                { raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> T.pack (show e)))\n        Right src ->\n          let n = length (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
-                { raw ["-- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Members '[FsRead, FsWrite] effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
-                { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let ls = lines src\n          n = length (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> T.pack (show n) <> \" lines in \" <> path) (Just n))"] },
-                { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
-                { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written.\n-- Storage and sandbox failures are `Left FsError`; inspect them before using\n-- the `WriteOutcome`. Get EXPECTED from fileHash; on conflict re-read,\n-- recompute, and retry. Never retry `FsDurabilityUnknown`: the write is visible.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs (Either FsError WriteOutcome)\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Left err -> Left err\n    Right (Right ()) -> Right (Written path 1)\n    Right (Left actual) -> Right (WriteConflict path expected actual)"] },
+                { name writeFile, raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
+                { name appendFile, raw ["-- | Append to a file (reads then writes). Failure is TYPED (#335): a read\n-- or write failure comes back as `Left (FsError)` DATA, nothing partially\n-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.\nappendFile :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Eff effs (Either FsError ())\nappendFile p t = do\n  er <- readFile p\n  case er of\n    Left e -> pure (Left e)\n    Right old -> writeFile p (old <> t)"] },
+                { name update, raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n        Right src ->\n          case length (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> T.pack (show n) <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
+                { name updateAll, raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> T.pack (show e)))\n        Right src ->\n          let n = length (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
+                { name updateJ, raw ["-- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Members '[FsRead, FsWrite] effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
+                { name insertAfter, raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let ls = lines src\n          n = length (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> T.pack (show n) <> \" lines in \" <> path) (Just n))"] },
+                { name writeChecked, raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
+                { name writeCheckedIf, raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written.\n-- Storage and sandbox failures are `Left FsError`; inspect them before using\n-- the `WriteOutcome`. Get EXPECTED from fileHash; on conflict re-read,\n-- recompute, and retry. Never retry `FsDurabilityUnknown`: the write is visible.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs (Either FsError WriteOutcome)\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Left err -> Left err\n    Right (Right ()) -> Right (Written path 1)\n    Right (Left actual) -> Right (WriteConflict path expected actual)"] },
             ],
         }
     };
@@ -1216,7 +1212,10 @@ mod tests {
         assert_eq!(d.constructors, &["TimeNow :: Time Int"]);
         assert!(d.type_defs.is_empty());
         assert_eq!(
-            d.helpers,
+            d.helpers
+                .iter()
+                .map(|helper| helper.source)
+                .collect::<Vec<_>>(),
             &[
                 "-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\n\
                getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime\n\
@@ -1255,7 +1254,7 @@ mod tests {
         );
         assert_eq!(d.helpers.len(), 3);
         assert_eq!(
-            d.helpers[0],
+            d.helpers[0].source,
             "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n\
              -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n\
              -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n\
@@ -1280,7 +1279,9 @@ mod tests {
             "MetaLookupCon :: Text -> Meta (Maybe (Int, Int))"
         );
         assert_eq!(d.helpers.len(), 7);
-        assert!(d.helpers[0].ends_with("metaConstructors = send MetaConstructors"));
+        assert!(d.helpers[0]
+            .source
+            .ends_with("metaConstructors = send MetaConstructors"));
     }
 
     /// The `errors` grammar renders an `Either`-wrapped result
@@ -1444,10 +1445,10 @@ mod tests {
         assert!(d
             .helpers
             .iter()
-            .any(|helper| helper.contains("say = send . Print")));
+            .any(|helper| helper.source.contains("say = send . Print")));
         assert!(d
             .helpers
             .iter()
-            .any(|helper| helper.contains("displayViewRaw")));
+            .any(|helper| helper.source.contains("displayViewRaw")));
     }
 }

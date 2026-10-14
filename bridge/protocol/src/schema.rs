@@ -15,22 +15,12 @@ pub use crate::types::{
     TypeShape, Validation, VariantFields, WireDerive, WireDerives,
 };
 
-/// The sentinel a substrate helper's rendered text carries as its first
-/// line — verbatim what `tidepool-mcp`'s `describe::helper_is_substrate`
-/// checks for, and what `effect_defs.rs`'s `helper_text!` macro's `raw
-/// substrate […]` arm emits via its own `substrate_marker!()` macro.
-///
-/// Two literal copies of this exact string necessarily exist: this one
-/// (plain Rust, used by [`Helper::render`] below) and `substrate_marker!()`
-/// in `tidepool-mcp` (a `macro_rules!` literal, spliced into other macros'
-/// `concat!` calls, which require a literal token — a `const` path cannot
-/// stand in for one, so that macro cannot simply reference this constant).
-/// This is a structural consequence of the `concat!` constraint, not a
-/// maintenance choice: `bridge/mcp/tests/effect_roster_sentinel.rs`'s
-/// `substrate_marker_matches_the_schema_constant` cross-checks the two
-/// literals stay byte-identical, converting the "must stay in sync" comment
-/// into an enforced invariant.
-pub const SUBSTRATE_MARKER: &str = "-- @substrate-helper@";
+/// Whether a helper belongs in the recommended callable index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperVisibility {
+    Public,
+    Substrate,
+}
 
 // ---------------------------------------------------------------------------
 // Effect
@@ -1036,14 +1026,9 @@ pub struct Helper {
     /// `runArgv` needed the raw escape hatch under the old grammar, and is the
     /// one-line affordance that retires it.
     pub doc: &'static [&'static str],
-    /// Is this an implementation-detail helper (extract-layer plumbing: a
-    /// `*Sited` call-site-id wrapper, a raw thread primitive) that a model
-    /// should not call directly? Emits [`SUBSTRATE_MARKER`] as the rendered
-    /// text's own first line — `tidepool-mcp`'s derived model-facing index
-    /// excludes any helper text carrying it, same mechanism as the
-    /// hand-written registry's `raw substrate […]` form. `false` for every
-    /// ordinary public helper.
-    pub substrate: bool,
+    /// Visibility in the recommended callable index; source remains available
+    /// for compilation and detailed browsing in either case.
+    pub visibility: HelperVisibility,
     /// The wrapper's shape.
     pub body: HelperBody,
 }
@@ -1155,10 +1140,6 @@ impl Helper {
     #[must_use]
     pub fn render(&self, eff: &Effect) -> String {
         let mut out = String::new();
-        if self.substrate {
-            out.push_str(SUBSTRATE_MARKER);
-            out.push('\n');
-        }
         for (i, line) in self.doc.iter().enumerate() {
             out.push_str(if i == 0 { "-- | " } else { "-- " });
             out.push_str(line);
