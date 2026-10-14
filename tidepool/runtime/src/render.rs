@@ -72,11 +72,6 @@ impl EvalResult {
         out
     }
 
-    /// Consume and return the inner HaskellValue (escape hatch for callers that need raw access).
-    pub fn into_value(self) -> HaskellValue {
-        self.value
-    }
-
     /// Borrow the inner HaskellValue.
     pub fn value(&self) -> &HaskellValue {
         &self.value

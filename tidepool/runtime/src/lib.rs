@@ -262,46 +262,6 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     )
 }
 
-/// Run an ALREADY-COMPILED prepared program to completion against `handlers`,
-/// as a bare one-shot: no session, no actor, no persistent declaration environment. Bootstraps a
-/// standalone [`session::prepared::PreparedEngine`], settles the entry, and
-/// drives any parked request through `handlers` via the resident turn
-/// machinery's own suspend/dispatch/resume loop
-/// ([`session::resident`]'s `finish_prepared`, `pub(crate)` there) — reusing
-/// exactly what a resident session turn already uses, not a second engine.
-///
-/// This entry point requires a self-contained program. Compiler artifact
-/// consumers use [`run_compiled_target`] to install certified imported groups
-/// alongside the target before entering the same settlement loop.
-///
-/// `on_ready` receives the freshly-built engine's [`CancelHandle`] BEFORE
-/// the (blocking) run begins, exactly as [`compile_and_run_cancellable`]
-/// uses it. A request no installed handler recognizes is reported as
-/// [`tidepool_effect::error::EffectError::UnhandledEffect`],
-/// matching what a plain (non-suspendable) run has always reported for an
-/// unclaimed effect — there is no resume path here for a caller to answer
-/// it later.
-pub fn run_prepared_program<U, H: DispatchEffect<U>>(
-    prepared: tidepool_repr::execution_schema::PreparedProgram,
-    table: &DataConTable,
-    nursery_size: usize,
-    handlers: &mut H,
-    user: &U,
-    on_ready: impl FnOnce(CancelHandle),
-) -> Result<HaskellValue, RuntimeError> {
-    let mut state = session::PersistentSession::new(None, nursery_size);
-    let program = state.install_prepared(prepared, Some(table))?;
-    let effective = state.session_table().clone();
-    run_installed_program(
-        state.require_prepared()?,
-        program,
-        &effective,
-        handlers,
-        user,
-        on_ready,
-    )
-}
-
 /// Run an ordinary compiler target with its complete certified source closure.
 /// Source groups and the target install together through the resident linker,
 /// with fresh mutable state for this one-shot execution.
@@ -720,14 +680,22 @@ mod tests {
                 result.to_json(),
                 serde_json::json!({"constructor": "Ticket", "fields": [42]})
             );
+            // Warning production is covered independently; this control checks
+            // that the target harness retains all fields of the execution result.
+            artifacts.warnings.warnings = vec!["constructor admission warning".into()];
             let through_consumer = tidepool_testing::eval_harness::EvalHarness::new().run_target(
                 &artifacts,
                 "__prepared",
                 frunk::HNil,
             );
             assert_eq!(through_consumer.json(), result.to_json());
-            let (_, effective) = through_consumer.expect("retained target result");
-            assert_eq!(effective.get(id).unwrap().name, "Ticket");
+            assert_eq!(
+                through_consumer.result().warnings(),
+                artifacts.warnings.warnings,
+            );
+            let retained = through_consumer.expect("retained target result");
+            assert_eq!(retained.table().get(id).unwrap().name, "Ticket");
+            assert_eq!(retained.warnings(), artifacts.warnings.warnings);
         }
     }
 

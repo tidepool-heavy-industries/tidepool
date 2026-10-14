@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_repr::DataConTable;
 pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
@@ -164,7 +163,7 @@ where
     })
 }
 
-/// The outcome of a compile+run: a thin, assertion-friendly wrapper over
+/// The outcome of an evaluation: a thin, assertion-friendly wrapper over
 /// `Result<EvalResult, RuntimeError>` with typed accessors so tests read
 /// `out.json()` / `out.value()` / `out.err()` instead of matching by hand.
 pub struct Outcome(Result<EvalResult, RuntimeError>);
@@ -211,54 +210,6 @@ impl Outcome {
     /// The raw `Result` (escape hatch for tests asserting on specific errors).
     pub fn into_result(self) -> Result<EvalResult, RuntimeError> {
         self.0
-    }
-}
-
-/// As [`Outcome`], but for one target of an [`EvalHarness::compile_many`]
-/// bundle, run via [`EvalHarness::run_target`]/[`run_target_owned`]. A
-/// pre-compiled target retains the execution owner's complete result, including
-/// the admitted constructor table used by dispatch and presentation.
-pub struct TargetOutcome(Result<EvalResult, RuntimeError>);
-
-impl TargetOutcome {
-    /// Did evaluation succeed?
-    pub fn is_ok(&self) -> bool {
-        self.0.is_ok()
-    }
-
-    /// The runtime error, if evaluation failed.
-    pub fn err(&self) -> Option<&RuntimeError> {
-        self.0.as_ref().err()
-    }
-
-    fn result(&self) -> &EvalResult {
-        self.0
-            .as_ref()
-            .unwrap_or_else(|e| panic!("expected successful eval, got error: {e}"))
-    }
-
-    /// Borrow the computed [`HaskellValue`] (panics on error).
-    pub fn value(&self) -> &HaskellValue {
-        self.result().value()
-    }
-
-    /// Render the result as JSON (panics on error).
-    pub fn json(&self) -> serde_json::Value {
-        self.result().to_json()
-    }
-
-    /// Consume and return the owned `(HaskellValue, DataConTable)` pair, panicking
-    /// with `ctx` + error.
-    pub fn expect(self, ctx: &str) -> (HaskellValue, DataConTable) {
-        self.into_result().unwrap_or_else(|e| panic!("{ctx}: {e}"))
-    }
-
-    /// The raw `Result` (escape hatch for tests asserting on specific errors).
-    pub fn into_result(self) -> Result<(HaskellValue, DataConTable), RuntimeError> {
-        self.0.map(|result| {
-            let table = result.table().clone();
-            (result.into_value(), table)
-        })
     }
 }
 
@@ -444,13 +395,9 @@ impl EvalHarness {
     /// thread, own dispatch, no additional `tidepool-extract` spawn (the
     /// target's Core was already produced by `compile_many`). Mirrors
     /// [`run`](Self::run) but takes the pre-compiled [`CompiledArtifacts`]
-    /// and a target name instead of source.
-    pub fn run_target<H>(
-        &self,
-        artifacts: &CompiledArtifacts,
-        target: &str,
-        handlers: H,
-    ) -> TargetOutcome
+    /// and a target name instead of source. The outcome retains the admitted
+    /// constructor table and compile warnings with the evaluated value.
+    pub fn run_target<H>(&self, artifacts: &CompiledArtifacts, target: &str, handlers: H) -> Outcome
     where
         H: DispatchEffect<()> + Send + 'static,
     {
@@ -464,7 +411,7 @@ impl EvalHarness {
         target: &str,
         handlers: H,
         user: U,
-    ) -> TargetOutcome
+    ) -> Outcome
     where
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
@@ -474,14 +421,14 @@ impl EvalHarness {
     }
 
     /// As [`run_target`](Self::run_target) but hands `handlers` back
-    /// alongside the [`TargetOutcome`] — for dispatchers whose post-eval
+    /// alongside the [`Outcome`] — for dispatchers whose post-eval
     /// state (write counts, stored files, recorded calls) IS the assertion.
     pub fn run_target_owned<H>(
         &self,
         artifacts: &CompiledArtifacts,
         target: &str,
         handlers: H,
-    ) -> (TargetOutcome, H)
+    ) -> (Outcome, H)
     where
         H: DispatchEffect<()> + Send + 'static,
     {
@@ -489,14 +436,14 @@ impl EvalHarness {
     }
 
     /// As [`run_target_with`](Self::run_target_with) but hands `handlers`
-    /// back alongside the [`TargetOutcome`].
+    /// back alongside the [`Outcome`].
     pub fn run_target_with_owned<U, H>(
         &self,
         artifacts: &CompiledArtifacts,
         target: &str,
         mut handlers: H,
         user: U,
-    ) -> (TargetOutcome, H)
+    ) -> (Outcome, H)
     where
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
@@ -507,7 +454,7 @@ impl EvalHarness {
                 run_compiled_target(artifacts, target, nursery, &mut handlers, &user, |_| {});
             (result, handlers)
         });
-        (TargetOutcome(result), handlers)
+        (Outcome(result), handlers)
     }
 }
 
