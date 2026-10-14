@@ -238,19 +238,20 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         let installed_tools = self
             .issued_tools
             .clone()
-            .or_else(|| self.installed_tools.snapshot());
+            .map(Ok)
+            .unwrap_or_else(|| self.installed_tools.snapshot_for_call());
         Box::pin(async move {
             let issued = client.issue_workbench_call(invocation.context.clone());
             let validated = (|| {
                 let arguments = arguments?;
                 if is_builtin(&invocation.name) {
-                    return Ok((builtin_request(&invocation.name, arguments)?, None));
+                    return Ok((
+                        builtin_request(&invocation.name, arguments)?,
+                        None,
+                        installed_tools.ok(),
+                    ));
                 }
-                let lease = installed_tools.as_ref().ok_or_else(|| {
-                    ResidentToolError::Unavailable(
-                        "actor has no installed endpoint snapshot".into(),
-                    )
-                })?;
+                let lease = installed_tools?;
                 let selected = lease.select(&invocation.name).ok_or_else(|| {
                     ResidentToolError::InvalidInvocation(format!(
                         "unknown actor tool {:?}",
@@ -258,9 +259,9 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ))
                 })?;
                 let admitted = selected.admit(arguments)?;
-                Ok((admitted.request(), Some(admitted)))
+                Ok((admitted.request(), Some(admitted), Some(lease)))
             })();
-            let (request, selected) = match validated {
+            let (request, selected, installed_tools) = match validated {
                 Ok(validated) => validated,
                 Err(error) => {
                     client.reject_workbench_call(&issued, &error);
