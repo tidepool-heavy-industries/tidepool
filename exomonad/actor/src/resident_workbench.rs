@@ -19455,6 +19455,13 @@ pub(crate) mod request_tests {
             let later = state.current().unwrap().select("probe").unwrap();
             assert_eq!(pinned.lease().tools().unwrap().install, 1);
             assert_eq!(later.lease().tools().unwrap().install, 2);
+            state.invalidate_source();
+            assert!(matches!(
+                state.current_for_call(),
+                Err(crate::ResidentToolError::Invocation(
+                    crate::KernelInvocationFailure::Rejected { actor, receipts, .. }
+                )) if actor == context.actor && receipts.is_empty()
+            ));
             for (selected, expected_output) in [
                 (pinned, "retained notebook value"),
                 (pinned_last, "retained notebook value"),
@@ -19484,6 +19491,10 @@ pub(crate) mod request_tests {
                 );
             }
             state.clear();
+            assert!(matches!(
+                state.current_for_call(),
+                Err(crate::ResidentToolError::Unavailable(_))
+            ));
         })
         .await;
     }
