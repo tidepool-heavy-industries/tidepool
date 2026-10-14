@@ -3861,17 +3861,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                             diagnostic: None,
                         }
                     })?;
-                    let mut checked_request = admitted.request();
-                    checked_request.input = request.input.clone();
-                    checked_request.verbose = request.verbose;
-                    if let Some(execution) = request.execution_id() {
-                        checked_request = checked_request.with_execution_id(execution.clone());
-                    }
-                    if let Some(boundary) = request.checkpoint_boundary() {
-                        checked_request =
-                            checked_request.with_checkpoint_boundary(boundary.clone());
-                    }
-                    request = checked_request;
                     Some(Arc::new(admitted))
                 }
                 None => None,
@@ -3879,6 +3868,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => None,
         };
         if let Some(call) = &selected_tool {
+            let mut checked_request = call.request();
+            checked_request.input = request.input.clone();
+            checked_request.verbose = request.verbose;
+            if let Some(execution) = request.execution_id() {
+                checked_request = checked_request.with_execution_id(execution.clone());
+            }
+            if let Some(boundary) = request.checkpoint_boundary() {
+                checked_request = checked_request.with_checkpoint_boundary(boundary.clone());
+            }
+            request = checked_request;
             let endpoint = call.selected().endpoint();
             if endpoint.plan().effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
