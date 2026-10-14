@@ -5645,16 +5645,66 @@ pub(crate) fn validate_available_originals_with_validation(
         &crate::recovery_artifacts::CertifiedRecoveryProduct,
     >,
     advertised: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    private: &[crate::artifact_inventory::QualifiedNativeAvailability],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
-    validate_selected_originals_with_validation(
-        available,
-        &[],
-        advertised,
-        validation,
-        OriginalNativeUse::Availability,
-    )
-    .map(|_| ())
+    let advertised_originals = advertised
+        .iter()
+        .map(|key| key.artifact)
+        .collect::<BTreeSet<_>>();
+    let mut qualified = BTreeMap::new();
+    for proof in private {
+        if !advertised_originals.contains(&proof.original()) {
+            return Err(CertificationError::Mismatch(
+                "private availability proof has no offered root",
+            ));
+        }
+        if qualified.insert(proof.original(), proof).is_some() {
+            return Err(CertificationError::Mismatch(
+                "multiple private availability carrier proofs",
+            ));
+        }
+    }
+    if advertised_originals.is_empty() {
+        return validate_selected_originals_with_validation(
+            available,
+            &[],
+            advertised,
+            validation,
+            OriginalNativeUse::Availability,
+            None,
+        )
+        .map(|_| ());
+    }
+    for original in advertised_originals {
+        let mut checked = advertised.clone();
+        let mut roots = advertised
+            .iter()
+            .filter(|key| key.artifact == original)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if let Some(proof) = qualified.get(&original) {
+            let closure = proof
+                .groups()
+                .iter()
+                .map(|group| crate::artifact_inventory::NativeGroupKey {
+                    artifact: group.binding.artifact,
+                    original_ordinal: group.original_ordinal,
+                })
+                .collect::<BTreeSet<_>>();
+            checked.extend(closure.iter().copied());
+            roots.extend(closure);
+        }
+        validate_selected_originals_with_validation(
+            available,
+            &[],
+            &checked,
+            validation,
+            OriginalNativeUse::Availability,
+            Some(&roots),
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_owned_originals_with_validation(
@@ -5897,6 +5947,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
         selected,
         validation,
         OriginalNativeUse::SelectedGroups,
+        None,
     )
 }
 
@@ -5910,6 +5961,7 @@ fn validate_selected_originals_with_validation(
     selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
     native_use: OriginalNativeUse,
+    validation_roots: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
     use crate::artifact_inventory::NativeGroupKey;
     let mut native_ids = std::collections::HashMap::new();
@@ -5984,6 +6036,9 @@ fn validate_selected_originals_with_validation(
     // membership uses exact artifact keys, never a module-only source map.
     let package_sources = SourceGroupMap::new();
     for (key, (group, witness)) in &originals {
+        if validation_roots.is_some_and(|roots| !roots.contains(key)) {
+            continue;
+        }
         for import in group.imports() {
             match import {
                 PendingImportOwner::Source {
@@ -10009,6 +10064,7 @@ pub(crate) mod tests {
             validate_available_originals_with_validation(
                 &available,
                 &advertised,
+                &[],
                 &mut PackageInterfaceValidation::default(),
             )
             .is_err(),
@@ -10041,6 +10097,7 @@ pub(crate) mod tests {
         validate_available_originals_with_validation(
             &available,
             &selected,
+            &[],
             &mut PackageInterfaceValidation::default(),
         )
         .expect("an exact advertised dependency closure remains private availability");
@@ -10060,6 +10117,7 @@ pub(crate) mod tests {
             validate_available_originals_with_validation(
                 &missing_leaf,
                 &selected,
+                &[],
                 &mut PackageInterfaceValidation::default(),
             )
             .is_err(),
@@ -10075,6 +10133,7 @@ pub(crate) mod tests {
             validate_available_originals_with_validation(
                 &replaced_leaf,
                 &selected,
+                &[],
                 &mut PackageInterfaceValidation::default(),
             )
             .is_err(),
@@ -10104,6 +10163,7 @@ pub(crate) mod tests {
                 validate_available_originals_with_validation(
                     &available,
                     &selected,
+                    &[],
                     &mut PackageInterfaceValidation::default(),
                 )
                 .is_err(),

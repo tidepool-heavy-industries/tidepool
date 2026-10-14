@@ -584,9 +584,31 @@ impl OriginalCompilerInputs {
                     "private availability dependency proof observation");
             }
         }
+        let mut private_closures = BTreeMap::new();
+        for requirement in &native_original_requirements {
+            let Some(closure) = requirement.qualify_availability(&artifacts)? else {
+                continue;
+            };
+            if let Some(previous) = private_closures.get(&closure.original()) {
+                if previous != &closure {
+                    return Err(crate::artifact_inventory::ArtifactInventoryError {
+                        failure:
+                            crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity {
+                                artifact: closure.original(),
+                            },
+                        diagnostic_artifacts: None,
+                        owner_conflict: None,
+                    }
+                    .into());
+                }
+            } else {
+                private_closures.insert(closure.original(), closure);
+            }
+        }
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
             &advertised,
+            &private_closures.into_values().collect::<Vec<_>>(),
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;

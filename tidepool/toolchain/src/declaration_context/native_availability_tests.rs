@@ -419,7 +419,19 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .unwrap();
     let rows = wire_groups(&request);
     assert_eq!(rows[&module], vec![7, 9001]);
-    assert_eq!(rows["TypeOnlyHelper"], vec![7]);
+    assert!(!rows.contains_key("TypeOnlyHelper"));
+    let retained = request
+        .compiler_inputs()
+        .native_original_requirements
+        .iter()
+        .find(|requirement| requirement.original == authored_id)
+        .unwrap();
+    assert_eq!(&retained.selection, &proof.selection);
+    assert!(request
+        .compiler_inputs()
+        .metadata
+        .artifacts
+        .contains_key(&helper_id));
     assert!(request
         .compiler_inputs()
         .metadata

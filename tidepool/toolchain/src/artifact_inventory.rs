@@ -433,7 +433,125 @@ pub(crate) struct NativeOriginalRequirement {
     pub(crate) selection: ExactArtifactSelection,
 }
 
+/// A single issued carrier's complete private body closure. This qualification
+/// preserves bindings and does not select executable groups or compiler roles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QualifiedNativeAvailability {
+    original: ArtifactId,
+    carrier: ArtifactBinding,
+    groups: BTreeSet<NativeGroupBinding>,
+}
+
+impl QualifiedNativeAvailability {
+    pub(crate) fn original(&self) -> ArtifactId {
+        self.original
+    }
+    pub(crate) fn groups(&self) -> &BTreeSet<NativeGroupBinding> {
+        &self.groups
+    }
+}
+
 impl NativeOriginalRequirement {
+    pub(crate) fn qualify_availability(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let graph = self.selection.graph_selection();
+        validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
+        let Some(carrier) = graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == self.original)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        if view
+            .lease
+            .selection
+            .namespace
+            .get(&self.original)
+            .is_some_and(|selected| *selected != carrier)
+        {
+            return Ok(None);
+        }
+        let entry = &state.payloads[&self.original];
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootNotOriginal {
+                    artifact: self.original,
+                },
+            ));
+        };
+        let canonical = ArtifactEntry::canonical(
+            product
+                .module_interface()
+                .ok_or_else(|| failure("private original lacks canonical carrier"))?
+                .clone(),
+        )
+        .descriptor
+        .id;
+        let Some(canonical_binding) = graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == canonical)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        if view
+            .lease
+            .selection
+            .namespace
+            .get(&canonical)
+            .is_none_or(|selected| *selected != canonical_binding)
+            || !state
+                .graph
+                .edges(state.indices[&InventoryNodeKey::Artifact(carrier)])
+                .any(|edge| {
+                    state.graph[edge.target()] == InventoryNodeKey::Artifact(canonical_binding)
+                        && *edge.weight() == ArtifactDependency::Interface
+                })
+        {
+            return Ok(None);
+        }
+        let nodes = graph
+            .bindings
+            .iter()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .chain(
+                graph
+                    .native_groups
+                    .iter()
+                    .copied()
+                    .map(InventoryNodeKey::Group),
+            )
+            .collect::<imbl::OrdSet<_>>();
+        let index = NativeSelectionIndex::build(&state, &nodes);
+        if entry.native_group_ordinals.is_empty()
+            || !entry
+                .native_group_ordinals
+                .iter()
+                .all(|ordinal| index.groups.contains_key(&(carrier, *ordinal)))
+        {
+            return Ok(None);
+        }
+        let roots = entry
+            .native_group_ordinals
+            .iter()
+            .map(|ordinal| index.resolve(carrier, *ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (_, groups) =
+            view.native_requirements_for_exact_groups_locked(&state, &nodes, roots)?;
+        Ok(Some(QualifiedNativeAvailability {
+            original: self.original,
+            carrier,
+            groups,
+        }))
+    }
+
     /// Capture only group handles already selected by this issuer. Byte custody
     /// and an available ordinal census cannot manufacture a group choice.
     pub(crate) fn from_selected_view(
