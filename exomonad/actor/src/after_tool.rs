@@ -92,9 +92,8 @@ impl Disposition {
     }
 }
 
-/// One invocation, kept where a model can ask for it rather than repeated into
-/// every result. This is where an abstention's reason lives, and where the
-/// reference a failure line carries points.
+/// One invocation, retained for explicit inspection rather than repeated into
+/// every result. Abstention and failure diagnostics stay here.
 #[derive(Debug, Clone)]
 pub(crate) struct Invocation {
     pub(crate) ordinal: u64,

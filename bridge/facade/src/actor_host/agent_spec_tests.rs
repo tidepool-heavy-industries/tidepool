@@ -709,7 +709,7 @@ async fn a_workspace_without_a_spec_installs_the_empty_default() {
                 assert!(!policy.tools().iter().any(|tool| tool.name() == "bash"));
 
                 // The Haskell workbench is untouched by any of this.
-                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
             })
         })
@@ -914,7 +914,7 @@ async fn a_pruned_result_says_it_is_a_selection_and_its_handle_answers_the_whole
 
                 // The handle is a binding in the same lexical scope the model's own cells
                 // run in, so the whole result is one cell away.
-                let cell = dispatch_haskell_script(policy, "inspectFull toolResult1").await;
+                let cell = dispatch_haskell_script(policy, "toolResult1").await;
                 assert!(
                     cell["items"][0]["output"]
                         .as_str()
@@ -996,7 +996,7 @@ async fn a_slot_that_fails_preserves_tool_success_and_logs_only() {
                     );
                     assert!(status.contains("failed:"), "{status}");
                 }
-                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
                 assert_eq!(cell["status"], "committed", "{cell}");
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
             })
@@ -1146,7 +1146,7 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let operation = first.operation("delivery-probe");
             if asynchronous {
-                first.async_call("delivery-probe", "inspectFull (\"keptwhole\" :: Text)");
+                first.async_call("delivery-probe", "\"keptwhole\" :: Text");
             } else {
                 first.function(
                     "delivery-probe",
@@ -1272,7 +1272,7 @@ async fn the_repair_tools_are_never_annotated_and_cells_reach_the_slot_unmatched
                     "{status_before_cell}"
                 );
 
-                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
                 // The cell's receipt still reached the slot — as `haskell`, which this
@@ -1303,7 +1303,7 @@ async fn a_haskell_cells_receipt_reaches_the_after_tool_slot_as_haskell() {
                 let policy = campaign.root_installation.policy.clone();
                 let policy = policy.as_ref();
 
-                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
                 let output = cell["items"][0]["output"].as_str().unwrap_or_default();
                 assert!(output.contains('2'), "{cell}");
                 assert!(output.contains("[after-tool]"), "{cell}");
@@ -1332,7 +1332,7 @@ async fn an_abstained_cell_receipt_is_delivered_untouched() {
                 let policy = campaign.root_installation.policy.clone();
                 let policy = policy.as_ref();
 
-                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
                 let status = status(policy).await;
