@@ -321,18 +321,11 @@ pub(crate) fn original_native_declaration_inputs(
             }
         })
         .collect::<Vec<_>>();
-    if products.is_empty() {
-        tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
-            roles = ?selected.entries.iter().map(|(owner, entry)| (owner, entry.descriptor.id, matches!(entry.payload, ArtifactPayload::Original(_)))).collect::<Vec<_>>(),
-            "activation native declaration offer omitted all originals");
-        return Ok(None);
-    }
-    crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+    crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
         context,
         CanonicalProducerIdentity::from_producer_bytes(producer),
         &products,
     )
-    .map(Some)
 }
 
 #[derive(Debug)]

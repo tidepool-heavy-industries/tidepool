@@ -654,3 +654,58 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn preview_reuses_selected_original_with_issued_group_custody() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let fixture = issued_declarations(true)[0].clone();
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(
+            &inventory.empty_view(),
+            vec![fixture.canonical.clone(), fixture.original.clone()],
+        )
+        .unwrap();
+    let view = full
+        .interface_projection(&[fixture.original.descriptor.owner.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::restore(
+        &view,
+        &[CompilerInputRole::ReusableOriginal {
+            interface: fixture.canonical.descriptor.id,
+            original: fixture.original.descriptor.id,
+        }],
+    )
+    .unwrap();
+    let target = fixture.original.descriptor.owner.clone();
+    let context = Arc::new(
+        ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            &view,
+            projection,
+            vec![ExactLexicalNode {
+                owner: target.clone(),
+                imports: vec![],
+            }],
+            target,
+            &[],
+        )
+        .unwrap(),
+    );
+    let before = context.as_ref().clone();
+    let private = original_native_declaration_inputs(&context, PRODUCER)
+        .unwrap()
+        .expect("selected Original role retains its issued private availability proof");
+    let scratch = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context.clone())
+        .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, Some(private))
+        .unwrap();
+    request.validate_artifacts().unwrap();
+    assert!(request
+        .compiler_inputs()
+        .native_original_requirements
+        .iter()
+        .any(|proof| proof.original == fixture.original.descriptor.id));
+    assert_eq!(context.as_ref(), &before);
+    assert!(context.artifact_view().selected_native_groups().is_empty());
+}
