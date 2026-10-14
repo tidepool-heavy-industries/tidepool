@@ -23783,14 +23783,16 @@ pub(crate) mod request_tests {
                     constructor.id, constructor.identity,
                 );
             }
-            for (identity, host_id) in compiled
+            for constructor in compiled
                 .prepared()
-                .definition_facts()
-                .constructors
+                .constructors()
                 .iter()
-                .filter(|(identity, _)| identity.symbol.occurrence == "RunRequest")
+                .filter(|constructor| constructor.identity.symbol.occurrence == "RunRequest")
             {
-                eprintln!("activation fixture {role} RunRequest prepared id={host_id:?} identity={identity:?}");
+                eprintln!(
+                    "activation fixture {role} RunRequest prepared id={:?} identity={:?}",
+                    constructor.host_id, constructor.identity,
+                );
             }
         }
 
