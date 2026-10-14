@@ -11540,15 +11540,16 @@ mod renderer_slot_tests {
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("remaining observer")
         };
+        let first_outcome = crate::settle_compiler_transaction_cancellable(
+            crate::CompilerTransactionCancellation::new(),
+            |_| {},
+            || {
+                first.begin_native().unwrap();
+                Err::<PreparedRenderer<usize>, _>("failed specialization")
+            },
+        );
         assert!(matches!(
-            first.settle_native(crate::settle_compiler_transaction_cancellable(
-                crate::CompilerTransactionCancellation::new(),
-                |_| {},
-                || {
-                    first.begin_native().unwrap();
-                    Err::<PreparedRenderer<usize>, _>("failed specialization")
-                },
-            )),
+            first.settle_native(first_outcome),
             Err(RendererProductionFailure::Compile("failed specialization"))
         ));
         let RendererAccess::Produce(mut second) = waiter.wait().await else {
@@ -11557,15 +11558,16 @@ mod renderer_slot_tests {
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("second observer")
         };
+        let second_outcome = crate::settle_compiler_transaction_cancellable(
+            crate::CompilerTransactionCancellation::new(),
+            |_| {},
+            || {
+                second.begin_native().unwrap();
+                Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
+            },
+        );
         let published = second
-            .settle_native(crate::settle_compiler_transaction_cancellable(
-                crate::CompilerTransactionCancellation::new(),
-                |_| {},
-                || {
-                    second.begin_native().unwrap();
-                    Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
-                },
-            ))
+            .settle_native(second_outcome)
             .unwrap_or_else(|_| panic!("matching compiler owner must publish"));
         let RendererAccess::Ready(observed) = waiter.wait().await else {
             panic!("sealed result")
