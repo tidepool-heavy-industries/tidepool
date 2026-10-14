@@ -74,13 +74,15 @@ fn source_import(
     product: &CertifiedRecoveryProduct,
     ordinal: u32,
 ) -> crate::certified_products::PendingImportOwner {
+    let mut binder = tidepool_repr::execution_schema::testing::identity(
+        &product.owner().module,
+        &format!("entry_{ordinal}"),
+    );
+    binder.unit = product.owner().unit.clone();
     crate::certified_products::PendingImportOwner::Source {
         owner: product.owner().clone(),
         original_ordinal: ordinal,
-        binder: tidepool_repr::execution_schema::testing::identity(
-            &product.owner().module,
-            &format!("entry_{ordinal}"),
-        ),
+        binder,
     }
 }
 
@@ -313,7 +315,18 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
 #[test]
 fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let helper = product("TypeOnlyHelper", 73);
+    let helper = fixture_finalized_product(
+        crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+            "main",
+            "TypeOnlyHelper",
+            vec![(7, vec![]), (9001, vec![])],
+            73,
+            &BTreeMap::new(),
+            b"TypeOnlyHelper".to_vec(),
+            &BTreeMap::new(),
+        ),
+        producer.sha256(),
+    );
     let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
     let authored = crate::certified_products::fixture_native_declaration_product(
         crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
