@@ -366,7 +366,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     host.run_scenario(|host| {
         Box::pin(async move {
             let scenario_started = std::time::Instant::now();
-            host.assert_fresh_prepared_workspace_original().await;
+            host.assert_prepared_workspace_original_handoff().await;
             host.input("Pass a workspace Task to the supplied child spec and return its typed candidate.")
                 .await
                 .unwrap();

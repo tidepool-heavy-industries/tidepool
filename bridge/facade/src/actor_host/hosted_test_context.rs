@@ -891,7 +891,7 @@ impl HostedTestRuntime {
         self.startup_readiness_elapsed.as_nanos()
     }
 
-    pub(super) async fn assert_fresh_prepared_workspace_original(&self) {
+    pub(super) async fn assert_prepared_workspace_original_handoff(&self) {
         let installation = self
             .context
             .observer
@@ -928,15 +928,18 @@ impl HostedTestRuntime {
         else {
             panic!("the shipped workspace must install its prepared workspace original");
         };
-        // Startup freezes the root's private helper graph. Its uncovered
-        // specialization is issued by this run, separately from deployment coverage.
-        assert!(!completed.contains_key(recipe));
-        let run_root = self.context.config.run_directory.path();
-        let issuer: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(run_root.join("workspace/runtime-preparation.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(issuer["original"], original.to_string());
+        let ready = frozen
+            .prepared_toolset
+            .as_ref()
+            .expect("immediate startup retains the preparation owner's ready toolset");
+        assert_eq!(completed.get(recipe), Some(original));
+        assert_eq!(selection, coverage[0].program);
+        assert_eq!(ready.selection(), Some(selection.clone()));
+        assert_eq!(
+            Some(ready.acquisition()),
+            installation.acquisition.as_ref(),
+            "handoff preserves the original producer's acquisition provenance"
+        );
         let actor = self.context.actor.identity();
         let placement = self
             .context
@@ -963,7 +966,7 @@ impl HostedTestRuntime {
         assert_eq!(retained.acquisition().selection(), Some(selection.clone()));
         let source: serde_json::Value =
             serde_json::from_slice(head.references.source.bytes()).unwrap();
-        assert_eq!(source["version"], 1);
+        assert_eq!(source["version"], 2);
         assert_eq!(source["domain"], frozen.identity());
         let roots = source["roots"]
             .as_array()
@@ -971,10 +974,22 @@ impl HostedTestRuntime {
             .iter()
             .map(|root| std::path::PathBuf::from(root["path"].as_str().unwrap()))
             .collect::<Vec<_>>();
-        let directory = run_root
-            .join("workspace/entries")
-            .join(recipe)
-            .join(original.to_string());
+        let entries = frozen
+            .prepared_deployment
+            .as_ref()
+            .expect("the selected deployment retains its physical owner")
+            .path()
+            .join("workspace/entries");
+        let directory = entries.join(recipe).join(original.to_string());
+        assert_eq!(source["entries"]["kind"], "completed");
+        assert_eq!(
+            source["entries"]["directory"],
+            entries.to_str().unwrap()
+        );
+        assert_eq!(
+            source["entries"]["selections"],
+            serde_json::to_value(&completed).unwrap()
+        );
         assert_eq!(std::fs::canonicalize(&directory).unwrap(), directory);
         let wrapper = directory.join("Expr.hs");
         let observed =
@@ -992,7 +1007,7 @@ impl HostedTestRuntime {
                 &tidepool_toolchain::artifacts::ProductionEntrySources::FrozenWorkspace(observed),
                 &frozen.catalog_selection,
             )
-            .expect("the selected run issuer's exact completed original authenticates");
+            .expect("the selected deployment owner's exact completed original authenticates");
         assert_eq!(original_output.source_path(), wrapper);
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
