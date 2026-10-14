@@ -320,8 +320,10 @@ where
 }
 
 fn revision_value(revision: &tidepool_bridge_effects::SrRevision) -> serde_json::Value {
-    serde_json::json!({ "identity":revision.identity,"generation":revision.generation,
-        "modules":revision.modules.iter().map(|module|serde_json::json!({"name":module.name,"digest":module.digest})).collect::<Vec<_>>() })
+    // Native receipts summarize the revision; source inspection and Haskell
+    // reload results retain its complete module inventory.
+    serde_json::json!({"identity": revision.identity, "generation": revision.generation,
+        "moduleCount": revision.modules.len()})
 }
 
 fn reload_result(
@@ -443,12 +445,21 @@ fn reload_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn revision(identity: &str) -> tidepool_bridge_effects::SrRevision {
+    fn revision_with_modules(identity: &str, count: usize) -> tidepool_bridge_effects::SrRevision {
         tidepool_bridge_effects::SrRevision {
             generation: 1,
             identity: identity.into(),
-            modules: Vec::new(),
+            modules: (0..count)
+                .map(|index| tidepool_bridge_effects::SrModule {
+                    name: format!("Unchanged.Inventory.Module{index}"),
+                    digest: format!("digest-{index:064}"),
+                })
+                .collect(),
         }
+    }
+
+    fn revision(identity: &str) -> tidepool_bridge_effects::SrRevision {
+        revision_with_modules(identity, 393)
     }
     #[test]
     fn native_reload_receipts_preserve_each_typed_publication_outcome() {
@@ -532,15 +543,85 @@ mod tests {
                 "{tag}"
             );
             assert_eq!(response.items[0].value.as_ref().unwrap()["outcome"], tag);
-            if tag == "publishedWithWarnings" {
-                assert_eq!(response.items[0].warnings, vec!["projection pending"]);
+            let value = response.items[0].value.as_ref().unwrap();
+            let summaries: &[(&str, &str)] = match tag {
+                "unchanged" => &[("revision", "A")],
+                "published" | "publishedWithWarnings" => &[("previous", "A"), ("revision", "B")],
+                "rejected" => &[("issuedRevision", "A"), ("candidate", "B")],
+                "cancelled" => &[("issuedRevision", "A")],
+                "publicationUnconfirmed" => &[("candidate", "B")],
+                "unavailable" | "unreadable" => &[],
+                _ => panic!("unrecognized test outcome"),
+            };
+            for &(field, identity) in summaries {
+                assert_eq!(value[field]["identity"], identity, "{tag}: {field}");
+                assert_eq!(value[field]["generation"], 1, "{tag}: {field}");
+                assert_eq!(value[field]["moduleCount"], 393, "{tag}: {field}");
+                assert!(value[field].get("modules").is_none(), "{tag}: {field}");
             }
-            if tag == "rejected" {
-                assert_eq!(
-                    response.items[0].value.as_ref().unwrap()["candidate"]["identity"],
-                    "B"
-                );
+            let warnings = if tag == "publishedWithWarnings" {
+                vec!["projection pending"]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(response.items[0].warnings, warnings, "{tag}");
+            match tag {
+                "published" => assert_eq!(value["changedModules"], serde_json::json!(["Work"])),
+                "publishedWithWarnings" => {
+                    assert_eq!(value["changedModules"], serde_json::json!([]))
+                }
+                "rejected" => assert_eq!(value["diagnostics"], "invalid draft"),
+                "publicationUnconfirmed" => {
+                    assert_eq!(value["diagnostics"], "native acknowledgement missing")
+                }
+                "unavailable" => assert_eq!(value["detail"], "not initialized"),
+                "unreadable" => assert_eq!(value["detail"], "permission denied"),
+                _ => {}
             }
         }
+    }
+
+    #[test]
+    fn native_reload_receipt_growth_depends_on_counts_not_module_inventories() {
+        fn rendered(count: usize) -> serde_json::Value {
+            let KernelStep::Continue(response) = reload_result(
+                Ok(SrReloadOutcome::ReloadPublished(
+                    revision_with_modules("A", count),
+                    revision_with_modules("B", count),
+                    vec!["Persona.SmokeHelper".into()],
+                )),
+                tidepool_runtime::session::WorkbenchExecutionId::from_digest([0; 16]),
+            )
+            .unwrap_or_else(|_| panic!("native reload receipt conversion failed")) else {
+                panic!("native reload returns a retained tool receipt")
+            };
+            serde_json::to_value(response).unwrap()
+        }
+        let small = rendered(393);
+        let large = rendered(3_930);
+        for (rendered, count) in [(&small, 393), (&large, 3_930)] {
+            let value = &rendered["items"][0]["value"];
+            assert_eq!(value["previous"]["moduleCount"], count);
+            assert_eq!(value["revision"]["moduleCount"], count);
+            assert_eq!(
+                value["changedModules"],
+                serde_json::json!(["Persona.SmokeHelper"])
+            );
+            assert!(value["previous"].get("modules").is_none());
+            assert!(value["revision"].get("modules").is_none());
+        }
+        // Each count adds one decimal digit. No inventory bytes may escape
+        // through another field in the complete model-facing response.
+        assert_eq!(
+            serde_json::to_vec(&large).unwrap().len(),
+            serde_json::to_vec(&small).unwrap().len() + 2
+        );
+        fn normalize_counts(mut rendered: serde_json::Value) -> serde_json::Value {
+            for field in ["previous", "revision"] {
+                rendered["items"][0]["value"][field]["moduleCount"] = serde_json::json!(0);
+            }
+            rendered
+        }
+        assert_eq!(normalize_counts(small), normalize_counts(large));
     }
 }
