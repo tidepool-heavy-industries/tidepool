@@ -893,11 +893,12 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
 
     let status = dispatch_haskell_script(observer, "Cmd.status job").await;
     assert_eq!(status["status"], "committed", "{status}");
-    let output =
-        dispatch_haskell_script(observer, "display =<< (Cmd.pageText <$> Cmd.output job)").await;
-    let output_text = super::test_campaign::committed_display_text(&output);
-    assert!(output_text.contains("first-line"), "{output}");
-    assert!(output_text.contains("second-line"), "{output}");
+    let output = dispatch_haskell_script(
+        observer,
+        "do { page <- Cmd.output job; if Cmd.pageText page == \"first-line\\nsecond-line\\n\" then pure () else error \"inherited command output mismatch\" }",
+    )
+    .await;
+    require_committed(&output);
 
     for (operation, refusal) in [
         ("Cmd.sendInput job \"foreign\"", "not authorized"),
@@ -3039,15 +3040,14 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 
     let sibling = tokio::time::timeout(
         Duration::from_secs(10),
-        dispatch_haskell_script(child.policy.as_ref(), "display (40 + 2 :: Int)"),
+        dispatch_haskell_script(
+            child.policy.as_ref(),
+            "if (40 + 2 :: Int) == 42 then pure () else error \"sibling value mismatch\"",
+        ),
     )
     .await
     .expect("sibling actor did not progress while the command waited");
-    assert_eq!(
-        super::test_campaign::committed_display_text(&sibling),
-        "42",
-        "sibling progress retains the evaluated value"
-    );
+    require_committed(&sibling);
     assert!(
         !waiting.is_finished(),
         "command wait ended before sibling progress"
