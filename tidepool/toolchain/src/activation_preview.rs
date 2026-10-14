@@ -323,7 +323,7 @@ pub(crate) fn original_native_declaration_inputs(
         .collect::<Vec<_>>();
     if products.is_empty() {
         tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
-            roles = ?selected.entries.iter().map(|(owner, entry)| (owner, entry.descriptor.id, entry.is_native())).collect::<Vec<_>>(),
+            roles = ?selected.entries.iter().map(|(owner, entry)| (owner, entry.descriptor.id, matches!(entry.payload, ArtifactPayload::Original(_)))).collect::<Vec<_>>(),
             "activation native declaration offer omitted all originals");
         return Ok(None);
     }
