@@ -203,20 +203,9 @@ projectWorkSource
   -> R.EventSource (ProgressState progress) -> WorkSourceInput value
 projectWorkSource name projectProgress projectAnswer results updates = WorkSourceInput
   { inputName = name
-  , inputProgressEvents = fmap ((,) name . projectProgressState projectProgress) updates
-  , inputResultEvents = fmap (mapResult name projectAnswer) results
+  , inputProgressEvents = fmap ((,) name . fmap projectProgress) updates
+  , inputResultEvents = fmap ((,) name . fmap (fmap projectAnswer)) results
   }
-
-projectProgressState :: (progress -> WorkProgress) -> ProgressState progress -> ProgressState WorkProgress
-projectProgressState _ ProgressPending = ProgressPending
-projectProgressState project (ProgressUpdate cursor value) = ProgressUpdate cursor (project value)
-projectProgressState _ ProgressClosed = ProgressClosed
-projectProgressState _ (ProgressRejected failure) = ProgressRejected failure
-
-mapResult :: Text -> (answer -> value)
-  -> Either ResponseFailure (ResponseResult answer)
-  -> (Text, Either ResponseFailure (ResponseResult value))
-mapResult name project = (,) name . fmap (\receipt -> receipt { responseValue = project (responseValue receipt) })
 
 readWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (WorkState value)
 readWork router = R.call (workSnapshot (R.client router)) ()

@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -175,7 +176,7 @@ data ProgressState progress
   | ProgressUpdate ProgressCursor progress
   | ProgressClosed
   | ProgressRejected ReplyError
-  deriving (Show, Eq)
+  deriving (Show, Eq, Functor)
 
 -- | Everything the host already tracks about the producing actor of one
 -- still-pending request or watch dependency, carried as data so a caller can
@@ -265,7 +266,7 @@ data ResponseResult result = ResponseResult
   , responseExecution :: ExecutionReceipt
   , responseWorktree :: WorktreeEvidence
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Functor)
 
 data ResponseState result
   = -- | The target is presented with the request and has an observed
