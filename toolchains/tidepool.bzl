@@ -88,7 +88,11 @@ def _nix_directory_impl(ctx):
         fail("{} requires an immutable Nix store directory; materialize its pinned package output and rerun scripts/buck2-configure.sh".format(ctx.label))
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
-        cmd_args([ctx.attrs.cp, "-a", ctx.attrs.store_path + "/.", output.as_output()]),
+        cmd_args([
+            ctx.attrs.python, ctx.attrs.directory_copier,
+            "--cp", ctx.attrs.cp, "--source", ctx.attrs.store_path,
+            "--output", output.as_output(),
+        ]),
         category = "nix_directory",
     )
     sub_targets = {}
@@ -105,6 +109,8 @@ nix_directory = rule(
     impl = _nix_directory_impl,
     attrs = {
         "cp": attrs.string(),
+        "python": attrs.string(),
+        "directory_copier": attrs.source(default = "root//scripts:directory_copier"),
         "store_path": attrs.string(),
         "projected_sources": attrs.list(attrs.string(), default = []),
     },
@@ -134,9 +140,9 @@ def _checked_harness_source_impl(ctx):
         path = ctx.attrs.store_path
         if not path.startswith("/nix/store/") or any([part in ["", ".", ".."] for part in path.split("/")[1:]]):
             fail("checked_harness_source requires an immutable Nix store path")
-        source = path + "/."
+        source = path
     else:
-        source = cmd_args(ctx.attrs.source, format = "{}/.")
+        source = ctx.attrs.source
     revision = ctx.actions.declare_output("harness-source-revision.txt")
     ctx.actions.run(
         cmd_args([
@@ -152,7 +158,11 @@ def _checked_harness_source_impl(ctx):
     )
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
-        cmd_args([ctx.attrs.cp, "-a", source, output.as_output()], hidden = [revision]),
+        cmd_args([
+            ctx.attrs.python, ctx.attrs.directory_copier,
+            "--cp", ctx.attrs.cp, "--source", source,
+            "--output", output.as_output(),
+        ], hidden = [revision]),
         category = "harness_source",
     )
     return [DefaultInfo(
@@ -165,6 +175,7 @@ checked_harness_source = rule(
     attrs = {
         "cp": attrs.string(),
         "python": attrs.string(),
+        "directory_copier": attrs.source(default = "root//scripts:directory_copier"),
         "store_path": attrs.string(default = ""),
         "source": attrs.option(attrs.source(), default = None),
         "revision": attrs.string(),

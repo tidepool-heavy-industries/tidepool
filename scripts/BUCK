@@ -8,6 +8,21 @@ filegroup(
 )
 
 export_file(name = "embedded_web_provenance_script", src = "embedded_web_provenance.py", visibility = ["PUBLIC"])
+export_file(name = "directory_copier", src = "copy-directory.py", visibility = ["PUBLIC"])
+
+sh_test(
+    name = "directory_copy_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_directory_copy"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_TEST_CP": read_root_config("nix", "coreutils") + "/cp",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:coreutils"],
+    visibility = ["PUBLIC"],
+)
 
 export_file(name = "probe_opacity_checker", src = "probe-opacity-check.py", visibility = ["PUBLIC"])
 export_file(name = "compiler_reuse_report", src = "compiler-reuse-report.py", visibility = ["PUBLIC"])
