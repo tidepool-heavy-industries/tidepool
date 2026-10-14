@@ -322,6 +322,9 @@ pub(crate) fn original_native_declaration_inputs(
         })
         .collect::<Vec<_>>();
     if products.is_empty() {
+        tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+            roles = ?selected.entries.iter().map(|(owner, entry)| (owner, entry.descriptor.id, entry.is_native())).collect::<Vec<_>>(),
+            "activation native declaration offer omitted all originals");
         return Ok(None);
     }
     crate::declaration_context::OriginalCompilerInputs::from_native_availability(
