@@ -1,6 +1,6 @@
 use super::command_jobs_tests::backend_request;
 use super::command_test_support::TestCommands;
-use super::test_campaign::TestCampaign;
+use super::test_campaign::{original_tool_call, TestCampaign};
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
 
@@ -72,77 +72,40 @@ async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() 
 })).await;
 }
 
-struct AfterToolDeadline(Option<std::ffi::OsString>);
-
-impl AfterToolDeadline {
-    fn install(milliseconds: u64) -> Self {
-        let previous = std::env::var_os(exomonad_actor::AFTER_TOOL_WAIT_ENV);
-        std::env::set_var(
-            exomonad_actor::AFTER_TOOL_WAIT_ENV,
-            milliseconds.to_string(),
-        );
-        Self(previous)
-    }
-}
-
-impl Drop for AfterToolDeadline {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(previous) => std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, previous),
-            None => std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV),
-        }
-    }
-}
-
 #[tokio::test]
-async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_uncertainty() {
-    let campaign = TestCampaign::start_with_config(
-        |admission| admission,
-        |config| {
-            let authored = config.workspace.join(".exomonad");
-            std::fs::create_dir_all(&authored).unwrap();
-            std::fs::write(
-                authored.join("AgentSpec.hs"),
-                tidepool_testing::fixture_source(
-                    "bridge/facade/src/actor_host/invocation_deadline_spec.hs",
-                ),
-            )
-            .unwrap();
-            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
-                project.haskell.source_roots = vec![".".into()];
-                project.haskell.modules = vec!["AgentSpec".into()];
-                project.haskell.spec = Some("AgentSpec.agentSpec".into());
-            });
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .unwrap(),
-            );
-        },
-    )
-    .await;
-    campaign
-        .run_scenario_expecting_cleanup_failure(|campaign| {
+async fn after_tool_completion_waits_and_retires_exact_worker_without_replay() {
+    let campaign = start_with_after_tool_worker().await;
+    let (releases, backend) = campaign
+        .run_scenario(|campaign| {
             Box::pin(async move {
                 campaign.forest.track_resource_release();
                 let root = campaign.root_installation.policy.clone();
-                // The root spec is already compiled. The parked command prevents a
-                // successful slot answer, independently of command execution timing.
-                let deadline = AfterToolDeadline::install(10_000);
+                // The command backend controls hook completion independently of timing.
                 let policy = root.clone();
                 let called = tokio::spawn(async move {
-                    dispatch_structured_tool(
-                        policy.as_ref(),
-                        "lifetimeProbe",
-                        serde_json::Value::Null,
-                    )
-                    .await
+                    let (invocation, completion) =
+                        original_tool_call(exomonad_tool::OriginalOperation {
+                            origin: exomonad_tool::ConversationOrigin::External {
+                                thread_id: "after-tool-retained-cleanup".into(),
+                            },
+                            request_id: "retained-probe".into(),
+                            call_id: "retained-probe".into(),
+                        });
+                    let result = policy
+                        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                            context: Some(invocation),
+                            name: "lifetime_probe".into(),
+                            arguments: exomonad_tool::ToolArguments::Structured(
+                                serde_json::json!({"topic": "lifecycle"}),
+                            ),
+                        })
+                        .await
+                        .expect("retained cleanup preserves tool success");
+                    (result, completion)
                 });
                 let child = campaign
                     .next_deployment(
-                        "invocation worker policy publication before slot expiry",
+                        "invocation worker policy publication before presentation completes",
                         Duration::from_secs(120),
                         |event| match event {
                             LocalResidentDeployment::PolicyInstalled(child)
@@ -155,6 +118,7 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                     )
                     .await;
                 let exact = child.actor.identity();
+                campaign.acknowledge_native_spawn(&child);
                 assert_eq!(child.creator, Some(campaign.actor.identity()));
                 assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
                 assert!(child.actor.terminal().get().is_none());
@@ -162,6 +126,8 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                 assert_eq!(request.owner, campaign.actor.identity());
                 let backend = TestCommands::new();
                 request.supply(Ok(backend.clone()));
+                assert!(!called.is_finished(), "final result awaits hook effects");
+                backend.finish();
                 let release = campaign
                     .next_deployment(
                         "host cleanup for the exact invocation-owned worker",
@@ -186,16 +152,15 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                 );
                 const RETAINED: &str = "scripted provider installation remains published";
                 assert!(release.answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into())));
-                let response = tokio::time::timeout(Duration::from_secs(30), called)
+                let (response, completion) = tokio::time::timeout(Duration::from_secs(30), called)
                     .await
                     .expect("retained host cleanup must settle the tool response")
                     .unwrap();
-                drop(deadline);
                 assert_eq!(response["status"], "committed", "{response}");
                 let rendered = response.to_string();
                 assert!(rendered.contains("original-result"), "{response}");
-                assert!(rendered.contains("no answer within 10s"), "{response}");
-                assert!(!rendered.contains("slot-finished"), "{response}");
+                assert!(!rendered.contains("the slot did not answer"), "{response}");
+                assert!(rendered.contains("slot-finished"), "{response}");
                 assert!(
                     rendered.contains("Invocation cleanup remains unconfirmed"),
                     "{response}"
@@ -205,8 +170,8 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                 assert_eq!(backend.executions(), 1);
                 assert_eq!(
                     backend.control_count(),
-                    1,
-                    "unfinished slot command cancelled once"
+                    0,
+                    "completed hook command is never cancelled or replayed"
                 );
                 let retired = campaign
                     .next_deployment(
@@ -236,30 +201,187 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                         .contains("invocation cleanup unconfirmed"),
                     "{status}"
                 );
-                let available = dispatch_haskell_script(root.as_ref(), "40 + 2 :: Int").await;
-                assert_eq!(available["items"][0]["output"], "42", "{available}");
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let available = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(root.as_ref(), "display (40 + 2 :: Int)"),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&available),
+                    "42",
+                    "{available}"
+                );
 
-                // Retirement retries the same retained invocation's cleanup. An external
-                // owner still retaining resources must keep root cleanup unconfirmed.
+                // Completion retries the same external owner. Retirement can release
+                // it only after the retained refusal has been observed.
                 campaign.drain_ready();
                 let mut deployments = campaign.take_deployments();
+                let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let release_state = released.clone();
                 let releases = tokio::spawn(async move {
                     while let Some(event) = deployments.recv().await {
                         if let LocalResidentDeployment::ReleaseAwait(release) = event {
                             assert_eq!(release.actor, exact);
-                            release
-                                .answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into()));
+                            let outcome =
+                                if release_state.load(std::sync::atomic::Ordering::Acquire) {
+                                    exomonad_actor::ResourceRelease::Released
+                                } else {
+                                    exomonad_actor::ResourceRelease::Retained(RETAINED.into())
+                                };
+                            assert!(release.answer(outcome));
                         }
                     }
                 });
-                campaign.observe_shutdown().await.expect_err("retained external owner keeps cleanup unconfirmed");
-                releases.abort();
-                assert!(releases.await.unwrap_err().is_cancelled());
-                assert!(!campaign.actor.terminal().cleanup().unwrap().is_confirmed());
+                let completion = root
+                    .complete_boxed(completion)
+                    .await
+                    .expect_err("retained external owner keeps invocation cleanup unconfirmed");
+                assert!(matches!(
+                    completion,
+                    exomonad_actor::ResidentToolError::Unavailable(_)
+                ));
+                released.store(true, std::sync::atomic::Ordering::Release);
+                (releases, backend)
             })
-        }, |failure| {
-            assert_eq!(failure.hosted, super::test_campaign::CampaignHostedJoin::Joined);
-            assert!(matches!(&failure.root, super::test_campaign::CampaignRootRetirement::Settled(shutdown) if !shutdown.cleanup.is_confirmed()));
         })
         .await;
+    releases.abort();
+    if let Err(error) = releases.await {
+        assert!(
+            error.is_cancelled(),
+            "cleanup responder must not panic: {error}"
+        );
+    }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "retirement must never replay hook effects"
+    );
+}
+
+async fn start_with_after_tool_worker() -> TestCampaign {
+    TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/invocation_deadline_spec.hs",
+                ),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["AgentSpec".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn runtime_shutdown_cleans_up_a_pending_after_tool_without_replay() {
+    let campaign = start_with_after_tool_worker().await;
+    let (called, backend, child) = campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let (invocation, _completion) =
+                    original_tool_call(exomonad_tool::OriginalOperation {
+                        origin: exomonad_tool::ConversationOrigin::External {
+                            thread_id: "after-tool-shutdown".into(),
+                        },
+                        request_id: "shutdown-probe".into(),
+                        call_id: "shutdown-probe".into(),
+                    });
+                let observed_invocation = invocation.clone();
+                let observer = policy.clone();
+                let called = tokio::spawn(async move {
+                    policy
+                        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                            context: Some(invocation),
+                            name: "lifetime_probe".into(),
+                            arguments: exomonad_tool::ToolArguments::Structured(
+                                serde_json::json!({"topic": "lifecycle"}),
+                            ),
+                        })
+                        .await
+                });
+                let child = campaign
+                    .next_deployment(
+                        "hook's invocation-owned worker",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(child)
+                                if child.label == "invocation-deadline-child" =>
+                            {
+                                Ok(child)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                campaign.acknowledge_native_spawn(&child);
+                let request = backend_request(campaign).await;
+                let backend = TestCommands::new();
+                request.supply(Ok(backend.clone()));
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while backend.executions() == 0 {
+                        let terminal = observer
+                            .retained_operation(observed_invocation.clone())
+                            .expect("admitted operation retains its native owner")
+                            .terminal();
+                        assert!(
+                            !matches!(
+                                terminal,
+                                exomonad_actor::HostedOperationTerminal::Settled(_)
+                            ),
+                            "hook invocation settled before its command started"
+                        );
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("hook command starts before runtime shutdown");
+                drop(observer);
+                assert!(
+                    !called.is_finished(),
+                    "pending hook cannot deliver final output"
+                );
+                (called, backend, child)
+            })
+        })
+        .await;
+    let response = called.await.expect("dispatch task joins without a panic");
+    if let Ok(response) = response {
+        assert!(
+            !response.to_string().contains("slot-finished"),
+            "{response}"
+        );
+    }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "shutdown must never replay hook effects"
+    );
+    assert_eq!(
+        backend.control_count(),
+        1,
+        "unfinished hook command is cancelled by shutdown"
+    );
+    assert!(child.actor.terminal().get().is_some());
+    assert!(child.actor.terminal().cleanup().unwrap().is_confirmed());
 }

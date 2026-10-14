@@ -616,35 +616,6 @@ impl<H, O> OwnedExecution<H, O> {
         cleanup.spawn_blocking(Some(timing), operation)
     }
 
-    fn expire_after_tool(&mut self) {
-        if let Some(stamp) = self
-            .state
-            .cursor
-            .running
-            .as_mut()
-            .and_then(|current| current.inflight_effect.take())
-        {
-            record_workbench_operation(
-                &mut self.state.cursor.unit.operations,
-                self.state.request.execution_id(),
-                self.state.cursor.index,
-                stamp.ordinal,
-                &stamp.effect,
-                stamp.display,
-                stamp.started.elapsed(),
-                WorkbenchOperationDisposition::Unknown,
-            );
-        }
-        let slot = self
-            .state
-            .cursor
-            .after_tool
-            .as_mut()
-            .expect("timeout retains the original after-tool frame");
-        slot.answer = Some(WorkbenchAfterToolAnswer::TimedOut);
-        slot.enforce_deadline = false;
-    }
-
     fn scopes(
         &self,
     ) -> (
@@ -857,13 +828,6 @@ where
         let cell_span = owned.state.cell_span.clone();
         async move {
             let (timing, cleanup) = owned.scopes();
-            let deadline = owned
-                .state
-                .cursor
-                .after_tool
-                .as_ref()
-                .filter(|slot| slot.enforce_deadline)
-                .map(|slot| (slot.frame.deadline(), slot.frame.entered()));
             let span = owned
                 .state
                 .cursor
@@ -871,9 +835,6 @@ where
                 .as_ref()
                 .map(|slot| slot.span.clone())
                 .unwrap_or_else(tracing::Span::none);
-            let observation = owned.observation.clone();
-            let index = owned.state.cursor.index;
-            let total = owned.state.request.items.len();
             let retirement = owned.retirement.clone();
             let model = owned.state.effects.model.clone();
             let control = owned
@@ -891,37 +852,7 @@ where
                 .expect("execution retains its cancellation owner")
                 .native_cancel();
             let completed = {
-                let operation = async {
-                    match deadline {
-                        Some((deadline, entered)) => {
-                            let operation = run(&mut owned);
-                            tokio::pin!(operation);
-                            let mut progress = tokio::time::interval_at(
-                                entered + crate::after_tool::AFTER_TOOL_PROGRESS,
-                                crate::after_tool::AFTER_TOOL_PROGRESS,
-                            );
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    completed = &mut operation => break Some(completed),
-                                    () = tokio::time::sleep_until(deadline) => {
-                                        if let Some(model) = &model { model.cancel(); }
-                                        control.request_cancellation();
-                                        operation.await;
-                                        break None;
-                                    },
-                                    _ = progress.tick() => observation.publish_workbench_posture(
-                                        crate::ActorWorkbenchPosture::AwaitingEffect {
-                                            input_unit_index: index, total,
-                                            effect: format!("after-tool slot, {}s elapsed", entered.elapsed().as_secs()),
-                                        },
-                                    ),
-                                }
-                            }
-                        },
-                        None => Some(run(&mut owned).await),
-                    }
-                }.instrument(span.clone());
+                let operation = run(&mut owned).instrument(span);
                 let running = crate::resident_workbench::with_invocation_cancellation(
                     cancel,
                     timing.scope(cleanup.scope(operation)),
@@ -933,15 +864,7 @@ where
                 let (timing, cleanup) = owned.scopes();
                 cell_span.in_scope(|| {
                     timing.sync_scope(|| {
-                        cleanup.sync_scope(|| match completed {
-                            Some(completed) => apply(behavior, kernel, owned, completed),
-                            None => {
-                                owned.expire_after_tool();
-                                Ok(WorkbenchAdvance::Park(
-                                    behavior.finish_owned_after_tool_task(owned, kernel.clone()),
-                                ))
-                            }
-                        })
+                        cleanup.sync_scope(|| apply(behavior, kernel, owned, completed))
                     })
                 })
             })
@@ -1379,13 +1302,6 @@ where
             OwnedWorkbenchCompletion::advance_async(move |behavior: &mut Self, kernel| {
                 Box::pin(async move {
                     let (timing, cleanup) = owned.scopes();
-                    let deadline = owned
-                        .state
-                        .cursor
-                        .after_tool
-                        .as_ref()
-                        .filter(|slot| slot.enforce_deadline)
-                        .map(|slot| slot.frame.deadline());
                     let result = {
                         let model = owned.state.effects.model.clone();
                         let control = owned
@@ -1413,32 +1329,17 @@ where
                         tokio::pin!(advance);
                         tokio::select! {
                             biased;
-                            result = &mut advance => Some(result),
+                            result = &mut advance => result,
                             _ = control.wait_for_cancellation() => {
                                 if let Some(model) = &model { model.cancel(); }
-                                Some(advance.await)
+                                advance.await
                             },
                             _ = retirement.wait_requested_shutdown() => {
                                 if let Some(model) = &model { model.cancel(); }
                                 control.request_cancellation();
-                                Some(advance.await)
-                            },
-                            () = async {
-                                match deadline {
-                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                    None => std::future::pending().await,
-                                }
-                            } => {
-                                if let Some(model) = &model { model.cancel(); }
-                                None
+                                advance.await
                             },
                         }
-                    };
-                    let Some(result) = result else {
-                        owned.expire_after_tool();
-                        return Ok(WorkbenchAdvance::Park(
-                            behavior.finish_owned_after_tool_task(owned, kernel.clone()),
-                        ));
                     };
                     let task = match result {
                         Ok(WorkbenchRunAdvance::ParkEffect) => {
@@ -1549,7 +1450,7 @@ where
             .expect("one completed after-tool invocation")
             .answer
             .take()
-            .expect("one after-tool answer or timeout");
+            .expect("one after-tool answer");
         Self::owned_step_task(
             owned,
             move |owned| {
@@ -1567,11 +1468,7 @@ where
                     .expect("same after-tool frame")
                     .frame;
                 Box::pin(async move {
-                    if matches!(
-                        &answer,
-                        WorkbenchAfterToolAnswer::TimedOut
-                            | WorkbenchAfterToolAnswer::Settled(Err(_))
-                    ) {
+                    if matches!(&answer, Err(_)) {
                         let reason =
                             "after-tool slot did not complete its native continuation".to_owned();
                         let aborted = tokio::select! {
@@ -1585,9 +1482,7 @@ where
                         }
                     }
                     let binding = match &answer {
-                        WorkbenchAfterToolAnswer::Settled(Ok(
-                            crate::after_tool::Annotation::Pruned { .. },
-                        )) => workbench
+                        Ok(crate::after_tool::Annotation::Pruned { .. }) => workbench
                             .bind_tool_result(
                                 context,
                                 frame.handle().to_owned(),
@@ -1626,44 +1521,11 @@ where
                     .expect("same after-tool invocation");
                 owned.state.effects.after_tool_active = false;
                 owned.state.cursor.running = None;
-                // Failed cleanup remains an execution failure. Earlier completed
-                // machine items may survive; this result is never an acknowledged timeout.
                 if let Err(error) = &binding {
-                    if matches!(
-                        &answer,
-                        WorkbenchAfterToolAnswer::TimedOut
-                            | WorkbenchAfterToolAnswer::Settled(Err(_))
-                    ) {
-                        slot.receipt.output = format!(
-                            "{}\nAfter-tool cleanup remains unconfirmed: {error}",
-                            slot.frame.output(),
-                        );
-                        slot.receipt.status = WorkbenchItemStatus::Stopped;
-                        slot.receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
-                        super::merge_retained_bindings(
-                            &mut slot.receipt,
-                            &owned.state.cursor.unit.recovered_bindings,
-                        );
-                        slot.receipt.operations =
-                            std::mem::take(&mut owned.state.cursor.unit.operations);
-                        owned.state.cursor.receipts.push(slot.receipt);
-                        let failure = WorkbenchExecutionFailure {
-                            receipts: std::mem::take(&mut owned.state.cursor.receipts),
-                            point: WorkbenchFailurePoint::InputUnit {
-                                index: owned.state.cursor.index,
-                            },
-                            publication: None,
-                            total: owned.state.request.items.len(),
-                            source: binding.expect_err("failed exact cleanup"),
-                        };
-                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                            owned,
-                            Err(failure),
-                        )));
-                    }
+                    tracing::warn!(actor = %slot.frame.actor(), ordinal = slot.frame.ordinal(),
+                        %error, "after-tool presentation cleanup or retention failed");
                 }
-                slot.receipt.output =
-                    behavior.render_owned_after_tool(&slot.frame, answer, binding);
+                slot.receipt.output = behavior.render_after_tool(&slot.frame, answer, binding);
                 super::merge_retained_bindings(
                     &mut slot.receipt,
                     &owned.state.cursor.unit.recovered_bindings,
@@ -1674,7 +1536,7 @@ where
         )
     }
 
-    fn render_owned_after_tool(
+    pub(super) fn render_after_tool(
         &mut self,
         frame: &after_tool_wait::AfterToolFrame,
         answer: WorkbenchAfterToolAnswer,
@@ -1684,59 +1546,33 @@ where
         let output = frame.output();
         let revision = frame.revision();
         let (delivered, disposition, detail) = match answer {
-            WorkbenchAfterToolAnswer::TimedOut => {
-                let wait = frame.deadline().duration_since(frame.entered());
-                let reason = format!(
-                    "no answer within {}",
-                    crate::after_tool::describe_wait(wait)
-                );
-                let notice = self
-                    .after_tool
-                    .notice(frame.installation(), frame.ordinal(), &reason);
-                (
-                    crate::after_tool::failed(output, &notice),
-                    Disposition::TimedOut(wait),
-                    reason,
-                )
-            }
-            WorkbenchAfterToolAnswer::Settled(Err(error))
-                if error.is_observation_budget_exhausted() =>
-            {
+            Err(error) if error.is_observation_budget_exhausted() => (
+                output.to_owned(),
+                Disposition::Abstained(
+                    "tool result too large for the slot to relay through its own effects".into(),
+                ),
+                String::new(),
+            ),
+            Err(error) => {
+                let reason = crate::after_tool::compact_reason(&error.to_string());
                 (
                     output.to_owned(),
-                    Disposition::Abstained(
-                        "tool result too large for the slot to relay through its own effects"
-                            .into(),
-                    ),
-                    String::new(),
-                )
-            }
-            WorkbenchAfterToolAnswer::Settled(Err(error)) => {
-                let reason = crate::after_tool::compact_reason(&error.to_string());
-                let notice = self
-                    .after_tool
-                    .notice(frame.installation(), frame.ordinal(), &reason);
-                (
-                    crate::after_tool::failed(output, &notice),
                     Disposition::Failed(reason.clone()),
                     reason,
                 )
             }
-            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Nothing)) => {
-                (output.to_owned(), Disposition::Silent, String::new())
-            }
-            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Abstained(reason))) => (
+            Ok(Annotation::Nothing) => (output.to_owned(), Disposition::Silent, String::new()),
+            Ok(Annotation::Abstained(reason)) => (
                 output.to_owned(),
                 Disposition::Abstained(reason.clone()),
                 reason,
             ),
-            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Annotated(text))) => (
+            Ok(Annotation::Annotated(text)) => (
                 crate::after_tool::annotated(output, &text, revision),
                 Disposition::Annotated,
                 crate::after_tool::compact_reason(&text),
             ),
-            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Pruned { text, .. })) => match binding
-            {
+            Ok(Annotation::Pruned { text, .. }) => match binding {
                 Ok(()) => (
                     crate::after_tool::pruned(&text, frame.handle(), revision),
                     Disposition::Pruned(frame.handle().into()),
@@ -1744,11 +1580,8 @@ where
                 ),
                 Err(error) => {
                     let reason = crate::after_tool::compact_reason(&error.to_string());
-                    let notice =
-                        self.after_tool
-                            .notice(frame.installation(), frame.ordinal(), &reason);
                     (
-                        crate::after_tool::failed(output, &notice),
+                        output.to_owned(),
                         Disposition::Failed(reason.clone()),
                         reason,
                     )
@@ -2039,13 +1872,6 @@ where
                     .expect("original cancellation owner");
                 let model = owned.state.effects.model.clone();
                 let retirement = owned.retirement.clone();
-                let deadline = owned
-                    .state
-                    .cursor
-                    .after_tool
-                    .as_ref()
-                    .filter(|slot| slot.enforce_deadline)
-                    .map(|slot| slot.frame.deadline());
                 let cancel = owned
                     .state
                     .effects
@@ -2068,24 +1894,8 @@ where
                         )),
                     ),
                 );
-                let operation = async {
-                    tokio::pin!(preparing);
-                    tokio::select! {
-                        prepared = &mut preparing => prepared,
-                        () = async {
-                            match deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending().await,
-                            }
-                        } => {
-                            if let Some(model) = &model { model.cancel(); }
-                            control.request_cancellation();
-                            preparing.await
-                        },
-                    }
-                };
                 let prepared =
-                    join_execution_step(operation, control.clone(), retirement, model.clone())
+                    join_execution_step(preparing, control.clone(), retirement, model.clone())
                         .await;
                 OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
                     let (timing, cleanup) = owned.scopes();

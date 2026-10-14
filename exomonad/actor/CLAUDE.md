@@ -44,7 +44,12 @@ issued selections retain their original source, context, public owner and
 implementation. Builtin controls use their owning actor routes and reserve their
 names at authored endpoint admission. After-tool and initial-context execution
 retain separate optional admitted slots from the same installation; one slot's
-presence cannot issue another slot.
+presence cannot issue another slot. After-tool presentation awaits the
+completed receipt before model delivery while the actor scheduler continues
+servicing its ordinary effect continuations. It has no separate deadline,
+cancellation control, or replay path. A failed hook preserves the original
+committed output and semantic value, and records a diagnostic internally;
+runtime shutdown retains the invocation's existing cleanup ownership.
 
 Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;

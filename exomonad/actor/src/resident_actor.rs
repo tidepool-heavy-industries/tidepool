@@ -3061,17 +3061,13 @@ struct WorkbenchCursor {
     after_tool: Option<WorkbenchAfterToolExecution>,
 }
 
-enum WorkbenchAfterToolAnswer {
-    Settled(Result<crate::after_tool::Annotation, ResidentActorWorkbenchError>),
-    TimedOut,
-}
+type WorkbenchAfterToolAnswer = Result<crate::after_tool::Annotation, ResidentActorWorkbenchError>;
 
 struct WorkbenchAfterToolExecution {
     frame: after_tool_wait::AfterToolFrame,
     receipt: WorkbenchItemReceipt,
     prepared: Option<Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>>,
     answer: Option<WorkbenchAfterToolAnswer>,
-    enforce_deadline: bool,
     span: tracing::Span,
 }
 
@@ -9883,213 +9879,61 @@ where
     /// Apply the retained after-tool slot at the tool-result boundary, and
     /// answer what the model is shown.
     ///
-    /// The result waits for the slot, up to five minutes. Past thirty seconds
-    /// the elapsed time is published as workbench posture, which is an
-    /// observation channel: nothing here wakes the model or causes an
-    /// inference. On timeout or failure the original result is delivered with
-    /// one compact line and a reference — work the slot already completed is
-    /// kept rather than replayed, because the blocking machine task settles
-    /// its own checkout whether or not this caller is still polling it, and a
-    /// diagnostic already shown becomes a reference to its first sighting
-    /// instead of a second copy.
+    /// The serial adapter awaits presentation using the same frame and finalizer
+    /// as the production actor-owned completion cursor.
     async fn annotate_tool_result(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
-        handler: &crate::resident_workbench::InstalledAfterTool,
+        handler: crate::resident_workbench::InstalledAfterTool,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
         value: Option<serde_json::Value>,
     ) -> String {
-        use crate::after_tool::{Annotation, Disposition, Invocation};
-
-        let tools = handler.tools();
-        let mut slot_context = context.clone();
-        slot_context.haskell_effects_alias = handler.entry().execution_effects().clone();
-        let context = &slot_context;
-        // A slot's own effects and tool use never trigger a slot.
         if execution_state.after_tool_active {
             return output;
         }
-        let provenance = tools.provenance();
-        let revision = tools.revision.clone().unwrap_or_else(|| "(run)".to_owned());
-        let ordinal = self.after_tool.begin();
-        // The span every Jev call and effect a slot makes is attributed to:
-        // which slot, the tool call that triggered it, the actor it ran on,
-        // and the spec revision it was compiled from. `elapsed_ms` is filled
-        // in once the slot settles.
-        let slot_span = tracing::info_span!(
-            "after_tool_slot",
-            slot = %crate::after_tool::AFTER_TOOL_SLOT,
-            tool = %call.name,
-            actor = %context.actor,
-            revision = %revision,
-            ordinal,
-            elapsed_ms = tracing::field::Empty,
+        let mut context = context.clone();
+        context.haskell_effects_alias = handler.entry().execution_effects().clone();
+        let frame = after_tool_wait::capture(
+            handler,
+            call.clone(),
+            output,
+            value,
+            self.after_tool.begin(),
+            16 * 1024,
         );
-        async {
-            // The handle is chosen before the slot runs, because the slot is shown
-            // it and names it back when it prunes. It is defined only if the slot
-            // actually prunes.
-            let handle = format!("toolResult{ordinal}");
-            let payload = after_tool_wait::result_payload(call, &handle, ordinal, &output, value);
-            let started = std::time::Instant::now();
-            let wait = crate::after_tool::wait();
-            let observation = self.runtime_observation.clone();
-            execution_state.after_tool_active = true;
-            let answer = {
-                let slot = workbench.with_exact_continuation_cleanup(
-                    context.clone(),
-                    "after-tool slot ran out of time or lost its caller".into(),
-                    self.run_after_tool(
-                        kernel,
-                        context,
-                        execution_state,
-                        workbench,
-                        Arc::clone(&tools.dispatch),
-                        call.name.clone(),
-                        payload,
-                    ),
-                );
-                tokio::pin!(slot);
-                let expiry = tokio::time::sleep(wait);
-                tokio::pin!(expiry);
-                let mut progress = tokio::time::interval_at(
-                    tokio::time::Instant::now() + crate::after_tool::AFTER_TOOL_PROGRESS,
-                    crate::after_tool::AFTER_TOOL_PROGRESS,
-                );
-                loop {
-                    tokio::select! {
-                        biased;
-                        settled = &mut slot => break Some(settled),
-                        () = &mut expiry => break None,
-                        _ = progress.tick() => observation.publish_workbench_posture(
-                            crate::ActorWorkbenchPosture::AwaitingEffect {
-                                input_unit_index: 0,
-                                total: 1,
-                                effect: format!(
-                                    "after-tool slot, {}s elapsed",
-                                    started.elapsed().as_secs()
-                                ),
-                            },
-                        ),
-                    }
-                }
-            };
-            execution_state.after_tool_active = false;
-            let elapsed = started.elapsed();
-            tracing::Span::current().record("elapsed_ms", elapsed.as_millis() as u64);
-            // `outcome_detail` is the one bounded line of reason text a compact
-            // `info` event can carry for whichever the outcome was: nothing said
-            // (empty), a nudge written straight onto the child's own result, a
-            // selection, or a failure. An escalation's own detail — the tripped
-            // heuristics and the parent it went to — is traced separately where
-            // the `Notifications` send happens, gated on `after_tool_active`.
-            let (delivered, disposition, outcome_detail) = match answer {
-                None => {
-                    let reason = format!(
-                        "no answer within {}",
-                        crate::after_tool::describe_wait(wait)
-                    );
-                    let notice = self.after_tool.notice(tools.install, ordinal, &reason);
-                    (
-                        crate::after_tool::failed(&output, &notice),
-                        Disposition::TimedOut(wait),
-                        reason,
-                    )
-                }
-                // A request or a display value too large to materialize says
-                // nothing about the tool result itself: the slot's own
-                // relay of it (to Jev, to a binding) hit the same size limit
-                // that display already tolerates elsewhere in a turn. The
-                // model asked for a judgement it happens not to be able to
-                // get, not a broken judgement, so this is a non-decision
-                // like any other abstention rather than a failure line
-                // repeated on every large tool result. Bounding what the
-                // slot itself sends through an effect (`Watchdog.hs`) is the
-                // real fix; this keeps the hook from failing regardless.
-                Some(Err(error)) if error.is_observation_budget_exhausted() => (
-                    output,
-                    Disposition::Abstained(
-                        "tool result too large for the slot to relay through its own effects"
-                            .into(),
-                    ),
-                    String::new(),
+        execution_state.after_tool_active = true;
+        let answer = workbench
+            .with_exact_continuation_cleanup(
+                context.clone(),
+                "after-tool presentation interrupted during runtime shutdown".into(),
+                self.run_after_tool(
+                    kernel,
+                    &context,
+                    execution_state,
+                    workbench,
+                    Arc::clone(frame.dispatch()),
+                    call.name.clone(),
+                    frame.payload(),
                 ),
-                Some(Err(error)) => {
-                    let reason = crate::after_tool::compact_reason(&error.to_string());
-                    let notice = self.after_tool.notice(tools.install, ordinal, &reason);
-                    (
-                        crate::after_tool::failed(&output, &notice),
-                        Disposition::Failed(reason.clone()),
-                        reason,
-                    )
-                }
-                Some(Ok(Annotation::Nothing)) => (output, Disposition::Silent, String::new()),
-                // Silent to the model. It never asked for a judgement on this
-                // result, and a non-decision is not a refusal to announce.
-                Some(Ok(Annotation::Abstained(reason))) => {
-                    let detail = reason.clone();
-                    (output, Disposition::Abstained(reason), detail)
-                }
-                Some(Ok(Annotation::Annotated(text))) => {
-                    let detail = crate::after_tool::compact_reason(&text);
-                    (
-                        crate::after_tool::annotated(&output, &text, &revision),
-                        Disposition::Annotated,
-                        detail,
-                    )
-                }
-                Some(Ok(Annotation::Pruned { text, .. })) => {
-                    match workbench
-                        .bind_tool_result(context.clone(), handle.clone(), output.clone())
-                        .await
-                        .and_then(|binding| binding.accept().map(|_| ()))
-                    {
-                        Ok(()) => {
-                            let detail = crate::after_tool::compact_reason(&text);
-                            (
-                                crate::after_tool::pruned(&text, &handle, &revision),
-                                Disposition::Pruned(handle),
-                                detail,
-                            )
-                        }
-                        // A selection whose whole is unreachable would be a
-                        // rewrite, so the original is delivered instead.
-                        Err(error) => {
-                            let reason = crate::after_tool::compact_reason(&error.to_string());
-                            let notice = self.after_tool.notice(tools.install, ordinal, &reason);
-                            (
-                                crate::after_tool::failed(&output, &notice),
-                                Disposition::Failed(reason.clone()),
-                                reason,
-                            )
-                        }
-                    }
-                }
-            };
-            tracing::info!(
-                actor = %context.actor,
-                tool = %call.name,
-                ordinal,
-                elapsed_ms = elapsed.as_millis(),
-                disposition = ?disposition,
-                detail = %outcome_detail,
-                "after-tool slot invoked"
-            );
-            self.after_tool.record(Invocation {
-                ordinal,
-                tool: call.name.clone(),
-                elapsed,
-                provenance,
-                disposition,
-            });
-            delivered
-        }
-        .instrument(slot_span)
-        .await
+            )
+            .await;
+        let binding = match &answer {
+            Ok(crate::after_tool::Annotation::Pruned { .. }) => workbench
+                .bind_tool_result(
+                    context,
+                    frame.handle().to_owned(),
+                    frame.output().to_owned(),
+                )
+                .await
+                .and_then(|binding| binding.accept().map(|_| ())),
+            _ => Ok(()),
+        };
+        execution_state.after_tool_active = false;
+        self.render_after_tool(&frame, answer, binding)
     }
 
     /// One slot invocation, in the actor's own resident machine: the retained
@@ -10430,8 +10274,7 @@ where
                         .after_tool
                         .as_mut()
                         .expect("same completed slot frame");
-                    after_tool.answer = Some(WorkbenchAfterToolAnswer::Settled(answer));
-                    after_tool.enforce_deadline = false;
+                    after_tool.answer = Some(answer);
                     return Ok(WorkbenchRunAdvance::ParkAfterToolFinish);
                 }
                 let mut step = None;
@@ -10723,7 +10566,6 @@ where
                                         receipt,
                                         prepared: None,
                                         answer: None,
-                                        enforce_deadline: true,
                                         span,
                                     });
                                     effects.after_tool_active = true;
@@ -10735,7 +10577,7 @@ where
                                         context,
                                         effects,
                                         workbench,
-                                        &handler,
+                                        handler,
                                         &call,
                                         receipt.output,
                                         receipt.value.clone(),

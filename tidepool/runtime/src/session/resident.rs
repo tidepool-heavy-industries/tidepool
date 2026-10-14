@@ -164,6 +164,10 @@ impl CompiledProvenancePlan {
                 certification.and_then(|certification| match certification.purpose() {
                     TurnPurpose::Execution { execution, .. }
                     | TurnPurpose::HostPrototype(execution) => execution.selected_native_sites(),
+                    TurnPurpose::Ordinary => certification
+                        .original_compile_input
+                        .as_ref()
+                        .map(|proof| proof.selected_native_sites()),
                     _ => None,
                 });
             let mut selected_sites = code
@@ -638,6 +642,20 @@ impl ProgramProvenance {
     #[must_use]
     pub fn has_completion_site(&self, site: u64) -> bool {
         self.native_sites.has_completion_site(site) || self.fresh_completion_sites.contains(&site)
+    }
+
+    /// Observe the exact issued completion authority without promoting site metadata.
+    #[must_use]
+    pub fn completion_site_ids(&self) -> std::collections::BTreeSet<u64> {
+        self.fresh_completion_sites
+            .iter()
+            .copied()
+            .chain(
+                self.native_sites
+                    .ids()
+                    .filter(|site| self.native_sites.has_completion_site(*site)),
+            )
+            .collect()
     }
 
     #[must_use]
@@ -11466,6 +11484,7 @@ mod compiled_provenance_plan_tests {
                 prop_assert!(observation.authenticated_inputs.is_empty());
                 prop_assert!(observation.source_originals.is_empty());
                 prop_assert!(observation.fresh_completion_sites.is_empty());
+                prop_assert!(observation.completion_site_ids().is_empty());
             }
         }
     }

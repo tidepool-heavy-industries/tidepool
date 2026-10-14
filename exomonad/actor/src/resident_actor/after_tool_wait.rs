@@ -1,4 +1,4 @@
-//! One after-tool entry retains its admitted tools and its original deadline.
+//! One presentation invocation retains its admitted handler and completed output.
 
 use super::*;
 use tidepool_runtime::session::workbench::WorkbenchToolCall;
@@ -30,7 +30,6 @@ pub(super) struct AfterToolFrame {
     ordinal: u64,
     handle: String,
     entered: tokio::time::Instant,
-    deadline: tokio::time::Instant,
     remaining_display_budget: usize,
 }
 
@@ -45,7 +44,6 @@ pub(super) fn capture(
     remaining: usize,
 ) -> AfterToolFrame {
     let entered = tokio::time::Instant::now();
-    let deadline = entered + crate::after_tool::wait();
     AfterToolFrame {
         handler,
         call,
@@ -54,7 +52,6 @@ pub(super) fn capture(
         ordinal,
         handle: format!("toolResult{ordinal}"),
         entered,
-        deadline,
         remaining_display_budget: remaining,
     }
 }
@@ -84,10 +81,6 @@ impl AfterToolFrame {
         &self.handle
     }
 
-    pub(super) fn installation(&self) -> u64 {
-        self.handler.tools().install
-    }
-
     pub(super) fn provenance(&self) -> String {
         self.handler.tools().provenance()
     }
@@ -98,10 +91,6 @@ impl AfterToolFrame {
 
     pub(super) fn entered(&self) -> tokio::time::Instant {
         self.entered
-    }
-
-    pub(super) fn deadline(&self) -> tokio::time::Instant {
-        self.deadline
     }
 
     pub(super) fn remaining_display_budget(&self) -> usize {
@@ -146,7 +135,7 @@ mod tests {
 }
 
 /// Only the original workbench's native begin runs here. The actor applies the
-/// returned step under its existing fence and owns effect/timeout settlement.
+/// returned step under its existing fence and owns effect settlement.
 pub(super) async fn prepare<H, O>(
     frame: &AfterToolFrame,
     workbench: &crate::ResidentActorWorkbench<H, O>,

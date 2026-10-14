@@ -6,7 +6,7 @@ import Control.Monad.Freer (Eff)
 import Tidepool.Agent.Contract
 import qualified Project.Tools as Tools
 
-agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects) => AgentSpec (Tools.SpecTools effects) effects
 agentSpec = defaultSpec
   { specTools = Tools.tools
   , afterTool = Just noted

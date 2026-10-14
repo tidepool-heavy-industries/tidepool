@@ -9660,6 +9660,7 @@ pub(crate) mod tests {
             vec![],
             &artifacts,
             &projection,
+            Default::default(),
         )
         .unwrap()
         .unwrap();

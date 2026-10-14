@@ -8,6 +8,7 @@
     ".exomonad/workspace/checks/progress-route.hs",
     ".exomonad/workspace/checks/route-reply-setup.hs",
     ".exomonad/workspace/checks/route-reply-worker.hs",
+    "bridge/facade/src/actor_host/after_tool_delivery_spec.hs",
     "bridge/facade/src/actor_host/cargo_report_contract.hs",
     "bridge/facade/src/actor_host/checkpoint_deferred_branch.hs",
     "bridge/facade/src/actor_host/checkpoint_issuer_capture.hs",

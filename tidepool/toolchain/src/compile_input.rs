@@ -32,6 +32,7 @@ pub struct SealedOriginalCompileInput {
     package_interfaces: CertifiedTargetPackageInterfaces,
     table: DataConTable,
     sites: Arc<[YieldSite]>,
+    native_sites: crate::checked_cell::SelectedNativeSites,
     replay: SourceReplayEligibility,
 }
 
@@ -57,6 +58,11 @@ impl SourceReplayEligibility {
 }
 
 impl SealedOriginalCompileInput {
+    /// Completion authority follows this original target's issued native closure.
+    pub fn selected_native_sites(&self) -> &crate::checked_cell::SelectedNativeSites {
+        &self.native_sites
+    }
+
     /// Exact generated source bytes consumed by this completed original.
     pub fn original_source(&self) -> &str {
         &self.source
@@ -732,6 +738,7 @@ pub(crate) fn seal(
     sites: Vec<YieldSite>,
     artifacts: &crate::artifact_inventory::ArtifactView,
     compiler_projection: &crate::artifact_inventory::CompilerInputProjection,
+    native_sites: crate::checked_cell::SelectedNativeSites,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
     // Original completed source output can retain compile-time execution.
     // Mutable resident Val/Lib interfaces belong to their exact context owner.
@@ -819,6 +826,7 @@ pub(crate) fn seal(
         package_interfaces: package_interfaces.clone(),
         table,
         sites: sites.into(),
+        native_sites,
         replay: SourceReplayEligibility::from_evidence(evidence),
     }))
 }
@@ -898,6 +906,7 @@ mod tests {
             vec![],
             &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
             &crate::artifact_inventory::CompilerInputProjection::default(),
+            Default::default(),
         )
         .unwrap()
         .expect("ordinary compiler issuer admits complete fixture inputs")

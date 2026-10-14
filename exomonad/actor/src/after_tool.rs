@@ -9,10 +9,9 @@
 //! reason is recorded here, in the actor's own inspectable log, because the
 //! model never asked for a judgement on that result.
 //!
-//! Only a *failure* warns. That distinction is the whole of the difference
-//! between [`Annotation::Abstained`] and [`Disposition::Failed`].
+//! A failed hook leaves presentation unchanged and records its diagnostic.
+//! Tool success and presentation success are separate outcomes.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// The entry index the retained dispatcher serves the after-tool slot at.
@@ -22,37 +21,6 @@ pub(crate) const AFTER_TOOL_ENTRY: i64 = 1;
 
 /// The slot name `installSpec` publishes when the spec fills the field.
 pub(crate) const AFTER_TOOL_SLOT: &str = "afterTool";
-
-/// How long a result waits for its slot. The point of waiting at all is that a
-/// result delivered early, with its evidence following, could send the model
-/// investigating or acting just before the thing it needed appears.
-pub(crate) const AFTER_TOOL_WAIT: Duration = Duration::from_secs(300);
-
-/// The one thing that shortens the wait, and the only reason it exists: the
-/// timeout path has to be exercisable without a five-minute test. Nothing in a
-/// run sets it.
-pub const AFTER_TOOL_WAIT_ENV: &str = "EXOMONAD_AFTER_TOOL_WAIT_MS";
-
-/// How long this result waits.
-pub(crate) fn wait() -> Duration {
-    std::env::var(AFTER_TOOL_WAIT_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .map_or(AFTER_TOOL_WAIT, Duration::from_millis)
-}
-
-/// The wait as the failure line names it.
-pub(crate) fn describe_wait(wait: Duration) -> String {
-    if wait.as_secs() > 0 {
-        format!("{}s", wait.as_secs())
-    } else {
-        format!("{}ms", wait.as_millis())
-    }
-}
-
-/// Past this, elapsed time is reported through the workbench posture — an
-/// observation channel, which never wakes the model and causes no inference.
-pub(crate) const AFTER_TOOL_PROGRESS: Duration = Duration::from_secs(30);
 
 /// How many invocations the actor keeps for `status`.
 const AFTER_TOOL_LOG: usize = 16;
@@ -83,16 +51,16 @@ impl Annotation {
             value
                 .get(name)
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("slot annotation requires a string field {name:?}"))
         };
         match value.get("kind").and_then(serde_json::Value::as_str) {
             Some("none") => Ok(Self::Nothing),
-            Some("abstained") => Ok(Self::Abstained(field("reason"))),
-            Some("annotated") => Ok(Self::Annotated(field("text"))),
+            Some("abstained") => Ok(Self::Abstained(field("reason")?)),
+            Some("annotated") => Ok(Self::Annotated(field("text")?)),
             Some("pruned") => Ok(Self::Pruned {
-                text: field("text"),
-                handle: field("handle"),
+                text: field("text")?,
+                handle: field("handle")?,
             }),
             other => Err(format!(
                 "slot answered an unknown annotation kind {:?}",
@@ -110,7 +78,6 @@ pub(crate) enum Disposition {
     Annotated,
     Pruned(String),
     Failed(String),
-    TimedOut(Duration),
 }
 
 impl Disposition {
@@ -121,14 +88,12 @@ impl Disposition {
             Self::Annotated => "annotated".to_owned(),
             Self::Pruned(handle) => format!("pruned, whole result bound as {handle}"),
             Self::Failed(reason) => format!("failed: {reason}"),
-            Self::TimedOut(wait) => format!("timed out after {}", describe_wait(*wait)),
         }
     }
 }
 
-/// One invocation, kept where a model can ask for it rather than repeated into
-/// every result. This is where an abstention's reason lives, and where the
-/// reference a failure line carries points.
+/// One invocation, retained for explicit inspection rather than repeated into
+/// every result. Abstention and failure diagnostics stay here.
 #[derive(Debug, Clone)]
 pub(crate) struct Invocation {
     pub(crate) ordinal: u64,
@@ -138,27 +103,15 @@ pub(crate) struct Invocation {
     pub(crate) disposition: Disposition,
 }
 
-/// Every after-tool invocation this actor has made, and what it takes to keep
-/// one repeated failure from filling the conversation with copies of itself.
+/// Bounded invocation history, independent of model-facing presentation.
 #[derive(Debug, Default)]
 pub(crate) struct AfterToolLog {
     invocations: Vec<Invocation>,
     next: u64,
-    /// Captured installation and failure reason to the first invocation, and how many
-    /// times it has been seen.
-    seen: HashMap<(u64, String), (u64, u64)>,
-}
-
-/// Whether a failure is the first of its kind, and therefore whether the
-/// diagnostic itself is worth the model's context a second time.
-pub(crate) enum FailureNotice {
-    First { ordinal: u64, reason: String },
-    Again { ordinal: u64, count: u64 },
 }
 
 impl AfterToolLog {
-    /// Claim the ordinal this invocation will be referred to by. Taken before
-    /// the slot runs, so a timeout has a reference too.
+    /// Claim an ordinal before invoking the retained hook.
     pub(crate) fn begin(&mut self) -> u64 {
         self.next += 1;
         self.next
@@ -168,40 +121,6 @@ impl AfterToolLog {
         self.invocations.push(invocation);
         let overflow = self.invocations.len().saturating_sub(AFTER_TOOL_LOG);
         self.invocations.drain(..overflow);
-        let retained = self
-            .invocations
-            .iter()
-            .map(|invocation| invocation.ordinal)
-            .collect::<std::collections::HashSet<_>>();
-        self.seen
-            .retain(|_, (ordinal, _)| retained.contains(ordinal));
-    }
-
-    /// The first sighting of a diagnostic earns the diagnostic. Every later
-    /// sighting earns a reference to the first and nothing more.
-    pub(crate) fn notice(
-        &mut self,
-        installation: u64,
-        ordinal: u64,
-        reason: &str,
-    ) -> FailureNotice {
-        let key = (installation, reason.to_owned());
-        match self.seen.get_mut(&key) {
-            Some((first, count)) => {
-                *count += 1;
-                FailureNotice::Again {
-                    ordinal: *first,
-                    count: *count,
-                }
-            }
-            None => {
-                self.seen.insert(key, (ordinal, 1));
-                FailureNotice::First {
-                    ordinal,
-                    reason: reason.to_owned(),
-                }
-            }
-        }
     }
 
     /// The status view's rows, newest last. Empty when no slot has ever run,
@@ -223,8 +142,7 @@ impl AfterToolLog {
     }
 }
 
-/// One line, bounded. A diagnostic that could change how a result is read
-/// earns a warning; it does not earn the model's whole context.
+/// Bound one line of diagnostic text for the invocation log.
 pub(crate) fn compact_reason(reason: &str) -> String {
     let line = reason
         .lines()
@@ -252,19 +170,6 @@ pub(crate) fn pruned(text: &str, handle: &str, revision: &str) -> String {
     format!(
         "[after-tool] A selection of this result, not the whole of it (spec revision {revision}). The complete result stays addressable as `{handle} :: Text` in a Haskell cell.\n{text}"
     )
-}
-
-/// The one compact line a failure is allowed, and the reference that leads to
-/// the rest of it. The original result is above it, unchanged.
-pub(crate) fn failed(output: &str, notice: &FailureNotice) -> String {
-    match notice {
-        FailureNotice::First { ordinal, reason } => format!(
-            "{output}\n\n[after-tool] This result is unannotated: the slot did not answer ({reason}). Reference after-tool#{ordinal}; `status` view=detailed has the rest."
-        ),
-        FailureNotice::Again { ordinal, count } => format!(
-            "{output}\n\n[after-tool] Unannotated again, same failure as after-tool#{ordinal} ({count} times)."
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -300,61 +205,6 @@ mod tests {
         assert!(Annotation::decode(r#"{"kind":"rewritten","text":"x"}"#).is_err());
     }
 
-    /// A repeated failure earns a reference, not a second copy of the
-    /// diagnostic. The first one earns the diagnostic.
-    #[test]
-    fn one_diagnostic_is_reported_once_however_often_the_slot_fails() {
-        let mut log = AfterToolLog::default();
-        let first = log.begin();
-        let notice = log.notice(1, first, "divide by zero");
-        let once = failed("result", &notice);
-        assert!(once.contains("divide by zero"), "{once}");
-        assert!(once.contains("after-tool#1"), "{once}");
-
-        let second = log.begin();
-        let notice = log.notice(1, second, "divide by zero");
-        let twice = failed("result", &notice);
-        assert!(!twice.contains("divide by zero"), "{twice}");
-        assert!(twice.contains("after-tool#1"), "{twice}");
-        assert!(twice.starts_with("result"), "{twice}");
-
-        // A different diagnostic is a different thing to say.
-        let third = log.begin();
-        let notice = log.notice(1, third, "no such binding");
-        let other = failed("result", &notice);
-        assert!(other.contains("no such binding"), "{other}");
-        assert!(other.contains("after-tool#3"), "{other}");
-    }
-
-    #[test]
-    fn failure_deduplication_is_scoped_to_the_captured_installation() {
-        let mut log = AfterToolLog::default();
-        let first_a = log.begin();
-        assert!(matches!(
-            log.notice(10, first_a, "timeout"),
-            FailureNotice::First { ordinal, .. } if ordinal == first_a
-        ));
-
-        let first_b = log.begin();
-        assert!(matches!(
-            log.notice(11, first_b, "timeout"),
-            FailureNotice::First { ordinal, .. } if ordinal == first_b
-        ));
-
-        // This late A result still reports against A after B has run.
-        let late_a = log.begin();
-        assert!(matches!(
-            log.notice(10, late_a, "timeout"),
-            FailureNotice::Again { ordinal, count: 2 } if ordinal == first_a
-        ));
-
-        let second_b = log.begin();
-        assert!(matches!(
-            log.notice(11, second_b, "timeout"),
-            FailureNotice::Again { ordinal, count: 2 } if ordinal == first_b
-        ));
-    }
-
     /// An abstention's reason reaches the log and nothing else; only the log
     /// grows, and it grows bounded.
     #[test]
@@ -377,48 +227,20 @@ mod tests {
     }
 
     #[test]
-    fn evicted_failure_references_are_reannounced_and_deduplication_stays_bounded() {
-        let mut log = AfterToolLog::default();
-        let first = log.begin();
-        let notice = log.notice(1, first, "repeated failure");
-        assert!(matches!(notice, FailureNotice::First { ordinal: 1, .. }));
-        log.record(failed_invocation(first));
-
-        for index in 0..AFTER_TOOL_LOG + 2 {
-            let ordinal = log.begin();
-            let reason = format!("distinct failure {index}");
-            let notice = log.notice(1, ordinal, &reason);
-            log.record(failed_invocation(ordinal));
-            assert!(matches!(notice, FailureNotice::First { .. }));
+    fn malformed_annotation_fields_are_refused() {
+        for answer in [
+            r#"{"kind":"abstained"}"#,
+            r#"{"kind":"abstained","reason":null}"#,
+            r#"{"kind":"annotated","text":4}"#,
+            r#"{"kind":"pruned","text":"selection"}"#,
+            r#"{"kind":"pruned","text":[],"handle":"toolResult1"}"#,
+            r#"{"kind":"pruned","text":"selection","handle":false}"#,
+        ] {
+            assert!(Annotation::decode(answer).is_err(), "{answer}");
         }
-
-        assert!(log.seen.len() <= AFTER_TOOL_LOG);
-        assert!(!log.seen.contains_key(&(1, "repeated failure".into())));
-
-        let ordinal = log.begin();
-        let notice = log.notice(1, ordinal, "repeated failure");
-        assert!(
-            matches!(notice, FailureNotice::First { ordinal: current, .. } if current == ordinal)
+        assert_eq!(
+            Annotation::decode(r#"{"kind":"annotated","text":""}"#).unwrap(),
+            Annotation::Annotated(String::new())
         );
-        assert!(failed("result", &notice).contains("repeated failure"));
-        log.record(failed_invocation(ordinal));
-
-        let ordinal = log.begin();
-        let notice = log.notice(1, ordinal, "repeated failure");
-        assert!(
-            matches!(notice, FailureNotice::Again { ordinal: first, count: 2 } if first == ordinal - 1)
-        );
-        log.record(failed_invocation(ordinal));
-        assert!(log.seen.len() <= AFTER_TOOL_LOG);
-    }
-
-    fn failed_invocation(ordinal: u64) -> Invocation {
-        Invocation {
-            ordinal,
-            tool: "probe".into(),
-            elapsed: Duration::from_millis(1),
-            provenance: "install=1".into(),
-            disposition: Disposition::Failed("failure".into()),
-        }
     }
 }

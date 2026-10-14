@@ -3726,6 +3726,13 @@ fn seal_turn_outputs_with_validation(
                             .source_selection
                             .compiler_projection(&artifact_view)
                             .map_err(compiler_evidence_failure)?,
+                        artifact_view.native_sites_for_groups(
+                            &target_native_selection.groups_for_target(
+                                &artifact_view,
+                                typed_entry.as_ref(),
+                                &pending_imports,
+                            )?,
+                        )?,
                     )
                 })
                 .transpose()?
