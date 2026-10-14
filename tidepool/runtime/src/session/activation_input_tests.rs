@@ -4802,6 +4802,7 @@ fn compile_activation_preview(
     budget: u64,
     includes: &[std::path::PathBuf],
 ) -> Result<turn::ActivationPreviewCompilation, turn::ActivationRendererFailure> {
+    use crate::CompileError;
     let renderer = match admission
         .acquire_renderer(template, budget)
         .expect("admitted renderer slot")
