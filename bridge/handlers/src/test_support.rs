@@ -102,7 +102,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                         occurrence: parsed.name.clone(),
                         record_parent: None,
                     },
-                    decl.name,
+                    decl.type_name,
                 ),
                 id: DataConId(next_id),
                 name: parsed.name,
