@@ -174,7 +174,7 @@ impl<T> CompilerTransactionSettled<T> {
     }
 
     pub fn belongs_to(&self, origin: &CompilerTransactionOrigin) -> bool {
-        Arc::ptr_eq(&self.origin.0, &origin.0)
+        &self.origin == origin
     }
 
     pub fn into_outcome(self) -> CompilerTransactionOutcome<T> {
@@ -186,6 +186,14 @@ impl<T> CompilerTransactionSettled<T> {
 /// retains no compiler transport and cannot authorize publication on its own.
 #[derive(Clone, Debug)]
 pub struct CompilerTransactionOrigin(Arc<()>);
+
+impl PartialEq for CompilerTransactionOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CompilerTransactionOrigin {}
 
 impl CompilerTransactionOrigin {
     pub fn current() -> Option<Self> {

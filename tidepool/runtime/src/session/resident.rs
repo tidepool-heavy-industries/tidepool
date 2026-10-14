@@ -1560,11 +1560,14 @@ enum RendererNativeState {
 
 impl<T> RendererProduction<T> {
     pub fn begin_native(&mut self) -> Result<(), crate::CompilerTransactionPublicationError> {
-        if matches!(self.native, RendererNativeState::Idle) {
-            self.native = RendererNativeState::Started(
-                crate::CompilerTransactionOrigin::current()
-                    .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?,
-            );
+        let origin = crate::CompilerTransactionOrigin::current()
+            .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?;
+        match &self.native {
+            RendererNativeState::Idle => self.native = RendererNativeState::Started(origin),
+            RendererNativeState::Started(previous) if previous == &origin => {}
+            RendererNativeState::Started(_) | RendererNativeState::CloseUnconfirmed => {
+                return Err(crate::CompilerTransactionPublicationError::DifferentOwner);
+            }
         }
         Ok(())
     }
@@ -11659,6 +11662,11 @@ mod renderer_slot_tests {
                 || {
                     if begin_fresh {
                         producer.begin_native().unwrap();
+                    } else {
+                        assert_eq!(
+                            producer.begin_native(),
+                            Err(crate::CompilerTransactionPublicationError::DifferentOwner,)
+                        );
                     }
                     original.into_outcome().action
                 },
