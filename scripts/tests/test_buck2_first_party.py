@@ -517,9 +517,9 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         cohort = self.rule("tidepool/toolchain", "toolchain_compiler_free_index_view_tests",
                            "tidepool_rust_test_cases")
         self.assertEqual(cohort["binary"], ":tidepool_toolchain_unit_tests_binary")
-        self.assertEqual(cohort["expected_count"], 30)
+        self.assertEqual(cohort["expected_count"], len(TOOLCHAIN_COMPILER_FREE_TESTS))
         self.assertEqual(cohort["exact_tests"], TOOLCHAIN_COMPILER_FREE_TESTS)
-        self.assertEqual(len(set(cohort["exact_tests"])), 30)
+        self.assertEqual(len(set(cohort["exact_tests"])), len(TOOLCHAIN_COMPILER_FREE_TESTS))
         self.assertNotIn("env", cohort)
         self.assertNotIn("resources", cohort)
         self.assertNotIn("resource_env", cohort)
