@@ -982,10 +982,7 @@ impl HostedTestRuntime {
             .join("workspace/entries");
         let directory = entries.join(recipe).join(original.to_string());
         assert_eq!(source["entries"]["kind"], "completed");
-        assert_eq!(
-            source["entries"]["directory"],
-            entries.to_str().unwrap()
-        );
+        assert_eq!(source["entries"]["directory"], entries.to_str().unwrap());
         assert_eq!(
             source["entries"]["selections"],
             serde_json::to_value(&completed).unwrap()
