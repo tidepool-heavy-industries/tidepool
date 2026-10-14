@@ -10752,6 +10752,57 @@ mod tests {
     }
 
     #[test]
+    fn completed_descendant_subsumes_late_ancestor_materialization() {
+        let (ancestor, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let gamma = crate::certified_products::fixture_finalized_product(
+            support_product("Gamma"),
+            ancestor.producer,
+        );
+        let descendant = Arc::new(
+            ancestor
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(ancestor.producer, &[gamma])
+                .unwrap(),
+        );
+        let completed = descendant
+            .prepare_compilation(&scratch.path().join("descendant"), &producer)
+            .unwrap();
+        let owner = completed.materialization.as_ref().unwrap();
+        assert!(owner._parents.is_empty());
+        let late = ancestor
+            .prepare_compilation(&scratch.path().join("late-ancestor"), &producer)
+            .unwrap();
+        let delta = crate::certified_products::fixture_finalized_product(
+            support_product("Delta"),
+            descendant.producer,
+        );
+        let next = Arc::new(
+            descendant
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(descendant.producer, &[delta])
+                .unwrap(),
+        );
+        let request = next
+            .prepare_compilation(&scratch.path().join("next"), &producer)
+            .unwrap();
+        let next_owner = request.materialization.as_ref().unwrap();
+        assert_eq!(next_owner.rows.len(), 1);
+        assert_eq!(next_owner._parents.len(), 1);
+        assert!(Arc::ptr_eq(&next_owner._parents[0], owner));
+        assert!(completed
+            .artifacts
+            .iter()
+            .all(|artifact| request.artifacts.contains(artifact)));
+        assert!(late
+            .artifacts
+            .iter()
+            .all(|artifact| !request.artifacts.contains(artifact)));
+    }
+
+    #[test]
     fn retained_materialization_prefix_a_b_a_borrows_only_unchanged_entries() {
         let (a, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();

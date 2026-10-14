@@ -3808,13 +3808,30 @@ struct ViewLease {
     selection: Arc<ExactSelectionSnapshot>,
     payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     inventory: ArtifactInventory,
-    materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
-    materialization_sources: imbl::OrdMap<usize, Arc<MaterializationCache>>,
-    materialization: Arc<MaterializationCache>,
+    materialization_sources: imbl::OrdMap<MaterializationCacheId, MaterializationSource>,
+    materialization: MaterializationSource,
 }
 
 type MaterializationCache =
     Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MaterializationCacheId(usize);
+
+#[derive(Clone)]
+struct MaterializationSource {
+    cache: Arc<MaterializationCache>,
+    // Every referenced cache stays owned by the view's persistent source map.
+    // IDs describe subsumption without retaining leases or recursive owners.
+    ancestors: imbl::OrdSet<MaterializationCacheId>,
+    fixed: imbl::Vector<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+}
+
+impl MaterializationSource {
+    fn id(&self) -> MaterializationCacheId {
+        MaterializationCacheId(Arc::as_ptr(&self.cache) as usize)
+    }
+}
 
 /// Operation-local inputs are folded into persistent maps at publication.
 /// Neither parent leases nor a duplicate root list survives in the live owner.
@@ -4019,7 +4036,7 @@ impl ViewLease {
             BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         >,
     > {
-        lock_materialization_cache(&self.materialization)
+        lock_materialization_cache(&self.materialization.cache)
     }
 
     fn collect_inherited_materializations(
@@ -4027,14 +4044,25 @@ impl ViewLease {
         materializations: &mut Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
-        visited: &mut BTreeSet<usize>,
+        visited: &mut BTreeSet<MaterializationCacheId>,
     ) -> Result<(), CompileError> {
-        for (id, source) in &self.materialization_sources {
-            if !visited.insert(*id) {
+        let mut sources = self.materialization_sources.iter().collect::<Vec<_>>();
+        sources.sort_by_key(|(id, source)| (std::cmp::Reverse(source.ancestors.len()), **id));
+        let mut covered = imbl::OrdSet::new();
+        // Observe descendants first: a completed source subsumes its ancestor
+        // rows, including ancestors which complete later, without locking them.
+        for (id, source) in sources {
+            if covered.contains(id) || !visited.insert(*id) {
                 continue;
             }
-            let retained = lock_materialization_cache(source)?;
-            for materialization in retained.values() {
+            let retained = lock_materialization_cache(&source.cache)?;
+            let owned = if retained.is_empty() {
+                source.fixed.iter().cloned().collect::<Vec<_>>()
+            } else {
+                covered.extend(source.ancestors.iter().copied());
+                retained.values().cloned().collect()
+            };
+            for materialization in &owned {
                 if !materializations
                     .iter()
                     .any(|existing| Arc::ptr_eq(existing, materialization))
@@ -4043,7 +4071,7 @@ impl ViewLease {
                 }
             }
         }
-        for materialization in &self.materialization_parents {
+        for materialization in &self.materialization.fixed {
             if !materializations
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, materialization))
@@ -4059,9 +4087,9 @@ impl ViewLease {
         materializations: &mut Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
-        visited: &mut BTreeSet<usize>,
+        visited: &mut BTreeSet<MaterializationCacheId>,
     ) -> Result<(), CompileError> {
-        if !visited.insert(Arc::as_ptr(&self.materialization) as usize) {
+        if !visited.insert(self.materialization.id()) {
             return Ok(());
         }
         let retained = self.lock_materialization()?;
@@ -4373,7 +4401,7 @@ impl ArtifactView {
             .collect()
     }
 
-    fn new(mut lease: ViewDraft) -> Self {
+    fn new(lease: ViewDraft) -> Self {
         let introduced = lease
             .selection
             .artifact_ids_introduced(
@@ -4434,36 +4462,35 @@ impl ArtifactView {
             .first()
             .map(|parent| parent.materialization_sources.clone())
             .unwrap_or_default();
-        for parent in &lease.parents {
-            for (id, source) in &parent.materialization_sources {
-                if !materialization_sources.contains_key(id) {
-                    materialization_sources.insert(*id, Arc::clone(source));
+        let mut materialization_ancestors = lease
+            .parents
+            .first()
+            .map(|parent| parent.materialization.ancestors.clone())
+            .unwrap_or_default();
+        for (index, parent) in lease.parents.iter().enumerate() {
+            if index != 0 {
+                for (id, source) in &parent.materialization_sources {
+                    if !materialization_sources.contains_key(id) {
+                        materialization_sources.insert(*id, source.clone());
+                    }
                 }
+                materialization_ancestors.extend(parent.materialization.ancestors.iter().copied());
             }
-            materialization_sources.insert(
-                Arc::as_ptr(&parent.materialization) as usize,
-                Arc::clone(&parent.materialization),
-            );
-            for materialization in &parent.materialization_parents {
-                if !lease
-                    .materialization_parents
-                    .iter()
-                    .any(|owned| Arc::ptr_eq(owned, materialization))
-                {
-                    lease
-                        .materialization_parents
-                        .push(Arc::clone(materialization));
-                }
-            }
+            materialization_sources
+                .insert(parent.materialization.id(), parent.materialization.clone());
+            materialization_ancestors.insert(parent.materialization.id());
         }
         let lease = Arc::new(ViewLease {
             admission_roots: lease.roots.into_iter().collect(),
             selection: lease.selection,
             payloads,
             inventory: lease.inventory.clone(),
-            materialization_parents: lease.materialization_parents,
             materialization_sources,
-            materialization: Arc::new(lease.materialization),
+            materialization: MaterializationSource {
+                cache: Arc::new(lease.materialization),
+                ancestors: materialization_ancestors,
+                fixed: lease.materialization_parents.into(),
+            },
         });
         for (id, entry) in &lease.payloads {
             state.intern(*id, entry);
@@ -4618,7 +4645,7 @@ impl ArtifactView {
         materializations: &mut Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
-        visited: &mut BTreeSet<usize>,
+        visited: &mut BTreeSet<MaterializationCacheId>,
     ) -> Result<(), CompileError> {
         self.lease
             .collect_materializations(materializations, visited)
@@ -5717,10 +5744,11 @@ impl ArtifactView {
                 lease.payloads.remove(&id);
             }
         }
-        Arc::get_mut(&mut retained.lease)
-            .expect("new selection lease")
-            .materialization_sources
-            .clear();
+        {
+            let lease = Arc::get_mut(&mut retained.lease).expect("new selection lease");
+            lease.materialization_sources.clear();
+            lease.materialization.ancestors.clear();
+        }
         let mut materializations = Vec::new();
         if !retained.is_empty() {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -5732,7 +5760,8 @@ impl ArtifactView {
                     );
                 Arc::get_mut(&mut retained.lease)
                     .expect("new selection lease")
-                    .materialization_parents = custody.into_iter().collect();
+                    .materialization
+                    .fixed = custody.into_iter().collect();
             }
         }
         Ok(retained)
@@ -7351,7 +7380,7 @@ mod tests {
         };
         let view = ArtifactInventory::default().empty_view();
         let metadata = view.metadata_snapshot();
-        let held = view.lease.materialization.lock().unwrap();
+        let held = view.lease.materialization.cache.lock().unwrap();
         let cancellation = CompilerTransactionCancellation::new();
         let (entered, observed) = std::sync::mpsc::channel();
         let (finished, received) = std::sync::mpsc::channel();
