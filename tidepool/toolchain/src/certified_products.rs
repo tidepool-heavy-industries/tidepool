@@ -9978,7 +9978,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn private_availability_validates_exact_dependencies_without_selecting_them() {
+    fn private_availability_requires_an_advertised_exact_dependency_closure() {
         use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
 
         let leaf = full_native_fixture("AvailableLeaf", vec![(5, vec![])], 7);
@@ -10005,12 +10005,15 @@ pub(crate) mod tests {
             original_ordinal: 11,
         }]);
         let unchanged = advertised.clone();
-        validate_available_originals_with_validation(
-            &available,
-            &advertised,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .expect("exact available dependency closure does not require executable selection");
+        assert!(
+            validate_available_originals_with_validation(
+                &available,
+                &advertised,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .is_err(),
+            "artifact-only custody does not advertise dependency bodies"
+        );
         assert_eq!(advertised, unchanged);
         assert!(matches!(
             certify_selected_owned_products_in_context_with_validation(
@@ -10035,6 +10038,12 @@ pub(crate) mod tests {
                 },
             ])
             .collect();
+        validate_available_originals_with_validation(
+            &available,
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .expect("an exact advertised dependency closure remains private availability");
         assert_eq!(
             certify_selected_owned_products_in_context_with_validation(
                 &available,
@@ -10050,7 +10059,7 @@ pub(crate) mod tests {
         assert!(
             validate_available_originals_with_validation(
                 &missing_leaf,
-                &advertised,
+                &selected,
                 &mut PackageInterfaceValidation::default(),
             )
             .is_err(),
@@ -10065,7 +10074,7 @@ pub(crate) mod tests {
         assert!(
             validate_available_originals_with_validation(
                 &replaced_leaf,
-                &advertised,
+                &selected,
                 &mut PackageInterfaceValidation::default(),
             )
             .is_err(),
@@ -10081,10 +10090,20 @@ pub(crate) mod tests {
         ] {
             let wrong = full_native_fixture("AvailableConsumer", vec![(11, vec![wrong_import])], 7);
             let available = BTreeMap::from([(consumer_id, &wrong), (leaf_id, &leaf)]);
+            let selected = BTreeSet::from([
+                NativeGroupKey {
+                    artifact: consumer_id,
+                    original_ordinal: 11,
+                },
+                NativeGroupKey {
+                    artifact: leaf_id,
+                    original_ordinal: 5,
+                },
+            ]);
             assert!(
                 validate_available_originals_with_validation(
                     &available,
-                    &advertised,
+                    &selected,
                     &mut PackageInterfaceValidation::default(),
                 )
                 .is_err(),
