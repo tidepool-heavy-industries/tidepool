@@ -6764,11 +6764,11 @@ where
                             // Empty is published, even if the async waiter vanished.
                             let settled = producer.settle_native(result).map_err(|failure| match failure {
                                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => error,
-                                tidepool_runtime::session::RendererProductionFailure::Publication(error) => {
-                                    CompileError::from(error).into()
+                                tidepool_runtime::session::RendererProductionFailure::Publication { error, action_error, .. } => {
+                                    action_error.unwrap_or_else(|| CompileError::from(error).into())
                                 }
-                                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed(close) => {
-                                    CompileError::ExtractFailed(format!("activation renderer compiler close is unconfirmed: {close:?}")).into()
+                                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { close, action_error } => {
+                                    action_error.unwrap_or_else(|| CompileError::ExtractFailed(format!("activation renderer compiler close is unconfirmed: {close:?}")).into())
                                 }
                             });
                             #[cfg(test)]

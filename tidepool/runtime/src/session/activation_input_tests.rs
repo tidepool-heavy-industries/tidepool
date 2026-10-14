@@ -4823,15 +4823,20 @@ fn compile_activation_preview(
                 .settle_native(outcome)
                 .map_err(|failure| match failure {
                     RendererProductionFailure::Compile(error) => error,
-                    RendererProductionFailure::Publication(error) => {
-                        CompileError::from(error).into()
-                    }
-                    RendererProductionFailure::CloseUnconfirmed(close) => {
+                    RendererProductionFailure::Publication {
+                        error,
+                        action_error,
+                        ..
+                    } => action_error.unwrap_or_else(|| CompileError::from(error).into()),
+                    RendererProductionFailure::CloseUnconfirmed {
+                        close,
+                        action_error,
+                    } => action_error.unwrap_or_else(|| {
                         CompileError::ExtractFailed(format!(
                             "renderer close is unconfirmed: {close:?}"
                         ))
                         .into()
-                    }
+                    }),
                 })?
         }
         RendererAccess::Wait(_) => {

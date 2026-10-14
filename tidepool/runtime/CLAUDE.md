@@ -40,7 +40,10 @@ hold no machine checkout. Reacquisition validates the mounted input and fresh
 affine admission before invocation. Only `Clean` or `NotStarted` compiler
 settlement permits publication or retry; successful code survives its first
 consumer's exit. Unconfirmed closure and producer panic wake waiters with terminal
-refusal without admitting another producer. Renderable slots publish only after
+refusal without admitting another producer. Runtime compilation stamps the complete
+renderer action, including errors, before returning; only a matching issued clean
+failure may retry. An unissued error cannot authorize retry, and terminal refusals
+retain the primary action error alongside their close observation. Renderable slots publish only after
 native target, reachable original-group images and literal storage are prepared.
 They retain immutable native custody, never rendered values or scoped installation
 plans. Each consumer resolves imports and source domains against its fresh scope

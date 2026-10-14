@@ -1524,7 +1524,7 @@ pub enum RendererAccess<T> {
     CloseUnconfirmed,
 }
 
-/// Native renderer output still bound to its preparing compiler owner.
+/// Native renderer action, including a failed action, bound to its compiler owner.
 /// Only runtime compilation constructs this value; it has no public constructor.
 pub struct PreparedRenderer<T> {
     value: T,
@@ -1532,17 +1532,27 @@ pub struct PreparedRenderer<T> {
 }
 
 impl<T> PreparedRenderer<T> {
-    pub(super) fn new(value: T) -> Result<Self, crate::CompilerTransactionPublicationError> {
+    pub(super) fn prepare(
+        action: impl FnOnce() -> T,
+    ) -> Result<Self, crate::CompilerTransactionPublicationError> {
         let origin = crate::CompilerTransactionOrigin::current()
             .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?;
+        let value = action();
         Ok(Self { value, origin })
     }
 }
 
 pub enum RendererProductionFailure<E> {
     Compile(E),
-    CloseUnconfirmed(crate::CompilerTransactionClose),
-    Publication(crate::CompilerTransactionPublicationError),
+    CloseUnconfirmed {
+        close: crate::CompilerTransactionClose,
+        action_error: Option<E>,
+    },
+    Publication {
+        error: crate::CompilerTransactionPublicationError,
+        close: crate::CompilerTransactionClose,
+        action_error: Option<E>,
+    },
 }
 
 /// Move this affine lease into the compiler's blocking owner. Publish or drop
@@ -1574,46 +1584,56 @@ impl<T> RendererProduction<T> {
 
     pub fn settle_native<E>(
         mut self,
-        outcome: crate::CompilerTransactionSettled<Result<PreparedRenderer<T>, E>>,
+        outcome: crate::CompilerTransactionSettled<Result<PreparedRenderer<Result<T, E>>, E>>,
     ) -> Result<Arc<T>, RendererProductionFailure<E>> {
-        let RendererNativeState::Started(origin) = &self.native else {
-            self.native = RendererNativeState::CloseUnconfirmed;
-            return Err(RendererProductionFailure::Publication(
-                crate::CompilerTransactionPublicationError::MissingOwner,
-            ));
+        let owner_error = match &self.native {
+            RendererNativeState::Started(origin) if outcome.belongs_to(origin) => None,
+            RendererNativeState::Started(_) => {
+                Some(crate::CompilerTransactionPublicationError::DifferentOwner)
+            }
+            RendererNativeState::Idle | RendererNativeState::CloseUnconfirmed => {
+                Some(crate::CompilerTransactionPublicationError::MissingOwner)
+            }
         };
-        if !outcome.belongs_to(origin) {
-            self.native = RendererNativeState::CloseUnconfirmed;
-            return Err(RendererProductionFailure::Publication(
-                crate::CompilerTransactionPublicationError::DifferentOwner,
-            ));
-        }
+        let issued = outcome.action().is_ok();
         let belongs_to_owner = outcome
             .action()
             .as_ref()
             .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
+        let owner_error = owner_error.or_else(|| {
+            if !issued {
+                Some(crate::CompilerTransactionPublicationError::MissingOwner)
+            } else if !belongs_to_owner {
+                Some(crate::CompilerTransactionPublicationError::DifferentOwner)
+            } else {
+                None
+            }
+        });
         let outcome = outcome.into_outcome();
+        let action = outcome.action.and_then(|prepared| prepared.value);
+        if let Some(error) = owner_error {
+            self.native = RendererNativeState::CloseUnconfirmed;
+            return Err(RendererProductionFailure::Publication {
+                error,
+                close: outcome.close,
+                action_error: action.err(),
+            });
+        }
         match outcome.close {
             crate::CompilerTransactionClose::Clean
-            | crate::CompilerTransactionClose::NotStarted => match outcome.action {
-                Ok(prepared) if belongs_to_owner => {
-                    self.native = RendererNativeState::Idle;
-                    Ok(self.publish(prepared.value))
+            | crate::CompilerTransactionClose::NotStarted => {
+                self.native = RendererNativeState::Idle;
+                match action {
+                    Ok(value) => Ok(self.publish(value)),
+                    Err(error) => Err(RendererProductionFailure::Compile(error)),
                 }
-                Ok(_) => {
-                    self.native = RendererNativeState::CloseUnconfirmed;
-                    Err(RendererProductionFailure::Publication(
-                        crate::CompilerTransactionPublicationError::DifferentOwner,
-                    ))
-                }
-                Err(error) => {
-                    self.native = RendererNativeState::Idle;
-                    Err(RendererProductionFailure::Compile(error))
-                }
-            },
+            }
             close @ crate::CompilerTransactionClose::Unconfirmed(_) => {
                 self.native = RendererNativeState::CloseUnconfirmed;
-                Err(RendererProductionFailure::CloseUnconfirmed(close))
+                Err(RendererProductionFailure::CloseUnconfirmed {
+                    close,
+                    action_error: action.err(),
+                })
             }
         }
     }
@@ -8877,7 +8897,9 @@ mod custody_release_tests {
 
     #[test]
     fn exclusive_binding_custody_survives_source_scope_retirement() {
-        for (retain_binding, retain_lexical) in [(false, false), (true, false), (false, true)] {
+        for (retain_binding, retain_lexical) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
             let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
             let other_id = bind_fixture(&mut session, other_scope, 43);
@@ -11545,7 +11567,9 @@ mod renderer_slot_tests {
             |_| {},
             || {
                 first.begin_native().unwrap();
-                Err::<PreparedRenderer<usize>, _>("failed specialization")
+                Ok::<_, &'static str>(
+                    PreparedRenderer::prepare(|| Err::<usize, _>("failed specialization")).unwrap(),
+                )
             },
         );
         assert!(matches!(
@@ -11563,7 +11587,9 @@ mod renderer_slot_tests {
             |_| {},
             || {
                 second.begin_native().unwrap();
-                Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
+                Ok::<_, &'static str>(
+                    PreparedRenderer::prepare(|| Ok::<_, &'static str>(42)).unwrap(),
+                )
             },
         );
         let published = second
@@ -11585,35 +11611,87 @@ mod renderer_slot_tests {
 
     #[tokio::test]
     async fn renderer_unconfirmed_native_settlement_never_retries() {
+        for primary_failure in [false, true] {
+            let slot = RendererSlot::<usize>::new();
+            let RendererAccess::Produce(mut producer) = slot.acquire() else {
+                panic!("first producer")
+            };
+            let RendererAccess::Wait(waiter) = slot.acquire() else {
+                panic!("waiter")
+            };
+            let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                |_| {},
+                |report| {
+                    producer.begin_native().unwrap();
+                    PreparedRenderer::prepare(|| {
+                        report(crate::CompilerTransactionClose::Unconfirmed(
+                            tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                                tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                                    disconnect: None,
+                                },
+                            ),
+                        ));
+                        if primary_failure { Err("primary native failure") } else { Ok(42) }
+                    }).map_err(|_| "missing compiler owner")
+                },
+            );
+            let Err(RendererProductionFailure::CloseUnconfirmed {
+                close,
+                action_error,
+            }) = producer.settle_native(outcome)
+            else {
+                panic!("uncertain native close must refuse publication and retry");
+            };
+            assert!(matches!(
+                close,
+                crate::CompilerTransactionClose::Unconfirmed(_)
+            ));
+            assert_eq!(
+                action_error,
+                primary_failure.then_some("primary native failure")
+            );
+            assert!(matches!(
+                waiter.wait().await,
+                RendererAccess::CloseUnconfirmed
+            ));
+            assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_unissued_action_error_refuses_retry_and_wakes_waiters() {
         let slot = RendererSlot::<usize>::new();
         let RendererAccess::Produce(mut producer) = slot.acquire() else {
-            panic!("first producer")
+            panic!("producer")
         };
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("waiter")
         };
-        let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+        let outcome = crate::settle_compiler_transaction_cancellable(
             crate::CompilerTransactionCancellation::new(),
             |_| {},
-            |report| {
+            || {
                 producer.begin_native().unwrap();
-                report(crate::CompilerTransactionClose::Unconfirmed(
-                    tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
-                        tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
-                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
-                            disconnect: None,
-                        },
-                    ),
-                ));
-                Ok::<_, &'static str>(PreparedRenderer::new(42).unwrap())
+                Err::<PreparedRenderer<Result<usize, &'static str>>, _>("unissued native error")
             },
         );
-        assert_eq!(outcome.action().as_ref().unwrap().value, 42);
-        assert!(matches!(
-            producer.settle_native(outcome),
-            Err(RendererProductionFailure::CloseUnconfirmed(_))
-        ));
+        let Err(RendererProductionFailure::Publication {
+            error,
+            close,
+            action_error,
+        }) = producer.settle_native(outcome)
+        else {
+            panic!("an unissued error cannot authorize a renderer retry");
+        };
+        assert_eq!(
+            error,
+            crate::CompilerTransactionPublicationError::MissingOwner
+        );
+        assert_eq!(close, crate::CompilerTransactionClose::NotStarted);
+        assert_eq!(action_error, Some("unissued native error"));
         assert!(matches!(
             waiter.wait().await,
             RendererAccess::CloseUnconfirmed
@@ -11623,7 +11701,9 @@ mod renderer_slot_tests {
 
     #[tokio::test]
     async fn renderer_reassociated_preparation_refuses_and_wakes_waiters() {
-        for (primary_failure, begin_fresh) in [(false, false), (true, false), (false, true)] {
+        for (primary_failure, begin_fresh) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let slot = RendererSlot::<usize>::new();
             let RendererAccess::Produce(mut producer) = slot.acquire() else {
                 panic!("producer")
@@ -11647,11 +11727,16 @@ mod renderer_slot_tests {
                             },
                         ),
                     ));
-                    if primary_failure {
-                        Err("original native failure")
-                    } else {
-                        Ok(PreparedRenderer::new(42).unwrap())
-                    }
+                    Ok::<_, &'static str>(
+                        PreparedRenderer::prepare(|| {
+                            if primary_failure {
+                                Err("original native failure")
+                            } else {
+                                Ok(42)
+                            }
+                        })
+                        .unwrap(),
+                    )
                 },
             );
             assert!(matches!(
@@ -11677,12 +11762,23 @@ mod renderer_slot_tests {
                 *reassociated.close(),
                 crate::CompilerTransactionClose::NotStarted
             );
-            assert!(matches!(
-                producer.settle_native(reassociated),
-                Err(RendererProductionFailure::Publication(
-                    crate::CompilerTransactionPublicationError::DifferentOwner
-                ))
-            ));
+            let Err(RendererProductionFailure::Publication {
+                error,
+                close,
+                action_error,
+            }) = producer.settle_native(reassociated)
+            else {
+                panic!("another owner must refuse publication");
+            };
+            assert_eq!(
+                error,
+                crate::CompilerTransactionPublicationError::DifferentOwner
+            );
+            assert_eq!(close, crate::CompilerTransactionClose::NotStarted);
+            assert_eq!(
+                action_error,
+                primary_failure.then_some("original native failure")
+            );
             assert!(matches!(
                 waiter.wait().await,
                 RendererAccess::CloseUnconfirmed

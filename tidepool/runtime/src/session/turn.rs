@@ -2651,18 +2651,27 @@ pub fn compile_activation_renderer(
     includes: &[PathBuf],
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<
-    super::resident::PreparedRenderer<super::SharedActivationRenderer>,
+    super::resident::PreparedRenderer<
+        Result<super::SharedActivationRenderer, ActivationRendererFailure>,
+    >,
     ActivationRendererFailure,
 > {
+    super::resident::PreparedRenderer::prepare(|| {
+        compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
+    })
+    .map_err(|error| CompileError::from(error).into())
+}
+
+fn compile_activation_renderer_inner(
+    admission: &super::RuntimeActivationPreviewAdmission,
+    template_source: &str,
+    budget: u64,
+    includes: &[PathBuf],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
     use tidepool_toolchain::activation_preview::ActivationPreviewSpecification;
-    crate::CompilerTransactionOrigin::current().ok_or(CompileError::CompilerPublication(
-        crate::CompilerTransactionPublicationError::MissingOwner,
-    ))?;
     let Some(context) = admission.original_display_context().cloned() else {
-        return super::resident::PreparedRenderer::new(
-            super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable,
-        )
-        .map_err(|error| CompileError::from(error).into());
+        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     };
     let temp = Arc::new(compiler_scratch_directory()?);
     if !tidepool_extract_cmd::retain_compiler_input_directory(temp.clone()) {
@@ -2718,10 +2727,7 @@ pub fn compile_activation_renderer(
         .activation_preview_unavailable(temp.path())
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?
     {
-        return super::resident::PreparedRenderer::new(
-            super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable,
-        )
-        .map_err(|error| CompileError::from(error).into());
+        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     }
     let result = decode_turn_output_dir(temp.path(), &offer, None)
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
@@ -2770,7 +2776,7 @@ pub fn compile_activation_renderer(
         proof,
         native,
     });
-    super::resident::PreparedRenderer::new(match disposition {
+    Ok(match disposition {
         tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
             super::SharedActivationRenderer::Renderable(renderer)
         }
@@ -2778,7 +2784,6 @@ pub fn compile_activation_renderer(
             super::SharedActivationRenderer::Opaque(renderer)
         }
     })
-    .map_err(|error| CompileError::from(error).into())
 }
 
 /// Prepare every authored item before the caller can execute the

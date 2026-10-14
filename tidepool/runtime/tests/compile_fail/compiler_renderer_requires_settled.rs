@@ -3,7 +3,7 @@ use tidepool_runtime::CompilerTransactionOutcome;
 
 fn publish(
     producer: RendererProduction<usize>,
-    outcome: CompilerTransactionOutcome<Result<PreparedRenderer<usize>, ()>>,
+    outcome: CompilerTransactionOutcome<Result<PreparedRenderer<Result<usize, ()>>, ()>>,
 ) {
     let _ = producer.settle_native(outcome);
 }
