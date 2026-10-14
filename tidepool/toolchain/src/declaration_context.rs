@@ -528,6 +528,59 @@ impl OriginalCompilerInputs {
                     }),
             );
         }
+        if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+        {
+            let missing = advertised.iter().find_map(|key| {
+                originals
+                    .get(&key.artifact)?
+                    .original_native()?
+                    .group(key.original_ordinal)?
+                    .imports()
+                    .iter()
+                    .find_map(|import| {
+                        let crate::certified_products::PendingImportOwner::Source {
+                            owner,
+                            original_ordinal,
+                            ..
+                        } = import
+                        else {
+                            return None;
+                        };
+                        let artifact = originals
+                            .iter()
+                            .find(|(_, product)| product.owner() == owner)?
+                            .0;
+                        let required = crate::artifact_inventory::NativeGroupKey {
+                            artifact: *artifact,
+                            original_ordinal: *original_ordinal,
+                        };
+                        (!advertised.contains(&required)).then_some((*key, required))
+                    })
+            });
+            if let Some((consumer, required)) = missing {
+                let recorded = native_original_requirements
+                    .iter()
+                    .map(|proof| {
+                        let graph = proof.selection.graph_selection();
+                        (
+                            proof.original,
+                            graph.native_groups.len(),
+                            graph
+                                .native_groups
+                                .iter()
+                                .filter(|group| {
+                                    group.binding.artifact == required.artifact
+                                        && group.original_ordinal == required.original_ordinal
+                                })
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?consumer, ?required, ?recorded,
+                    "private availability dependency proof observation");
+            }
+        }
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
             &advertised,
