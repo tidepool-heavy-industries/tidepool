@@ -10769,10 +10769,7 @@ mod tests {
         let completed = descendant
             .prepare_compilation(&scratch.path().join("descendant"), &producer)
             .unwrap();
-        let delta = crate::certified_products::fixture_finalized_product(
-            support_product("LatePrivate"),
-            ancestor.producer,
-        );
+        let delta = scaffold_native_fixture(ancestor.producer, "fixture", "LatePrivate", 1);
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(&producer);
         let private = OriginalCompilerInputs::from_native_availability(
             &ancestor,
