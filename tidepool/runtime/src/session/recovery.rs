@@ -19,11 +19,20 @@ pub use newrecovery_v2::{
 pub struct DeclarationDomainObservation {
     pub domain: super::RecoveryDomainId,
     pub source_session: u64,
-    pub high_water: tidepool_repr::Generation,
+    /// Durable reservation ceiling, including identities not yet published.
+    pub allocation_ceiling: tidepool_repr::Generation,
     reader: RecoveryDomainReader,
 }
 
 impl DeclarationDomainObservation {
+    /// Enumerate the declarations present in this exact immutable snapshot.
+    /// Reads the declaration index, not declaration bodies or artifact graphs.
+    pub fn declaration_generations(&self) -> Result<Vec<tidepool_repr::Generation>, SessionError> {
+        self.reader
+            .node_ids()
+            .map_err(|error| graph_error(self.reader.store.path(), error))
+    }
+
     pub fn declaration(
         &self,
         generation: tidepool_repr::Generation,
@@ -120,7 +129,7 @@ pub fn observe_declaration_domain(
     Ok(Some(DeclarationDomainObservation {
         domain,
         source_session: reader.source_session(),
-        high_water: state.allocation_ceiling,
+        allocation_ceiling: state.allocation_ceiling,
         reader,
     }))
 }

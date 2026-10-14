@@ -510,7 +510,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
     let recovery_path = campaign.session_root.path().join("recovery.sqlite");
     let parent_domain = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
         .unwrap().expect("the root declaration domain is retained");
-    let parent_high_water = parent_domain.high_water;
+    let parent_allocation_ceiling = parent_domain.allocation_ceiling;
     let root_for_setup = root.clone();
     let setup = tokio::spawn(async move {
         dispatch_haskell_script(
@@ -567,7 +567,8 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         )
         .await;
     let child_before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Session(child_session))
-        .unwrap().expect("the typed child has retained its declaration domain").high_water;
+        .unwrap().expect("the typed child has retained its declaration domain")
+        .declaration_generations().unwrap().into_iter().collect::<std::collections::BTreeSet<_>>();
     let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let reply = campaign.drive_actor_output(&store, dispatch_haskell_script(
         installation.policy.as_ref(),
@@ -583,13 +584,14 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         .unwrap().expect("the dedicated child declaration domain is retained");
     assert_eq!(child_domain.domain, RecoveryDomainId::Session(child_session));
     assert_eq!(child_domain.source_session, child_session.0);
-    let authored = ((child_before.0 + 1)..=child_domain.high_water.0)
-        .filter_map(|id| child_domain.declaration(tidepool_repr::Generation(id)).unwrap())
+    let authored = child_domain.declaration_generations().unwrap().into_iter()
+        .filter(|id| !child_before.contains(id))
+        .filter_map(|id| child_domain.declaration(id).unwrap())
         .find(|node| node.kind == RecoveryNodeKind::Authored && node.exports.iter()
             .any(|export| export.identity.occurrence == "FreshChildNominal"))
         .expect("the child's cell retains its own authored nominal declaration");
     let generation = authored.generation;
-    assert!(generation > parent_high_water, "{child_domain:?}");
+    assert!(generation > parent_allocation_ceiling, "{child_domain:?}");
     let identity = &authored.exports.iter()
         .find(|export| export.identity.occurrence == "FreshChildNominal").unwrap().identity;
     assert_eq!(identity.module, tidepool_repr::SessionModule::lib(generation).module_name());
@@ -674,7 +676,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
     assert_eq!(
         child_teardown.wait(Duration::from_secs(120)).await,
         SessionRemovalWait::Removed,
-        "selected child's session is physically removed after retirement"
+        "selected child's session is removed from the registry after retirement"
     );
     assert_eq!(
         campaign.forest.session_state_of(child_session),

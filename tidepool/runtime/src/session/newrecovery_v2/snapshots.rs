@@ -51,6 +51,10 @@ impl RecoveryDomainReader {
     pub(crate) fn source_session(&self) -> u64 {
         self.snapshot.source_session
     }
+    pub(crate) fn node_ids(&self) -> Result<Vec<Generation>, RecoveryError> {
+        let nodes = hydrate_map::<u64, Cid, _>(self.store.as_ref(), &self.snapshot.nodes)?;
+        Ok(nodes.facts().keys().copied().map(Generation).collect())
+    }
     pub(crate) fn node(&self, id: Generation) -> Result<Option<RecoveryNode>, RecoveryError> {
         let Some(cid) =
             lookup_map::<u64, Cid, _>(self.store.as_ref(), &self.snapshot.nodes, &id.0)?
@@ -908,6 +912,11 @@ mod tests {
         };
         let retained = observe();
         assert_eq!(retained.source_session, 7);
+        assert_eq!(retained.allocation_ceiling, Generation(u64::MAX));
+        assert_eq!(
+            retained.declaration_generations().unwrap(),
+            vec![Generation(1)]
+        );
         assert!(retained.declaration(Generation(1)).unwrap().is_some());
         assert!(retained.declaration(Generation(2)).unwrap().is_none());
         assert!(retained
@@ -926,6 +935,14 @@ mod tests {
         );
         let selected = observe();
         assert_eq!(
+            retained.declaration_generations().unwrap(),
+            vec![Generation(1)]
+        );
+        assert_eq!(
+            selected.declaration_generations().unwrap(),
+            vec![Generation(1), Generation(2)]
+        );
+        assert_eq!(
             selected.declaration(Generation(2)).unwrap().unwrap().parent,
             Some(Generation(1))
         );
@@ -941,6 +958,11 @@ mod tests {
         )
         .unwrap();
         let header = observe();
+        assert_eq!(
+            header.declaration_generations().unwrap(),
+            vec![Generation(1), Generation(2)],
+            "index observation does not hydrate unrelated damaged bodies"
+        );
         assert!(
             header.declaration(Generation(1)).unwrap().is_some(),
             "unselected damaged leaves cannot broaden a narrow observation"
@@ -1285,6 +1307,41 @@ mod tests {
     }
     proptest! {
         #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+        #[test]
+        fn observed_declarations_follow_publication_not_reservation_ceiling(
+            generated in prop::collection::vec((any::<bool>(), 0u64..32), 0..12)
+        ) {
+            let (_directory, mut graph) = fixture();
+            let mut expected = Vec::new();
+            let mut next_id = 0;
+            let operations = [(true, 0), (false, 30), (true, 1)]
+                .into_iter().chain(generated);
+            for (commit, gap) in operations {
+                let before = crate::session::observe_declaration_domain(
+                    graph.store().path(), RecoveryDomainId::Root,
+                ).unwrap().unwrap();
+                let previous = expected.clone();
+                next_id += gap + 1;
+                let mut candidate = graph.candidate();
+                let root = context(&mut candidate);
+                candidate.insert_node(node(
+                    next_id, expected.last().map(|id: &Generation| id.0), root, "authored",
+                )).unwrap();
+                if commit {
+                    graph = publish(candidate, &graph);
+                    expected.push(Generation(next_id));
+                } else {
+                    drop(candidate);
+                }
+                let after = crate::session::observe_declaration_domain(
+                    graph.store().path(), RecoveryDomainId::Root,
+                ).unwrap().unwrap();
+                prop_assert_eq!(after.allocation_ceiling, Generation(u64::MAX));
+                prop_assert_eq!(before.declaration_generations().unwrap(), previous);
+                prop_assert_eq!(after.declaration_generations().unwrap(), expected.clone());
+            }
+        }
+
         #[test]
         fn transferred_surface_histories_match_independent_facts(
             generated in prop::collection::vec(surface_operation(), 1..32)

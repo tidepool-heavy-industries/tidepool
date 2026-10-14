@@ -1754,7 +1754,10 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
         .unwrap()
         .unwrap()
-        .high_water;
+        .declaration_generations()
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     input(
         initial["address"].as_str().unwrap(),
         &initial_identity,
@@ -1769,12 +1772,12 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let published = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
         .unwrap()
         .unwrap();
-    let authored = ((before.0 + 1)..=published.high_water.0)
-        .filter_map(|id| {
-            published
-                .declaration(tidepool_repr::Generation(id))
-                .unwrap()
-        })
+    let authored = published
+        .declaration_generations()
+        .unwrap()
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .filter_map(|id| published.declaration(id).unwrap())
         .find(|node| {
             node.kind == RecoveryNodeKind::Authored
                 && node.exports.iter().any(|export| {
