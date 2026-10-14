@@ -14301,7 +14301,7 @@ where
                     let mut descriptor =
                         ActorDescriptor::new_optional(durable.label.clone(), placement)
                             .with_capabilities(role)
-                            .with_model(durable.model.clone().map(crate::Model::Literal))
+                            .with_model(durable.model.clone().map(crate::Model::ProviderModel))
                             .with_instructions(durable.instructions.clone())
                             .with_fork_effort(durable.effort)
                             .with_source_layer(durable.source_layer.clone());

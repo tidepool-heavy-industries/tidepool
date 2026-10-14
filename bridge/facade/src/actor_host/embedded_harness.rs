@@ -124,9 +124,9 @@ impl EmbeddedHarnessRuntime {
                     .as_ref()
                     .is_some_and(|workspace| workspace.models.contains_key(selection));
                 let model = if configured {
-                    exomonad_actor::Model::Alias(selection.to_owned())
+                    exomonad_actor::Model::CustomAlias(selection.to_owned())
                 } else {
-                    exomonad_actor::Model::Literal(selection.to_owned())
+                    exomonad_actor::Model::ProviderModel(selection.to_owned())
                 };
                 super::resolve_model(&config, &model)
             }))

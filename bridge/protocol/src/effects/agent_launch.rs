@@ -3,7 +3,7 @@
 use crate::hs::HsType;
 use crate::schema::{
     Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
-    TypeShape, VariantFields, Verb, WireDerives,
+    TypeShape, VariantFields, Verb, WireDerive, WireDerives,
 };
 
 /// Admit an idle persistent actor with explicit context, directory and tools.
@@ -302,26 +302,50 @@ fn context_types() -> Vec<TypeDef> {
     vec![
         TypeDef {
             name: "Model",
-            wire_rust: None,
-            haskell_module: None,
+            wire_rust: Some("Model"),
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
-                        ctor: "Alias",
+                        ctor: "Luna",
+                        fields: VariantFields::Positional(vec![]),
+                        doc: &["The configured Luna tier."],
+                    },
+                    SumVariant {
+                        ctor: "Sol",
+                        fields: VariantFields::Positional(vec![]),
+                        doc: &["The configured Sol tier."],
+                    },
+                    SumVariant {
+                        ctor: "Astra",
+                        fields: VariantFields::Positional(vec![]),
+                        doc: &["The configured Astra tier."],
+                    },
+                    SumVariant {
+                        ctor: "CustomAlias",
                         fields: VariantFields::Positional(vec![HsType::Text]),
                         doc: &[],
                     },
                     SumVariant {
-                        ctor: "Literal",
+                        ctor: "ProviderModel",
                         fields: VariantFields::Positional(vec![HsType::Text]),
                         doc: &[],
                     },
                 ],
             },
             json: JsonInstance::None,
-            derives: WireDerives(&[]),
+            derives: WireDerives(&[
+                WireDerive::FromHaskell,
+                WireDerive::ToHaskell,
+                WireDerive::Clone,
+                WireDerive::Debug,
+                WireDerive::PartialEq,
+                WireDerive::Eq,
+            ]),
             domain: None,
-            doc: &["A frozen workspace alias or an explicit provider model name."],
+            doc: &[
+                "A configured built-in tier, custom workspace alias, or explicit provider model name.",
+            ],
         },
         TypeDef {
             name: "WorkerLifetime",

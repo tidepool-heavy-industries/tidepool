@@ -83,3 +83,6 @@ reflectResponseIdentity turn = case Authored.turnState turn of
 
 reflectRuntimeIdentity :: Authored.ConversationTurn -> Text
 reflectRuntimeIdentity = Authored.turnIdentity
+
+configuredModels :: [Core.Model]
+configuredModels = [Core.Luna, Core.Sol, Core.Astra, Core.CustomAlias "local", Core.ProviderModel "provider-id"]

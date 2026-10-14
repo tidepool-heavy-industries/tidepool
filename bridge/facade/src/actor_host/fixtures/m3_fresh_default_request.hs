@@ -8,7 +8,7 @@ import Tidepool.Actors.Exomonad
 
 let freshDefaultOptions :: SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
     freshDefaultOptions = (defaultSpawnOptions Installed.agentSpec)
-      { spawnModel = Just (Alias "luna"), spawnLifetime = ActorOwned
+      { spawnModel = Just Luna, spawnLifetime = ActorOwned
       , spawnInstructions = Just "Execute the shell, then settle the Text request with respond."
       }
 Right freshDefaultChild <- spawnSubagent (FreshCtx "Return a pure typed Text response after the real command.")

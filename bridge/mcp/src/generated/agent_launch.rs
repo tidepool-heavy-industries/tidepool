@@ -15,7 +15,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
             "AgentLaunchReleaseCheckpointWith :: Text -> AgentLaunch (Either CheckpointRefusal ())",
         ],
         type_defs: &[
-            "data Model = Alias Text | Literal Text deriving (Show, Eq)",
+            "data Model = Luna | Sol | Astra | CustomAlias Text | ProviderModel Text deriving (Show, Eq)",
             "data WorkerLifetime = InvocationOwned | ActorOwned | RunOwned | InScope Scope deriving (Show, Eq)",
             "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | ReleasedCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",

@@ -1836,7 +1836,10 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                     }
                 }
                 for child in &children {
-                    assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
+                    assert_eq!(
+                        child.model,
+                        Some(exomonad_actor::Model::ProviderModel("gpt-6-sol".into()))
+                    );
                     assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
                     if child.label == "exact" {
                         assert_eq!(child.context_parent, Some(campaign.actor.identity()));
@@ -1955,7 +1958,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             match arrival {
                 ReviewArrival::Child(child) => {
                     assert_eq!(child.context_parent, None);
-                    assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
+                    assert_eq!(child.model, Some(exomonad_actor::Model::ProviderModel("gpt-6-sol".into())));
                     bindings.push(open_test_workspace(campaign, &child));
                     reviewer = Some(child);
                 }

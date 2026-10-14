@@ -55,9 +55,9 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
         let model = match descriptor.model() {
             Some(model) => match self.launch_config.as_ref() {
                 Some(config) => super::resolve_model(config, model),
-                None => match model {
-                    exomonad_actor::Model::Literal(model) => Ok(model.clone()),
-                    exomonad_actor::Model::Alias(alias) => Err(format!(
+                None => match model.workspace_key() {
+                    None => Ok(model.value().to_owned()),
+                    Some(alias) => Err(format!(
                         "model alias {alias} has no admitted workspace policy"
                     )),
                 },

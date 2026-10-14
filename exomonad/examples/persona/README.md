@@ -5,7 +5,7 @@ conversation and browser. Its character and ways of working emerge through
 shared history, curiosity and human steering. The seed supplies no name, voice,
 interests or activity program. The operator has selected `gpt-6-astra` with
 `medium` effort; changing the root model/effort remains outside the companion's autonomy.
-Helpers preferentially use the configured Luna/Sol aliases; Astra context forks
+Helpers preferentially use the configured `Luna`/`Sol` selectors; `Astra` context forks
 remain available. The prompt states the root-model boundary; the existing context effect also contains
 model-selection operations, so this is an instruction, not a new per-operation
 runtime restriction. Haskell is an expressive medium it can use to develop

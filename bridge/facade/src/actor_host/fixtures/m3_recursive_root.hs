@@ -8,7 +8,7 @@ import Tidepool.Actors.Exomonad
 Right rootSeed <- checkpoint "recursive root native helper"
 let recursiveSpec = workspaceAgentSpec
 let recursiveOptions = (defaultSpawnOptions recursiveSpec)
-      { spawnModel = Just (Alias "luna"), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
+      { spawnModel = Just Luna, spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
 Right recursiveChild <- spawnSubagent (ForkCtx rootSeed) (ForkWorktree projectHead) recursiveOptions
 Right childRequest <- request @Int recursiveChild (RecursiveRootInput 20) defaultRequestOptions
 childWatch <- watch (Just "recursive-child-reply") (settlement childRequest)

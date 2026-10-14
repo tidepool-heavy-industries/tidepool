@@ -10,7 +10,7 @@ inheritedAnswer <- recursiveHelper
 Right childSeed <- checkpoint "recursive child native helper"
 let leafSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, Lookup, BoundWorktree]
 let leafOptions = (defaultSpawnOptions leafSpec)
-      { spawnModel = Just (Alias "luna"), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-grandchild" }
+      { spawnModel = Just Luna, spawnLifetime = ActorOwned, spawnLabel = Just "recursive-grandchild" }
 Right recursiveGrandchild <- spawnSubagent (ForkCtx childSeed) (ForkWorktree currentCheckout) leafOptions
 Right grandchildRequest <- request @Int recursiveGrandchild ((sessionInput :: RecursiveRootInput), RecursiveChildInput 22) defaultRequestOptions
 grandchildWatch <- watch (Just "recursive-grandchild-reply") (settlement grandchildRequest)

@@ -180,6 +180,7 @@ protocol_generated(
         "tidepool/bridge-effects/src/generated/jev.rs",
         "bridge/mcp/src/generated/agent_inspection.rs",
         "bridge/mcp/src/generated/agent_launch.rs",
+        "tidepool/bridge-effects/src/generated/agent_launch.rs",
         "bridge/mcp/src/generated/agent_tools.rs",
         "bridge/mcp/src/generated/agent_session.rs",
         "bridge/mcp/src/generated/reflect.rs",

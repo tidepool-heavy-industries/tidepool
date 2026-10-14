@@ -522,8 +522,11 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         "AgentLaunch",
         &[
             "Model",
-            "Alias",
-            "Literal",
+            "Luna",
+            "Sol",
+            "Astra",
+            "CustomAlias",
+            "ProviderModel",
             "WorkerLifetime",
             "InvocationOwned",
             "ActorOwned",

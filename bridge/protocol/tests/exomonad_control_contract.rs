@@ -328,3 +328,24 @@ fn command_observation_preserves_independent_output_failure_in_both_wire_languag
     assert!(haskell.contains("observedCommandResult :: CommandResult"));
     assert!(haskell.contains("observedCommandOutput :: Either CommandError CommandOutput"));
 }
+
+#[test]
+fn agent_launch_generates_shared_model_without_actor_owned_live_types() {
+    let files = tidepool_protocol::generated_files();
+    let wire = files
+        .iter()
+        .find(|file| file.path == "tidepool/bridge-effects/src/generated/agent_launch.rs")
+        .unwrap();
+    assert!(wire.contents.contains("pub enum Model"));
+    assert!(!wire.contents.contains("pub enum crate::"));
+    assert!(!wire.contents.contains("SpawnContextWire"));
+    assert!(!wire.contents.contains("SpawnWorkspaceWire"));
+    let declaration = files
+        .iter()
+        .find(|file| file.path == "bridge/mcp/src/generated/agent_launch.rs")
+        .unwrap();
+    for name in ["Luna", "Sol", "Astra", "CustomAlias", "ProviderModel"] {
+        assert!(wire.contents.contains(name));
+        assert!(declaration.contents.contains(name));
+    }
+}

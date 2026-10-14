@@ -24,6 +24,8 @@ model = "gpt-6.1-sol"
 effort = "medium"
 
 [models]
+astra = "gpt-6-astra"
+sol = "gpt-6.1-sol"
 planner = "gpt-6-astra"
 executor = "gpt-6.1-sol"
 luna = "gpt-6-luna"

@@ -439,7 +439,10 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     use exomonad_actor::{ActorPlacement, Model};
     let storage = tempfile::tempdir().unwrap();
     let workspace = serde_json::from_value(json!({
-        "include": [], "modules": [], "prompts": {}, "models": {"fast":"admitted-model"},
+        "include": [], "modules": [], "prompts": {}, "models": {
+            "fast":"admitted-model", "luna":"configured-luna",
+            "sol":"configured-sol", "astra":"configured-astra"
+        },
         "files": {}, "config": "", "library_identity": "", "runtime_orchestration": ""
     }))
     .unwrap();
@@ -480,7 +483,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
         },
     )
-    .with_model(Some(Model::Alias("fast".into())));
+    .with_model(Some(Model::CustomAlias("fast".into())));
     let policy = factory.policy(&descriptor).unwrap();
     assert_eq!(
         policy.models,
@@ -494,6 +497,24 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         (exomonad_actor::ForkEffort::Medium, Effort::Medium)
     ));
     assert_eq!(policy.efforts, [Effort::Medium]);
+    for (selection, expected) in [
+        (Model::Luna, "configured-luna"),
+        (Model::Sol, "configured-sol"),
+        (Model::Astra, "configured-astra"),
+        (Model::ProviderModel("luna".into()), "luna"),
+    ] {
+        let selected = descriptor.clone().with_model(Some(selection));
+        let policy = factory.policy(&selected).unwrap();
+        assert_eq!(policy.default_model, expected);
+        assert_eq!(policy.models, [expected]);
+    }
+    let mut missing = config.clone();
+    missing.workspace_inputs = None;
+    assert!(super::super::resolve_model(&missing, &Model::Luna).is_err());
+    assert_eq!(
+        super::super::resolve_model(&missing, &Model::ProviderModel("luna".into())).unwrap(),
+        "luna"
+    );
     let binding = factory.bind(
         &WorkbenchExecutionId::from_digest([1; 16]),
         PrincipalId::new(1, 1),
@@ -515,6 +536,6 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         (16, 64, 128_000, 300)
     );
     assert!(factory
-        .policy(&descriptor.with_model(Some(Model::Alias("not-admitted".into()))))
+        .policy(&descriptor.with_model(Some(Model::CustomAlias("not-admitted".into()))))
         .is_err());
 }

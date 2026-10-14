@@ -36,28 +36,7 @@ pub enum ForkEffort {
     High,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
-pub enum Model {
-    Alias(String),
-    Literal(String),
-}
-
-impl Model {
-    #[must_use]
-    pub fn value(&self) -> &str {
-        match self {
-            Self::Alias(value) | Self::Literal(value) => value,
-        }
-    }
-}
-
-impl std::ops::Deref for Model {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.value()
-    }
-}
+pub use tidepool_bridge_effects::Model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum WorkerLifetime {

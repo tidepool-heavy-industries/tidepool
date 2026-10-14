@@ -1053,21 +1053,20 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
     }
 }
 
-/// Resolve a requested `Model` (an alias into the frozen workspace's model
-/// table, or an already-literal provider model name) against the host
-/// config. Actual launches and recipe checks use the same frozen model table.
+/// Resolve configured tiers and custom aliases against the frozen workspace.
+/// Actual launches and recipe checks use the same model table.
 pub(crate) fn resolve_model(
     config: &ActorHostConfig,
     model: &exomonad_actor::Model,
 ) -> std::result::Result<String, String> {
-    match model {
-        exomonad_actor::Model::Alias(alias) => config
+    match model.workspace_key() {
+        Some(alias) => config
             .workspace_inputs
             .as_ref()
             .and_then(|workspace| workspace.models.get(alias))
             .cloned()
             .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}")),
-        exomonad_actor::Model::Literal(model) => Ok(model.clone()),
+        None => Ok(model.value().to_owned()),
     }
 }
 

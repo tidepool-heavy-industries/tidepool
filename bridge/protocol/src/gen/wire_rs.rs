@@ -37,7 +37,13 @@ pub fn path(e: &Effect) -> String {
 /// Does this effect have any wire types to emit?
 #[must_use]
 pub fn has_wire_types(e: &Effect) -> bool {
-    !e.type_defs.is_empty()
+    e.type_defs.iter().any(|t| emits_wire_type(e, t))
+}
+
+fn emits_wire_type(e: &Effect, t: &TypeDef) -> bool {
+    e.generated_handler
+        || (t.wire_rust.is_some()
+            && (t.derives.has(WireDerive::FromHaskell) || t.derives.has(WireDerive::ToHaskell)))
 }
 
 /// The `mod`-index for the generated wire modules.
@@ -113,12 +119,12 @@ fn body(e: &Effect) -> String {
         out.push('\n');
     }
 
-    for t in &e.type_defs {
+    for t in e.type_defs.iter().filter(|t| emits_wire_type(e, t)) {
         emit_type_decl(e, t, &mut out);
         out.push('\n');
     }
 
-    for t in &e.type_defs {
+    for t in e.type_defs.iter().filter(|t| emits_wire_type(e, t)) {
         if matches!(t.shape, TypeShape::Identity { .. }) {
             emit_identity_impl(t, &mut out);
             out.push('\n');

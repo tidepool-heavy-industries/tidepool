@@ -9,6 +9,7 @@ rust_filegroup(
     name = "tidepool_bridge_effects_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-effects/Cargo.toml",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_agent_launch_rs]": "tidepool/bridge-effects/src/generated/agent_launch.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_ask_user_rs]": "tidepool/bridge-effects/src/generated/ask_user.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_commands_rs]": "tidepool/bridge-effects/src/generated/commands.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_context_read_write_rs]": "tidepool/bridge-effects/src/generated/context_read_write.rs",
@@ -51,6 +52,7 @@ rust_filegroup(
     name = "tidepool_bridge_effects_unit_tests_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-effects/Cargo.toml",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_agent_launch_rs]": "tidepool/bridge-effects/src/generated/agent_launch.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_ask_user_rs]": "tidepool/bridge-effects/src/generated/ask_user.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_commands_rs]": "tidepool/bridge-effects/src/generated/commands.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_context_read_write_rs]": "tidepool/bridge-effects/src/generated/context_read_write.rs",

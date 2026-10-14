@@ -20,6 +20,29 @@ use tidepool_bridge_derive::{HaskellRecord, ToHaskell};
 pub mod generated;
 pub use generated::*;
 
+impl Model {
+    /// Frozen workspace key for configured tiers and custom aliases.
+    #[must_use]
+    pub fn workspace_key(&self) -> Option<&str> {
+        match self {
+            Self::Luna => Some("luna"),
+            Self::Sol => Some("sol"),
+            Self::Astra => Some("astra"),
+            Self::CustomAlias(alias) => Some(alias),
+            Self::ProviderModel(_) => None,
+        }
+    }
+
+    /// Requested selector text for presentation; configuration owns resolution.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        match self {
+            Self::ProviderModel(model) => model,
+            _ => self.workspace_key().expect("configured selector"),
+        }
+    }
+}
+
 /// Hand-written extension methods on the GENERATED `EvRepositoryEvent` — logic,
 /// not contract, so it stays outside the schema (same split as an
 /// `AdapterKind::HandWritten` conversion — see `tidepool-protocol`'s `DomainMap`
@@ -202,7 +225,7 @@ mod model_control_tests;
 
 #[cfg(test)]
 mod context_constructor_tests {
-    use super::{ContextBlock, ContextNativeKind, ContextRole};
+    use super::{ContextBlock, ContextNativeKind, ContextRole, Model};
     use tidepool_bridge::{FromHaskell, HaskellValue, ToHaskell};
     use tidepool_repr::{DataCon, DataConId, DataConTable};
 
@@ -226,6 +249,39 @@ mod context_constructor_tests {
             qualified_name: Some(format!("{module}.{name}")),
             type_name: "FixtureType".into(),
         }
+    }
+
+    #[test]
+    fn model_selectors_roundtrip_preserves_tiers_custom_alias_and_provider_identity() {
+        let mut table = DataConTable::new();
+        table
+            .extend_checked([
+                row(1, "Tidepool.Effects.Core", "Luna", 0),
+                row(2, "Tidepool.Effects.Core", "Sol", 0),
+                row(3, "Tidepool.Effects.Core", "Astra", 0),
+                row(4, "Tidepool.Effects.Core", "CustomAlias", 1),
+                row(5, "Tidepool.Effects.Core", "ProviderModel", 1),
+                row(6, "Data.Text", "Text", 3),
+                row(7, "User", "Luna", 0),
+            ])
+            .unwrap();
+        for model in [
+            Model::Luna,
+            Model::Sol,
+            Model::Astra,
+            Model::CustomAlias("luna".into()),
+            Model::CustomAlias("unknown-custom".into()),
+            Model::ProviderModel("luna".into()),
+        ] {
+            let encoded = model.to_value(&table).unwrap();
+            assert_eq!(Model::from_value(&encoded, &table).unwrap(), model);
+        }
+        assert!(Model::from_value(&HaskellValue::Con(DataConId(7), vec![]), &table).is_err());
+        assert!(Model::from_value(
+            &HaskellValue::Con(DataConId(1), vec![HaskellValue::Con(DataConId(2), vec![]),]),
+            &table
+        )
+        .is_err());
     }
 
     #[test]
