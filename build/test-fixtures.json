@@ -298,6 +298,7 @@
     "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs",
     "exomonad/actor/src/fixtures/LookupPlanParent.hs",
     "exomonad/actor/src/fixtures/ProgressRuntime.hs",
+    "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
     "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
     "exomonad/actor/src/fixtures/captured-spec-installer.hs",
     "exomonad/actor/src/fixtures/host-job-first.hs",

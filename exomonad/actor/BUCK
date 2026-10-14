@@ -35,6 +35,7 @@ rust_filegroup(
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
         "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
+        "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
@@ -254,6 +255,7 @@ rust_filegroup(
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
         "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
+        "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
@@ -852,6 +854,7 @@ filegroup(
         "exomonad/actor/src/descriptor.rs": "src/descriptor.rs",
         "exomonad/actor/src/external_application.rs": "src/external_application.rs",
         "exomonad/actor/src/fixtures/AwaitRuntime.hs": "src/fixtures/AwaitRuntime.hs",
+        "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs": "src/fixtures/captured-replacement-installers-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
         "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
@@ -1073,6 +1076,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f50726f677265737352756e74696d652e6873",
     src = "src/fixtures/ProgressRuntime.hs",
     out = "ProgressRuntime.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f63617074757265642d7265706c6163656d656e742d696e7374616c6c6572732d62696e642e6873",
+    src = "src/fixtures/captured-replacement-installers-bind.hs",
+    out = "captured-replacement-installers-bind.hs",
     visibility = ["PUBLIC"],
 )
 

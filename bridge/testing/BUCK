@@ -426,6 +426,7 @@ filegroup(
         "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e4d6f64756c654f6e6c792e6873",
         "exomonad/actor/src/fixtures/LookupPlanParent.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e506172656e742e6873",
         "exomonad/actor/src/fixtures/ProgressRuntime.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f50726f677265737352756e74696d652e6873",
+        "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f63617074757265642d7265706c6163656d656e742d696e7374616c6c6572732d62696e642e6873",
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f63617074757265642d737065632d696e7374616c6c65722d62696e642e6873",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f63617074757265642d737065632d696e7374616c6c65722e6873",
         "exomonad/actor/src/fixtures/host-job-first.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a6f622d66697273742e6873",
