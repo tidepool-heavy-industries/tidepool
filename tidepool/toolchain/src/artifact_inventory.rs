@@ -2363,19 +2363,30 @@ impl ArtifactInventory {
             BTreeMap::<NativeGroupKey, BTreeSet<(LogicalNodeKey, ArtifactDependency)>>::new();
         let mut pending = demanded.iter().copied().collect::<Vec<_>>();
         let mut reused = BTreeSet::new();
+        let mut resolved_groups = BTreeMap::new();
         while let Some(group) = pending.pop() {
-            if let Some(issued) = fixed.groups.get(&group) {
-                if issued.len() != 1 {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: group.artifact,
-                        },
-                    ));
-                }
-                reused.insert(group);
+            if resolved_groups.contains_key(&group) || planned.contains_key(&group) {
                 continue;
             }
-            if planned.contains_key(&group) {
+            let carrier = fixed.resolve_binding(group.artifact, &state)?;
+            // The payload key narrows candidates; its recorded carrier edges
+            // decide reuse. Independently issued carriers cannot substitute.
+            let issued_nodes = fixed
+                .groups
+                .get(&group)
+                .into_iter()
+                .flatten()
+                .copied()
+                .map(InventoryNodeKey::Group)
+                .collect::<imbl::OrdSet<_>>();
+            let issued = NativeSelectionIndex::build(&state, &issued_nodes);
+            if issued
+                .groups
+                .contains_key(&(carrier, group.original_ordinal))
+            {
+                let binding = issued.resolve(carrier, group.original_ordinal)?;
+                resolved_groups.insert(group, binding);
+                reused.insert(group);
                 continue;
             }
             let entry = fixed.entries.get(&group.artifact).ok_or_else(|| {
@@ -2447,17 +2458,8 @@ impl ArtifactInventory {
                 LogicalNodeKey::Artifact(id) => {
                     InventoryNodeKey::Artifact(fixed.resolve_binding(id, &state)?)
                 }
-                LogicalNodeKey::Group(group) => match fixed.groups.get(&group) {
-                    Some(issued) if issued.len() == 1 => {
-                        InventoryNodeKey::Group(*issued.first().unwrap())
-                    }
-                    Some(_) => {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity {
-                                artifact: group.artifact,
-                            },
-                        ));
-                    }
+                LogicalNodeKey::Group(group) => match resolved_groups.get(&group) {
+                    Some(issued) => InventoryNodeKey::Group(*issued),
                     None => LogicalNodeKey::Group(group).bind(scope),
                 },
             })
@@ -5804,6 +5806,169 @@ mod tests {
             proptest::prop_assert!(combined.selected_native_groups().is_empty());
             proptest::prop_assert!(NativeOriginalRequirement::from_issued_group_custody(id, canonical, &combined)
                 .unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn bound_segment_demand_selects_one_complete_original_carrier() {
+        assert_bound_segment_exact_carrier(true);
+    }
+
+    #[test]
+    fn bound_segment_demand_does_not_borrow_another_carriers_group() {
+        assert_bound_segment_exact_carrier(false);
+    }
+
+    #[test]
+    fn bound_segment_preserves_explicit_groups_and_same_carrier_ambiguity() {
+        for explicit in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let native = Arc::new(issued_native_groups(
+                "BoundInheritedCarrier",
+                vec![(7, Vec::new())],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let id = native.descriptor.id;
+            let base = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![native.clone()],
+                    &BTreeSet::new(),
+                )
+                .unwrap();
+            let capture = |name: &str| {
+                inventory
+                    .admit_recovery_selection(
+                        &base,
+                        vec![native.clone(), Arc::new(entry(name, &[]))],
+                        &BTreeSet::from([NativeGroupKey {
+                            artifact: id,
+                            original_ordinal: 7,
+                        }]),
+                    )
+                    .unwrap()
+            };
+            let left = capture("InheritedLeft");
+            let right = capture("InheritedRight");
+            assert_eq!(left.namespace()[&id], right.namespace()[&id]);
+            assert_ne!(
+                left.capture_graph_selection().native_groups,
+                right.capture_graph_selection().native_groups
+            );
+            let chosen = left.merge(&right).unwrap();
+            let mut selection = bound_selection_for_entries(&chosen, &[native.clone()]);
+            if explicit {
+                let requirement = NativeOriginalRequirement::from_selected_view(id, &left)
+                    .unwrap()
+                    .unwrap();
+                selection
+                    .with_native_original_requirements(&chosen.metadata_snapshot(), &[requirement])
+                    .unwrap();
+            }
+            let mut fixed = inventory
+                .bind_segment(&chosen, vec![native.clone()], &selection)
+                .unwrap();
+            let imports = [issued_source(&native, 7)];
+            let result = inventory.admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            );
+            if explicit {
+                let demanded = result.expect("issued exact Group requirement remains selected");
+                let expected = left.capture_graph_selection().native_groups[0];
+                assert!(demanded
+                    .roots()
+                    .contains(&InventoryNodeKey::Group(expected)));
+            } else {
+                assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
+            }
+        }
+    }
+
+    fn assert_bound_segment_exact_carrier(complete: bool) {
+        {
+            let inventory = ArtifactInventory::default();
+            let native = Arc::new(issued_native_groups(
+                "BoundExactCarrier",
+                vec![(3, Vec::new()), (7, Vec::new())],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let id = native.descriptor.id;
+            let ArtifactPayload::Original(product) = &native.payload else {
+                unreachable!()
+            };
+            let canonical = Arc::new(ArtifactEntry::canonical(
+                product.module_interface().unwrap().clone(),
+            ));
+            let canonical_id = canonical.descriptor.id;
+            let base = inventory
+                .admit_shared(&inventory.empty_view(), vec![canonical])
+                .unwrap();
+            let capture = |name: &str, ordinals: &[u32]| {
+                inventory
+                    .admit_recovery_selection(
+                        &base,
+                        vec![native.clone(), Arc::new(entry(name, &[]))],
+                        &ordinals
+                            .iter()
+                            .map(|ordinal| NativeGroupKey {
+                                artifact: id,
+                                original_ordinal: *ordinal,
+                            })
+                            .collect(),
+                    )
+                    .unwrap()
+            };
+            let left = capture("SelectedCarrier", if complete { &[3, 7] } else { &[3] });
+            let right = capture("OtherCarrier", &[3, 7]);
+            let selected_carrier = left.namespace()[&id];
+            let roles = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+            let chosen = left
+                .merge_compiler_inputs(&roles, &right, &roles.interface_only())
+                .unwrap()
+                .0;
+            let requirement = if complete {
+                NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &chosen)
+                    .unwrap()
+                    .unwrap()
+            } else {
+                NativeOriginalRequirement::from_selected_view(id, &left)
+                    .unwrap()
+                    .unwrap()
+            };
+            let mut selection = bound_selection_for_entries(&chosen, &[native.clone()]);
+            selection
+                .with_native_original_requirements(&chosen.metadata_snapshot(), &[requirement])
+                .unwrap();
+            let mut fixed = inventory
+                .bind_segment(&chosen, vec![native.clone()], &selection)
+                .unwrap();
+            assert_eq!(fixed.view.namespace()[&id], selected_carrier);
+            let imports = [issued_source(&native, 7)];
+            let demanded = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selection,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("complete={complete}: exact carrier demand refused: {error:?}")
+                });
+            let state = inventory.0.lock().unwrap();
+            let index =
+                NativeSelectionIndex::build(&state, &demanded.read_projection(&state).nodes);
+            let resolved = index.resolve(selected_carrier, 7);
+            drop(state);
+            let group = resolved.expect("demand must use selected original carrier");
+            assert!(demanded.roots().contains(&InventoryNodeKey::Group(group)));
         }
     }
 
