@@ -595,12 +595,17 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     assert_eq!(resident.value_handle_count(), handles);
     assert_eq!(resident.outstanding_custody(), custody);
     assert_eq!(resident.parked_realm(&observation_hole), Some(realm));
-    resident
-        .abort(
+    assert!(matches!(
+        resident.abort(
             observation_hole.cont_id(),
-            "observation-only refusal".into(),
-        )
-        .unwrap();
+            "observation-only refusal".into()
+        ),
+        Err(ResidentError::Run(crate::RuntimeError::Jit(
+            tidepool_effect::error::EffectError::Handler(_)
+        )))
+    ));
+    assert_eq!(resident.parked_realm(&observation_hole), None);
+    assert_eq!(resident.parked_count(), 0);
     drop(observed);
     resident.settle_dropped_custody();
 
@@ -686,9 +691,12 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
         resident.capture_request_receiver_entry(&registration, site_wire, realm),
         Err(ResidentError::WrongContinuation { .. })
     ));
-    resident
-        .abort(receiver.cont_id(), "receiver capture test completed".into())
-        .unwrap();
+    assert!(matches!(
+        resident.abort(receiver.cont_id(), "receiver capture test completed".into()),
+        Err(ResidentError::Run(crate::RuntimeError::Jit(
+            tidepool_effect::error::EffectError::Handler(_)
+        )))
+    ));
     drop(installer);
     assert_eq!(resident.outstanding_custody(), 0);
     assert_eq!(resident.parked_count(), 0);
