@@ -11676,7 +11676,9 @@ where
                     .await
                     .map_err(|error| Self::failure(error.to_string()))?;
             }
-            kernel.install_session_context(context.clone()).await?;
+            // Configure the lifecycle before exposing either directory fact.
+            // Startup refusal retires through this behavior's retained descriptor;
+            // it does not require a registered directory session or authority.
             let lifecycle = kernel.lifecycle().clone();
             lifecycle
                 .configure_resident(
@@ -11691,7 +11693,11 @@ where
                 .map_err(Self::failure)?;
             self.lifecycle = Some(lifecycle.clone());
             kernel
-                .register_authority(self.descriptor.clone(), self.forest_control)
+                .register_resident(
+                    context.clone(),
+                    self.descriptor.clone(),
+                    self.forest_control,
+                )
                 .await
                 .map_err(|error| Self::failure(error.to_string()))?;
             self.environment.actors.lock().insert(

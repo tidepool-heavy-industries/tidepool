@@ -106,6 +106,8 @@ pub enum DirectoryError {
     Unauthorized { actor: ActorRef },
     #[error("actor {actor:?} is already registered by another executor")]
     AlreadyRegistered { actor: ActorRef },
+    #[error("resident context differs from actor {actor:?}'s descriptor")]
+    ResidentContextMismatch { actor: ActorRef },
     #[error("actor {actor:?} refused confirmed retirement: {cause}")]
     RetirementRefused {
         actor: ActorRef,
@@ -553,8 +555,9 @@ pub(super) enum RunControlMessage {
         target: ActorRef,
         reply: oneshot::Sender<bool>,
     },
-    RegisterAuthority {
+    RegisterResident {
         actor: ActorRef,
+        context: crate::ActorSessionContext,
         descriptor: crate::ActorDescriptor,
         forest_control: bool,
         reply: oneshot::Sender<Result<(), DirectoryError>>,
@@ -753,10 +756,6 @@ pub(super) enum RunControlMessage {
     Session {
         actor: ActorRef,
         reply: oneshot::Sender<Option<crate::ActorSessionContext>>,
-    },
-    InstallSession {
-        context: crate::ActorSessionContext,
-        reply: oneshot::Sender<Result<(), DirectoryError>>,
     },
     Forget {
         actor: ActorRef,
@@ -998,16 +997,24 @@ impl Actor for RunControl {
             } => {
                 let _ = reply.send(in_authority_tree(&state.entries, owner, target, true));
             }
-            RunControlMessage::RegisterAuthority {
+            RunControlMessage::RegisterResident {
                 actor,
+                context,
                 descriptor,
                 forest_control,
                 reply,
             } => {
+                // Issued source roots may select a newer immutable revision than
+                // the deployment roots. Retain that exact selection while checking
+                // every actor/placement/effect fact against its descriptor.
+                let mut expected = descriptor.session_context(actor);
+                expected.source_layer = context.source_layer.clone();
                 let result = if state.phase != RunPhase::Running {
                     Err(DirectoryError::Closed)
+                } else if context != expected {
+                    Err(DirectoryError::ResidentContextMismatch { actor })
                 } else if let Some(entry) = state.entries.get_mut(&actor) {
-                    if entry.authority.is_some() {
+                    if entry.authority.is_some() || state.sessions.contains_key(&actor) {
                         Err(DirectoryError::AlreadyRegistered { actor })
                     } else {
                         entry.authority = Some(ActorAuthority {
@@ -1016,6 +1023,7 @@ impl Actor for RunControl {
                             forest_control,
                             observation_roots: HashSet::new(),
                         });
+                        state.sessions.insert(actor, context);
                         Ok(())
                     }
                 } else {
@@ -1918,19 +1926,6 @@ impl Actor for RunControl {
             RunControlMessage::Session { actor, reply } => {
                 let _ = reply.send(state.sessions.get(&actor).cloned());
             }
-            RunControlMessage::InstallSession { context, reply } => {
-                let result = if state.phase != RunPhase::Running {
-                    Err(DirectoryError::Closed)
-                } else if state.entries.contains_key(&context.actor) {
-                    state.sessions.insert(context.actor, context);
-                    Ok(())
-                } else {
-                    Err(DirectoryError::Unauthorized {
-                        actor: context.actor,
-                    })
-                };
-                let _ = reply.send(result);
-            }
             RunControlMessage::Forget { actor, reply } => {
                 let terminal = state
                     .entries
@@ -2166,14 +2161,18 @@ impl RunControlClient {
         })
         .await
     }
-    pub(crate) async fn register_authority(
+    /// Install both resident directory facts in one serialized owner turn.
+    /// Losing the reply observer does not withdraw accepted registration.
+    pub(crate) async fn register_resident(
         &self,
         actor: ActorRef,
+        context: crate::ActorSessionContext,
         descriptor: crate::ActorDescriptor,
         forest_control: bool,
     ) -> Result<(), DirectoryError> {
-        self.ask(|reply| RunControlMessage::RegisterAuthority {
+        self.ask(|reply| RunControlMessage::RegisterResident {
             actor,
+            context,
             descriptor,
             forest_control,
             reply,
@@ -2572,13 +2571,6 @@ impl RunControlClient {
     ) -> Result<Option<Arc<KernelContext>>, DirectoryError> {
         self.ask(|reply| RunControlMessage::Context { actor, reply })
             .await
-    }
-    pub(super) async fn install_session_context(
-        &self,
-        context: crate::ActorSessionContext,
-    ) -> Result<(), DirectoryError> {
-        self.ask(|reply| RunControlMessage::InstallSession { context, reply })
-            .await?
     }
     pub(crate) async fn register_executor(
         &self,

@@ -315,13 +315,14 @@ impl KernelContext {
     ) -> Result<bool, run_control::DirectoryError> {
         self.directory.authorize_observe(owner, target).await
     }
-    pub(crate) async fn register_authority(
+    pub(crate) async fn register_resident(
         &self,
+        context: crate::ActorSessionContext,
         descriptor: crate::ActorDescriptor,
         forest_control: bool,
     ) -> Result<(), run_control::DirectoryError> {
         self.directory
-            .register_authority(self.identity, descriptor, forest_control)
+            .register_resident(self.identity, context, descriptor, forest_control)
             .await
     }
     pub(crate) async fn share_observation(
@@ -623,22 +624,6 @@ impl KernelContext {
         actor: ActorRef,
     ) -> Result<Option<LocalActorRef>, run_control::DirectoryError> {
         self.directory.resolve(actor).await
-    }
-
-    pub async fn install_session_context(
-        &self,
-        context: crate::ActorSessionContext,
-    ) -> Result<(), KernelBehaviorError> {
-        if context.actor != self.identity {
-            return Err(KernelBehaviorError::new(format!(
-                "actor {:?} cannot install session context for {:?}",
-                self.identity, context.actor
-            )));
-        }
-        self.directory
-            .install_session_context(context)
-            .await
-            .map_err(|error| KernelBehaviorError::new(error.to_string()))
     }
 
     pub async fn session_context(
@@ -3780,6 +3765,233 @@ mod reply_settlement_history;
 
 #[cfg(test)]
 mod tests {
+    mod resident_registration {
+        use super::*;
+        use crate::DirectoryError;
+
+        struct Fixture {
+            directory: LocalActorDirectory,
+            directory_task: ractor::concurrency::JoinHandle<()>,
+            actor: LocalActorRef,
+            actor_task: ractor::concurrency::JoinHandle<()>,
+            peer: LocalActorRef,
+            peer_task: ractor::concurrency::JoinHandle<()>,
+            kernel: KernelContext,
+            descriptor: crate::ActorDescriptor,
+        }
+
+        impl Fixture {
+            async fn new() -> Self {
+                let (directory, directory_task) = LocalActorDirectory::start().await.unwrap();
+                let observations = Arc::new(Mutex::new(Vec::new()));
+                let (actor, actor_task) = spawn_local_actor_in_directory(
+                    None,
+                    observed_probe(&observations),
+                    crate::Incarnation::FIRST,
+                    directory.clone(),
+                )
+                .await
+                .unwrap();
+                let kernel = observations.lock()[0].0.clone();
+                let (peer, peer_task) = spawn_local_actor_in_directory(
+                    None,
+                    behavior(false).behavior,
+                    crate::Incarnation::FIRST,
+                    directory.clone(),
+                )
+                .await
+                .unwrap();
+                // This component registers metadata only. Native scope admission
+                // and cleanup are exercised by the resident forest tests.
+                let descriptor = crate::ActorDescriptor::new(
+                    "registration",
+                    crate::ActorPlacement {
+                        session: tidepool_runtime::session::fresh_session_id(),
+                        lexical_scope: tidepool_codegen::scope::ScopeId(0),
+                        resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+                    },
+                );
+                Self {
+                    directory,
+                    directory_task,
+                    actor,
+                    actor_task,
+                    peer,
+                    peer_task,
+                    kernel,
+                    descriptor,
+                }
+            }
+
+            async fn observe(&self, expected: Option<&crate::ActorSessionContext>, control: bool) {
+                assert_eq!(
+                    self.kernel
+                        .session_context(self.actor.identity())
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    expected
+                );
+                assert_eq!(
+                    self.kernel
+                        .authorize_control(self.peer.identity())
+                        .await
+                        .unwrap(),
+                    control,
+                    "forest authority must accompany the observed session"
+                );
+            }
+
+            async fn finish(self) {
+                for actor in [&self.actor, &self.peer] {
+                    actor
+                        .shutdown(ActorTerminal::new(ActorExitKind::Completed, "test done"))
+                        .await
+                        .unwrap();
+                }
+                self.actor_task.await.unwrap();
+                self.peer_task.await.unwrap();
+                self.directory.stop_owner_for_test().await;
+                self.directory_task.await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn registration_preserves_exact_context_after_admitted_waiter_drop() {
+            let fixture = Fixture::new().await;
+            let mut context = fixture.descriptor.session_context(fixture.actor.identity());
+            let source = tempfile::tempdir().unwrap();
+            // An actual selected source path can differ from deployment roots;
+            // directory admission must retain it rather than reconstruct it.
+            context.source_layer =
+                crate::ActorSourceRoots::Deployment(vec![source.path().to_owned()].into());
+            drop(fixture.kernel.register_resident(
+                context.clone(),
+                fixture.descriptor.clone(),
+                true,
+            ));
+            fixture.observe(None, false).await;
+
+            let mut abandoned = Box::pin(fixture.kernel.register_resident(
+                context.clone(),
+                fixture.descriptor.clone(),
+                true,
+            ));
+            assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
+            drop(abandoned);
+            // A FIFO observation follows the already enqueued mutation, even
+            // though its completion reply no longer has a receiver.
+            fixture.observe(Some(&context), true).await;
+            fixture.finish().await;
+        }
+
+        #[tokio::test]
+        async fn registration_refusals_preserve_both_directory_facts() {
+            let fixture = Fixture::new().await;
+            let context = fixture.descriptor.session_context(fixture.actor.identity());
+            for changed in 0..7 {
+                let mut mismatched = context.clone();
+                match changed {
+                    0 => mismatched.actor = fixture.peer.identity(),
+                    1 => {
+                        mismatched.placement.session = tidepool_runtime::session::fresh_session_id()
+                    }
+                    2 => mismatched.placement.lexical_scope = tidepool_codegen::scope::ScopeId(1),
+                    3 => {
+                        mismatched.placement.resource_scope =
+                            tidepool_codegen::suspension::RealmId::fresh()
+                    }
+                    4 => mismatched.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll,
+                    5 => {
+                        mismatched.live_payload = tidepool_effect::LivePayloadPolicy::ValueField(0)
+                    }
+                    _ => mismatched.haskell_effects_alias = "'[]".into(),
+                }
+                assert_eq!(
+                    fixture
+                        .kernel
+                        .register_resident(mismatched, fixture.descriptor.clone(), true)
+                        .await,
+                    Err(DirectoryError::ResidentContextMismatch {
+                        actor: fixture.actor.identity()
+                    })
+                );
+                fixture.observe(None, false).await;
+            }
+            fixture
+                .kernel
+                .register_resident(context.clone(), fixture.descriptor.clone(), true)
+                .await
+                .unwrap();
+            let replacement = fixture
+                .descriptor
+                .clone()
+                .with_supervisor_parent(fixture.peer.identity());
+            assert_eq!(
+                fixture
+                    .kernel
+                    .register_resident(context.clone(), replacement, false)
+                    .await,
+                Err(DirectoryError::AlreadyRegistered {
+                    actor: fixture.actor.identity()
+                })
+            );
+            fixture.observe(Some(&context), true).await;
+            let stale = ActorRef {
+                incarnation: crate::Incarnation(2),
+                ..fixture.actor.identity()
+            };
+            assert_eq!(
+                fixture
+                    .directory
+                    .register_resident(
+                        stale,
+                        fixture.descriptor.session_context(stale),
+                        fixture.descriptor.clone(),
+                        false
+                    )
+                    .await,
+                Err(DirectoryError::Unauthorized { actor: stale })
+            );
+            fixture.observe(Some(&context), true).await;
+            fixture.finish().await;
+        }
+
+        #[tokio::test]
+        async fn seal_order_decides_complete_registration_or_unchanged_refusal() {
+            for registration_first in [false, true] {
+                let fixture = Fixture::new().await;
+                let context = fixture.descriptor.session_context(fixture.actor.identity());
+                let mut registration = Box::pin(fixture.kernel.register_resident(
+                    context.clone(),
+                    fixture.descriptor.clone(),
+                    true,
+                ));
+                let mut seal = Box::pin(fixture.directory.seal());
+                if registration_first {
+                    assert!(futures_util::poll!(registration.as_mut()).is_pending());
+                    assert!(futures_util::poll!(seal.as_mut()).is_pending());
+                } else {
+                    assert!(futures_util::poll!(seal.as_mut()).is_pending());
+                    assert!(futures_util::poll!(registration.as_mut()).is_pending());
+                }
+                assert_eq!(
+                    registration.await,
+                    if registration_first {
+                        Ok(())
+                    } else {
+                        Err(DirectoryError::Closed)
+                    }
+                );
+                drop(seal.await.unwrap());
+                fixture
+                    .observe(registration_first.then_some(&context), registration_first)
+                    .await;
+                fixture.finish().await;
+            }
+        }
+    }
+
     mod startup_history {
         use super::*;
         use proptest::prelude::*;

@@ -1,5 +1,6 @@
 use super::*;
 use futures_util::future::BoxFuture;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
@@ -88,6 +89,7 @@ struct ObservedBehavior {
     cleanups: Arc<AtomicUsize>,
     gate: Option<Arc<CleanupGate>>,
     start_gate: Option<Arc<tokio::sync::Semaphore>>,
+    configured_start_gate: Option<Arc<CleanupGate>>,
 }
 
 impl KernelBehavior for ObservedBehavior {
@@ -109,12 +111,40 @@ impl KernelBehavior for ObservedBehavior {
         });
         assert!(self.context.take().unwrap().send(context.clone()).is_ok());
         let start_gate = self.start_gate.clone();
+        let configured_start_gate = self.configured_start_gate.clone();
         let inner = &mut self.inner;
         Box::pin(async move {
             if let Some(start_gate) = start_gate {
                 start_gate.acquire().await.unwrap().forget();
             }
-            inner.start(context).await
+            let mut start = inner.start(context);
+            if let Some(gate) = configured_start_gate {
+                let mut announced = false;
+                let mut released = false;
+                let mut release = Box::pin(gate.release.acquire());
+                // On this current-thread history, Configure replies on its next
+                // actor turn. Observe its retained outcome before polling startup
+                // past that reply and allowing directory registration to enqueue.
+                futures_util::future::poll_fn(|cx| {
+                    if !announced && context.lifecycle().resident_snapshot().is_some() {
+                        announced = true;
+                        gate.entered.add_permits(1);
+                    }
+                    if announced && !released {
+                        match release.as_mut().poll(cx) {
+                            std::task::Poll::Pending => return std::task::Poll::Pending,
+                            std::task::Poll::Ready(permit) => {
+                                permit.unwrap().forget();
+                                released = true;
+                            }
+                        }
+                    }
+                    start.as_mut().poll(cx)
+                })
+                .await
+            } else {
+                start.await
+            }
         })
     }
 
@@ -238,6 +268,7 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
             cleanups: cleanups.clone(),
             gate: Some(gate.clone()),
             start_gate: None,
+            configured_start_gate: None,
         },
         forest.incarnation,
         forest.directory.clone(),
@@ -262,6 +293,7 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
                 cleanups: cleanups.clone(),
                 gate: Some(gate.clone()),
                 start_gate: None,
+                configured_start_gate: None,
             },
         )
         .await
@@ -289,6 +321,7 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
         cleanups: cleanups.clone(),
         gate: Some(gate.clone()),
         start_gate: Some(start_gate.clone()),
+        configured_start_gate: None,
     };
     let spawning_run_owned = tokio::spawn(async move {
         spawning_kernel
@@ -701,6 +734,7 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
             cleanups: cleanups.clone(),
             gate: None,
             start_gate: None,
+            configured_start_gate: None,
         },
         forest.incarnation,
         forest.directory.clone(),
@@ -1235,4 +1269,311 @@ async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
     assert_eq!(retired[0].terminal(), Some(&terminal));
     assert!(retired[0].active_requests.is_empty());
     assert!(retired[0].queued_requests.is_empty());
+}
+
+#[tokio::test]
+async fn resident_startup_registers_both_facts_and_configure_refusal_releases_placement() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let valid_placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let valid = ActorDescriptor::new("registered-resident", valid_placement);
+    let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        fixture.behavior(valid.clone()),
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    let admitted = forest
+        .directory
+        .session_context(actor.identity())
+        .await
+        .unwrap()
+        .expect("successful startup publishes the complete directory entry");
+    assert_eq!(admitted, valid.session_context(actor.identity()));
+    assert_eq!(
+        actor.lifecycle().resident_snapshot().unwrap().context,
+        admitted
+    );
+    assert_eq!(
+        forest
+            .directory
+            .share_observation(actor.identity(), actor.identity(), actor.identity())
+            .await
+            .unwrap(),
+        crate::local_actor::run_control::ObservationShareOutcome::Shared,
+        "the successfully started resident also has its directory authority"
+    );
+
+    let refused_placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(refused_placement));
+    let refused = ActorDescriptor::new("missing-durable-path", refused_placement)
+        .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+    let error = match crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        fixture.behavior(refused),
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("durable resident without its admitted path must be refused"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    match cause {
+        Some(crate::local_actor::StartupFailureCause::Behavior(error)) => {
+            assert_eq!(
+                error.detail,
+                "durable actor requires its canonical admitted path"
+            );
+        }
+        other => panic!("expected lifecycle Configure refusal, got {other:?}"),
+    }
+    let cleanup = crate::local_actor::startup_cleanup(&error)
+        .expect("failed resident startup retains its real cleanup outcome");
+    assert!(cleanup.is_confirmed());
+    assert!(forest
+        .directory
+        .session_context(cleanup.actor())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!forest
+        .environment
+        .actors
+        .lock()
+        .contains_key(&cleanup.actor()));
+    assert!(!fixture.scope_is_live(refused_placement));
+    // Refusal must leave the earlier successful resident's facts and resources.
+    assert_eq!(
+        forest
+            .directory
+            .session_context(actor.identity())
+            .await
+            .unwrap(),
+        Some(admitted)
+    );
+    assert!(fixture.scope_is_live(valid_placement));
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "{outcomes:?}"
+    );
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn seal_after_lifecycle_configuration_refuses_directory_registration_and_cleans_startup() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let descriptor = ActorDescriptor::new("sealed-after-configure", placement);
+    let gate = Arc::new(CleanupGate::new());
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let behavior = ObservedBehavior {
+        inner: fixture.behavior(descriptor.clone()),
+        context: Some(send),
+        owner: crate::local_actor::SpawnOwnership::Independent,
+        peers: Arc::default(),
+        cleanups: cleanups.clone(),
+        gate: None,
+        start_gate: None,
+        configured_start_gate: Some(gate.clone()),
+    };
+    let directory = forest.directory.clone();
+    let incarnation = forest.incarnation;
+    let spawning = tokio::spawn(async move {
+        crate::local_actor::spawn_local_actor_in_directory(None, behavior, incarnation, directory)
+            .await
+    });
+    let kernel = receive.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let lifecycle = kernel.lifecycle().clone();
+    assert_eq!(
+        lifecycle.resident_snapshot().unwrap().context,
+        descriptor.session_context(kernel.identity())
+    );
+    assert!(forest
+        .directory
+        .session_context(kernel.identity())
+        .await
+        .unwrap()
+        .is_none());
+    // Seal the actual directory owner only after the distinct lifecycle owner
+    // confirms configuration; no state injection or startup error substitute.
+    forest.directory.seal().await.unwrap();
+    gate.release.add_permits(1);
+    let error = match tokio::time::timeout(Duration::from_secs(5), spawning)
+        .await
+        .expect("sealed startup must settle its actual refusal cleanup")
+        .unwrap()
+    {
+        Ok(_) => panic!("sealed directory admitted resident registration"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    match cause {
+        Some(crate::local_actor::StartupFailureCause::Behavior(error)) => {
+            assert_eq!(error.detail, crate::DirectoryError::Closed.to_string());
+        }
+        other => panic!("expected the post-Configure directory refusal, got {other:?}"),
+    }
+    let cleanup = crate::local_actor::startup_cleanup(&error).unwrap();
+    assert_eq!(cleanup.actor(), kernel.identity());
+    assert!(cleanup.is_confirmed());
+    assert_eq!(cleanups.load(Ordering::Relaxed), 1);
+    assert!(forest
+        .directory
+        .session_context(kernel.identity())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!forest
+        .environment
+        .actors
+        .lock()
+        .contains_key(&kernel.identity()));
+    assert!(!fixture.scope_is_live(placement));
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "{outcomes:?}"
+    );
+    assert!(
+        lifecycle.resident_snapshot().is_none(),
+        "finalization releases the configured owner"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_resident_startup_caller_cleans_configured_actor_and_exact_placement() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let descriptor = ActorDescriptor::new("abandoned-after-configure", placement);
+    let gate = Arc::new(CleanupGate::new());
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let behavior = ObservedBehavior {
+        inner: fixture.behavior(descriptor.clone()),
+        context: Some(send),
+        owner: crate::local_actor::SpawnOwnership::Independent,
+        peers: Arc::default(),
+        cleanups: cleanups.clone(),
+        gate: None,
+        start_gate: None,
+        configured_start_gate: Some(gate.clone()),
+    };
+    let directory = forest.directory.clone();
+    let incarnation = forest.incarnation;
+    let spawning = tokio::spawn(async move {
+        crate::local_actor::spawn_local_actor_in_directory(None, behavior, incarnation, directory)
+            .await
+    });
+    let kernel = receive.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let actor = kernel.resolve(kernel.identity()).await.unwrap().unwrap();
+    let lifecycle = actor.lifecycle().clone();
+    assert_eq!(
+        lifecycle.resident_snapshot().unwrap().context,
+        descriptor.session_context(kernel.identity())
+    );
+    assert!(fixture.scope_is_live(placement));
+    spawning.abort();
+    assert!(spawning.await.unwrap_err().is_cancelled());
+    gate.release.add_permits(1);
+    // The existing preparation owner retires a completed startup whose caller
+    // vanished. Observe that actual actor's terminal/cleanup rather than the
+    // cancelled caller task or a synthetic directory entry.
+    tokio::time::timeout(Duration::from_secs(5), actor.terminal().wait())
+        .await
+        .unwrap();
+    // Terminal publication precedes the behavior's stopped hook. Physical
+    // executor termination confirms that hook finished publishing retirement.
+    actor
+        .address()
+        .get_cell()
+        .wait(Some(Duration::from_secs(5)))
+        .await
+        .expect("abandoned startup executor completes its stopped hook");
+    let cleanup = actor
+        .terminal()
+        .cleanup()
+        .expect("abandoned startup retains cleanup");
+    assert!(cleanup.is_confirmed());
+    assert_eq!(cleanup.actor(), actor.identity());
+    assert_eq!(cleanups.load(Ordering::Relaxed), 1);
+    assert!(!fixture.scope_is_live(placement));
+    let admitted = forest
+        .directory
+        .session_context(actor.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted, descriptor.session_context(actor.identity()));
+    assert!(forest
+        .environment
+        .actors
+        .lock()
+        .get(&actor.identity())
+        .unwrap()
+        .terminal
+        .is_some());
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "{outcomes:?}"
+    );
+    assert!(
+        lifecycle.resident_snapshot().is_none(),
+        "finalization releases retained startup state"
+    );
+    assert!(
+        matches!(
+            forest.directory.resolve(actor.identity()).await,
+            Err(crate::DirectoryError::Unavailable)
+        ),
+        "finalization ends the directory owner; it does not issue an absence observation"
+    );
 }
