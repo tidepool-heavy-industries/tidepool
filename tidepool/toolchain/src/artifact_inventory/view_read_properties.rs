@@ -657,11 +657,11 @@ proptest! {
             "projected metadata has no selected native groups"
         );
         prop_assert!(
-            interface.lease.materialization_parents.is_empty(),
+            interface.lease.materialization.fixed.is_empty(),
             "projection has no materialization parents"
         );
         prop_assert!(
-            interface.lease.materialization.lock().unwrap().is_empty(),
+            interface.lease.materialization.cache.lock().unwrap().is_empty(),
             "projection has no retained materializations"
         );
         let projected_entries = interface.entries();
