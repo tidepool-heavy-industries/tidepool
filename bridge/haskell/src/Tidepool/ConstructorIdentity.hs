@@ -48,10 +48,10 @@ captureIdentityResolver env defining = do
     when (moduleNameString (moduleName owner) == "Tidepool.Effects.Core") $
       hPutStrLn stderr $ "nominal-interface-custody defining="
         ++ show (moduleNameString . moduleName . mi_module <$> defining)
-        ++ " owner=" ++ show owner
+        ++ " owner=" ++ moduleNameString (moduleName owner)
         ++ " iface=" ++ show (mi_iface_hash (mi_final_exts iface))
         ++ " declarations=" ++ show
-          [(name, mi_hash_fn (mi_final_exts iface) (mkTcOcc name))
+          [(name, snd <$> mi_hash_fn (mi_final_exts iface) (mkTcOcc name))
           | name <- ["Worktree", "WorktreeSpec", "WorktreeError", "WorkspaceHandle",
               "WorktreeHandle", "WorktreeId", "WorktreeSummary", "SubmissionObservation",
               "BranchName", "GitOid", "MergeRequest", "MergeOutcome"]]) home
