@@ -159,15 +159,15 @@ impl PreparedValueSourceSupport {
                 "retained source surface lacks its exact artifact owner",
             ));
         }
-        let compiler_roots = value
-            .root_entries()
-            .iter()
-            .map(|entry| entry.descriptor.id)
-            .chain(entries.values().map(|entry| entry.descriptor.id))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let compiler_artifacts = self.context.artifact_view().select_roots(compiler_roots)?;
+        let source_owners = lexical.iter().map(|node| node.owner.clone()).collect();
+        let support = self
+            .context
+            .compiler_input_projection()
+            .source_support(self.context.artifact_view(), &source_owners)?;
+        // The value already owns its exact graph; source roles retain their
+        // issued namespace and group handles without choosing new body demand.
+        let compiler_artifacts = value.merge(support.artifacts())?;
+        support.projection().validate(&compiler_artifacts)?;
         let artifacts = self
             .context
             .artifact_view()

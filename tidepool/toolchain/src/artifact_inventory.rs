@@ -6371,8 +6371,13 @@ mod tests {
     }
 
     #[test]
+    fn compiler_source_retention_preserves_issued_groups_in_cumulative_prefix() {
+        assert_target_group_choice_in_prefix(2, 0, false, 1, true);
+    }
+
+    #[test]
     fn target_sealing_preserves_exact_group_choice_in_cumulative_prefix() {
-        assert_target_group_choice_in_prefix(2, 0, false, 1);
+        assert_target_group_choice_in_prefix(2, 0, false, 1, false);
     }
 
     proptest::proptest! {
@@ -6380,7 +6385,7 @@ mod tests {
         fn target_group_choice_survives_cumulative_issued_histories(
             branches in 2usize..7, chosen in 0usize..7, reversed in proptest::bool::ANY, repetitions in 1usize..5,
         ) {
-            assert_target_group_choice_in_prefix(branches, chosen, reversed, repetitions);
+            assert_target_group_choice_in_prefix(branches, chosen, reversed, repetitions, true);
         }
     }
 
@@ -6389,6 +6394,7 @@ mod tests {
         chosen: usize,
         reversed: bool,
         repetitions: usize,
+        retain_source: bool,
     ) {
         let inventory = ArtifactInventory::default();
         let child = Arc::new(issued_native_groups(
@@ -6508,6 +6514,96 @@ mod tests {
             );
             assert_eq!(inventory.metrics().installed_binding_rows, before);
             prefix = target.artifacts;
+        }
+        if retain_source {
+            assert!(
+                matches!(prefix.select_roots(vec![id]), Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
+            );
+            let lexical = vec![
+                crate::declaration_join::ExactLexicalNode {
+                    owner: native.descriptor.owner.clone(),
+                    imports: vec![child.descriptor.owner.clone()],
+                },
+                crate::declaration_join::ExactLexicalNode {
+                    owner: child.descriptor.owner.clone(),
+                    imports: vec![],
+                },
+            ];
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
+                    .unwrap();
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                    [2; 32],
+                    &prefix,
+                    projection,
+                    lexical.clone(),
+                    native.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap();
+            let value = prefix
+                .interface_projection(&[native.descriptor.owner.clone()])
+                .unwrap();
+            let retained = context
+                .retain_value_source_surface(&value, &lexical)
+                .unwrap();
+            assert_eq!(retained.lexical, lexical);
+            assert_eq!(
+                retained
+                    .compiler_artifacts
+                    .capture_graph_selection()
+                    .native_groups,
+                prefix.capture_graph_selection().native_groups
+            );
+            assert_eq!(inventory.metrics().installed_binding_rows, before);
+            assert_eq!(
+                retained.compiler_artifacts.namespace()[&id],
+                prefix.namespace()[&id]
+            );
+            assert_eq!(
+                retained.compiler_artifacts.namespace()[&child.descriptor.id],
+                prefix.namespace()[&child.descriptor.id]
+            );
+            let hidden = Arc::new(entry("UnselectedCompilerRole", &[]));
+            let hidden_view = inventory
+                .admit_shared(&inventory.empty_view(), vec![hidden.clone()])
+                .unwrap();
+            let expanded = prefix.merge(&hidden_view).unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
+                    .unwrap();
+            let missing_role_context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                    [2; 32],
+                    &expanded,
+                    projection,
+                    lexical.clone(),
+                    native.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap();
+            let value_with_hidden = value
+                .merge(
+                    &hidden_view
+                        .interface_projection(&[hidden.descriptor.owner.clone()])
+                        .unwrap(),
+                )
+                .unwrap();
+            let mut unsupported = lexical;
+            unsupported.push(crate::declaration_join::ExactLexicalNode {
+                owner: hidden.descriptor.owner.clone(),
+                imports: vec![],
+            });
+            let rows_before_refusal = inventory.metrics().installed_binding_rows;
+            assert!(missing_role_context
+                .retain_value_source_surface(&value_with_hidden, &unsupported)
+                .is_err());
+            assert_eq!(
+                inventory.metrics().installed_binding_rows,
+                rows_before_refusal
+            );
         }
     }
 
