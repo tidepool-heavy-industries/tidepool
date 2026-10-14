@@ -3039,12 +3039,15 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 
     let sibling = tokio::time::timeout(
         Duration::from_secs(10),
-        dispatch_haskell_script(child.policy.as_ref(), "40 + 2 :: Int"),
+        dispatch_haskell_script(child.policy.as_ref(), "display (40 + 2 :: Int)"),
     )
     .await
     .expect("sibling actor did not progress while the command waited");
-    assert_eq!(sibling["status"], "committed", "{sibling}");
-    assert!(sibling.to_string().contains("42"), "{sibling}");
+    assert_eq!(
+        super::test_campaign::committed_display_text(&sibling),
+        "42",
+        "sibling progress retains the evaluated value"
+    );
     assert!(
         !waiting.is_finished(),
         "command wait ended before sibling progress"
