@@ -116,7 +116,7 @@ import Tidepool.ExactScope
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem
   , originalGroupFromProjected
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..)
   , revalidateExactScope, scopeInterfaces, extendExactScopeGeneration, extendCheckedValueScope
   , scopeAvailableOriginalProducts
