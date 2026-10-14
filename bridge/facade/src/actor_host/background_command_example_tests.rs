@@ -24,7 +24,10 @@ async fn workspace_campaign() -> TestCampaign {
     });
     TestCampaign::start_with_conversation(
         |admission| admission,
-        super::jev_tests::pinned_jev_workspace,
+        |config| {
+            config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
+            super::jev_tests::pinned_jev_workspace(config);
+        },
         Some(reader),
     )
     .await
