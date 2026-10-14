@@ -4878,6 +4878,20 @@ impl ArtifactView {
         // Keep an already issued original carrier only when its recorded
         // canonical edge points into the selected interface closure. Artifact
         // bytes alone do not qualify a carrier or provide missing Group nodes.
+        let canonical_by_original = artifact_ids(owned)
+            .into_iter()
+            .filter_map(|id| {
+                let ArtifactPayload::Original(product) = &state.payloads[&id].payload else {
+                    return None;
+                };
+                Some((
+                    id,
+                    ArtifactEntry::canonical(product.module_interface()?.clone())
+                        .descriptor
+                        .id,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
         let carriers = owned
             .iter()
             .flat_map(|node| {
@@ -4897,10 +4911,7 @@ impl ArtifactView {
                         {
                             return None;
                         }
-                        let ArtifactPayload::Original(product) = &state.payloads[&carrier.artifact].payload else {
-                            return None;
-                        };
-                        let canonical = ArtifactEntry::canonical(product.module_interface()?.clone()).descriptor.id;
+                        let canonical = *canonical_by_original.get(&carrier.artifact)?;
                         state
                             .graph
                             .edges(state.indices[&carrier_node])
