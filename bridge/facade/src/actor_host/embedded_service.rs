@@ -709,6 +709,10 @@ impl EmbeddedDriverError {
                 harness::engine::EngineError::Cleanup { primary, .. } => {
                     engine_requires_recovery(primary)
                 }
+                harness::engine::EngineError::InferenceBlockPersistence {
+                    primary,
+                    persistence,
+                } => engine_requires_recovery(primary) || store_requires_recovery(persistence),
                 _ => false,
             }
         }
@@ -1502,6 +1506,34 @@ mod shutdown_tests {
             matches!(error, EmbeddedDriverError::Engine(EngineError::Cleanup { cleanup, .. })
             if cleanup == "outstanding call claim could not be settled")
         );
+    }
+
+    #[test]
+    fn inference_block_persistence_preserves_storage_recovery_requirement() {
+        use harness::store::StoreError;
+
+        for (primary_fenced, persistence_fenced, expected) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let primary = if primary_fenced {
+                EngineError::Store(StoreError::AdmissionFenced)
+            } else {
+                EngineError::InvalidFunctionCall
+            };
+            let persistence = if persistence_fenced {
+                StoreError::AdmissionFenced
+            } else {
+                StoreError::InvalidForm
+            };
+            let error = EngineError::InferenceBlockPersistence {
+                primary: Box::new(primary),
+                persistence,
+            };
+            assert_eq!(EmbeddedDriverError::Engine(error).requires_recovery(), expected);
+        }
     }
 
     #[test]
