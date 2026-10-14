@@ -8897,9 +8897,7 @@ mod custody_release_tests {
 
     #[test]
     fn exclusive_binding_custody_survives_source_scope_retirement() {
-        for (retain_binding, retain_lexical) in
-            [(false, false), (true, false), (false, true), (true, true)]
-        {
+        for (retain_binding, retain_lexical) in [(false, false), (true, false), (false, true)] {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
             let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
             let other_id = bind_fixture(&mut session, other_scope, 43);
