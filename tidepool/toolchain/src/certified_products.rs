@@ -9977,6 +9977,122 @@ pub(crate) mod tests {
         .product
     }
 
+    #[test]
+    fn private_availability_validates_exact_dependencies_without_selecting_them() {
+        use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
+
+        let leaf = full_native_fixture("AvailableLeaf", vec![(5, vec![])], 7);
+        let source = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: testing::identity(&product.owner().module, &format!("entry_{ordinal}")),
+            }
+        };
+        let helper = full_native_fixture("AvailableHelper", vec![(3, vec![source(&leaf, 5)])], 7);
+        let consumer =
+            full_native_fixture("AvailableConsumer", vec![(11, vec![source(&helper, 3)])], 7);
+        let consumer_id = ArtifactId([1; 32]);
+        let helper_id = ArtifactId([2; 32]);
+        let leaf_id = ArtifactId([3; 32]);
+        let available = BTreeMap::from([
+            (consumer_id, &consumer),
+            (helper_id, &helper),
+            (leaf_id, &leaf),
+        ]);
+        let advertised = BTreeSet::from([NativeGroupKey {
+            artifact: consumer_id,
+            original_ordinal: 11,
+        }]);
+        let unchanged = advertised.clone();
+        validate_available_originals_with_validation(
+            &available,
+            &advertised,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .expect("exact available dependency closure does not require executable selection");
+        assert_eq!(advertised, unchanged);
+        assert!(matches!(
+            certify_selected_owned_products_in_context_with_validation(
+                &available,
+                &[],
+                &advertised,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("source binder/group closure"))
+        ));
+        let selected = advertised
+            .iter()
+            .copied()
+            .chain([
+                NativeGroupKey {
+                    artifact: helper_id,
+                    original_ordinal: 3,
+                },
+                NativeGroupKey {
+                    artifact: leaf_id,
+                    original_ordinal: 5,
+                },
+            ])
+            .collect();
+        assert_eq!(
+            certify_selected_owned_products_in_context_with_validation(
+                &available,
+                &[],
+                &selected,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap()
+            .len(),
+            3,
+        );
+        let missing_leaf = BTreeMap::from([(consumer_id, &consumer), (helper_id, &helper)]);
+        assert!(
+            validate_available_originals_with_validation(
+                &missing_leaf,
+                &advertised,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .is_err(),
+            "availability validates transitive dependencies"
+        );
+        let different_leaf = full_native_fixture("AvailableLeaf", vec![(5, vec![])], 9);
+        let replaced_leaf = BTreeMap::from([
+            (consumer_id, &consumer),
+            (helper_id, &helper),
+            (leaf_id, &different_leaf),
+        ]);
+        assert!(
+            validate_available_originals_with_validation(
+                &replaced_leaf,
+                &advertised,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .is_err(),
+            "same module and ordinal cannot replace an exact source owner"
+        );
+        for wrong_import in [
+            source(&leaf, 6),
+            PendingImportOwner::Source {
+                owner: leaf.owner().clone(),
+                original_ordinal: 5,
+                binder: testing::identity("AvailableLeaf", "missing"),
+            },
+        ] {
+            let wrong = full_native_fixture("AvailableConsumer", vec![(11, vec![wrong_import])], 7);
+            let available = BTreeMap::from([(consumer_id, &wrong), (leaf_id, &leaf)]);
+            assert!(
+                validate_available_originals_with_validation(
+                    &available,
+                    &advertised,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .is_err(),
+                "exact owner alone cannot supply an absent ordinal or binder"
+            );
+        }
+    }
+
     fn check_original_native_index_against_linear_scan(raw: &[(u32, bool, bool)], query: u32) {
         use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
         let original = full_native_fixture(
