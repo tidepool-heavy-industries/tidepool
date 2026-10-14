@@ -8568,6 +8568,7 @@ mod tests {
             &BTreeMap::new(),
             interface.interface_bytes().to_vec(),
             &BTreeMap::new(),
+            &[],
         );
         let owner = raw.owner().clone();
         let certification = crate::certified_products::encode_home_certification_with_module(

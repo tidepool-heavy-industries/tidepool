@@ -9858,7 +9858,14 @@ pub(crate) mod tests {
         sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         original_groups_fixture_in_unit_with_sites(
-            "fixture", module, groups, version, packages, interface, sites,
+            "fixture",
+            module,
+            groups,
+            version,
+            packages,
+            interface,
+            sites,
+            &[],
         )
     }
 
@@ -9870,6 +9877,7 @@ pub(crate) mod tests {
         packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
         interface: Vec<u8>,
         sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
+        literal: &[u8],
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let projected = groups
             .iter()
@@ -9886,7 +9894,7 @@ pub(crate) mod tests {
                     top.identity = testing::identity(module, "entry");
                 }
                 top.identity.unit = unit.into();
-                top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(Vec::new());
+                top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(literal.to_vec());
                 let top = top.clone();
                 wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
                 wire.expressions.nodes.clear();

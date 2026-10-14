@@ -75,6 +75,7 @@ fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
         &BTreeMap::new(),
         interface,
         &BTreeMap::new(),
+        &[],
     );
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     if native {

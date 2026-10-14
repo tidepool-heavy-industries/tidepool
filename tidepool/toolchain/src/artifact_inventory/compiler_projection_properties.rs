@@ -86,6 +86,7 @@ impl Catalog {
                     &BTreeMap::new(),
                     interface_bytes(module),
                     &BTreeMap::new(),
+                    &[],
                 )
             })
             .collect::<Vec<_>>();
@@ -123,6 +124,7 @@ impl Catalog {
                         &BTreeMap::new(),
                         interface_bytes(module),
                         &BTreeMap::new(),
+                        &[],
                     )
                 })
                 .collect::<Vec<_>>()

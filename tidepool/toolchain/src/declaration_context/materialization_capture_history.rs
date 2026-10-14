@@ -346,3 +346,231 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     drop(owner);
     assert!(!a_directory.exists() && !b_directory.exists());
 }
+
+#[test]
+fn late_private_native_literals_and_graphs_survive_detached_capture() {
+    use crate::certified_products::PendingImportOwner;
+    use tidepool_repr::execution_schema::{Group, HeapRhs};
+    let source = tempfile::tempdir().unwrap();
+    let (graph_b, originals) =
+        crate::execution_source::test_prepared_graph_with_interfaces(source.path(), |module| {
+            format!("{module} graph interface").into_bytes()
+        });
+    let graph_a = crate::execution_source::test_graph_requiring_original(
+        &graph_b,
+        &originals[1].owner,
+        graph_b.digest(),
+    );
+    let a = execution_entry(originals[0].clone(), Arc::clone(&graph_a));
+    let b = execution_entry(originals[1].clone(), Arc::clone(&graph_b));
+    let helper = crate::certified_products::tests::original_groups_fixture_with_interface(
+        "LateNativeHelper",
+        vec![(7, vec![])],
+        11,
+        &BTreeMap::new(),
+        b"late helper interface".to_vec(),
+    );
+    let import = PendingImportOwner::Source {
+        owner: helper.owner().clone(),
+        original_ordinal: 7,
+        binder: tidepool_repr::execution_schema::testing::identity("LateNativeHelper", "entry"),
+    };
+    let literal = [0, 17, 128, 255, 42];
+    let root = crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+        "fixture",
+        "LateNativeRoot",
+        vec![(7, vec![import.clone()])],
+        12,
+        &BTreeMap::new(),
+        b"late root interface".to_vec(),
+        &BTreeMap::new(),
+        &literal,
+    );
+    let products = crate::certified_products::tests::recovered_witness_fixtures(&[
+        crate::certified_products::fixture_finalized_product(helper, [7; 32]),
+        crate::certified_products::fixture_finalized_product(root, [7; 32]),
+    ]);
+    let root_product_bytes = products[1].product.product_bytes().to_vec();
+    let mut entries = products
+        .into_iter()
+        .map(|original| Arc::new(ArtifactEntry::original([7; 32], original.product).unwrap()))
+        .collect::<Vec<_>>();
+    let root_id = entries[1].descriptor.id;
+    entries.extend([Arc::clone(&a), Arc::clone(&b)]);
+    let roots = vec![root_id, a.descriptor.id, b.descriptor.id];
+    let graph_bytes = BTreeMap::from([
+        (graph_a.digest(), graph_a.bytes().to_vec()),
+        (graph_b.digest(), graph_b.bytes().to_vec()),
+    ]);
+    // These existing graph fixtures carry a test producer digest. Exercise
+    // the production host input/materialization owners without pretending to
+    // qualify a compiler endpoint whose producer bytes cannot match it.
+    let ancestor = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(
+                [7; 32],
+                &[crate::certified_products::fixture_finalized_product(
+                    support_product("PrivateBase"),
+                    [7; 32],
+                )],
+            )
+            .unwrap(),
+    );
+    let extend = |context: &Arc<ExactDeclarationContext>, module: &str| {
+        Arc::new(
+            context
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(
+                    [7; 32],
+                    &[crate::certified_products::fixture_finalized_product(
+                        support_product(module),
+                        [7; 32],
+                    )],
+                )
+                .unwrap(),
+        )
+    };
+    let materialize = |context: &Arc<ExactDeclarationContext>,
+                       metadata: &ArtifactMetadataSnapshot| {
+        context
+            .inventory
+            .retain_materialization(metadata, |parents| {
+                context.materialize_retained_artifacts(
+                    metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                )
+            })
+            .unwrap()
+    };
+    let private_inputs = |context: &Arc<ExactDeclarationContext>| {
+        // AllGroups is the existing issuer of exact native roots, not an
+        // inference from available code or a test certificate constructor.
+        let artifacts = context
+            .inventory
+            .inventory()
+            .admit_shared(&context.inventory, entries.clone())
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+            &projection,
+            &artifacts,
+            &[],
+        )
+        .unwrap();
+        let private = OriginalCompilerInputs {
+            projection,
+            artifacts,
+            native_original_requirements: requirements,
+        };
+        ProtectedScaffoldRequirements::default()
+            .compiler_inputs(context, Some(&private))
+            .unwrap()
+    };
+    let descendant = extend(&ancestor, "BeforePrivate");
+    let completed = materialize(
+        &descendant,
+        &descendant.compiler_metadata_snapshot().unwrap(),
+    );
+    assert!(completed.groups.is_empty());
+    assert!(completed.graph_paths.is_empty());
+    let completed_directory = completed.directory().path().to_path_buf();
+    let late_inputs = private_inputs(&ancestor);
+    assert_eq!(late_inputs.metadata.selected_native_groups.len(), 2);
+    let late = materialize(&ancestor, &late_inputs.metadata);
+    let late_directory = late.directory().path().to_path_buf();
+    let next = extend(&descendant, "AfterPrivate");
+    let inputs = private_inputs(&next);
+    assert_ne!(
+        inputs.metadata.materialization_key(),
+        descendant
+            .compiler_metadata_snapshot()
+            .unwrap()
+            .materialization_key()
+    );
+    let current = materialize(&next, &inputs.metadata);
+    let current_directory = current.directory().path().to_path_buf();
+    let check_native = |owner: &RetainedArtifactMaterialization,
+                        metadata: &ArtifactMetadataSnapshot| {
+        assert_eq!(metadata.selected_native_groups.len(), 2);
+        let selected = RetainedArtifactMaterialization::selected_group_refs([owner], metadata);
+        assert_eq!(selected.len(), 2);
+        let root = selected
+            .iter()
+            .find(|group| group.owner().module == "LateNativeRoot")
+            .unwrap();
+        assert_eq!(root.imports(), std::slice::from_ref(&import));
+        let bindings = root.group().definitions().bindings();
+        let Group::Recursive(tops) = &bindings[0] else {
+            panic!("fixture literal group")
+        };
+        assert_eq!(tops[0].binding.rhs, HeapRhs::Bytes(literal.to_vec()));
+        let artifact = owner.selected_rows(metadata)[&root_id].artifact();
+        assert_eq!(
+            std::fs::read(artifact.product.unwrap().path).unwrap(),
+            root_product_bytes
+        );
+    };
+    check_native(&late, &late_inputs.metadata);
+    check_native(&current, &inputs.metadata);
+    let paths = current
+        .graph_path_refs()
+        .into_iter()
+        .map(|(digest, file)| (digest, file.path.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(paths.len(), 2);
+    for (digest, bytes) in &graph_bytes {
+        assert_eq!(std::fs::read(&paths[digest]).unwrap(), *bytes);
+    }
+    let mut captured = next.as_ref().clone();
+    captured.inventory = inputs.artifacts.select_roots(roots).unwrap();
+    captured.compiler_projection = inputs.projection.within_view(&captured.inventory);
+    captured.lexical = crate::exact_context::ExactLexicalSnapshot::default();
+    captured.normalize().unwrap();
+    let captured = Arc::new(captured);
+    let payload = Arc::downgrade(&captured.inventory.metadata_snapshot().artifacts[&root_id]);
+    let proof = Arc::clone(captured.inventory.selection_snapshot());
+    let weak_current = Arc::downgrade(&current);
+    let weak_late = Arc::downgrade(&late);
+    drop(inputs);
+    drop(late_inputs);
+    drop(current);
+    drop(late);
+    drop(completed);
+    drop(next);
+    drop(descendant);
+    drop(ancestor);
+    drop(entries);
+    drop(a);
+    drop(b);
+    drop(graph_a);
+    drop(graph_b);
+    drop(originals);
+    std::fs::remove_dir_all(source.path()).unwrap();
+    assert!(weak_current.upgrade().is_none() && weak_late.upgrade().is_none());
+    assert!(!completed_directory.exists() && !late_directory.exists());
+    assert!(current_directory.is_dir());
+    for path in paths.values() {
+        assert!(path.is_file());
+    }
+    let restored_metadata = captured.compiler_metadata_snapshot().unwrap();
+    let restored = materialize(&captured, &restored_metadata);
+    check_native(&restored, &restored_metadata);
+    assert_eq!(restored.payload_work.written_bytes, 0);
+    let restored_paths = restored.graph_path_refs();
+    assert_eq!(restored_paths.len(), 2);
+    for (digest, bytes) in &graph_bytes {
+        assert_eq!(restored_paths[digest].path, paths[digest]);
+        assert_eq!(std::fs::read(&paths[digest]).unwrap(), *bytes);
+    }
+    drop(restored_metadata);
+    drop(captured);
+    assert!(current_directory.is_dir());
+    drop(restored);
+    assert!(!current_directory.exists());
+    assert!(paths.values().all(|path| !path.exists()));
+    assert!(payload.upgrade().is_none());
+    assert!(!proof.scopes.is_empty());
+}

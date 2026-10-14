@@ -678,6 +678,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                         &BTreeMap::new(),
                         b"shared canonical interface".to_vec(),
                         &BTreeMap::new(),
+                        &[],
                     ),
                     producer.sha256(),
                     1,
@@ -862,6 +863,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 &BTreeMap::new(),
                 b"different canonical interface".to_vec(),
                 &BTreeMap::new(),
+                &[],
             ),
             producer.sha256(),
         );

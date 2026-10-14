@@ -561,12 +561,23 @@ pub(crate) fn test_prepared_graph(
     Arc<CertifiedExecutionSourceGraph>,
     Vec<PreparedExecutionSourceOriginal>,
 ) {
-    let (graph, owners) = test_graph(root);
+    test_prepared_graph_with_interfaces(root, |_| b"iface".to_vec())
+}
+
+#[cfg(test)]
+pub(crate) fn test_prepared_graph_with_interfaces(
+    root: &Path,
+    interface_bytes: impl Fn(&str) -> Vec<u8>,
+) -> (
+    Arc<CertifiedExecutionSourceGraph>,
+    Vec<PreparedExecutionSourceOriginal>,
+) {
+    let (graph, owners) = test_graph_with_interfaces(root, &interface_bytes);
     let mut wire = GraphWire::decode(graph.bytes()).unwrap();
     let originals = owners
         .into_iter()
         .map(|mut owner| {
-            let interface = b"iface".to_vec();
+            let interface = interface_bytes(&owner.module);
             let product = tidepool_test_data::prepared_encode::encode_module_products(&[
                 tidepool_repr::execution_schema::RawModuleProduct {
                     unit: owner.unit.clone(),
