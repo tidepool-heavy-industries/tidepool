@@ -16,7 +16,8 @@ use std::time::Duration;
 
 /// The entry index the retained dispatcher serves the after-tool slot at.
 /// `Tidepool.Agent.Contract.afterToolEntry` is the other half of this pair;
-/// ordinary tool calls are entry zero.
+/// Named authored dispatch is entry zero, initialization is entry two, and
+/// admitted endpoint dispatch starts at entry three.
 pub(crate) const AFTER_TOOL_ENTRY: i64 = 1;
 
 /// The slot name `installSpec` publishes when the spec fills the field.
