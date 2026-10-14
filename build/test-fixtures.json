@@ -186,6 +186,7 @@
     "bridge/facade/src/actor_host/fixtures/tool_dispatch_fixture.hs",
     "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
     "bridge/facade/src/actor_host/fixtures/usage_comparisons.hs",
+    "bridge/facade/src/actor_host/fixtures/watchdog_history_probe.hs",
     "bridge/facade/src/actor_host/fresh_callable_exit_read.hs",
     "bridge/facade/src/actor_host/fresh_callable_exit_setup.hs",
     "bridge/facade/src/actor_host/fresh_callable_result_read.hs",

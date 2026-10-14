@@ -2035,6 +2035,161 @@ _ <- if {check} then pure () else error "watchdog escalation evidence contract f
 })).await;
 }
 
+#[tokio::test]
+async fn watchdog_recent_calls_include_only_completed_turns() {
+    use exomonad_actor::{
+        ConversationTurn, ConversationTurnState, ConversationUnavailable, TurnItem,
+    };
+    use std::collections::VecDeque;
+
+    let turn = |identity: &str, state| ConversationTurn {
+        turn: identity.into(),
+        state,
+        started_at: None,
+        completed_at: None,
+        items: vec![
+            TurnItem::ToolCall {
+                call: "first".into(),
+                tool: format!("{identity}-first"),
+                arguments: "first arguments".into(),
+            },
+            TurnItem::ToolCall {
+                call: "second".into(),
+                tool: format!("{identity}-second"),
+                arguments: "second arguments".into(),
+            },
+            TurnItem::ToolResult {
+                call: "second".into(),
+                output: "second result".into(),
+            },
+            TurnItem::ToolResult {
+                call: "first".into(),
+                output: "first result".into(),
+            },
+            TurnItem::ToolCall {
+                call: "pending".into(),
+                tool: "pending-call".into(),
+                arguments: "no result yet".into(),
+            },
+            TurnItem::ToolResult {
+                call: "orphan".into(),
+                output: "no matching call".into(),
+            },
+            TurnItem::ToolCall {
+                call: "refused".into(),
+                tool: "haskell".into(),
+                arguments: "respond value".into(),
+            },
+            TurnItem::ToolResult {
+                call: "refused".into(),
+                output: "reply not settled: an update has not been shown".into(),
+            },
+        ],
+    };
+    // Missing timestamps do not revoke the response owner's completed state.
+    let completed = turn(
+        "completed",
+        ConversationTurnState::Completed {
+            provider_response_id: None,
+        },
+    );
+    let older = turn(
+        "older",
+        ConversationTurnState::Completed {
+            provider_response_id: Some("provider-response".into()),
+        },
+    );
+    let histories = Arc::new(Mutex::new(VecDeque::from([
+        Ok(vec![
+            completed.clone(),
+            turn("active", ConversationTurnState::InProgress),
+        ]),
+        Ok(vec![
+            completed.clone(),
+            turn("interrupted", ConversationTurnState::Interrupted),
+        ]),
+        Ok(vec![
+            completed.clone(),
+            turn("unknown", ConversationTurnState::Unknown),
+        ]),
+        Ok(vec![older, completed]),
+        Ok(Vec::new()),
+        Err(ConversationUnavailable::Unbound),
+        Err(ConversationUnavailable::Unreadable(
+            "history read failed".into(),
+        )),
+    ])));
+    let remaining = Arc::clone(&histories);
+    let reader: exomonad_actor::ConversationReader = Arc::new(move |_actor, count| {
+        assert_eq!(count, 2, "the watchdog bounds its read before filtering");
+        let history = remaining.lock().pop_front().expect("one read per judgment");
+        Box::pin(async move { history })
+    });
+    let backend = Arc::new(ScriptedNoulJev {
+        requests: Mutex::new(Vec::new()),
+        likelihood: 0.0,
+    });
+    let campaign = TestCampaign::start_with_conversation(
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
+            pinned_jev_workspace(config);
+        },
+        Some(reader),
+    )
+    .await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let judged = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    include_str!("fixtures/watchdog_history_probe.hs"),
+                )
+                .await;
+                assert_eq!(judged["status"], "committed", "{judged}");
+                assert!(histories.lock().is_empty(), "every history was consumed");
+
+                let requests = backend.requests.lock();
+                assert_eq!(requests.len(), 7, "one real Jev input per history");
+                let calls = |identity: &str| {
+                    serde_json::json!([
+                        {"tool": format!("{identity}-first"), "arguments": "first arguments", "result": "first result"},
+                        {"tool": format!("{identity}-second"), "arguments": "second arguments", "result": "second result"},
+                    ])
+                };
+                for (index, request) in requests.iter().enumerate() {
+                    let state = request["state"]
+                        .as_object()
+                        .expect("the watchdog's rawState is a JSON object");
+                    let recent = &state["recent_calls"];
+                    match index {
+                        0..=2 => assert_eq!(recent, &serde_json::json!({
+                            "availability": "completed turns only; current turn excluded",
+                            "calls": calls("completed"),
+                        }), "mixed-state history {index}: {request}"),
+                        3 => {
+                            let mut expected = calls("older").as_array().unwrap().clone();
+                            expected.extend(calls("completed").as_array().unwrap().clone());
+                            assert_eq!(recent, &serde_json::json!({
+                                "availability": "completed turns only; current turn excluded",
+                                "calls": expected,
+                            }), "completed history order: {request}");
+                        }
+                        4 => assert_eq!(recent, &serde_json::json!({
+                            "availability": "completed turns only; current turn excluded",
+                            "calls": [],
+                        }), "available empty history: {request}"),
+                        5..=6 => assert_eq!(recent, &serde_json::json!({
+                            "availability": "unavailable",
+                        }), "unavailable history {index}: {request}"),
+                        _ => unreachable!(),
+                    }
+                }
+            })
+        })
+        .await;
+}
+
 /// `Project.Watchdog.watchBy` forwards a finished call's own displayed text
 /// into its own Jev ask (`rawState`'s `result` field, and each entry of
 /// `recent_calls`). Before `Watchdog.hs`'s `boundedEvidence`, that text was

@@ -60,8 +60,8 @@ import Tidepool.Agent.Contract
 import qualified Tidepool.Command.Tools as Command
 import Tidepool.Actors.Exomonad (parentAgent, sendMessage)
 import Tidepool.Effects.Core
-  ( ActorContext, ActorContextInfo (..), ConversationTurn (..), Jev, Notifications, Reflect
-  , TurnItem (..), actorContext, reflect
+  ( ActorContext, ActorContextInfo (..), ConversationTurn (..), ConversationTurnState (..)
+  , Jev, Notifications, Reflect, TurnItem (..), actorContext, reflect
   )
 import qualified Jev.Operators as J
 import qualified Project.Shell as Shell
@@ -84,9 +84,9 @@ data Heuristic = Heuristic
   }
 
 -- | 'repeatingItself' and 'ignoringAFailure' read @recent_calls@, which
--- 'watchBy' fills from this actor's own last 'historyDepth' COMPLETED turns
--- (see 'recentToolActivity'). A retry earlier in the turn now in progress is
--- not in there yet — 'reflect' only ever returns turns that have finished.
+-- 'watchBy' fills from completed turns among this actor's latest 'historyDepth'
+-- reflected turns (see 'recentToolActivity'). A retry in the turn now in progress is
+-- excluded from that completed-turn evidence.
 repeatingItself, guessingInsteadOfReading, ignoringAFailure, outOfScope, destructiveCommand :: Heuristic
 repeatingItself = Heuristic "repeating_itself"
   "Does this call retry an approach that already failed the same way in a recent call, per recent_calls?" 0.6
@@ -122,7 +122,8 @@ coreHeuristics = [repeatingItself, destructiveCommand]
 codingHeuristics :: [Heuristic]
 codingHeuristics = coreHeuristics <> [ignoringAFailure, outOfScope, guessingInsteadOfReading]
 
--- | How many of the actor's own completed turns 'recentToolActivity' reads.
+-- | How many of the actor's own latest turns 'recentToolActivity' reads.
+-- The read includes the active turn; only completed turns enter the evidence.
 -- Every judgment pays for what this returns, in packet size and in the read
 -- itself, so this stays small rather than reaching for the whole
 -- conversation. Raise it only if a heuristic actually needs to see further
@@ -130,12 +131,12 @@ codingHeuristics = coreHeuristics <> [ignoringAFailure, outOfScope, guessingInst
 historyDepth :: Int
 historyDepth = 2
 
--- | The tool calls and results from this actor's own last 'historyDepth'
--- completed turns, oldest first, each call paired with its result by call
--- identity — the @recent_calls@ evidence 'repeatingItself' and
--- 'ignoringAFailure' are worded to ask about. A call earlier in the turn now
--- in progress is not included: 'reflect' only ever returns turns that have
--- already completed. An unavailable history is explicitly marked, not treated
+-- | Completed calls from completed turns in this actor's latest
+-- 'historyDepth' reflected turns, oldest first, paired with their result by
+-- call identity. These are the @recent_calls@ evidence 'repeatingItself' and
+-- 'ignoringAFailure' ask about. In-progress, interrupted and unknown turns
+-- are excluded, as are calls without a result in their completed turn.
+-- An unavailable history is explicitly marked, not treated
 -- as evidence that an earlier read or corrective action never happened. A
 -- call the host refused to settle ('hostSettlementRefusal') is left out: it
 -- met request state the model does not control, not a failed approach.
@@ -150,6 +151,7 @@ recentToolActivity = do
         , "calls" .=
             [ object ["tool" .= name, "arguments" .= arguments, "result" .= boundedEvidence out]
             | t <- ts
+            , TurnCompleted _ <- [turnState t]
             , TurnToolCall callId name arguments <- turnItems t
             , TurnToolResult callId' out <- turnItems t
             , callId == callId'

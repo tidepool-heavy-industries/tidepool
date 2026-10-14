@@ -1112,6 +1112,7 @@ rust_filegroup(
         "src/actor_host/fixtures/terminal_transfer_request.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs",
         "src/actor_host/fixtures/terminal_transfer_setup.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs",
         "src/actor_host/fixtures/three_actor_workload_roster.json": "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json",
+        "src/actor_host/fixtures/watchdog_history_probe.hs": "bridge/facade/src/actor_host/fixtures/watchdog_history_probe.hs",
         "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/fresh_child_tests.rs": "bridge/facade/src/actor_host/fresh_child_tests.rs",
         "src/actor_host/harness_usecase_performance.rs": "bridge/facade/src/actor_host/harness_usecase_performance.rs",
@@ -2901,6 +2902,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs": "src/actor_host/fixtures/terminal_transfer_request.hs",
         "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs": "src/actor_host/fixtures/terminal_transfer_setup.hs",
         "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json": "src/actor_host/fixtures/three_actor_workload_roster.json",
+        "bridge/facade/src/actor_host/fixtures/watchdog_history_probe.hs": "src/actor_host/fixtures/watchdog_history_probe.hs",
         "bridge/facade/src/actor_host/form_output.rs": "src/actor_host/form_output.rs",
         "bridge/facade/src/actor_host/fresh_child_tests.rs": "src/actor_host/fresh_child_tests.rs",
         "bridge/facade/src/actor_host/harness_usecase_performance.rs": "src/actor_host/harness_usecase_performance.rs",
@@ -4248,6 +4250,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f75736167655f636f6d70617269736f6e732e6873",
     src = "src/actor_host/fixtures/usage_comparisons.hs",
     out = "usage_comparisons.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7761746368646f675f686973746f72795f70726f62652e6873",
+    src = "src/actor_host/fixtures/watchdog_history_probe.hs",
+    out = "watchdog_history_probe.hs",
     visibility = ["PUBLIC"],
 )
 
