@@ -6153,48 +6153,49 @@ where
                     InstalledToolCode::ExplicitLive(installer) => Some(Arc::clone(installer)),
                     InstalledToolCode::SourcePrepared(_) => None,
                 };
+                let selections = match &code {
+                    InstalledToolCode::SourcePrepared(_) => {
+                        public_original.iter().cloned().collect::<Vec<_>>()
+                    }
+                    InstalledToolCode::ExplicitLive(installer) => {
+                        installer.published_source_original_selections().to_vec()
+                    }
+                };
                 move |session, context, _, settlement| {
-                    let (outcome, warnings, pending_originals) = match (prepared, installer) {
+                    let pending_originals = if matches!(
+                        purpose,
+                        ToolInstallationPurpose::InitialTools
+                            | ToolInstallationPurpose::SpawnApplication
+                    ) && !selections.is_empty()
+                    {
+                        Some(session.stage_published_source_original_selections_in(
+                            public_scope,
+                            selections,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let (outcome, warnings) = match (prepared, installer) {
                         (Some(prepared), None) => {
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                             let entry =
                                 session.prepare_startup_entry(prepared.entry.compiled().code())?;
-                            let pending = None;
                             (
                                 session.run_startup_entry(entry, settlement),
                                 prepared.entry.compiled().warnings.warnings.clone(),
-                                pending,
                             )
                         }
-                        (None, Some(installer)) => {
-                            let selections =
-                                installer.published_source_original_selections().to_vec();
-                            let pending = if matches!(
-                                purpose,
-                                ToolInstallationPurpose::InitialTools
-                                    | ToolInstallationPurpose::SpawnApplication
-                            ) && !selections.is_empty()
-                            {
-                                Some(session.stage_published_source_original_selections_in(
-                                    public_scope,
-                                    selections,
-                                )?)
-                            } else {
-                                None
-                            };
-                            (
-                                session.run_rooted_entry_borrowed(
-                                    "agent_spec_installer",
-                                    &installer,
-                                    0,
-                                    context.placement.resource_scope,
-                                    None,
-                                    settlement,
-                                ),
-                                Vec::new(),
-                                pending,
-                            )
-                        }
+                        (None, Some(installer)) => (
+                            session.run_rooted_entry_borrowed(
+                                "agent_spec_installer",
+                                &installer,
+                                0,
+                                context.placement.resource_scope,
+                                None,
+                                settlement,
+                            ),
+                            Vec::new(),
+                        ),
                         _ => unreachable!("one installation producer"),
                     };
                     let step = start_fragment_settlement(
@@ -18273,6 +18274,31 @@ pub(crate) mod request_tests {
                 .prepare_tools(context.clone(), 1, vec![])
                 .await
                 .unwrap(),
+        );
+        let initial_originals = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                let view = session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap();
+                Ok(view
+                    .exact_declaration_context()
+                    .expect("initial installation publishes its issued original")
+                    .published_source_original_selections()
+                    .map_err(ResidentActorWorkbenchError::Compile)?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(initial_originals.len(), 1);
+        assert_eq!(
+            initial_originals[0].public_root(),
+            public_selection.public_root()
+        );
+        assert_eq!(initial_originals[0].revision(), public_selection.revision());
+        assert_eq!(
+            initial_originals[0].context().semantic_sha256(),
+            public_selection.context().semantic_sha256(),
+            "ordinary installation carries the exact completed original before durability"
         );
         workbench
             .access
