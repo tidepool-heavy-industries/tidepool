@@ -230,7 +230,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                 .unwrap();
             if !matches!(
                 original.module_interface().unwrap().origin(),
-                CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
             ) {
                 assert_eq!(
                     row[6],
