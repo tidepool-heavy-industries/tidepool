@@ -315,7 +315,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             effect.wire_name, effect.identity.rust_wire
         ));
     }
-    rust.push_str("            _ => ActorEffectKey::deserialize(\n                serde::de::value::StrDeserializer::<D::Error>::new(&name),\n            )\n            .map(Self::Actor),\n        }\n    }\n}\n");
+    rust.push_str("            _ => ActorEffectKey::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(\n                &name,\n            ))\n            .map(Self::Actor),\n        }\n    }\n}\n");
     let mut bridge = crate::gen::header("//! ", "Nominal actor effect key bridge");
     bridge.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]\npub enum ActorEffectKeyWire {\n");
     let mut bridge_effects = actor.clone();
