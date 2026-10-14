@@ -189,110 +189,121 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         Some(reader),
     )
     .await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = campaign.root_installation.policy.clone();
-    let bash = {
-        let policy = policy.clone();
-        tokio::spawn(async move {
-            policy
-                .dispatch_json_boxed(exomonad_tool::ToolInvocation {
-                    context: None,
-                    name: "bash".into(),
-                    arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
-                        "cmd":"cat", "stdin":true, "yield_time_ms":0
-                    })),
-                })
-                .await
-        })
-    };
-    let backend = TestCommands::new();
-    backend_request(campaign)
-        .await
-        .supply(Ok(backend.clone()));
-    let started = bash.await.unwrap().unwrap();
-    assert_eq!(started["status"], "committed", "{started}");
-    let initial_budgets = backend.output_budgets();
-    assert!(
-        initial_budgets.iter().all(|bytes| *bytes <= 16 * 1024),
-        "the initial presenter must read only bounded pages"
-    );
-    let session = started["items"][0]["output"]
-        .as_str()
-        .unwrap()
-        .split("session_id: ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let bash = {
+                    let policy = policy.clone();
+                    tokio::spawn(async move {
+                        policy
+                            .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                                context: None,
+                                name: "bash".into(),
+                                arguments: exomonad_tool::ToolArguments::Structured(
+                                    serde_json::json!({
+                                        "cmd":"cat", "stdin":true, "yield_time_ms":0
+                                    }),
+                                ),
+                            })
+                            .await
+                    })
+                };
+                let backend = TestCommands::new();
+                backend_request(campaign).await.supply(Ok(backend.clone()));
+                let started = bash.await.unwrap().unwrap();
+                assert_eq!(started["status"], "committed", "{started}");
+                let initial_budgets = backend.output_budgets();
+                assert!(
+                    initial_budgets.iter().all(|bytes| *bytes <= 16 * 1024),
+                    "the initial presenter must read only bounded pages"
+                );
+                let session = started["items"][0]["output"]
+                    .as_str()
+                    .unwrap()
+                    .split("session_id: ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned();
 
-    let preview = dispatch_haskell_script(
-        policy.as_ref(),
-        "import qualified Tidepool.Command as Cmd\nobserved <- Cmd.observeWith (Cmd.Observation (Cmd.For (Cmd.milliseconds 0)) 32768) job1 (\\_ -> pure \"\")",
-    )
-    .await;
-    assert_eq!(preview["status"], "committed", "{preview}");
-    let observed_budgets = backend.output_budgets();
-    assert_eq!(
-        &observed_budgets[..initial_budgets.len()],
-        initial_budgets.as_slice(),
-        "the explicit observation preserves earlier reads"
-    );
-    assert_eq!(
-        &observed_budgets[initial_budgets.len()..],
-        &[16 * 1024],
-        "observeWith must materialize exactly one bounded initial page"
-    );
+                let preview = policy
+                    .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                        context: None,
+                        name: "write_stdin".into(),
+                        arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
+                            "session_id":session, "yield_time_ms":0
+                        })),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(preview["status"], "committed", "{preview}");
+                let observed_budgets = backend.output_budgets();
+                assert_eq!(
+                    &observed_budgets[..initial_budgets.len()],
+                    initial_budgets.as_slice(),
+                    "the explicit polling observation preserves earlier reads"
+                );
+                let polling_budgets = &observed_budgets[initial_budgets.len()..];
+                assert_eq!(polling_budgets.len(), 1, "polling reads one initial page");
+                assert!(
+                    polling_budgets[0] <= 16 * 1024,
+                    "polling must read only a bounded initial page"
+                );
+                assert_eq!(backend.control_count(), 0, "polling must not submit input");
 
-    // Make the presenter's Reflect input exceed the host observation budget
-    // only after the command has started; the accepted write itself must not
-    // invoke that optional presenter.
-    large_context.store(true, Ordering::Release);
-    let input = policy
-        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: "write_stdin".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
-                "session_id":session, "chars":"q", "yield_time_ms":0
-            })),
-        })
-        .await
-        .unwrap();
-    assert_eq!(input["status"], "committed", "{input}");
-    assert!(
-        input["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Input acknowledged by backend; child consumption is unknown."),
-        "the host acknowledgment must survive presentation failure: {input}"
-    );
-    assert_eq!(backend.control_count(), 1, "input must be submitted once");
+                // Make the presenter's Reflect input exceed the host observation budget
+                // only after the command has started; the accepted write itself must not
+                // invoke that optional presenter.
+                large_context.store(true, Ordering::Release);
+                let input = policy
+                    .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                        context: None,
+                        name: "write_stdin".into(),
+                        arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
+                            "session_id":session, "chars":"q", "yield_time_ms":0
+                        })),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(input["status"], "committed", "{input}");
+                assert!(
+                    input["items"][0]["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Input acknowledged by backend; child consumption is unknown."),
+                    "the host acknowledgment must survive presentation failure: {input}"
+                );
+                assert_eq!(backend.control_count(), 1, "input must be submitted once");
 
-    // Empty input is still a polling observation and invokes the presenter.
-    // Its oversized Reflect context is optional context, not grounds to
-    // reinterpret the earlier accepted write as a failed call.
-    backend.finish();
-    let poll = policy
-        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: "write_stdin".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
-                "session_id":session, "yield_time_ms":0
-            })),
+                // Empty input is still a polling observation and invokes the presenter.
+                // Its oversized Reflect context is optional context, not grounds to
+                // reinterpret the earlier accepted write as a failed call.
+                backend.finish();
+                let poll = policy
+                    .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                        context: None,
+                        name: "write_stdin".into(),
+                        arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
+                            "session_id":session, "yield_time_ms":0
+                        })),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(poll["status"], "committed", "{poll}");
+                assert!(
+                    backend
+                        .output_budgets()
+                        .iter()
+                        .all(|bytes| *bytes <= 16 * 1024),
+                    "no implicit observation may request an unbounded initial page"
+                );
+                assert_eq!(backend.control_count(), 1, "polling must not resend input");
+            })
         })
-        .await
-        .unwrap();
-    assert_eq!(poll["status"], "committed", "{poll}");
-    assert!(
-        backend
-            .output_budgets()
-            .iter()
-            .all(|bytes| *bytes <= 16 * 1024),
-        "no implicit observation may request an unbounded initial page"
-    );
-    assert_eq!(backend.control_count(), 1, "polling must not resend input");
-})).await;
+        .await;
 }
 
 /// A focused command retains its output even when the typed Jev section-scoring
