@@ -9,9 +9,9 @@ cache gates remain pending. Keep Buck remote execution disabled with
 to configure the project worker.
 
 The checkout must be a provisioned Git checkout with `buck-out` bind-mounted to
-its own directory on `/srv/build`. Ask the infrastructure owner to provision a
-new mount for a new checkout; do not create a mount helper or replace an active
-output. Before any Buck invocation, run `findmnt --mountpoint "$PWD/buck-out"`
+its own directory on `/srv/build`. For a new inanna-owned checkout, run
+`swarm-checkout-storage provision "$PWD"`; do not hand-create mounts or replace
+active outputs. Before any Buck invocation, run `findmnt --mountpoint "$PWD/buck-out"`
 and stop if it is not a mount. Develop and build as `inanna`. Use `swarm-build`
 for the admitted `build.slice` scope; it enters the scope and runs the command
 as `inanna`. The first Buck command, including metadata queries, must run
@@ -482,6 +482,59 @@ clients in the same admitted slice so they can reuse the daemon. Do not restart
 a daemon with active work; coordinate any restart of an idle daemon owned by
 this checkout. Local execution remains required while the NativeLink project
 closure, isolation and cache gates are pending.
+
+### Resource closeout
+
+Warm caches support repeated checks. Give each retained daemon and output tree
+an owner and a next use: accumulated daemons without a continuing owner consume
+memory and inotify watches even while no command runs.
+
+Each lane's review or qualification handoff reports the checkout and source OID,
+Git/WIP disposition, daemon owner/PID/cgroup/isolation, active commands, exact
+outputs needed by runtime or evidence consumers, retained reports, and the next
+expected build. The coordinator keeps active delivery warm, including pending
+checks and repairs. When the owner confirms there is no near-term rebuild,
+release that lane's idle daemon with its pinned checkout entrypoint. Confirm its
+identity and empty `active_commands` immediately before stopping it; also inspect
+process working directories, open files and mapped executables for current owners
+or jobs using the checkout and scratch paths. A quiet CWD inventory alone does
+not establish idle ownership.
+
+For an already observed daemon in the usual `v2` isolation, inspect status without
+printing its local authentication token:
+
+```sh
+swarm-build bash scripts/buck2-run.sh --isolation-dir v2 status | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+print(json.dumps({k: s[k] for k in
+    ("project_root", "isolation_dir", "active_commands", "forkserver_pid")}
+    | {"daemon_pid": s["process_info"]["pid"]}))'
+swarm-build bash scripts/buck2-run.sh --isolation-dir v2 kill
+```
+
+Use the recorded isolation for a nondefault daemon. A status query can start a
+missing daemon, so observe its PID first. Stop only the accepted checkout's
+owned daemon; verify daemon and forkserver exit and retain the receipt. Keep
+shared compiler, Nix, NativeLink and live runtime services under their own owners.
+
+Scratch reclamation is a separate, authorized action. Record the exact mounted
+scratch identity, source/WIP, accepted evidence and retained-product dependencies
+before deleting selected disposable output subtrees. Preserve referenced artifact
+directories in place and inspect their relative symlink closure, declared runtime
+resources, manifests and loader dependencies. ELF `NEEDED` entries alone do not
+establish the complete runtime closure. Recheck open references after daemon
+exit; avoid symlink traversal, preserve protected paths and their ancestors, and
+verify retained hashes, links, source/Git state and mounts afterward. Retain bytes
+freed and unresolved dependencies. Leave a subtree intact when its retention
+boundary is uncertain. Source, Git, WIP and evidence have separate dispositions.
+
+Stopping a daemon or reclaiming selected outputs leaves the checkout registration
+and mount in place. Full retirement follows the infrastructure repository's
+`docs/checkout-retirement.md`: self-service registrations use
+`swarm-checkout-storage retire NAME --confirm-idle` after its idle checks;
+declarative mounts require the infrastructure owner. Resource metadata and
+closeout checks do not establish compilation, executed tests or release acceptance.
 
 Codex is deprecated and excluded from this migration. Its existing build path
 is retained separately. Toolchain-only Nix evaluation uses the repository's

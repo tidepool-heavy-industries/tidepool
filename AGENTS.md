@@ -269,6 +269,12 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   findings, accepted decisions, and unresolved questions. Reassign work when
   evidence changes the critical path; local acceptance does not replace
   combined acceptance.
+- Close each lane with its checkout/daemon owner, active commands, output and
+  runtime dependencies, retained evidence, and next expected build. After a
+  review or qualification handoff, the coordinator releases the lane's idle Buck
+  daemon when no near-term rebuild is planned; keep active delivery caches warm.
+  Artifact reclamation has a separate retention decision. Preserve source,
+  Git and WIP, and follow [resource closeout](docs/swarm-builds.md#resource-closeout).
 - Exomonad owns continuation: native Codex goals are disabled on every node,
   including root.
 - Judge cache preservation using actual normalized provider requests and usage,
