@@ -425,7 +425,7 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
           completionOrder <- newIORef []
           workers <- newMVar Set.empty
           releaseFirst <- newEmptyMVar
-          let inputs = PreparedModuleCompletionInputs
+          let inputs = PreparedModuleCompletionInputs Nothing
                 (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture")
               firstOwner = pmModule (head queue)
               secondOwner = pmModule (queue !! 1)
@@ -3654,7 +3654,7 @@ originalProjectionProducts = withScratch $ \work -> do
   pendingBodyCache <- newPreparedBodyCache
   pendingRawCache <- newOriginalProjectionCollector
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
-    let inputs = PreparedModuleCompletionInputs
+    let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules paired)))
           (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture")
         completionOrder = [consumer,ownerModule,provider,independent]
@@ -3721,7 +3721,7 @@ originalProjectionProducts = withScratch $ \work -> do
       {projectionRetainedGenerations=Map.singleton known 1})
     unless (unrelatedHit && not relevantHit) $
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
-    let inputs = PreparedModuleCompletionInputs
+    let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules captured)))
           (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture")
     (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor

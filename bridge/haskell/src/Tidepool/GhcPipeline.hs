@@ -32,7 +32,9 @@ module Tidepool.GhcPipeline
   , CompilerTransactionFailure(..)
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
-  , CompilerScope(..), CompilerScopeRunner, withResidentCompilerScopes
+  , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
+  , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
+  , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
   , withScopedExactInterfaceTransaction
   , withExactInterfaceTransaction
@@ -318,7 +320,8 @@ type PreparedModuleCompletion = HscEnv -> Map.Map ModuleName ModIface -> Module
 -- owner is distinct from a missing original; exact external executable groups
 -- are already supplied. Siblings retain the full finalized typed Id census.
 data PreparedModuleCompletionInputs = PreparedModuleCompletionInputs
-  { completionSourceOwners :: Set.Set Module
+  { completionRecovery :: Maybe CompilerRecoveryCaches
+  , completionSourceOwners :: Set.Set Module
   , completionSiblings :: Map.Map String Id
   , completionExternalOriginals :: Set.Set SymbolIdentity
   , completionExternalOriginalBindings :: Map.Map Name SymbolIdentity
@@ -1185,7 +1188,7 @@ data CompilerTransactionFailure
   | CompilerTransactionReleased
   | CompilerTransactionWrongThread
   | CompilerTransactionFailed
-  deriving (Show)
+  deriving (Eq, Show)
 
 instance Exception CompilerTransactionFailure
 
@@ -1284,16 +1287,15 @@ data CompletedOriginalVersion = CompletedOriginalVersion
 
 -- Only the active attempt carries targets and a mutable memo. It is released
 -- after the request; immutable dependency nodes survive independently.
-data ActiveCompilerAttempt = ActiveCompilerAttempt
+newtype ActiveCompilerAttempt = ActiveCompilerAttempt
   { activeEnvironment :: HscEnv
-  , activeRecovery :: CompilerRecoveryCaches
   }
 
 data CycleState
   = StandaloneCycle
   | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest))
       (Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion)))
-      (Map.Map Module CompletedModuleVersion -> IO ())
+      (Map.Map Module CompletedModuleVersion -> IO CompilerRecoveryCaches)
       (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
@@ -2142,6 +2144,7 @@ runCompileCycle
   :: PipelineSelection result -> CycleState
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
+    completionRecoveryRef <- liftIO (newIORef Nothing)
     packageFinder <- case cycleState of
       StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
       TransactionCycle _ _ _ _ _ _ facts _ -> pure facts
@@ -2700,7 +2703,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       StandaloneCycle -> pure ()
       TransactionCycle _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
         selectedVersions <- readIORef selectedVersionsRef
-        activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
+        recovery <- activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
+        writeIORef completionRecoveryRef (Just recovery)
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
           , ms_mod summary `Map.notMember` validatedMemo
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
@@ -3507,6 +3511,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   interfaces <- liftIO (readIORef productInterfacesRef)
                   siblings <- liftIO (readIORef preparedSiblingsRef)
                   externalBindings <- liftIO (availableOriginalBindings env)
+                  recovery <- liftIO (readIORef completionRecoveryRef)
                   let taskNames = Set.fromList (map fst tasks)
                       sourceOwners = Set.fromList
                         [ ms_mod summary | observation <- observations
@@ -3519,7 +3524,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                          ++ [binder | admitted <- Map.elems acceptedCandidates
                             , group <- candidateGroups (admittedCandidateOriginal admitted)
                             , binder <- candidateGroupBinders group])
-                      inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals externalBindings reuseContext
+                      inputs = PreparedModuleCompletionInputs recovery sourceOwners siblings externalOriginals externalBindings reuseContext
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
@@ -4794,17 +4799,51 @@ withResidentPipelineSelectedRequests baseIncludes useRequests =
 -- | Transaction-issued operations share one thread/phase guard. A released
 -- capability cannot access contexts retained by the worker for later requests.
 data CompilerScope = CompilerScope
-  { scopedCompile :: ResidentCompiler
-  , scopedReadExactScope :: FilePath -> IO (Either String ExactScope)
-  , scopedRunGhc :: forall result. Ghc result -> IO result
-  , scopedParserFlags :: DynFlags
-  , scopedRecoveryCaches :: IO CompilerRecoveryCaches
-  , scopedExecutor :: Maybe CompilerExecutor
+  { ownedScopedCompile :: ResidentCompiler
+  , ownedScopedCompileCompleted :: CompletedResidentCompiler
+  , ownedScopedReadExactScope :: FilePath -> IO (Either String ExactScope)
+  , ownedScopedRunGhc :: forall result. Ghc result -> IO result
+  , ownedScopedParserFlags :: DynFlags
   }
+
+-- Ordinary functions deliberately expose no record-update labels.
+scopedCompile :: CompilerScope -> ResidentCompiler
+scopedCompile = ownedScopedCompile
+
+scopedCompileCompleted :: CompilerScope -> CompletedResidentCompiler
+scopedCompileCompleted = ownedScopedCompileCompleted
+
+scopedReadExactScope :: CompilerScope -> FilePath -> IO (Either String ExactScope)
+scopedReadExactScope = ownedScopedReadExactScope
+
+scopedRunGhc :: CompilerScope -> Ghc result -> IO result
+scopedRunGhc = ownedScopedRunGhc
+
+scopedParserFlags :: CompilerScope -> DynFlags
+scopedParserFlags = ownedScopedParserFlags
 
 type ResidentCompiler = forall result.
   PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+
+-- Issued by the same guarded operation that completes the actual compiler result.
+-- Recovery references belong to that selection, independent of later operations.
+data CompletedCompilerResult result = CompletedCompilerResult result CompilerRecoveryCaches (IO ())
+
+completedCompilerResult :: CompletedCompilerResult result -> result
+completedCompilerResult (CompletedCompilerResult result _ _) = result
+
+completedCompilerRecovery :: CompletedCompilerResult result -> CompilerRecoveryCaches
+completedCompilerRecovery (CompletedCompilerResult _ recovery _) = recovery
+
+-- This closure retains only the issuing thread and its existing phase cell.
+-- It does not keep the resident universe or a usable compiler capability alive.
+completedCompilerGuard :: CompletedCompilerResult result -> IO ()
+completedCompilerGuard (CompletedCompilerResult _ _ guard) = guard
+
+type CompletedResidentCompiler = forall result.
+  PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> IO (CompletedCompilerResult result)
 
 type RequestRunner = forall requestResult.
   IO () -> (ResidentCompiler -> IO requestResult) -> IO requestResult
@@ -4849,7 +4888,16 @@ withResidentCompilerScopes baseIncludes useRequests = do
             interpreterAttempt <- newIORef InterpreterConfirmed
             operationPurpose <- newIORef "request"
             operationIdentity <- newTimingRequestIdentity >>= newIORef
-            let runGuarded :: forall result. IO result -> IO result
+            let requireReady = do
+                  caller <- myThreadId
+                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+                  state <- readIORef phase
+                  case state of
+                    CompilerReady -> pure ()
+                    CompilerRunning -> throwIO CompilerTransactionBusy
+                    CompilerFailed -> throwIO CompilerTransactionFailed
+                    CompilerClosed -> throwIO CompilerTransactionReleased
+                runGuarded :: forall result. IO result -> IO result
                 runGuarded operation = mask $ \restore -> do
                   caller <- myThreadId
                   unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
@@ -4891,12 +4939,15 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   writeIORef phase CompilerReady
                   pure result
                 compile :: ResidentCompiler
-                compile selection retained purpose mscope path includes products = runGuarded $ do
+                compile selection retained purpose mscope path includes products =
+                  completedCompilerResult <$> compileCompleted selection retained purpose mscope path includes products
+                compileCompleted :: CompletedResidentCompiler
+                compileCompleted selection retained purpose mscope path includes products = runGuarded $ do
                   requestIdentity <- newTimingRequestIdentity
                   writeIORef operationIdentity requestIdentity
                   writeIORef operationPurpose (compilePurposeLabel purpose)
                   reflectGhc
-                    (residentCompileOne producer selection retained universe active interpreterAttempt baseEnv baseFlags
+                    (residentCompileOne requireReady producer selection retained universe active interpreterAttempt baseEnv baseFlags
                       timing requestIdentity purpose mscope path includes products) session
                 readScope manifest = runGuarded $ do
                   selected <- readIORef universe
@@ -4927,16 +4978,6 @@ withResidentCompilerScopes baseIncludes useRequests = do
                           {hsc_FC=hsc_FC observed, hsc_unit_env=(hsc_unit_env (universeEnvironment state))
                             {ue_eps=ue_eps (hsc_unit_env observed)}}})
                       pure result)
-                recovery = do
-                  caller <- myThreadId
-                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
-                  state <- readIORef phase
-                  unless (state == CompilerReady || state == CompilerRunning)
-                    (throwIO CompilerTransactionReleased)
-                  current <- readIORef active
-                  case current of
-                    Just context -> pure (activeRecovery context)
-                    Nothing -> recoveryContextCaches . universeRecovery <$> readIORef universe
                 finish = do
                   writeIORef phase CompilerClosed
                   cancelled <- readIORef interrupted
@@ -4949,7 +4990,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     writeIORef availability ResidentBusy
                   writeIORef active Nothing
                   restoreBase
-            action (CompilerScope compile readScope runOperation parserFlags recovery Nothing) `finally` finish
+            action (CompilerScope compile compileCompleted readScope runOperation parserFlags) `finally` finish
           acquire = do
             caller <- myThreadId
             unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
@@ -5006,11 +5047,11 @@ sourceReuseAdmitted variant session = case pvExactScope variant of
   Nothing -> null (pvDownsweepExcludes variant)
 
 residentCompileOne
-  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity
+  :: IO () -> Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity
   -> IORef CompilerUniverse -> IORef (Maybe ActiveCompilerAttempt) -> IORef InterpreterAttemptState
   -> HscEnv -> DynFlags -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope
-  -> FilePath -> [FilePath] -> Maybe FilePath -> Ghc result
-residentCompileOne producer selection retained universeRef active interpreterAttempt baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
+  -> FilePath -> [FilePath] -> Maybe FilePath -> Ghc (CompletedCompilerResult result)
+residentCompileOne guard producer selection retained universeRef active interpreterAttempt baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
   sessionT0 <- monotonicTime
   resources <- beginResourceTiming timing
   selected <- liftIO $ case mscope of
@@ -5060,7 +5101,8 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
           ([(owner,completedOriginalRecovery node) | (owner,node) <- Map.toList originalNodes]
            ++ [(owner,completedModuleRecovery node) | (owner,node) <- Map.toList sourceNodes])
         writeIORef recoveryRef caches
-        writeIORef active (Just (ActiveCompilerAttempt attempt caches))
+        writeIORef active (Just (ActiveCompilerAttempt attempt))
+        pure caches
   setSession (hscUpdateFlags flags attempt {hsc_targets=[]})
   result <- runCompileCycle selection
     (TransactionCycle cache memo candidates
@@ -5070,7 +5112,7 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   final <- getSession
   targetOwner <- liftIO (targetModuleFor (hsc_mod_graph final) path)
   recovery <- liftIO (readIORef recoveryRef)
-  let context = ActiveCompilerAttempt final recovery
+  let context = ActiveCompilerAttempt final
       recoveryContext = RecoveryContext recoveryIdentity recovery
   snapshot <- liftIO (readIORef memo)
   let unsealed = unsealedSourceInputs variant final
@@ -5117,7 +5159,7 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
           originalVersions (universeOriginalVersions current)
           else universeOriginalVersions current })
-  pure result
+  pure (CompletedCompilerResult result recovery guard)
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,
 -- retaining the original environment on ordinary hits across changing views.

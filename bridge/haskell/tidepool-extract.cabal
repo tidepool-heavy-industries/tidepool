@@ -114,6 +114,7 @@ library tidepool-extract-internal
     Tidepool.PackageWitness
     Tidepool.CertifiedProducts
     Tidepool.CompilerProducts
+    Tidepool.CompilerRequest
     Tidepool.CompileInput
     Tidepool.PrimOps
     Tidepool.CompilerExecution
@@ -454,6 +455,7 @@ test-suite source-boot-product-reuse-test
   other-modules:    SourceBootCases
                     RequestInputsTest
                     PhysicalExecutableEpochTest
+                    CompilerRequestTest
                     BoundedReadTest
                     ExecutionSourceDecodeTest
                     Tidepool.Test.GenuineCandidate

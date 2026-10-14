@@ -40,7 +40,7 @@ import System.Process (ProcessHandle, getPid, getProcessExitCode)
 import System.Timeout (timeout)
 import Numeric (showHex)
 import Tidepool.GhcPipeline
-  ( CompilerScope(..), CompilerTransactionFailure(..), CheckedEnvironmentResult(..), PipelineSelection(..)
+  ( CompilerScope, scopedCompile, scopedRunGhc, CompilerTransactionFailure(..), CheckedEnvironmentResult(..), PipelineSelection(..)
   , CompilePurpose(..), renderType
   , withResidentCompilerScopes, withScopedExactInterfaceTransaction )
 import Tidepool.ExactHydration

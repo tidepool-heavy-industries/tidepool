@@ -3,6 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
+import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
 import SourceBootFixtureSupport (withTiming, withScratch)
@@ -17,7 +18,10 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "owned arena range reads" ownedArenaRangeReads
+  [ testCase "completed compiler request histories" completedRequestHistories
+  , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
+  , testCase "closed executor refuses completed cached preparation" completedRequestRelease
+  , testCase "owned arena range reads" ownedArenaRangeReads
   , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
   , testCase "owned scope input reuse" ownedScopeInputReuse

@@ -19,6 +19,17 @@ paired; consumers cannot construct or update the issued records. Refusal tests
 change raw inputs at their admission owner, and projection tests change the
 projection inputs without reissuing compiler results.
 
+`CompilerRequest` binds normalized worker arguments, admitted exact scope and
+one compiler executor before mode dispatch. `CompilerScope` exposes ordinary
+operations, never public record-update labels. A `PreparedCompilation` retains
+its actual compiler result, selected recovery references and compilation-local
+original worklist; concrete projection consumes that completion rather than
+reading the most recent compilation's context. Entry checks use the issuing
+thread/phase and executor's existing closed state, including empty projections.
+Retained facts may outlive that allowance; they do not authorize later effects.
+Package cells keep their existing GHC owner, and changed projection inputs still
+use the original worklist's validation and fallback.
+
 ## Build the compiler worker
 
 From the repository root, after materializing and configuring pinned tools:

@@ -1,6 +1,6 @@
 module Tidepool.CellProgramState
   ( ProgramCellState(programPrologue, programExact, programValues, programOriginal, programOriginals, programRetained, programSourceImports)
-  , initialProgramCellState, programItemOffset
+  , initialProgramCellState, programItemOffset, selectedProgramValues
   , recordDeclarationSegment, recordTypedSegment
   , programPlans, programObservations, programCaptureSignatures
   , programSources, programDeclarations, programTypedPlans
@@ -13,7 +13,7 @@ import Data.Word (Word64)
 import Tidepool.Binders
   ( SourcePrologue, CellSourcePlan(..), CellExpressionPlan )
 import Tidepool.CheckedCell (CheckedSignature)
-import Tidepool.CheckedPrefixImports (CompletedValueImport)
+import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.GhcPipeline (ProgramSourceImports)
@@ -77,3 +77,13 @@ programSources = toList . sourceHistory
 
 programDeclarations :: ProgramCellState -> [(Int,String)]
 programDeclarations = toList . declarationHistory
+
+selectedProgramValues :: [CompletedValueImport] -> [CompletedValueImport]
+selectedProgramValues values =
+  [value { completedValueBinders = kept }
+  | (index,value) <- zip [0::Int ..] values
+  , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value
+          , Map.lookup name winners == Just index]
+  , not (null kept)]
+  where winners = Map.fromList [(name,index) | (index,value) <- zip [0::Int ..] values
+          , (name,_) <- completedValueBinders value]

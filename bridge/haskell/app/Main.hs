@@ -14,8 +14,8 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, SomeException, Exception
-  , toException, IOException, bracket )
+  ( evaluate, try, throwIO, SomeException
+  , toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (intercalate, nub, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
@@ -33,14 +33,11 @@ import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Core (Bind(..), CoreBind)
-import Tidepool.ConstructorIdentity (IssuedConstructor)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-
-import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 
 import Tidepool.Binders
   ( extractBindersNamedGhc
@@ -60,49 +57,35 @@ import Tidepool.TypedSegment
   , TypedItemPlan(..), TypedItemBody(..), typedSegmentOriginalRoot, typedSegmentItems, typedItemPlan, typedItemRoot
   , typedItemCaptures, typedCaptureIdentifier, typedCaptureType, typedItemObservation
   , typedObservationLift, typedObservationValueType, ObservationLift(..) )
-import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, serialCompilerExecutionGrant, withCompilerExecutor)
-import GHC.Conc (getNumCapabilities, setNumCapabilities)
+import Tidepool.CompilerRequest
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
-  , pprPackageImports, pprAcceptedCandidates, pprReuseContext, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
+  , pprPackageImports, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements, retainProgramSourceImports
-  , withProgramSourceImports, CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
-  , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope(..), CompilerRecoveryCaches(..)
-  , withResidentCompilerScopes, withScopedExactInterfaceTransaction, checkCellInstances
+  , CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
+  , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
+  , withResidentCompilerScopes, checkCellInstances
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
-import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
+import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCacheAndReuse
-  , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
-  , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
-  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
-  , retainStagedProgramProducts, prepareCompilerProjectionContext
+  , retainStagedProgramProducts
   , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
-import Tidepool.HostBindingAuthority
-  ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
-import Tidepool.ExecutionSchema
-  ( SymbolIdentity(..)
-  , WireProgram(..), SiteRow(..) )
-import qualified Tidepool.ExecutionSchema as Execution
+import Tidepool.ExecutionProjection (preparedRootIdentity)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
-  ( pmModule, pmIdentityResolver, pmYieldSites )
-import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
-  , preparedRecoveryClosure, requirePreparedRecoveryPublication )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
+  ( pmModule, pmIdentityResolver )
 import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.CertifiedProducts (resolvePackageGlobal, homeInterfaceUsageOwners)
+import Tidepool.CertifiedProducts (homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedCore )
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained, unrecoveredExactProducts)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
   , generatedActivationPreviewRecipe
   , RenderedProtectedTemplateImports
@@ -119,23 +102,23 @@ import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
-  ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission )
+  ( validateCheckedCellAdmission, validateCheckedItemAdmission )
 import Tidepool.CheckedRecipe
   ( checkedItemCompilePurpose, checkedRecipeSourceWithLineOffset, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
-import Tidepool.ExtractRequest (RequestShapeError(..), RequestOperation(..), admitRequestOperation, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
+import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
-  ( ExactCompilation(..), ExactScope , scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopePurpose, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactCompilation(..), ExactScope , scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, ExactProduct(..), ExactOriginalGroup(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
+  , scopeCheckedCell, scopeCheckedItem
   , originalGroupFromProjected
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..)
-  , readExactScope, revalidateExactScope, scopeInterfaces, extendExactScopeGeneration, extendCheckedValueScope
+  , revalidateExactScope, scopeInterfaces, extendExactScopeGeneration, extendCheckedValueScope
   , scopeAvailableOriginalProducts
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -175,37 +158,6 @@ import Tidepool.DependencyEvidence
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 
--- | The retained-generation 'Set.Set' threads a request's
--- @--retained-generation@ symbols (see 'Tidepool.RetainedUnfoldings') into
--- the compile call so an imported retained-generation symbol's unfolding is
--- withheld from GHC's own simplifier rather than being inlined into a
--- consumer compiled in the same session. Every call site outside
--- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
--- only a prepared-STG compile recovers and persists retained-generation
--- 'GlobalDecl' references; metadata checks have nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
--- used only behind @--worker-loop-v2@) honors this parameter per compile too,
--- with an immutable withholding policy installed in each owning compiler view.
-type Compiler =
-  forall result. PipelineSelection result
-  -> Set.Set SymbolIdentity
-  -> CompilePurpose
-  -> Maybe SessionScope
-  -> FilePath
-  -> [FilePath]
-  -> Maybe FilePath
-  -> IO result
-
--- Recovery values share their completed resolution context's lifetime.
--- Acquire after compilation, when the current context has been selected.
-data RecoveryCaches = RecoveryCaches
-  { acquireRecoveryCaches :: IO CompilerRecoveryCaches
-  , recoveryExecutor :: Maybe CompilerExecutor
-  , recoveryOriginalWorklist :: IO (Maybe OriginalProductWorklist)
-  }
-
-scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
-scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) (pure Nothing)
-
 -- | Serve one typed request, or answer the role probe before compiler setup.
 -- For requests, stdout contains exactly one diagnostics document; stderr is
 -- the human-readable channel.
@@ -224,177 +176,67 @@ main = do
         WorkerServer.runWorkerLoop $ \serveTransaction ->
           runRequest (pure ()) $ \scope ->
             serveTransaction (\cwd argv ->
-              setCurrentDirectory cwd >> runWorkerInvocation scope (scopeRecoveryCaches scope) argv)
+              setCurrentDirectory cwd >> runWorkerInvocation scope argv)
     else do
       hSetEncoding stdout utf8
       -- Direct transport boots the same compiler owner once for all helpers.
       result <- withResidentCompilerScopes [] $ \runRequest ->
         runRequest (pure ()) $ \scope ->
-          runWorkerInvocation scope (scopeRecoveryCaches scope) rawWorkerRequest
+          runWorkerInvocation scope rawWorkerRequest
       exitWith result
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
 runWorkerInvocation
-  :: CompilerScope -> RecoveryCaches -> [String] -> IO ExitCode
-runWorkerInvocation compilerScope caches rawWorkerRequest = do
+  :: CompilerScope -> [String] -> IO ExitCode
+runWorkerInvocation compilerScope rawWorkerRequest = do
   parsedWorkerRequest <- case workerRequestFromArgv rawWorkerRequest of
     Left err -> hPutStrLn stderr err >> pure Nothing
     Right (Just request) -> pure (Just request)
     Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
   case parsedWorkerRequest of
     Nothing -> pure (ExitFailure 2)
-    Just request -> runParsedInvocation compilerScope caches request
+    Just request -> runParsedInvocation compilerScope request
 
-runParsedInvocation
-  :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
-runParsedInvocation compilerScope caches parsedWorkerRequest = do
-  grant <- either fail pure (compilerExecutionGrant (requestCompilerJobs parsedWorkerRequest))
-  bracket getNumCapabilities setNumCapabilities $ \_previous -> do
-    setNumCapabilities (requestCompilerCapabilities parsedWorkerRequest)
-    withCompilerExecutor grant $ \executor -> do
-      originalWorklist <- newIORef Nothing
-      let completion env interfaces owner exact inputs = do
-            recovery <- scopedRecoveryCaches compilerScope
-            (observer,worklist) <- observeOriginalProjectionWithRecovery
-              (compilerOriginalProjections recovery) (compilerPreparedBodies recovery) executor
-              (requestRetainedGenerations parsedWorkerRequest)
-              [preparedResumeTargetName,preparedApplyEntryTargetName,preparedApplyValueTargetName] Nothing
-              env interfaces owner exact inputs
-            writeIORef originalWorklist (Just worklist)
-            pure observer
-          observeProducts :: PipelineSelection result -> PipelineSelection result
-          observeProducts selection = case selection of
-            PreparedStg -> WithPreparedModuleCompletion completion selection
-            PreparedProducts _ -> WithPreparedModuleCompletion completion selection
-            _ -> selection
-          scope = compilerScope
-            { scopedCompile = \selection retained purpose session source includes products -> do
-                writeIORef originalWorklist Nothing
-                scopedCompile compilerScope
-                  (WithCompilerExecution grant executor (observeProducts selection))
-                  retained purpose session source includes products
-            , scopedExecutor = Just executor
-            }
-      runGrantedInvocation scope (caches
-        {recoveryExecutor=Just executor,recoveryOriginalWorklist=readIORef originalWorklist}) parsedWorkerRequest
-
-runGrantedInvocation
-  :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
-runGrantedInvocation compilerScope caches parsedWorkerRequest = do
-  -- Read once per invocation (see Tidepool.Timing) and thread down;
-  -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
-  -- files — see the module doc there.
+runParsedInvocation :: CompilerScope -> WorkerRequest -> IO ExitCode
+runParsedInvocation compilerScope parsed = do
   timing <- readTimingEnabled
-  -- Apply the harness language profile by rewriting a scratch copy:
-  -- rewrite the target to a pragma-prepended scratch copy BEFORE any mode
-  -- dispatch below, so every mode (one-shot, session, turn) sees a plain
-  -- file with no pragma-block requirement of its own. See
-  -- 'spliceHarnessProfilePragma'.
-  args <- if requestHarnessProfile parsedWorkerRequest && not (requestCheckSource parsedWorkerRequest)
-            then spliceHarnessProfilePragma parsedWorkerRequest
-            else pure parsedWorkerRequest
-  dispatch compilerScope caches timing args
+  admitted <- trySynchronous (withBoundCompilerRequest compilerScope parsed (dispatch timing))
+  either (reportDiags . Left) pure admitted
 
--- | Dispatch one decoded worker request.
--- The request owner decodes the offered metadata once. Compiler stages still
--- authenticate its current bytes and resolution before consuming it.
-data AdmittedRequest = AdmittedRequest
-  { admittedRequestScope :: Maybe ExactScope
-  , admittedRequestOperation :: RequestOperation
-  }
-
-dispatch
-  :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
-dispatch compilerScope caches timing args = do
-  admitted <- trySynchronous $ do
-    operation <- case admitRequestOperation args of
-      Left InvalidSourceCheckShape -> fail "source checking cannot carry product or notebook authority"
-      Left InvalidCellPlanShape -> throwIO InvalidCellPlanRequest
-      Left failure -> fail (show failure)
-      Right operation -> pure operation
-    exact <- forM (requestSessionArtifacts args) $ \manifest -> do
-      scope <- scopedReadExactScope compilerScope manifest >>= either fail pure
-      forM_ (scopeIncludePaths scope) $ \includes ->
-        unless (requestIncludes args == includes)
-          (throwIO SearchInputsChanged)
-      case scopePurpose scope of
-        NoCheckedPurpose -> pure ()
-        ExactInspectionPurpose values _ ->
-          unless (matchesInspectionAdmission args (map exactModule values))
-            (throwIO CheckedPurposeMismatch)
-        ExactReloadInspectionPurpose values _ ->
-          unless (matchesInspectionAdmission args (map exactModule values))
-            (throwIO CheckedPurposeMismatch)
-        ExactCellPurpose _ _ ->
-          unless (requestCell args && not (requestTurn args) && not (requestClassify args)
-            && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
-            && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
-            (throwIO CheckedPurposeMismatch)
-        ExactItemPurpose admission _ -> do
-          let previewPurpose = case itemPurpose admission of
-                AuthoredCheckedItem -> not (requestActivationPreview args)
-          unless (requestTurn args && not (requestCell args) && not (requestClassify args)
-            && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
-            && not (requestCertifyHomeProducts args) && previewPurpose
-            && not (isJust (requestTarget args)))
-            (throwIO CheckedPurposeMismatch)
-        ExactActivationPreviewPurpose _ _ ->
-          unless (requestActivationPreview args && requestTurn args
-            && length (requestFiles args) == 1 && null (requestTurnTemplates args)
-            && not (isJust (requestTurnVerdict args)) && not (requestCell args)
-            && not (requestCellPlan args) && not (requestCheckSource args)
-            && not (requestClassify args) && null (requestInspections args)
-            && not (isJust (requestDeclarationJoin args)) && not (requestCertifyHomeProducts args)
-            && not (requestHarnessProfile args) && null (requestTargets args)
-            && not (isJust (requestTarget args)) && null (requestInjectVals args)
-            && Map.null (requestRetainedGenerations args))
-            (throwIO CheckedPurposeMismatch)
-      pure scope
-    pure (AdmittedRequest exact operation)
-  case admitted of
-    Left failure -> reportDiags (Left failure)
-    Right request -> case admittedRequestOperation request of
-      DeclarationOperation manifest output -> runDeclarationOperation compilerScope args manifest output
-      _ -> dispatchSource compilerScope caches timing request args
-
-dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> AdmittedRequest -> WorkerRequest -> IO ExitCode
-dispatchSource compilerScope caches timing request args =
-  let admittedScope = compilerScope
-        { scopedCompile = \selection retained purpose session source includes products ->
-            scopedCompile compilerScope selection retained
-              (maybe purpose (ExactScopeCompile purpose) (admittedRequestScope request))
-              session source includes products
-        }
-      compiler :: Compiler
-      compiler = scopedCompile admittedScope
-  in
-  case requestFiles args of
-    [] -> reportDiags (Left (toException (userError "worker request contains no input")))
-    (file : _)
-        -- Classification consumes every input; all other modes use the first.
+-- Mode selection, normalized arguments and exact admission come from one owner.
+dispatch :: Bool -> BoundCompilerRequest -> IO ExitCode
+dispatch timing bound =
+  let args = boundWorkerRequest bound
+  in case boundRequestOperation bound of
+    DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
+    _ -> case requestFiles args of
+      [] -> reportDiags (Left (toException (userError "worker request contains no input")))
+      (file : _)
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
-                                                  -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
-        | otherwise -> case admittedRequestOperation request of
-            ActivationPreviewOperation -> runActivationPreviewMode (scopedParserFlags compilerScope) compiler caches request args file
-            SourceCheckOperation -> runSourceCheckMode compiler args file
-            CellPlanOperation -> runCellPlanMode (scopedParserFlags compilerScope) args file
-            CellOperation -> runCellMode admittedScope caches request args file
-            ClassificationOperation -> runClassifyMode (scopedParserFlags compilerScope) timing args
-            InspectionOperation -> runInspectionMode admittedScope args file
-            TurnOperation -> runTurnMode admittedScope caches request args file
-            SourceOperation -> timePhase timing "total" (processFile compiler caches timing args file)
-            DeclarationOperation manifest output -> runDeclarationOperation compilerScope args manifest output
+          -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
+        | otherwise -> case boundRequestOperation bound of
+            ActivationPreviewOperation -> runActivationPreviewMode bound file
+            SourceCheckOperation -> runSourceCheckMode bound file
+            CellPlanOperation -> runCellPlanMode (boundParserFlags bound) args file
+            CellOperation -> runCellMode bound file
+            ClassificationOperation -> runClassifyMode (boundParserFlags bound) timing args
+            InspectionOperation -> runInspectionMode bound file
+            TurnOperation -> runTurnMode bound file
+            SourceOperation -> timePhase timing "total" (processFile bound timing file)
+            DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
-runActivationPreviewMode :: DynFlags -> Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
-runActivationPreviewMode parserFlags compiler caches request args path = do
+runActivationPreviewMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runActivationPreviewMode bound path = do
+  let args = boundWorkerRequest bound
+      parserFlags = boundParserFlags bound
   timing <- readTimingEnabled
   lastAttempt <- newIORef Nothing
   result <- timePhase timing "total" $ trySynchronous $ do
-    exact <- requireArg "--session-artifacts" (admittedRequestScope request)
+    exact <- requireArg "--session-artifacts" (boundRequestExactScope bound)
     admission <- maybe (throwIO CheckedPurposeMismatch) pure (scopeActivationPreview exact)
     let readTemplate = withBinaryFile path ReadMode $ \handle -> do
           bytes <- BS.hGet handle ((32 * 1024 * 1024) + 1)
@@ -419,17 +261,18 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
             (previewOriginalTarget admission) protected named modulePath moduleName' >>= either fail pure
           pure (named, modulePath, GeneratedScaffoldCompile recipe basePurpose)
     (_, probePath, probePurpose) <- render opaque
-    probe <- compiler CheckedEnvironment Set.empty probePurpose (Just (scopeFromWorkerRequest args))
-      probePath (requestIncludes args) (requestBuildProductsDir args)
+    probe <- compileBoundRequest bound CheckedEnvironment Set.empty probePurpose (Just (scopeFromWorkerRequest args))
+      probePath
     input <- either fail pure (activationPreviewInputType (crTargetTcGblEnv probe))
     rendered <- satisfiesCapturedConstraint (crHscEnv probe) (crTargetTcGblEnv probe)
       "__tidepoolActivationConstraint" input
     (source, modulePath, purpose) <- render (if rendered
       then "TidepoolInspection.workbenchActivationDisplay " ++ show (previewBudget admission) ++ " __activationInput"
       else opaque)
-    prepared <- compiler (PreparedProducts (requestModuleCandidates args)) Set.empty purpose
-      (Just (scopeFromWorkerRequest args)) modulePath (requestIncludes args) (requestBuildProductsDir args)
-    let compiled = pprPipelineResult prepared
+    completion <- compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args)) Set.empty purpose
+      (Just (scopeFromWorkerRequest args)) modulePath
+    let prepared = preparedCompilationResult completion
+        compiled = pprPipelineResult prepared
         environment = prHscEnv compiled
         binds = prBinds compiled
     verifiedInput <- either fail pure (activationPreviewInputType (prTargetTcGblEnv compiled))
@@ -443,7 +286,7 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
     encodedWitness <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
     let witnessBytes = toStrictByteString encodedWitness
     projection <- try (prepareArtifactsWithProjection requirePreviewProjection
-      originalInterfaces outDir caches prepared [preparedScaffoldTargetName]
+      originalInterfaces outDir completion [preparedScaffoldTargetName]
       (standardAuxiliaryRoots binds) Map.empty [])
       :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedProductContext))
     validateDependencyEvidence (preparedFreshDependencies prepared)
@@ -476,19 +319,20 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
     Right _ -> pure ()
   reportDiags result
 
-runSourceCheckMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-runSourceCheckMode compiler args path = do
+runSourceCheckMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runSourceCheckMode bound path = do
+  let args = boundWorkerRequest bound
   checked <- trySynchronous $ do
-    compiled <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
-      Set.empty GeneralCompile Nothing path (requestIncludes args) (requestBuildProductsDir args)
+    compiled <- compileBoundRequest bound (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
+      Set.empty GeneralCompile Nothing path
     pure (crWarnings compiled)
   reportDiagsWithWarnings checked
 
-runDeclarationOperation :: CompilerScope -> WorkerRequest -> FilePath -> FilePath -> IO ExitCode
-runDeclarationOperation compilerScope args manifest out = do
+runDeclarationOperation :: BoundCompilerRequest -> FilePath -> FilePath -> IO ExitCode
+runDeclarationOperation bound manifest out = do
   result <- trySynchronous $ do
     operation <- readDeclarationOperation manifest
-    withScopedExactInterfaceTransaction compilerScope (requestIncludes args) $ \operations ->
+    withBoundExactInterfaceTransaction bound $ \operations ->
       case operation of
         InspectInventory artifacts -> renderDeclarationInventoryOutcome
           <$> inspectDeclarationArtifacts operations artifacts >>= writeFile out
@@ -517,16 +361,15 @@ runDeclarationOperation compilerScope args manifest out = do
             <> encodeBindingInterfacePurpose issuedPurpose)
   reportDiags result
 
-runInspectionMode :: CompilerScope -> WorkerRequest -> FilePath -> IO ExitCode
-runInspectionMode compilerScope args _path = do
-  let compiler :: Compiler
-      compiler = scopedCompile compilerScope
+runInspectionMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runInspectionMode bound _path = do
+  let args = boundWorkerRequest bound
   res <- trySynchronous $ do
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-        compile purpose path = compiler CheckedEnvironment Set.empty purpose scope path
-          (requestIncludes args) (requestBuildProductsDir args)
-        inspect successful requests = scopedRunGhc compilerScope $ runInspectionGhc
+        compile purpose path = compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
+
+        inspect successful requests = runBoundGhc bound $ runInspectionGhc
           (crHscEnv successful)
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
@@ -552,8 +395,9 @@ scopeFromWorkerRequest args = SessionScope
   }
 
 processFile
-  :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
-processFile compiler caches timing args path = do
+  :: BoundCompilerRequest -> Bool -> FilePath -> IO ExitCode
+processFile bound timing path = do
+  let args = boundWorkerRequest bound
   let mOutDir = requestOutDir args
       mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -563,8 +407,9 @@ processFile compiler caches timing args path = do
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
     let purpose = if requestCertifyHomeProducts args
           then CertifyHomeProductsCompile else GeneralCompile
-    prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) purpose scope path (requestIncludes args) (requestBuildProductsDir args)
-    let result = pprPipelineResult prepared
+    completion <- compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) purpose scope path
+    let prepared = preparedCompilationResult completion
+        result = pprPipelineResult prepared
     let binds = prBinds result
         hscEnv = prHscEnv result
         -- Inferred type of the eval's top expression (the @__user@ binding),
@@ -587,7 +432,7 @@ processFile compiler caches timing args path = do
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     (preparedArtifacts, productContext) <- prepareArtifactsWithIntent
       (if requestPortableOutput args then PortableExecutable else NativeOriginals)
-      originalInterfaces outDir caches prepared preparedTargets
+      originalInterfaces outDir completion preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -614,190 +459,6 @@ writeRequestProducts args originalInterfaces outDir prepared productContext prep
     writeCompileInputProof outDir (prHscEnv (pprPipelineResult prepared))
       (preparedFreshDependencies prepared) (pprPackageImports prepared)
   pure products
-
-data PreparedArtifact = PreparedArtifact
-  { paTarget :: String
-  , paProgram :: WireProgram
-  , paBytes :: BS.ByteString
-  , paConstructors :: [IssuedConstructor]
-  , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
-  }
-
--- Project before writing artifacts so the shared constructor
--- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
-  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithIntent NativeOriginals
-
-data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
-
-prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
-  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithIntent intent = prepareArtifactsWithProjectionIntent intent requireProjection
-
-prepareArtifactsWithProjection
-  :: (forall a. Either ProjectionError a -> IO a)
-  -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
-  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent NativeOriginals
-
-prepareArtifactsWithProjectionIntent
-  :: PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
-  -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
-  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjectionIntent _ _ _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
-  recoveryCaches <- acquireRecoveryCaches caches
-  timing <- readTimingEnabled
-  let result = pprPipelineResult prepared
-      hscEnv = prHscEnv result
-      interfaces = pprProductInterfaces prepared
-      modules = pprModules prepared
-      candidates = pprAcceptedCandidates prepared
-      exactScope = compilationScope <$> preparedExactCompilation prepared
-      targetModule = tcg_mod (prTargetTcGblEnv result)
-      matching = [preparedModule | preparedModule <- modules,
-        pmModule preparedModule == targetModule]
-  preparedModule <- case matching of
-    [value] -> pure value
-    values -> ioError (userError ("prepared target module selection was not unique: " ++ show (length values)))
-  firstContext <- prepareCompilerProjectionContext prepared retainedGenerations (pmModule preparedModule)
-    firstTarget auxiliaryRoots (case mapMaybe hostBindingRepresentationJsonAuthority hostBindings of
-      authority : _ -> Just authority
-      [] -> Nothing)
-  let contextFor target = firstContext
-        { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
-  let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
-      externalOriginalBinders = Set.fromList
-        ([binder | product <- exactProducts, group <- originalGroups product
-          , binder <- originalBinders group]
-         ++ [binder | candidate <- candidates, group <- candidateGroups candidate
-          , binder <- candidateGroupBinders group])
-  let prepareOriginal executor = do
-        acquired <- recoveryOriginalWorklist caches
-        case acquired of
-          Just worklist -> prepareOriginalProductsWithWorklist worklist
-            hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
-          Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
-            (compilerPreparedBodies recoveryCaches) (Just (compilerOriginalProjections recoveryCaches)) executor
-            hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
-  (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
-    case recoveryExecutor caches of
-      Just executor -> prepareOriginal executor
-      Nothing -> withCompilerExecutor serialCompilerExecutionGrant prepareOriginal
-  productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
-  inventory <- maybe (fail "current original admission did not issue its inventory") pure
-    (preparedCurrentOriginalInventory productContext)
-  originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
-  originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
-  let products = preparedProductInventory productContext
-      roots = Set.fromList (map (projectionEntry . contextFor) targets
-        ++ projectionAuxiliaryRoots firstContext)
-      originalBindings = case intent of
-        NativeOriginals -> currentOriginalBindingsExcept inventory roots
-        PortableExecutable -> Map.empty
-      withOriginals context = context {projectionCurrentOriginals = originalBindings}
-      admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
-  let originalProducts =
-        [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
-          either (Left . show) Right outcome)
-        | (owner, outcome) <- preparedModuleProductOutcomes products]
-      originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
-        originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-      exactOriginals =
-        [(originalUnit originalProduct, originalModule originalProduct,
-          [(originalOrdinal group, originalBinders group, originalGlobals group)
-           | group <- originalGroups originalProduct])
-        | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-  finalCandidates <- newIORef Map.empty
-  let demandPackages entry packageRoots recovered = do
-        let target = T.unpack (symbolOccurrence entry)
-            roots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
-            finalContext = (withOriginals (contextFor target))
-              { projectionAuxiliaryRoots = projectionAuxiliaryRoots (contextFor target) ++ roots }
-        requirePreparedRecoveryPublication target recovered
-        selected <- timePhase timing "prepared_project" $
-          project (prepareComponentProjectionWithReachability finalContext
-            (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
-        candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
-        project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate))
-        required <- either (ioError . userError) pure (originalPackageGlobals (candidateGlobals candidate))
-        let additions = Set.toAscList (Set.fromList required `Set.difference` Set.fromList roots)
-        if null additions then do
-          modifyIORef' finalCandidates (Map.insert entry (candidate,roots))
-          pure []
-        else forM additions $ \identity -> do
-          (identifier,_) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
-          when (preparedRootIdentity identifier /= identity) $
-            ioError (userError "package recovery root differs from canonical original global")
-          pure identifier
-  recover <- newPreparedRecoveryWithDemandAndReuse (Just (pprReuseContext prepared)) (recoveryExecutor caches) demandPackages
-    hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
-    (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
-  artifacts <- forM targets $ \target -> do
-    let context = withOriginals (contextFor target)
-    -- The same component ledger closes ordinary dependencies and exact
-    -- original-package demand before the final candidate is flattened.
-    closed <- timePhase timing "prepared_recover" (recover (projectionEntry context))
-    let recovered = preparedRecoveryClosure closed
-    candidatesByTarget <- readIORef finalCandidates
-    (candidate,roots) <- maybe (fail "closed recovery did not issue its final projected candidate") pure
-      (Map.lookup (projectionEntry context) candidatesByTarget)
-    (program,constructors) <- project (finalizePreparedCandidate candidate)
-    reportRecoveryResiduals target (closureFailures recovered)
-    when (intent == PortableExecutable) $ do
-      let homeUnit = T.pack (unitString (moduleUnit targetModule))
-          unresolvedHome = [Execution.globalIdentity global | global <- programGlobals program
-            , symbolUnit (Execution.globalIdentity global) == homeUnit]
-      unless (null unresolvedHome) $
-        fail ("portable output has unresolved home imports: " ++ show unresolvedHome)
-    let defined = Set.fromList
-          [identity | group <- programBindings program
-          , Execution.TopBinding identity _ <- case group of
-              Execution.NonRecursive binding -> [binding]
-              Execution.Recursive bindings -> bindings]
-    when (any (`Set.notMember` defined) roots) $
-      ioError (userError ("required original-group package root has no executable definition: "
-        ++ show (filter (`Set.notMember` defined) roots)))
-    bytes <- timePhase timing "prepared_encode" $ evaluate (encodeWireProgram program)
-    let admitted = Set.fromList (map siteId (programSites program))
-        yieldSites =
-          [ site
-          | preparedModule' <- closureModules recovered
-          , site <- pmYieldSites preparedModule'
-          , Tidepool.EffectSchema.ysSite site `Set.member` admitted
-          ]
-    allSites <- either (fail . ("conflicting executable site metadata: " ++) . show) pure
-      (Tidepool.EffectSchema.mergeYieldSites (yieldSites ++ originalSites))
-    sealedSites <- forM allSites $ \site -> do
-      witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
-        maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
-      pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
-    pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
-  pure (artifacts, Just productContext)
-
--- The pure preview boundary preserves only this chosen executable-demand
--- failure. Every other projection, source, authority, or IO failure keeps its
--- ordinary rejection path.
-newtype PreviewOriginalDependenciesUnavailable = PreviewOriginalDependenciesUnavailable [SymbolIdentity]
-  deriving Show
-instance Exception PreviewOriginalDependenciesUnavailable
-
-requirePreviewProjection :: Either ProjectionError a -> IO a
-requirePreviewProjection = \case
-  Left (UnavailableOriginalHomeDependencies identities) ->
-    throwIO (PreviewOriginalDependenciesUnavailable identities)
-  result -> requireProjection result
-
-requireProjection :: Either ProjectionError a -> IO a
-requireProjection = \case
-  Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
-  Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
-  Right projected -> evaluate projected
 
 -- | Filter the standard prepared-turn auxiliary root names
 -- ('preparedResumeTargetName' and the generic apply roots) down to those the
@@ -848,12 +509,6 @@ writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
         let asksName = if multiple then paTarget artifact ++ ".asks.json" else "asks.json"
         writeFile (outDir </> asksName) (renderAsksJson (paYieldSites artifact))
 
-reportRecoveryResiduals :: String -> [RecoveryFailure] -> IO ()
-reportRecoveryResiduals _ [] = pure ()
-reportRecoveryResiduals target failures =
-  hPutStrLn stderr $ "  Prepared recovery residuals (" ++ target ++ "): "
-    ++ show failures
-
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
 -- matching template, compile through the resident prepared-STG path, and write the rich
@@ -873,10 +528,9 @@ reportRecoveryResiduals target failures =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: CompilerScope -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
-runTurnMode compilerScope caches request args path = do
-  let compiler :: Compiler
-      compiler = scopedCompile compilerScope
+runTurnMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runTurnMode bound path = do
+  let args = boundWorkerRequest bound
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   lastAttempt <- newIORef Nothing
@@ -889,12 +543,12 @@ runTurnMode compilerScope caches request args path = do
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
-    let parserFlags = scopedParserFlags compilerScope
+    let parserFlags = boundParserFlags bound
     sb <- case mVerdict of
       Just verdict -> pure verdict
       Nothing -> timePhase timing "classify"
         (evaluate (classifyWithFlags parserFlags turnSrc))
-    let exact = admittedRequestScope request
+    let exact = boundRequestExactScope bound
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
@@ -909,13 +563,13 @@ runTurnMode compilerScope caches request args path = do
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule parserFlags outDir lastAttempt spliced
-        items <- timePhase timing "declaration_binders" $ scopedRunGhc compilerScope (extractBindersNamedGhc modulePath (requestIncludes args) modName)
+        items <- timePhase timing "declaration_binders" $ runBoundGhc bound (extractBindersNamedGhc modulePath (requestIncludes args) modName)
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
       _kind -> do
-        compileClassifiedTurn parserFlags compiler caches args timing outDir turnSrc sb bindersStr admittedItem lastAttempt exact
+        compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr admittedItem lastAttempt exact
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -957,13 +611,13 @@ writeSplicedModule flags outDir lastAttempt spliced = do
 -- | Compile one non-declaration turn from authored syntax or an admitted
 -- native recipe. Checked signatures remain compiler payloads, never type text.
 compileClassifiedTurn
-  :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  :: DynFlags -> BoundCompilerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
   -> IORef (Maybe (FilePath, String))
   -> Maybe ExactScope
   -> IO TurnOut
-compileClassifiedTurn flags compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt exact =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags) exact
+compileClassifiedTurn flags bound timing outDir turnSrc sb bindersStr admitted lastAttempt exact =
+  compiledTurn <$> compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags) exact
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -977,10 +631,11 @@ data TurnParseContext
   | PlannedTurnParse DynFlags SourcePrologue
 
 compileClassifiedTurnKeeping
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  :: BoundCompilerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
   -> IORef (Maybe (FilePath, String)) -> [String] -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext exact = do
+compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext exact = do
+    let args = boundWorkerRequest bound
     let (parserFlags, prologue) = case parseContext of
           StandaloneTurnParse flags -> (flags, Nothing)
           PlannedTurnParse flags authored -> (flags, Just authored)
@@ -1111,10 +766,9 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
               recipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
                 protectedOccurrences protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
-          compiler (PreparedProducts (requestModuleCandidates args))
+          compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
-            (Just scope) modulePath (requestIncludes args)
-            (requestBuildProductsDir args)
+            (Just scope) modulePath
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants _ ((index,tmplFile):rest) = do
           (protected, spliced, protectedOccurrences, modName, modulePath) <- spliceInto tmplFile
@@ -1125,8 +779,9 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
             Left err@(_ :: SomeException) -> case (sourceFailureDiagnostics err, rest) of
               (Just _, _ : _) | not (isJust admitted) -> compileVariants (index + 1) rest
               _               -> throwIO err
-    (variant, spliced, prepared) <- compileVariants (0 :: Int) matching
-    let result = pprPipelineResult prepared
+    (variant, spliced, completion) <- compileVariants (0 :: Int) matching
+    let prepared = preparedCompilationResult completion
+        result = pprPipelineResult prepared
         binds       = prBinds result
         hscEnv      = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
@@ -1139,7 +794,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir completion
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
@@ -1227,21 +882,23 @@ runCellPlanMode parserFlags args cellPath = do
     BS.writeFile out (toStrictByteString receipt)
   reportDiags result
 
-runCellMode :: CompilerScope -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
-runCellMode compilerScope caches request args cellPath = do
-  let exact = admittedRequestScope request
+runCellMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runCellMode bound cellPath = do
+  let exact = boundRequestExactScope bound
   case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
-    Just (scope, planned) -> runCellProgramMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches args cellPath scope planned
-    Nothing -> runLegacyCellMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches request args cellPath
+    Just (scope, planned) -> runCellProgramMode bound cellPath scope planned
+    Nothing -> runLegacyCellMode bound cellPath
 
-runLegacyCellMode :: DynFlags -> Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
-runLegacyCellMode parserFlags compiler caches request args cellPath = do
+runLegacyCellMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runLegacyCellMode bound cellPath = do
+  let args = boundWorkerRequest bound
+      parserFlags = boundParserFlags bound
   provisionalOutput <- newIORef Nothing
   res <- trySynchronous $ do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
-    let admittedScope = admittedRequestScope request
+    let admittedScope = boundRequestExactScope bound
     forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
       validateCheckedCellAdmission args admission cellSource template
     checkingTemplate <- case admittedScope >>= scopeCheckedCell of
@@ -1267,7 +924,7 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
     preparedDeclaration <- case admittedScope >>= \exact -> (,) exact <$> scopeCheckedCell exact of
       Just (exact, admission)
         | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
-            Just <$> prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initialPlan
+            Just <$> prepareOriginalCellDeclaration bound template outDir scope exact admission initialPlan
       _ -> pure Nothing
     let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact,_) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
         checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
@@ -1290,9 +947,9 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
             (checkedTemplateImports admission) mappedImports checkingTemplate rendered modulePath moduleName'
             >>= either fail pure
           pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
-      compiler checkedSelection Set.empty
+      compileBoundRequest bound checkedSelection Set.empty
         (withSourceImportIntents (cellPlanPrologue effective) compilePurpose)
-        scope modulePath (requestIncludes args) (requestBuildProductsDir args))
+        scope modulePath)
         (maybe initialPlan (\(plan,_,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
     let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
@@ -1332,9 +989,11 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
 
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
-runCellProgramMode :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> FilePath
+runCellProgramMode :: BoundCompilerRequest -> FilePath
   -> ExactScope -> PlannedCellAdmission -> IO ExitCode
-runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
+runCellProgramMode bound cellPath exact planned = do
+  let args = boundWorkerRequest bound
+      parserFlags = boundParserFlags bound
   timing <- readTimingEnabled
   attempted <- trySynchronous $ do
     source <- readFile cellPath
@@ -1384,16 +1043,14 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
     pure []
   reportDiagsWithWarnings attempted
   where
+    args = boundWorkerRequest bound
     compileSegment parserFlags timing admission template outDir batches state (segmentIndex, segment) = do
       let offset = programItemOffset state
           prefix = selectedProgramValues (programValues state)
           withPrefix = installProgramImports prefix (programOriginals state) segment
           scope = programExact state
-          localArgs = args { requestInjectVals = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell scope))
-            , requestRetainedGenerations = programRetained state }
-          scoped :: Compiler
-          scoped selection retained purpose session path includes products =
-            compiler selection retained (ExactScopeCompile (programPurpose state purpose) scope) session path includes products
+          segmentRequest = cellSegmentRequest bound state
+          localArgs = boundWorkerRequest segmentRequest
           directory = outDir </> "segment-" ++ show segmentIndex
       createDirectoryIfMissing True directory
       case cellPlanItems segment of
@@ -1405,7 +1062,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
           let owner = "Tidepool.Session.Lib.G" ++ show generation
               ownAdmission = admission { checkedReservedModules = [owner] }
           (finalized,_,inventory,extended,(prepared,certified)) <- timePhase timing "cell_program_declaration" $
-            prepareOriginalCellDeclaration scoped caches localArgs template directory
+            prepareOriginalCellDeclaration segmentRequest template directory
               (Just (scopeFromWorkerRequest localArgs)) scope ownAdmission withPrefix
           retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
             (certifiedFinalizedArtifacts certified) extended
@@ -1470,18 +1127,18 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                     purpose = GeneratedScaffoldCompile recipe
                       (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
                         (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] (programOriginal state) prefix)))
-                compiledSegment <- scoped (WithTypedSegmentPreparation prepare
+                compiledSegment <- compilePreparedSegmentRequest segmentRequest (WithTypedSegmentPreparation prepare
                   (PreparedSegmentProducts typedPlan (requestModuleCandidates localArgs)))
                   (Map.keysSet (requestRetainedGenerations localArgs))
                   (withSourceImportIntents (cellPlanPrologue plan) purpose)
-                  (Just (scopeFromWorkerRequest localArgs)) sourcePath (requestIncludes args) (requestBuildProductsDir args)
+                  (Just (scopeFromWorkerRequest localArgs)) sourcePath
                 pure (authored,compiledSegment)
           (finalized,(authored,compiled)) <- timePhase timing "cell_program_segment_frontend"
             (checkCellInstances compile withPrefix)
           (stagingRoot,batch) <- readIORef preparedBatch
             >>= maybe (fail "typed segment has no prepared Session batch") pure
-          let prepared = preparedSegmentProducts compiled
-              typed = preparedSegmentCaptures compiled
+          let (completion,typed) = compiled
+              prepared = preparedCompilationResult completion
               typedPlan = preparedTypedSegmentPlan authored
               rendered = preparedTypedSegmentSource authored
               result = pprPipelineResult prepared
@@ -1520,7 +1177,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             (fail "typed segment output collides with a retained generation")
           let projectionGenerations = Map.union producedGenerations (programRetained state)
           (artifacts,productContext) <- timePhase timing "cell_program_segment_project" $
-            prepareArtifacts originalInterfaces directory caches prepared targets (standardAuxiliaryRoots binds)
+            prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
               projectionGenerations (typedSegmentSessionBindingRepresentations batch)
           unless (length artifacts == length items) (fail "typed segment projection lost an entry")
           currentProducts <- maybe (fail "typed segment has no admitted original inventory") pure productContext
@@ -1609,30 +1266,8 @@ writeTypedItemReceipt root scope admission source plan original entry ordinal = 
     (fail "typed segment roots leave their ordinary value owner")
   BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)
 
-programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
-programPurpose state = withProgramSourceImports (programSourceImports state) . replacePurpose
-  where
-    replacePurpose purpose = case purpose of
-      ParsedImportSelection intents inner -> ParsedImportSelection intents (replacePurpose inner)
-      GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (replacePurpose inner)
-      GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (replacePurpose inner)
-      TypedSegmentCompile plan operations inner -> TypedSegmentCompile plan operations (replacePurpose inner)
-      OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
-      CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
-      other -> other
-
 programValueImport :: CompletedValueImport -> (String,[String])
 programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
-
-selectedProgramValues :: [CompletedValueImport] -> [CompletedValueImport]
-selectedProgramValues values =
-  [value { completedValueBinders = kept }
-  | (index,value) <- zip [0::Int ..] values
-  , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value
-          , Map.lookup name winners == Just index]
-  , not (null kept)]
-  where winners = Map.fromList [(name,index) | (index,value) <- zip [0::Int ..] values
-          , (name,_) <- completedValueBinders value]
 
 installProgramImports :: [CompletedValueImport] -> [((String,String),String)] -> CellSourcePlan -> CellSourcePlan
 installProgramImports values original plan = plan { cellPlanPrologue = prologue
@@ -1680,11 +1315,12 @@ addProgramValue root generation binders@(firstBinder:_) state = do
 -- The successful frontend's prepared interface supplies the declaration's
 -- native product and its retained type evidence.
 prepareOriginalCellDeclaration
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> String -> FilePath -> Maybe SessionScope
+  :: BoundCompilerRequest -> String -> FilePath -> Maybe SessionScope
   -> ExactScope -> CheckedCellAdmission -> CellSourcePlan
   -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope,
          (PreparedPipelineResult, CertifiedOriginalProducts))
-prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initial = do
+prepareOriginalCellDeclaration bound template outDir scope exact admission initial = do
+  let args = boundWorkerRequest bound
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
     _ -> throwIO InvalidDeclarationReservation
@@ -1699,20 +1335,20 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         pure original
       compileOriginal plan = do
         _ <- writeOriginal plan
-        compiler (PreparedProducts (requestModuleCandidates args))
+        compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args))
           (Map.keysSet (requestRetainedGenerations args))
           (withSourceImportIntents (cellPlanPrologue plan)
             (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
-          (requestIncludes args) (requestBuildProductsDir args)
   createDirectoryIfMissing True directory
-  (finalized, prepared) <- checkCellInstances compileOriginal initial
+  (finalized, completion) <- checkCellInstances compileOriginal initial
   original <- planned finalized
-  let result = pprPipelineResult prepared
+  let prepared = preparedCompilationResult completion
+      result = pprPipelineResult prepared
       environment = prHscEnv result
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
   originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
-  (artifacts, productContext) <- prepareArtifacts originalInterfaces directory caches prepared
+  (artifacts, productContext) <- prepareArtifacts originalInterfaces directory completion
     ["__result"] [] (requestRetainedGenerations args) []
   writePreparedSidecars SeparateYieldSites directory binds
     Nothing (map T.pack (prWarnings result)) artifacts
