@@ -139,7 +139,7 @@ tests =
           Tools.payload_lines = 1, Tools.complete = True} -> True
         _ -> False
       pageTextHasState =
-        "bytes 0..2 of 5 · more available" `T.isInfixOf` Tools.presentation output
+        "captured bytes 0..2 · retained from 0 through 5 · more available" `T.isInfixOf` Tools.presentation output
           && "next_offset: 2" `T.isInfixOf` Tools.presentation output
           && not ("lost 0 bytes" `T.isInfixOf` Tools.presentation output)
           && not ("lossy UTF-8" `T.isInfixOf` Tools.presentation output)
