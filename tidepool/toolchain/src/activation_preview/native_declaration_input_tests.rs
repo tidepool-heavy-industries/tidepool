@@ -221,9 +221,24 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| {
+        .filter_map(|row| {
             let row = row.as_array().unwrap();
             let module = string(&row[1]).unwrap();
+            let original = originals
+                .iter()
+                .find(|product| product.owner().module == module)
+                .unwrap();
+            if !matches!(
+                original.module_interface().unwrap().origin(),
+                CanonicalOrigin::NativeAuthoredDeclaration { .. }
+            ) {
+                assert_eq!(
+                    row[6],
+                    Value::Array(Vec::new()),
+                    "ordinary original custody does not advertise private native availability"
+                );
+                return None;
+            }
             // The manifest advertises ordinals; authenticated original groups
             // retain their independent binder identities and definitions.
             assert_eq!(
@@ -235,10 +250,6 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                 ),
                 "complete sparse native availability census"
             );
-            let original = originals
-                .iter()
-                .find(|product| product.owner().module == module)
-                .unwrap();
             let groups = crate::certified_products::original_available_groups(original)
                 .unwrap()
                 .collect::<Vec<_>>();
@@ -256,7 +267,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                     }]
                 );
             }
-            module.to_owned()
+            Some(module.to_owned())
         })
         .collect::<Vec<_>>();
     owners.sort();
