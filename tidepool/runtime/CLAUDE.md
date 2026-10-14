@@ -69,8 +69,9 @@ Notebook compilation first admits physical targets and checked-item receipts,
 then prepares existing cumulative declaration projections under one compiler
 ticket. The ticket closes normally before contextual item sealing, prefix
 assembly and candidate publication. `PreparedRuntimeCell` retains its physical
-scratch owner and checked facts across that boundary; an explicit
-`HostAdmissionCancellation` preserves invocation cancellation after END.
+scratch owner and checked facts across that boundary; the settled product carries
+its issuer's explicit `HostAdmissionCancellation` after END. Cell publication uses
+that observer, so a caller cannot substitute another stop edge.
 Convenience callers use `compile_cell_program_admitted`, which owns the same
 prepare/close/seal pipeline. Ticket owners use `prepare_cell_program_admitted`
 and pass the opaque owner-issued `CompilerTransactionSettled` product to

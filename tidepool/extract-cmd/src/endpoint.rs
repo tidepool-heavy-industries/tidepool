@@ -162,6 +162,7 @@ pub struct CompilerTransactionOutcome<T> {
 pub struct CompilerTransactionSettled<T> {
     outcome: CompilerTransactionOutcome<T>,
     origin: CompilerTransactionOrigin,
+    host_admission: Option<HostAdmissionCancellation>,
 }
 
 impl<T> CompilerTransactionSettled<T> {
@@ -171,6 +172,10 @@ impl<T> CompilerTransactionSettled<T> {
 
     pub fn close(&self) -> &CompilerTransactionClose {
         &self.outcome.close
+    }
+
+    pub fn host_admission_cancellation(&self) -> Option<&HostAdmissionCancellation> {
+        self.host_admission.as_ref()
     }
 
     pub fn belongs_to(&self, origin: &CompilerTransactionOrigin) -> bool {
@@ -2111,6 +2116,9 @@ fn with_compiler_transaction_inner<T>(
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionSettled<T> {
     let origin = CompilerTransactionOrigin(Arc::new(()));
+    let host_admission = cancellation
+        .as_ref()
+        .map(CompilerTransactionCancellation::host_admission_cancellation);
     TRANSACTION_SCOPE.with(|scope| {
         assert!(
             scope.borrow().is_none(),
@@ -2133,6 +2141,7 @@ fn with_compiler_transaction_inner<T>(
     let close = guard.finish();
     CompilerTransactionSettled {
         origin,
+        host_admission,
         outcome: CompilerTransactionOutcome { action, close },
     }
 }

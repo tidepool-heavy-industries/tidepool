@@ -70,8 +70,8 @@ scope. It returns `io::ErrorKind::Interrupted` when that scope is cancelled;
 unscoped work is allowed. Polling acquires no endpoint or admission and leaves
 accepted-request and END cleanup custody with the original owner.
 Post-close admission receives `HostAdmissionCancellation` explicitly from the
-invocation's compiler cancellation owner. This logical stop edge retains no
-transport and survives END and thread-local scope removal.
+invocation's compiler cancellation owner, carried by its settled product. This
+logical stop edge retains no transport and survives END and thread-local scope removal.
 Post-close sealing enters that explicit observer's synchronous `run_sync`
 extent so existing deep host checkpoints retain the stop relationship. Nested
 host observers all apply, and unwind restores the previous extent. This scope

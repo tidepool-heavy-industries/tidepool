@@ -2997,7 +2997,6 @@ pub fn prepare_cell_program_admitted(
 /// Unconfirmed close preserves exact input owners in the existing close evidence.
 pub fn finish_cell_program_admitted(
     outcome: crate::CompilerTransactionSettled<Result<PreparedRuntimeCell, CellCheckFailure>>,
-    cancellation: &crate::HostAdmissionCancellation,
 ) -> Result<
     (
         CellCheck,
@@ -3005,6 +3004,7 @@ pub fn finish_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
+    let cancellation = outcome.host_admission_cancellation().cloned();
     let belongs_to_owner = outcome
         .action()
         .as_ref()
@@ -3021,7 +3021,10 @@ pub fn finish_cell_program_admitted(
         )
         .into());
     }
-    prepared.seal(cancellation)
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+        crate::CompilerTransactionPublicationError::MissingOwner,
+    ))?;
+    prepared.seal(&cancellation)
 }
 
 impl PreparedRuntimeCell {
@@ -3064,7 +3067,6 @@ fn compile_cell_program_admitted_inner(
     CellCheckFailure,
 > {
     let cancellation = crate::CompilerTransactionCancellation::new();
-    let host = cancellation.host_admission_cancellation();
     let settlement = std::cell::RefCell::new(settlement);
     let outcome = crate::settle_compiler_transaction_cancellable(
         cancellation,
@@ -3088,7 +3090,7 @@ fn compile_cell_program_admitted_inner(
     if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, outcome.action()) {
         audit_compiler_issued_item_receipts(&prepared.offer, prepared.root.path(), test_name);
     }
-    let result = finish_cell_program_admitted(outcome, &host);
+    let result = finish_cell_program_admitted(outcome);
     #[cfg(test)]
     if let (CellProgramAudit::PublicationRefusal(cache), Some((root, _))) = (audit, &evidence) {
         let outcome = match &result {
@@ -7183,7 +7185,6 @@ mod tests {
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
-        let host = cancellation.host_admission_cancellation();
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = crate::settle_compiler_transaction_cancellable(
             cancellation.clone(),
@@ -7194,8 +7195,22 @@ mod tests {
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1, "one physical whole-cell request");
+        outcome
+            .host_admission_cancellation()
+            .unwrap()
+            .checkpoint()
+            .unwrap();
         cancellation.cancel();
-        let failure = finish_cell_program_admitted(outcome, &host).unwrap_err();
+        assert_eq!(
+            outcome
+                .host_admission_cancellation()
+                .unwrap()
+                .checkpoint()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        let failure = finish_cell_program_admitted(outcome).unwrap_err();
         assert!(
             matches!(failure.error, CompileError::Io(ref error) if error.kind() == std::io::ErrorKind::Interrupted)
         );
@@ -7221,7 +7236,6 @@ mod tests {
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
-        let host = cancellation.host_admission_cancellation();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = crate::settle_compiler_transaction_cancellable(
@@ -7247,7 +7261,7 @@ mod tests {
         assert!(root.join("cell.cbor").exists());
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1);
-        let failure = finish_cell_program_admitted(outcome, &host).unwrap_err();
+        let failure = finish_cell_program_admitted(outcome).unwrap_err();
         assert!(matches!(
             failure.error,
             CompileError::CompilerPreparationCloseUnconfirmed(_)
@@ -7304,14 +7318,13 @@ mod tests {
         let weak = Arc::downgrade(&prepared.root);
         let root = prepared.root.path().to_owned();
         let fresh = crate::CompilerTransactionCancellation::new();
-        let host = fresh.host_admission_cancellation();
         let reassociated =
             crate::settle_compiler_transaction_cancellable(fresh, |_| {}, || original.action);
         assert_eq!(
             *reassociated.close(),
             crate::CompilerTransactionClose::NotStarted
         );
-        let failure = finish_cell_program_admitted(reassociated, &host).unwrap_err();
+        let failure = finish_cell_program_admitted(reassociated).unwrap_err();
         assert!(matches!(
             failure.error,
             CompileError::CompilerPublication(
@@ -7341,7 +7354,6 @@ mod tests {
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
-        let host = cancellation.host_admission_cancellation();
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = crate::settle_compiler_transaction_cancellable(
             cancellation,
@@ -7357,7 +7369,7 @@ mod tests {
             "whole cell plus the existing cumulative declaration projection"
         );
         drop(fixture);
-        let (checked, program) = finish_cell_program_admitted(outcome, &host).unwrap();
+        let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
         assert_eq!(checked.items.len(), 2);
         assert_eq!(program.items().len(), 2);
         assert!(program.items()[0].native().is_none());
