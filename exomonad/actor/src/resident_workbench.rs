@@ -19804,6 +19804,7 @@ pub(crate) mod request_tests {
             }).await.unwrap();
             assert_eq!(public_after_refusal, public_before, "refused candidate preparation preserves public admission");
             let later = state.current().unwrap().select("probe").unwrap();
+            let later_last = state.current().unwrap().select("last_probe").unwrap();
             assert_eq!(pinned.lease().tools().unwrap().install, 1);
             assert_eq!(later.lease().tools().unwrap().install, 2);
             state.invalidate_source();
@@ -19817,7 +19818,7 @@ pub(crate) mod request_tests {
                 (pinned, "retained notebook value"),
                 (pinned_last, "retained notebook value"),
                 (later, "replacement notebook value"),
-                (state.current().unwrap().select("last_probe").unwrap(), "replacement notebook value"),
+                (later_last, "replacement notebook value"),
             ] {
                 let call = selected
                     .admit(exomonad_tool::ToolArguments::Raw("input".into()))

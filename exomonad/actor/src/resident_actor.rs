@@ -3943,7 +3943,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             installed_tools.as_ref().ok_or_else(|| KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
                 actor: context.actor,
-                detail: "cannot admit exact source layer: the source installation is unavailable; repair it with reload_helpers".into(),
+                detail: "cannot admit exact source layer: the source installation is unavailable; repair it with reload".into(),
                 diagnostic: None,
             })?.source().clone()
         };
