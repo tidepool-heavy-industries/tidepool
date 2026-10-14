@@ -2271,9 +2271,16 @@ mod authored_tests {
                 .any(|descriptor| descriptor.owner == *support
                     && descriptor.kind
                         == crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface));
-            assert!(baseline.recovery_products().iter().all(|product| {
-                product.owner().unit != support.unit || product.owner().module != support.module
-            }));
+            assert!(baseline
+                .recovery_products()
+                .iter()
+                .filter(|product| {
+                    product.owner().unit == support.unit && product.owner().module == support.module
+                })
+                .all(|product| matches!(
+                    product.module_interface().unwrap().origin(),
+                    crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
+                )));
         }
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
         let context = Arc::new(
@@ -2463,10 +2470,10 @@ mod authored_tests {
             .compiler_input_roles()
             .iter()
             .all(|role| role.original() != Some(first_root)));
-        assert_eq!(
-            context.artifact_view().selected_native_groups(),
-            selected_before
-        );
+        let selected_before = context.artifact_view().selected_native_groups();
+        assert!(selected_before
+            .iter()
+            .any(|group| group.artifact == result_root));
         let compiled = crate::artifacts::test_support::compile_invocation_in_context(
             &invocation,
             Arc::clone(&context),

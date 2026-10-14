@@ -805,8 +805,17 @@ pub(crate) fn assert_selected_authored_private_inputs(
     root: &Path,
     producer_bytes: &[u8],
 ) {
-    let native_context =
-        ExactDeclarationContext::new(std::slice::from_ref(certificate), &[], vec![]).unwrap();
+    let owner = certificate.product().owner();
+    let mut native_context = ExactDeclarationContext::new(
+        std::slice::from_ref(certificate),
+        &[],
+        vec![ExactLexicalNode {
+            owner: identity(&owner.unit, &owner.module),
+            imports: Vec::new(),
+        }],
+    )
+    .unwrap();
+    native_context.compiler_projection = native_context.compiler_projection.interface_only();
     let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
     let authored_root = native_context.authored_native_root(generation).unwrap();
     let selected_before = native_context.inventory.selected_native_groups();
@@ -897,6 +906,54 @@ pub(crate) fn assert_selected_authored_private_inputs(
         selected_before
     );
     assert_exact_offer(&native_context, "full-authored-exact-offer", true);
+    // Source-role demotion preserves the issuer's complete native group graph
+    // as custody. A later private offer must keep that graph without restoring
+    // lexical visibility or selecting executable groups in the captured context.
+    let mut captured = native_context.clone();
+    let interface_roles = captured.compiler_projection.interface_only();
+    let (custody, projection) = captured
+        .inventory
+        .inventory()
+        .empty_view()
+        .merge_compiler_inputs(
+            &CompilerInputProjection::default(),
+            &captured.inventory,
+            &interface_roles,
+        )
+        .unwrap();
+    captured.inventory = custody;
+    captured.compiler_projection = projection;
+    assert!(captured.inventory.selected_native_groups().is_empty());
+    assert!(captured
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    let before_custody = captured.clone();
+    let private =
+        OriginalCompilerInputs::from_selected_authored_declarations(&captured, producer, &[])
+            .unwrap()
+            .expect("complete issued authored group custody keeps private availability");
+    let captured_request = ExactCompileContext::new(Arc::new(captured.clone()))
+        .prepare_compilation_with_private_input(
+            &root.join("custodied-authored-scope"),
+            producer_bytes,
+            None,
+            Some(private),
+        )
+        .unwrap();
+    assert!(captured_request
+        .compiler_original_products()
+        .unwrap()
+        .iter()
+        .any(|product| product.owner() == certificate.product().owner()));
+    assert_eq!(captured_request.context().as_ref(), &before_custody);
+    assert!(captured_request
+        .compiler_inputs()
+        .metadata
+        .selected_native_groups
+        .is_empty());
+    assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
+    assert_eq!(captured, before_custody);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.

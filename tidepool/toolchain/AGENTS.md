@@ -27,6 +27,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   retain artifact or group nodes through snapshots, recovery and reclamation;
   only issued roots and their closure select executable groups. Later requests can
   select another body without recreating its issuing dependency versions.
+  Complete authored group custody can issue private native availability only
+  through one recorded original carrier paired to the selected canonical binding.
+  Artifact-only custody and unions across carriers cannot supply that proof.
+  Availability preserves exact dependency graphs without selecting executable
+  groups or restoring source, lexical or instance authority.
   Published originals retain their issuer's immutable artifact/group selection
   separately from later executable demand. Reopening and recovery validate that
   proof against exact retained custody; a broader inventory cannot recreate it.

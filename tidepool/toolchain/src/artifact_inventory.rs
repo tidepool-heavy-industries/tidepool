@@ -380,6 +380,94 @@ impl NativeOriginalRequirement {
         }))
     }
 
+    /// Qualify private availability from an already issued complete group
+    /// closure. Artifact bytes alone cannot supply this proof, and groups from
+    /// different original carriers cannot complete each other's census.
+    pub(crate) fn from_issued_group_custody(
+        original: ArtifactId,
+        canonical: ArtifactId,
+        view: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let projection = view.read_projection(&state);
+        let owned = &projection.nodes;
+        let Some(canonical_binding) = view.lease.selection.namespace.get(&canonical).copied()
+        else {
+            return Ok(None);
+        };
+        let Some(entry) = state.payloads.get(&original) else {
+            return Err(failure(
+                "private native original is outside retained custody",
+            ));
+        };
+        if !matches!(entry.payload, ArtifactPayload::Original(_)) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
+            ));
+        }
+        let ordinals = &entry.native_group_ordinals;
+        if ordinals.is_empty() {
+            return Ok(None);
+        }
+        let index = projection.native_selection(&state);
+        let mut complete = Vec::new();
+        for node in owned {
+            let InventoryNodeKey::Artifact(carrier) = node else {
+                continue;
+            };
+            if carrier.artifact != original
+                || view
+                    .lease
+                    .selection
+                    .namespace
+                    .get(&original)
+                    .is_some_and(|selected| selected != carrier)
+                || !state.graph.edges(state.indices[node]).any(|edge| {
+                    state.graph[edge.target()] == InventoryNodeKey::Artifact(canonical_binding)
+                        && *edge.weight() == ArtifactDependency::Interface
+                })
+            {
+                continue;
+            }
+            if !ordinals
+                .iter()
+                .all(|ordinal| index.groups.contains_key(&(*carrier, *ordinal)))
+            {
+                continue;
+            }
+            let groups = ordinals
+                .iter()
+                .map(|ordinal| index.resolve(*carrier, *ordinal))
+                .collect::<Result<Vec<_>, _>>()?;
+            complete.push((*carrier, groups));
+        }
+        let Some((carrier, groups)) = complete.pop() else {
+            return Ok(None);
+        };
+        if !complete.is_empty() {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+            ));
+        }
+        drop(state);
+        // Keep the exact group/dependency bindings available, without selecting
+        // them for execution. A later target's actual demand owns that choice.
+        let mut available = view.retain_projected_materializations(view.inventory().retain(
+            vec![InventoryNodeKey::Artifact(carrier)],
+            groups.into_iter().map(InventoryNodeKey::Group).collect(),
+            Vec::new(),
+            Vec::new(),
+        ))?;
+        available.replace_namespace(&BTreeMap::from([
+            (original, carrier),
+            (canonical, canonical_binding),
+        ]));
+        Ok(Some(Self {
+            original,
+            selection: ExactArtifactSelection::capture(&available),
+        }))
+    }
+
     /// Preserve every distinct supplied choice. A published role owns its
     /// explicit selection; ordinary roles use their pre-merge source issuer.
     pub(crate) fn for_projection(
@@ -5580,6 +5668,204 @@ mod view_read_properties;
 mod tests {
     use super::*;
 
+    proptest::proptest! {
+        #[test]
+        fn complete_native_group_custody_survives_demotion_histories(
+            count in 1u32..7, repeats in 1usize..12,
+        ) {
+            let inventory = ArtifactInventory::default();
+            let original = Arc::new(issued_native_groups("CustodiedAvailable",
+                (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
+            let id = original.descriptor.id;
+            let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
+            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
+            let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
+            for _ in 0..repeats {
+                view = inventory.empty_view().merge_compiler_inputs(
+                    &CompilerInputProjection::default(), &view, &roles,
+                ).unwrap().0;
+                let before = ExactArtifactSelection::capture(&view);
+                let proof = NativeOriginalRequirement::from_issued_group_custody(id, canonical, &view)
+                    .unwrap().expect("one complete issued carrier remains available");
+                proptest::prop_assert!(view.selected_native_groups().is_empty());
+                proptest::prop_assert!(proof.selection.graph_selection().roots.iter()
+                    .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
+                proptest::prop_assert_eq!(proof.selection.graph_selection().native_groups.iter()
+                    .filter(|group| group.binding.artifact == id).count(), count as usize);
+                proptest::prop_assert_eq!(ExactArtifactSelection::capture(&view), before);
+            }
+        }
+
+        #[test]
+        fn incomplete_native_carriers_cannot_union_their_available_census(
+            count in 2u32..7, pivot in 1u32..6,
+        ) {
+            let pivot = 1 + (pivot % (count - 1));
+            let inventory = ArtifactInventory::default();
+            let original = Arc::new(issued_native_groups("SplitAvailable",
+                (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
+            let id = original.descriptor.id;
+            let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
+            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
+            let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().unwrap().clone()));
+            let base = inventory.admit_shared(&inventory.empty_view(), vec![canonical_entry]).unwrap();
+            let canonical_binding = base.namespace()[&canonical];
+            let capture = |range: std::ops::Range<u32>, name: &str| inventory.admit_recovery_selection(
+                &base, vec![original.clone(), Arc::new(entry(name, &[]))],
+                &range.map(|original_ordinal| NativeGroupKey { artifact: id, original_ordinal }).collect(),
+            ).unwrap();
+            let left = capture(0..pivot, "LeftPartition");
+            let right = capture(pivot..count, "RightPartition");
+            proptest::prop_assert_eq!(left.namespace()[&canonical], canonical_binding);
+            proptest::prop_assert_eq!(right.namespace()[&canonical], canonical_binding);
+            proptest::prop_assert_ne!(left.namespace()[&id], right.namespace()[&id]);
+            let combined = left.merge_compiler_inputs(&roles, &right, &roles).unwrap().0;
+            proptest::prop_assert!(combined.selected_native_groups().is_empty());
+            proptest::prop_assert!(NativeOriginalRequirement::from_issued_group_custody(id, canonical, &combined)
+                .unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn private_native_availability_resolves_exact_carrier_authority_controls() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "CarrierAvailable",
+            vec![(3, Vec::new()), (7, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let id = native.descriptor.id;
+        let ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            product.module_interface().unwrap().clone(),
+        ));
+        let canonical_id = canonical.descriptor.id;
+        let base = inventory
+            .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+            .unwrap();
+        let canonical_binding = base.namespace()[&canonical_id];
+        let original_roles =
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+        let interface_roles = original_roles.interface_only();
+        let make = |name: &str, ordinals: &[u32]| {
+            let groups = ordinals
+                .iter()
+                .map(|original_ordinal| NativeGroupKey {
+                    artifact: id,
+                    original_ordinal: *original_ordinal,
+                })
+                .collect();
+            let view = inventory
+                .admit_recovery_selection(
+                    &base,
+                    vec![native.clone(), Arc::new(entry(name, &[]))],
+                    &groups,
+                )
+                .unwrap();
+            assert_eq!(
+                view.capture_graph_selection()
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact == id)
+                    .map(|group| group.original_ordinal)
+                    .collect::<BTreeSet<_>>(),
+                ordinals.iter().copied().collect()
+            );
+            view
+        };
+        let left = make("LeftCarrier", &[3, 7]);
+        let right = make("RightCarrier", &[3, 7]);
+        assert_eq!(left.namespace()[&canonical_id], canonical_binding);
+        assert_eq!(right.namespace()[&canonical_id], canonical_binding);
+        assert_ne!(left.namespace()[&id], right.namespace()[&id]);
+        let joined = left.merge(&right).unwrap();
+        let ambiguous = inventory
+            .empty_view()
+            .merge_compiler_inputs(
+                &CompilerInputProjection::default(),
+                &joined,
+                &interface_roles,
+            )
+            .unwrap()
+            .0;
+        assert!(
+            matches!(NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &ambiguous),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == id))
+        );
+        let chosen = left
+            .merge_compiler_inputs(&original_roles, &right, &interface_roles)
+            .unwrap()
+            .0;
+        let proof = NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &chosen)
+            .unwrap()
+            .unwrap();
+        assert!(proof
+            .selection
+            .graph_selection()
+            .bindings
+            .contains(&left.namespace()[&id]));
+        assert!(!proof
+            .selection
+            .graph_selection()
+            .bindings
+            .contains(&right.namespace()[&id]));
+
+        let partial = make("PartialCarrier", &[3]);
+        assert_eq!(partial.namespace()[&canonical_id], canonical_binding);
+        let no_fallback = partial
+            .merge_compiler_inputs(&original_roles, &right, &interface_roles)
+            .unwrap()
+            .0;
+        assert_eq!(no_fallback.namespace()[&id], partial.namespace()[&id]);
+        assert!(
+            NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &no_fallback)
+                .unwrap()
+                .is_none(),
+            "an explicit incomplete carrier cannot borrow another complete carrier"
+        );
+        let other_half = make("OtherPartialCarrier", &[7]);
+        assert_eq!(other_half.namespace()[&canonical_id], canonical_binding);
+        let split = partial.merge(&other_half).unwrap();
+        let split = inventory
+            .empty_view()
+            .merge_compiler_inputs(
+                &CompilerInputProjection::default(),
+                &split,
+                &interface_roles,
+            )
+            .unwrap()
+            .0;
+        assert!(
+            NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &split)
+                .unwrap()
+                .is_none()
+        );
+
+        let changed = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![canonical, Arc::new(entry("AnotherCanonicalScope", &[]))],
+            )
+            .unwrap();
+        assert_ne!(changed.namespace()[&canonical_id], canonical_binding);
+        let mismatch = changed
+            .merge_compiler_inputs(&interface_roles, &left, &interface_roles)
+            .unwrap()
+            .0;
+        assert!(
+            NativeOriginalRequirement::from_issued_group_custody(id, canonical_id, &mismatch)
+                .unwrap()
+                .is_none(),
+            "equal canonical bytes cannot substitute another recorded binding"
+        );
+    }
+
     #[test]
     fn reissued_selection_observation_does_not_embed_a_large_native_graph() {
         let inventory = ArtifactInventory::default();
@@ -10449,6 +10735,30 @@ mod tests {
         assert_eq!(restored.capture_graph_selection(), graph);
         assert_eq!(restored.binding_dependencies(), edges);
         for view in [&demanded, &restored] {
+            let ArtifactPayload::Original(product) = &native.payload else {
+                unreachable!()
+            };
+            let canonical_id =
+                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                    .descriptor
+                    .id;
+            let proof =
+                NativeOriginalRequirement::from_issued_group_custody(native_id, canonical_id, view)
+                    .unwrap()
+                    .unwrap();
+            assert!(proof
+                .selection
+                .graph_selection()
+                .native_groups
+                .iter()
+                .any(|group| group.original_ordinal == 7
+                    && group.binding.selection != original_binding.selection));
+            assert!(proof
+                .selection
+                .graph_selection()
+                .roots
+                .iter()
+                .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
             view.native_requirements_from_roots(&[NativeRequirementRoot::Group {
                 artifact: native_id,
                 original_ordinal: 7,

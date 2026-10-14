@@ -349,19 +349,11 @@ impl OriginalCompilerInputs {
             .into_iter()
             .map(|role| (role.interface(), role.original()))
             .collect::<BTreeMap<_, _>>();
-        let selected = metadata
-            .selected_native_groups
-            .iter()
-            .map(|group| group.artifact)
-            .collect::<BTreeSet<_>>();
         let mut products = Vec::new();
-        for id in selected {
-            let entry = metadata
-                .artifacts
-                .get(&id)
-                .ok_or_else(|| failure("selected native group lost its original artifact"))?;
+        let mut availability = Vec::new();
+        for (id, entry) in &metadata.artifacts {
             let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(failure("selected native group has no original product"));
+                continue;
             };
             let Some(interface) = product.module_interface().filter(|interface| {
                 matches!(
@@ -377,21 +369,20 @@ impl OriginalCompilerInputs {
                 // independent names in the current compiler namespace.
                 continue;
             };
-            if original.is_some_and(|original| original != id) {
+            if original.is_some_and(|original| original != *id) {
                 continue;
             }
-            // A selected dependency group alone grants no availability for
-            // other bodies in the same original module.
-            let complete = crate::certified_products::original_available_groups(product)
-                .map_err(compiler_evidence_failure)?
-                .all(|group| {
-                    metadata.selected_native_groups.contains(&NativeGroupKey {
-                        artifact: id,
-                        original_ordinal: group.original_ordinal(),
-                    })
-                });
-            if complete {
+            // A complete body must retain one exact issued carrier graph.
+            // Neither selected ordinal unions nor byte custody issue this fact.
+            let proof =
+                crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
+                    *id,
+                    canonical,
+                    &context.inventory,
+                )?;
+            if let Some(proof) = proof {
                 products.push(product.clone());
+                availability.push(proof);
             }
         }
         // Validate the complete issued private namespace together: an authored
@@ -401,7 +392,13 @@ impl OriginalCompilerInputs {
         if products.is_empty() {
             Ok(None)
         } else {
-            Self::from_native_availability(context, producer, &products).map(Some)
+            Self::from_native_availability_with_requirements(
+                context,
+                producer,
+                &products,
+                &availability,
+            )
+            .map(Some)
         }
     }
 
@@ -435,6 +432,15 @@ impl OriginalCompilerInputs {
         context: &ExactDeclarationContext,
         producer: CanonicalProducerIdentity,
         products: &[CertifiedRecoveryProduct],
+    ) -> Result<Self, CompileError> {
+        Self::from_native_availability_with_requirements(context, producer, products, &[])
+    }
+
+    fn from_native_availability_with_requirements(
+        context: &ExactDeclarationContext,
+        producer: CanonicalProducerIdentity,
+        products: &[CertifiedRecoveryProduct],
+        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
     ) -> Result<Self, CompileError> {
         let selected = context.compiler_metadata_snapshot()?;
         let retained = context.inventory.metadata_snapshot();
@@ -473,11 +479,16 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+        let mut preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
             &context.compiler_projection,
             &context.inventory,
             &[],
         )?;
+        for proof in availability {
+            if !preferred.contains(proof) {
+                preferred.push(proof.clone());
+            }
+        }
         let native_original_requirements =
             capture_native_original_requirements(&projection, &context.inventory, &preferred)?;
         let effective = context.compiler_projection.merge(&projection)?;
