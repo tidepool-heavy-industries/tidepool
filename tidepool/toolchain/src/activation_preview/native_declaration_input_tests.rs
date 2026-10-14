@@ -270,12 +270,21 @@ pub(crate) fn with_irrelevant_values(
     versions: &[u8],
     lexical_value: bool,
 ) -> Arc<ExactDeclarationContext> {
+    with_irrelevant_values_named(context, versions, lexical_value, "Tidepool.Session.Val.G")
+}
+
+pub(crate) fn with_irrelevant_values_named(
+    context: &Arc<ExactDeclarationContext>,
+    versions: &[u8],
+    lexical_value: bool,
+    module_prefix: &str,
+) -> Arc<ExactDeclarationContext> {
     let producer = context.toolchain_identity_sha256();
     let values = versions
         .iter()
         .enumerate()
         .map(|(index, version)| {
-            let module = format!("Tidepool.Session.Val.G{}", index + 100);
+            let module = format!("{module_prefix}{}", index + 100);
             let bytes = vec![*version];
             let package_roots = array([
                 text("TPPKGROOTS"),
@@ -321,6 +330,55 @@ pub(crate) fn with_irrelevant_values(
             expanded.artifact_view(),
             expanded.compiler_input_projection().clone(),
             lexical,
+            context.original_instance_target().unwrap().clone(),
+            &[],
+        )
+        .unwrap(),
+    )
+}
+
+pub(crate) fn admit_irrelevant_value_root(
+    context: &Arc<ExactDeclarationContext>,
+    module: &str,
+) -> Arc<ExactDeclarationContext> {
+    let producer = context.toolchain_identity_sha256();
+    let bytes = vec![0x6b];
+    let package_roots = array([
+        text("TPPKGROOTS"),
+        text("2"),
+        array([text("main"), text(module), text(hash(&bytes))]),
+        array([]),
+        array([]),
+    ]);
+    let mut packages = Vec::new();
+    ciborium::into_writer(&package_roots, &mut packages).unwrap();
+    let interface = Arc::new(crate::artifact_inventory::ArtifactEntry::interface(
+        crate::recovery_artifacts::CertifiedJoinedInterface::from_certification(
+            producer,
+            "main".into(),
+            module.into(),
+            bytes,
+            packages,
+        )
+        .unwrap(),
+        crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
+        Vec::new(),
+    ));
+    let view = context
+        .artifact_view()
+        .inventory()
+        .admit_shared_with_demand(
+            context.artifact_view(),
+            vec![interface],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    Arc::new(
+        ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            &view,
+            context.compiler_input_projection().clone(),
+            context.lexical_graph().to_vec(),
             context.original_instance_target().unwrap().clone(),
             &[],
         )

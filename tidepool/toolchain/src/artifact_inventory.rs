@@ -5463,14 +5463,14 @@ impl ArtifactView {
     /// dependency closure of retained roots, but are not promoted to roots.
     pub(crate) fn without_value_interface_roots(
         &self,
-        excluded: &BTreeSet<ExactModuleIdentity>,
+        excluded: &BTreeSet<ArtifactId>,
     ) -> Result<Self, CompileError> {
         if excluded.is_empty() {
             return Ok(self.clone());
         }
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let is_excluded_value = |node: &InventoryNodeKey| {
-            excluded.contains(&state.payloads[&node.artifact()].descriptor.owner)
+            excluded.contains(&node.artifact())
                 && matches!(
                     state.payloads[&node.artifact()].payload,
                     ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
@@ -6600,7 +6600,10 @@ mod tests {
                 )
                 .unwrap();
             if test_display_projection {
-                let expanded = Arc::new(context.clone());
+                let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
+                    &Arc::new(context.clone()),
+                    "Tidepool.Session.ProjectionAudit.G100",
+                );
                 let prototype_context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
                     [2; 32],
                     selected,
@@ -6616,6 +6619,26 @@ mod tests {
                         &Arc::new(prototype_context),
                     );
                 let before = expanded.artifact_view().capture_graph_selection();
+                let irrelevant_value = expanded
+                    .artifact_view()
+                    .entries()
+                    .into_iter()
+                    .find(|entry| {
+                        matches!(
+                            &entry.payload,
+                            ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                        ) && entry.descriptor.owner.module
+                            == "Tidepool.Session.ProjectionAudit.G100"
+                    })
+                    .expect("the display input carries one irrelevant value root");
+                let irrelevant_binding = before
+                    .bindings
+                    .iter()
+                    .copied()
+                    .find(|binding| binding.artifact == irrelevant_value.descriptor.id)
+                    .unwrap();
+                let irrelevant_root = ArtifactBindingNode::Artifact(irrelevant_binding);
+                assert!(before.roots.contains(&irrelevant_root));
                 assert!(
                     !before.native_groups.is_empty(),
                     "selected exact group bindings are present"
@@ -6662,9 +6685,25 @@ mod tests {
                     "activation display must preserve the exact nonempty demand"
                 );
                 let after = projected.artifact_view().capture_graph_selection();
+                let expected_roots = before
+                    .roots
+                    .iter()
+                    .copied()
+                    .filter(|root| *root != irrelevant_root)
+                    .collect::<Vec<_>>();
                 assert_eq!(
-                    after.roots, before.roots,
-                    "exact issued demand roots survive"
+                    after.roots, expected_roots,
+                    "only the irrelevant value root is removed"
+                );
+                assert_eq!(
+                    after.bindings,
+                    before
+                        .bindings
+                        .iter()
+                        .copied()
+                        .filter(|binding| *binding != irrelevant_binding)
+                        .collect::<Vec<_>>(),
+                    "the value root is the only removed artifact binding"
                 );
                 assert_eq!(
                     after.native_groups, before.native_groups,
@@ -6677,6 +6716,7 @@ mod tests {
                     "exact selected child closures survive"
                 );
             }
+            let before_retention = inventory.metrics().installed_binding_rows;
             let value = prefix
                 .interface_projection(&[native.descriptor.owner.clone()])
                 .unwrap();
@@ -6691,7 +6731,7 @@ mod tests {
                     .native_groups,
                 prefix.capture_graph_selection().native_groups
             );
-            assert_eq!(inventory.metrics().installed_binding_rows, before);
+            assert_eq!(inventory.metrics().installed_binding_rows, before_retention);
             assert_eq!(
                 retained.compiler_artifacts.namespace()[&id],
                 prefix.namespace()[&id]
@@ -11066,7 +11106,7 @@ mod tests {
         }));
 
         let projected = view
-            .without_value_interface_roots(&BTreeSet::from([value.descriptor.owner.clone()]))
+            .without_value_interface_roots(&BTreeSet::from([value.descriptor.id]))
             .unwrap();
         let after = projected.capture_graph_selection();
         assert!(!after.roots.contains(&value_root));
@@ -11083,6 +11123,46 @@ mod tests {
                 .copied()
                 .unwrap(),
         )));
+    }
+
+    #[test]
+    fn same_owner_distinct_value_roots_are_rejected_before_projection() {
+        let inventory = ArtifactInventory::default();
+        let make_value = |producer| {
+            let interface = crate::certified_products::fixture_module_interface(
+                producer,
+                "fixture",
+                "SameOwnerValue",
+                BTreeMap::new(),
+            );
+            Arc::new(ArtifactEntry::interface(
+                CertifiedJoinedInterface::from_certification(
+                    producer,
+                    "fixture".into(),
+                    "SameOwnerValue".into(),
+                    interface.interface_bytes().to_vec(),
+                    interface.package_imports_bytes().to_vec(),
+                )
+                .unwrap(),
+                JoinedInterfaceRole::ValueInterface,
+                Vec::new(),
+            ))
+        };
+        let input_value = make_value([2; 32]);
+        let unrelated_value = make_value([3; 32]);
+        assert_eq!(
+            input_value.descriptor.owner,
+            unrelated_value.descriptor.owner
+        );
+        assert_ne!(input_value.descriptor.id, unrelated_value.descriptor.id);
+        assert!(matches!(
+            inventory.admit_shared(
+                &inventory.empty_view(),
+                vec![input_value, unrelated_value],
+            ),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. })
+        ));
     }
 
     #[test]

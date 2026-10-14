@@ -5219,7 +5219,7 @@ impl ExactDeclarationContext {
         let graph = self.original_preview_interface_graph()?;
         let mut context = self.clone().extend_interface_context(input)?;
         let input_ids = input.artifact_view().artifact_ids();
-        let excluded_value_owners = context
+        let excluded_value_roots = context
             .inventory
             .entries()
             .into_iter()
@@ -5234,12 +5234,12 @@ impl ExactDeclarationContext {
                         .template_imports
                         .as_ref()
                         .is_some_and(|imports| imports.graph.contains_key(&entry.descriptor.owner));
-                (value_interface && !retained).then_some(entry.descriptor.owner.clone())
+                (value_interface && !retained).then_some(entry.descriptor.id)
             })
             .collect::<BTreeSet<_>>();
         context.inventory = context
             .inventory
-            .without_value_interface_roots(&excluded_value_owners)?;
+            .without_value_interface_roots(&excluded_value_roots)?;
         context.compiler_projection = context.compiler_projection.within_view(&context.inventory);
         let context = context.finish()?;
         if context.original_preview_interface_graph()? != graph {
