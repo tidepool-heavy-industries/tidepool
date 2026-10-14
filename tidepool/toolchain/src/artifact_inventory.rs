@@ -6372,6 +6372,24 @@ mod tests {
 
     #[test]
     fn target_sealing_preserves_exact_group_choice_in_cumulative_prefix() {
+        assert_target_group_choice_in_prefix(2, 0, false, 1);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn target_group_choice_survives_cumulative_issued_histories(
+            branches in 2usize..7, chosen in 0usize..7, reversed in proptest::bool::ANY, repetitions in 1usize..5,
+        ) {
+            assert_target_group_choice_in_prefix(branches, chosen, reversed, repetitions);
+        }
+    }
+
+    fn assert_target_group_choice_in_prefix(
+        branches: usize,
+        chosen: usize,
+        reversed: bool,
+        repetitions: usize,
+    ) {
         let inventory = ArtifactInventory::default();
         let child = Arc::new(issued_native_groups(
             "TargetPrefixChild",
@@ -6411,16 +6429,41 @@ mod tests {
                 )
                 .unwrap()
         };
-        let left = issue("TargetPrefixLeft");
-        let right = issue("TargetPrefixRight");
-        assert_eq!(left.namespace()[&id], right.namespace()[&id]);
-        assert_ne!(
-            left.capture_graph_selection().native_groups,
-            right.capture_graph_selection().native_groups
-        );
-        let prefix = left.merge(&right).unwrap();
+        let issued = (0..branches)
+            .map(|index| issue(&format!("TargetPrefixBranch{index}")))
+            .collect::<Vec<_>>();
+        let selected = &issued[chosen % branches];
+        let child_edges = |view: &ArtifactView| {
+            view.binding_dependencies()
+                .into_iter()
+                .filter_map(|(source, target, edge)| match (source, target, edge) {
+                    (
+                        ArtifactBindingNode::Group(source),
+                        ArtifactBindingNode::Group(target),
+                        ArtifactDependency::NativeGroup { .. },
+                    ) if source.binding.artifact == id => Some(target),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        for neighbor in issued.iter().filter(|view| !std::ptr::eq(*view, selected)) {
+            assert_eq!(selected.namespace()[&id], neighbor.namespace()[&id]);
+            assert_eq!(
+                selected.namespace()[&child.descriptor.id],
+                neighbor.namespace()[&child.descriptor.id]
+            );
+            assert_ne!(child_edges(selected), child_edges(neighbor));
+        }
+        let mut order = (0..branches).collect::<Vec<_>>();
+        if reversed {
+            order.reverse();
+        }
+        let mut prefix = issued[order[0]].clone();
+        for index in order.into_iter().skip(1) {
+            prefix = prefix.merge(&issued[index]).unwrap();
+        }
         let mut selection = bound_selection_for_entries(&prefix, &[native.clone(), child.clone()]);
-        let requirement = NativeOriginalRequirement::from_selected_view(id, &left)
+        let requirement = NativeOriginalRequirement::from_selected_view(id, selected)
             .unwrap()
             .unwrap();
         selection
@@ -6430,33 +6473,42 @@ mod tests {
             .bind_segment(&prefix, vec![native.clone(), child.clone()], &selection)
             .unwrap();
         let imports = [issued_source(&native, 7)];
-        let target = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &prefix,
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
-                &selection,
-            )
-            .unwrap();
-        assert!(target
-            .artifacts
-            .lease
-            .roots
-            .iter()
-            .all(|node| !matches!(node, InventoryNodeKey::Group(_))));
-        let expected = left
+        let expected = selected
             .capture_graph_selection()
             .native_groups
             .into_iter()
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            target
-                .selection
-                .groups_for_target(&target.artifacts, None, &imports)
-                .unwrap(),
-            expected
-        );
+        let before = inventory.metrics().installed_binding_rows;
+        for _ in 0..repetitions {
+            let target = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &prefix,
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selection,
+                )
+                .unwrap();
+            assert!(target
+                .artifacts
+                .lease
+                .roots
+                .iter()
+                .all(|node| !matches!(node, InventoryNodeKey::Group(_))));
+            assert_eq!(
+                target
+                    .selection
+                    .groups_for_target(&target.artifacts, None, &imports)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                target.artifacts.selected_native_groups(),
+                prefix.selected_native_groups()
+            );
+            assert_eq!(inventory.metrics().installed_binding_rows, before);
+            prefix = target.artifacts;
+        }
     }
 
     #[test]
