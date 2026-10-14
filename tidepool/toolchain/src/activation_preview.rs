@@ -467,4 +467,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "activation_preview/native_declaration_input_tests.rs"]
-mod native_declaration_input_tests;
+pub(crate) mod native_declaration_input_tests;

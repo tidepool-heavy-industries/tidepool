@@ -5458,6 +5458,54 @@ impl ArtifactView {
         ))
     }
 
+    /// Remove independent value-interface roots while preserving the exact
+    /// graph selected by the issuer. Required interfaces remain in the
+    /// dependency closure of retained roots, but are not promoted to roots.
+    pub(crate) fn without_value_interface_roots(
+        &self,
+        excluded: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Self, CompileError> {
+        if excluded.is_empty() {
+            return Ok(self.clone());
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let is_excluded_value = |node: &InventoryNodeKey| {
+            excluded.contains(&state.payloads[&node.artifact()].descriptor.owner)
+                && matches!(
+                    state.payloads[&node.artifact()].payload,
+                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                )
+        };
+        let roots = self
+            .roots()
+            .iter()
+            .copied()
+            .filter(|node| !is_excluded_value(node))
+            .collect::<Vec<_>>();
+        let custody = self
+            .custody_roots()
+            .iter()
+            .copied()
+            .filter(|node| !is_excluded_value(node))
+            .collect::<Vec<_>>();
+        let namespace = self.namespace();
+        drop(state);
+
+        let mut retained = self
+            .lease
+            .inventory
+            .retain(roots, custody, Vec::new(), Vec::new());
+        let retained_nodes = retained.capture_graph_selection().bindings;
+        let namespace = namespace
+            .into_iter()
+            .filter(|(_, binding)| retained_nodes.contains(binding))
+            .collect::<BTreeMap<_, _>>();
+        retained.replace_namespace(&namespace);
+        let mut retained = self.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
+    }
+
     /// Consume this admission's namespace and exact group roots before joining
     /// broader historical custody. The admission owner chose these handles;
     /// carrier bytes and ordinal alone cannot recreate that choice.
@@ -6372,12 +6420,12 @@ mod tests {
 
     #[test]
     fn compiler_source_retention_preserves_issued_groups_in_cumulative_prefix() {
-        assert_target_group_choice_in_prefix(2, 0, false, 1, true);
+        assert_target_group_choice_in_prefix(2, 0, false, 1, true, true);
     }
 
     #[test]
     fn target_sealing_preserves_exact_group_choice_in_cumulative_prefix() {
-        assert_target_group_choice_in_prefix(2, 0, false, 1, false);
+        assert_target_group_choice_in_prefix(2, 0, false, 1, false, false);
     }
 
     proptest::proptest! {
@@ -6385,7 +6433,7 @@ mod tests {
         fn target_group_choice_survives_cumulative_issued_histories(
             branches in 2usize..7, chosen in 0usize..7, reversed in proptest::bool::ANY, repetitions in 1usize..5,
         ) {
-            assert_target_group_choice_in_prefix(branches, chosen, reversed, repetitions, true);
+            assert_target_group_choice_in_prefix(branches, chosen, reversed, repetitions, true, false);
         }
     }
 
@@ -6395,15 +6443,23 @@ mod tests {
         reversed: bool,
         repetitions: usize,
         retain_source: bool,
+        test_display_projection: bool,
     ) {
         let inventory = ArtifactInventory::default();
-        let child = Arc::new(issued_native_groups(
+        let home_unit = if test_display_projection {
+            "main"
+        } else {
+            "fixture"
+        };
+        let child = Arc::new(issued_native_groups_in_unit(
+            home_unit,
             "TargetPrefixChild",
             vec![(7, Vec::new())],
             &[],
             &BTreeMap::new(),
         ));
-        let native = Arc::new(issued_native_groups(
+        let native = Arc::new(issued_native_groups_in_unit(
+            home_unit,
             "TargetPrefix",
             vec![(7, vec![issued_source(&child, 7)])],
             &[&child],
@@ -6543,6 +6599,84 @@ mod tests {
                     &[],
                 )
                 .unwrap();
+            if test_display_projection {
+                let expanded = Arc::new(context.clone());
+                let prototype_context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                    [2; 32],
+                    selected,
+                    CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
+                        .unwrap(),
+                    lexical.clone(),
+                    native.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap();
+                let prototype =
+                    crate::activation_preview::native_declaration_input_tests::display_prototype(
+                        &Arc::new(prototype_context),
+                    );
+                let before = expanded.artifact_view().capture_graph_selection();
+                assert!(
+                    !before.native_groups.is_empty(),
+                    "selected exact group bindings are present"
+                );
+                assert!(
+                    !expanded.artifact_view().selected_native_groups().is_empty(),
+                    "the prefix carries nonempty target demand"
+                );
+                let demanded = before
+                    .roots
+                    .iter()
+                    .filter_map(|root| match root {
+                        ArtifactBindingNode::Group(binding) => Some(*binding),
+                        ArtifactBindingNode::Artifact(_) => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    demanded.len() > 1,
+                    "the prefix carries multiple issued exact group roots"
+                );
+                let same_carrier = before
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact == id && group.original_ordinal == 7)
+                    .collect::<Vec<_>>();
+                assert!(
+                    same_carrier.len() > 1,
+                    "multiple exact group bindings share one carrier/ordinal"
+                );
+                assert!(same_carrier.iter().all(|group| demanded.contains(group)));
+                let display =
+                    crate::activation_preview::OriginalDisplayContext::issue(&prototype, &expanded)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                        "display projection must preserve existing exact group bindings: {error:?}"
+                    )
+                        })
+                        .unwrap();
+                let projected = display.declarations();
+                assert!(projected.value_interfaces().is_empty());
+                assert_eq!(
+                    projected.artifact_view().selected_native_groups(),
+                    expanded.artifact_view().selected_native_groups(),
+                    "activation display must preserve the exact nonempty demand"
+                );
+                let after = projected.artifact_view().capture_graph_selection();
+                assert_eq!(
+                    after.roots, before.roots,
+                    "exact issued demand roots survive"
+                );
+                assert_eq!(
+                    after.native_groups, before.native_groups,
+                    "all exact group bindings survive"
+                );
+                assert_eq!(after.custody_roots, before.custody_roots);
+                assert_eq!(
+                    projected.artifact_view().binding_dependencies(),
+                    expanded.artifact_view().binding_dependencies(),
+                    "exact selected child closures survive"
+                );
+            }
             let value = prefix
                 .interface_projection(&[native.descriptor.owner.clone()])
                 .unwrap();
@@ -8152,8 +8286,25 @@ mod tests {
         requirements: &[&ArtifactEntry],
         packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
     ) -> ArtifactEntry {
-        let product =
-            crate::certified_products::tests::original_groups_fixture(name, groups, 1, packages);
+        issued_native_groups_in_unit("fixture", name, groups, requirements, packages)
+    }
+
+    fn issued_native_groups_in_unit(
+        unit: &str,
+        name: &str,
+        groups: Vec<(u32, Vec<crate::certified_products::PendingImportOwner>)>,
+        requirements: &[&ArtifactEntry],
+        packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
+    ) -> ArtifactEntry {
+        let product = crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+            unit,
+            name,
+            groups,
+            1,
+            packages,
+            vec![0x42],
+            &BTreeMap::new(),
+        );
         let requirements = requirements
             .iter()
             .map(|entry| {
@@ -10847,6 +10998,91 @@ mod tests {
         let custody = object.remove("custody_roots").unwrap();
         object.insert("native_custody".into(), custody);
         assert!(serde_json::from_value::<ArtifactGraphSelection>(old).is_err());
+    }
+
+    #[test]
+    fn value_root_filter_keeps_exact_value_dependency_without_promoting_it() {
+        let inventory = ArtifactInventory::default();
+        let identity = |module: &str| ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: module.into(),
+        };
+        let make_interface = |module: &str, role, requirements| {
+            let interface = crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "fixture",
+                module,
+                BTreeMap::new(),
+            );
+            Arc::new(ArtifactEntry::interface(
+                CertifiedJoinedInterface::from_certification(
+                    [2; 32],
+                    "fixture".into(),
+                    module.into(),
+                    interface.interface_bytes().to_vec(),
+                    interface.package_imports_bytes().to_vec(),
+                )
+                .unwrap(),
+                role,
+                requirements,
+            ))
+        };
+        let value = make_interface(
+            "PrivateValue",
+            JoinedInterfaceRole::ValueInterface,
+            Vec::new(),
+        );
+        let lexical = make_interface(
+            "RetainedLexical",
+            JoinedInterfaceRole::LexicalJoin,
+            vec![identity("PrivateValue")],
+        );
+        let view = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![value.clone(), lexical.clone()],
+            )
+            .unwrap();
+        let before = view.capture_graph_selection();
+        let value_binding = before
+            .bindings
+            .iter()
+            .copied()
+            .find(|binding| binding.artifact == value.descriptor.id)
+            .unwrap();
+        let value_root = ArtifactBindingNode::Artifact(value_binding);
+        assert!(before.roots.contains(&value_root));
+        assert!(view.binding_dependencies().iter().any(|(from, to, _)| {
+            *from
+                == ArtifactBindingNode::Artifact(
+                    before
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.artifact == lexical.descriptor.id)
+                        .copied()
+                        .unwrap(),
+                )
+                && *to == value_root
+        }));
+
+        let projected = view
+            .without_value_interface_roots(&BTreeSet::from([value.descriptor.owner.clone()]))
+            .unwrap();
+        let after = projected.capture_graph_selection();
+        assert!(!after.roots.contains(&value_root));
+        assert!(after.bindings.contains(&value_binding));
+        assert!(projected
+            .binding_dependencies()
+            .iter()
+            .any(|(_, to, _)| *to == value_root));
+        assert!(after.roots.contains(&ArtifactBindingNode::Artifact(
+            before
+                .bindings
+                .iter()
+                .find(|binding| binding.artifact == lexical.descriptor.id)
+                .copied()
+                .unwrap(),
+        )));
     }
 
     #[test]

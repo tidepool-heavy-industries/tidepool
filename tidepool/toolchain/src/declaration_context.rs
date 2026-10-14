@@ -5219,24 +5219,27 @@ impl ExactDeclarationContext {
         let graph = self.original_preview_interface_graph()?;
         let mut context = self.clone().extend_interface_context(input)?;
         let input_ids = input.artifact_view().artifact_ids();
-        let roots = context
+        let excluded_value_owners = context
             .inventory
             .entries()
             .into_iter()
-            .filter(|entry| {
-                !matches!(
-                    entry.payload,
+            .filter_map(|entry| {
+                let value_interface = matches!(
+                    &entry.payload,
                     ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
-                ) || graph.contains_key(&entry.descriptor.owner)
+                );
+                let retained = graph.contains_key(&entry.descriptor.owner)
                     || input_ids.contains(&entry.descriptor.id)
                     || context
                         .template_imports
                         .as_ref()
-                        .is_some_and(|imports| imports.graph.contains_key(&entry.descriptor.owner))
+                        .is_some_and(|imports| imports.graph.contains_key(&entry.descriptor.owner));
+                (value_interface && !retained).then_some(entry.descriptor.owner.clone())
             })
-            .map(|entry| entry.descriptor.id)
-            .collect();
-        context.inventory = context.inventory.select_roots(roots)?;
+            .collect::<BTreeSet<_>>();
+        context.inventory = context
+            .inventory
+            .without_value_interface_roots(&excluded_value_owners)?;
         context.compiler_projection = context.compiler_projection.within_view(&context.inventory);
         let context = context.finish()?;
         if context.original_preview_interface_graph()? != graph {

@@ -232,7 +232,9 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
     owners
 }
 
-fn display_prototype(context: &Arc<ExactDeclarationContext>) -> Arc<ExactHostBindingPrototype> {
+pub(crate) fn display_prototype(
+    context: &Arc<ExactDeclarationContext>,
+) -> Arc<ExactHostBindingPrototype> {
     // Component codec fixture. Context authority comes from the original
     // issuer above, rather than from these nominal signature bytes.
     let mut structure = Vec::new();
@@ -263,12 +265,12 @@ fn display_prototype(context: &Arc<ExactDeclarationContext>) -> Arc<ExactHostBin
     .unwrap()
 }
 
-fn with_irrelevant_values(
+pub(crate) fn with_irrelevant_values(
     context: &Arc<ExactDeclarationContext>,
     versions: &[u8],
     lexical_value: bool,
 ) -> Arc<ExactDeclarationContext> {
-    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let producer = context.toolchain_identity_sha256();
     let values = versions
         .iter()
         .enumerate()
@@ -389,6 +391,32 @@ fn display_projection_preserves_native_availability_and_refuses_missing_instance
     assert!(OriginalDisplayContext::issue(&prototype, &unknown)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn display_projection_keeps_native_custody_without_promoting_group_demand() {
+    let original = original_context(&[(true, true, true)]);
+    let prototype = display_prototype(&original);
+    let expanded = with_irrelevant_values(&original, &[1], false);
+    let before_groups = expanded.artifact_view().selected_native_groups();
+    assert!(before_groups.is_empty());
+    assert_eq!(expanded.value_interfaces().len(), 1);
+
+    let projected = OriginalDisplayContext::issue(&prototype, &expanded)
+        .unwrap()
+        .unwrap();
+    let declarations = projected.declarations();
+    assert!(declarations.value_interfaces().is_empty());
+    assert_eq!(
+        declarations.artifact_view().selected_native_groups(),
+        before_groups,
+        "display visibility must not promote retained native custody into executable demand"
+    );
+    assert_eq!(
+        offered_native_owners(declarations),
+        ["Tidepool.Session.Lib.G1"],
+        "the retained original native body remains available"
+    );
 }
 
 #[test]
