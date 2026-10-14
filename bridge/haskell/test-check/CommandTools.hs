@@ -127,10 +127,16 @@ tests =
       resultWireOmitsPresentation = toJSON accepted == toJSON (Tools.facts accepted)
       schemaMatches = jsonSchema (Proxy :: Proxy Tools.CommandToolResult) == jsonSchema (Proxy :: Proxy Tools.CommandToolFacts)
       pageFacts = case Tools.facts output of
-        Tools.OutputPage _ Tools.OutputStdout 0 2 2 5 False 0 False 1 False -> True
+        Tools.OutputPage {Tools.stream = Tools.OutputStdout, Tools.start_offset = 0,
+          Tools.end_offset = 2, Tools.next_offset = 2, Tools.available_end = 5,
+          Tools.finished = False, Tools.lost_bytes = 0, Tools.lossy = False,
+          Tools.payload_lines = 1, Tools.complete = False} -> True
         _ -> False
       completePageFacts = case Tools.facts fullOutput of
-        Tools.OutputPage _ Tools.OutputStdout 0 2 2 2 True 0 False 1 True -> True
+        Tools.OutputPage {Tools.stream = Tools.OutputStdout, Tools.start_offset = 0,
+          Tools.end_offset = 2, Tools.next_offset = 2, Tools.available_end = 2,
+          Tools.finished = True, Tools.lost_bytes = 0, Tools.lossy = False,
+          Tools.payload_lines = 1, Tools.complete = True} -> True
         _ -> False
       pageTextHasState =
         "bytes 0..2 of 5 · more available" `T.isInfixOf` Tools.presentation output
@@ -163,7 +169,7 @@ tests =
           not ("[payload clipped" `T.isInfixOf` Tools.presentation uncroppedPrefix)
             && "stream=\"Stdout\", offset=9000" `T.isInfixOf` Tools.presentation uncroppedPrefix
         _ -> False
-  in testGroup "command tool receipt contract"
+  in testGroup "command tool receipt contract" $
     [ testCase "named command routes never request host presentation" $
         check "named command routes never request host presentation" noPresented
     , testCase "immediate command blocks through status-only wait without capturing output" $
