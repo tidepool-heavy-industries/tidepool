@@ -129,7 +129,7 @@ tests =
       pageFacts = case Tools.facts output of
         Tools.OutputPage {Tools.stream = Tools.OutputStdout, Tools.start_offset = 0,
           Tools.end_offset = 2, Tools.next_offset = 2, Tools.available_end = 5,
-          Tools.finished = False, Tools.lost_bytes = 0, Tools.lossy = False,
+          Tools.finished = True, Tools.lost_bytes = 0, Tools.lossy = False,
           Tools.payload_lines = 1, Tools.complete = False} -> True
         _ -> False
       completePageFacts = case Tools.facts fullOutput of
