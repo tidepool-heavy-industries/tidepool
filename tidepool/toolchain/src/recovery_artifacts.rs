@@ -676,20 +676,105 @@ impl CertifiedValueInterface {
     }
 }
 
+/// Physical acquisition retains one immutable record. Admission-bearing bytes
+/// and their reference cannot be replaced independently of the decoded proof.
 #[derive(Debug)]
 pub struct VerifiedRecoveryArtifact {
-    pub reference: RecoveryArtifactRef,
-    pub interface_path: PathBuf,
-    pub package_imports_path: PathBuf,
-    pub product_path: PathBuf,
-    pub interface_bytes: Vec<u8>,
-    pub package_imports_bytes: Vec<u8>,
-    pub certification_path: PathBuf,
-    pub certification_bytes: Vec<u8>,
-    pub product_bytes: Vec<u8>,
-    pub(crate) module_interface: crate::certified_products::CertifiedModuleInterface,
-    pub(crate) execution_source:
-        Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    reference: RecoveryArtifactRef,
+    interface_path: PathBuf,
+    package_imports_path: PathBuf,
+    product_path: PathBuf,
+    interface_bytes: Vec<u8>,
+    package_imports_bytes: Vec<u8>,
+    certification_path: PathBuf,
+    certification: crate::certified_products::VerifiedHomeCertification,
+    product_bytes: Vec<u8>,
+    module_interface: crate::certified_products::CertifiedModuleInterface,
+    execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+impl VerifiedRecoveryArtifact {
+    pub fn interface_path(&self) -> &Path {
+        &self.interface_path
+    }
+
+    pub fn package_imports_path(&self) -> &Path {
+        &self.package_imports_path
+    }
+
+    pub fn product_path(&self) -> &Path {
+        &self.product_path
+    }
+
+    pub fn certification_path(&self) -> &Path {
+        &self.certification_path
+    }
+
+    pub fn reference(&self) -> &RecoveryArtifactRef {
+        &self.reference
+    }
+
+    pub fn interface_bytes(&self) -> &[u8] {
+        &self.interface_bytes
+    }
+
+    pub fn package_imports_bytes(&self) -> &[u8] {
+        &self.package_imports_bytes
+    }
+
+    pub fn product_bytes(&self) -> &[u8] {
+        &self.product_bytes
+    }
+
+    pub fn certification_bytes(&self) -> &[u8] {
+        self.certification.bytes()
+    }
+
+    pub(crate) fn certification(&self) -> &crate::certified_products::VerifiedHomeCertification {
+        &self.certification
+    }
+
+    pub(crate) fn into_original(
+        self,
+    ) -> Result<
+        (
+            CertifiedRecoveryProduct,
+            crate::certified_products::HomeCertification,
+        ),
+        crate::certified_products::CertificationError,
+    > {
+        let owner = self.certification.owner().clone();
+        let binding = self.certification.bind_module(
+            &self.module_interface,
+            &self.interface_bytes,
+            &self.package_imports_bytes,
+        )?;
+        if let Some(graph) = &self.execution_source {
+            if !graph.eligible_source_replay_root(&owner)
+                || self.certification.execution_source_digest() != Some(graph.digest())
+            {
+                return Err(crate::certified_products::CertificationError::Mismatch(
+                    "execution source owner",
+                ));
+            }
+        }
+        let (certificate_bytes, witness) = self.certification.into_parts();
+        let mut product = CertifiedRecoveryProduct::from_finalized_certification(
+            owner,
+            self.product_bytes,
+            certificate_bytes,
+            binding,
+        );
+        if let Some(graph) = self.execution_source {
+            let OriginalState::Draft(draft) = &mut product.state else {
+                return Err(crate::certified_products::CertificationError::Mismatch(
+                    "recovery original completion",
+                ));
+            };
+            Arc::make_mut(&mut draft.bytes).execution_source = Some(graph);
+        }
+        Ok((product, witness))
+    }
 }
 
 #[derive(Debug)]
@@ -1325,18 +1410,12 @@ fn ref_owner(reference: &RecoveryArtifactRef) -> CachedHomeOwner {
     }
 }
 
-struct VerifiedCertification {
-    bytes: Vec<u8>,
-    execution_source_digest: Option<[u8; 32]>,
-    module_certificate_digest: Option<[u8; 32]>,
-}
-
 fn read_certification(
     path: &Path,
     expected_sha256: Option<&[u8; 32]>,
     owner: &CachedHomeOwner,
     validation: &mut PackageInterfaceValidation,
-) -> Result<VerifiedCertification, RecoveryArtifactError> {
+) -> Result<crate::certified_products::VerifiedHomeCertification, RecoveryArtifactError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             RecoveryArtifactError::CertifiedOwnersUnavailable(path.to_path_buf())
@@ -1364,21 +1443,14 @@ fn read_certification(
     if let Some(expected) = expected_sha256 {
         validation.record_observed(path, *expected, bytes.len() as u64, true)?;
     }
-    let (execution_source_digest, module_certificate_digest) =
-        crate::certified_products::home_certification_digests_with_validation(
-            &bytes, owner, validation,
-        )
-        .map_err(|error| {
+    crate::certified_products::VerifiedHomeCertification::capture(bytes, owner, validation).map_err(
+        |error| {
             recovery_validation_error(
                 error,
                 RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()),
             )
-        })?;
-    Ok(VerifiedCertification {
-        bytes,
-        execution_source_digest,
-        module_certificate_digest,
-    })
+        },
+    )
 }
 
 fn read_package_imports(
@@ -2475,7 +2547,7 @@ pub fn materialize_recovery_closure(
                 interface_bytes,
                 product_bytes,
                 package_imports_bytes,
-                certification_bytes.bytes,
+                certification_bytes.into_parts().0,
             )
             .with_module_interface_with_validation(module_interface, &mut validation)?,
         );
@@ -2577,7 +2649,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
         &owner,
         validation,
     )?;
-    if certification.module_certificate_digest
+    if certification.module_certificate_digest()
         != reference
             .module_interface
             .as_ref()
@@ -2587,7 +2659,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
             certification_path,
         ));
     }
-    if certification.execution_source_digest
+    if certification.execution_source_digest()
         != reference
             .execution_source
             .as_ref()
@@ -2643,7 +2715,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
         interface_bytes,
         package_imports_bytes,
         certification_path,
-        certification_bytes: certification.bytes,
+        certification,
         product_bytes,
         execution_source,
     })
@@ -2998,7 +3070,10 @@ mod tests {
         );
         for (reference, product) in references.iter().zip(&products) {
             let verified = verify_materialized_ref(run.path(), reference).unwrap();
-            assert_eq!(verified.certification_bytes, product.certification_bytes());
+            assert_eq!(
+                verified.certification_bytes(),
+                product.certification_bytes()
+            );
             assert_eq!(
                 reference.certification_path,
                 certified_owners_path(&Sha256::digest(product.certification_bytes()).into())
@@ -3932,7 +4007,7 @@ mod tests {
         let verified = verify_materialized_ref(run.path(), &refs[0]).unwrap();
         assert_eq!(verified.interface_bytes, b"iface");
         assert!(!verified.package_imports_bytes.is_empty());
-        assert!(!verified.certification_bytes.is_empty());
+        assert!(!verified.certification_bytes().is_empty());
         assert_eq!(
             verified.reference.certification_path,
             certified_owners_path(&verified.reference.certification_sha256)
@@ -3987,7 +4062,7 @@ mod tests {
             verify_materialized_ref(run.path(), &refs[0]),
             Err(RecoveryArtifactError::CertifiedOwnersUnavailable(_))
         ));
-        fs::write(&verified.certification_path, &verified.certification_bytes).unwrap();
+        fs::write(&verified.certification_path, verified.certification_bytes()).unwrap();
         fs::write(&verified.certification_path, b"tampered").unwrap();
         assert!(matches!(
             verify_materialized_ref(run.path(), &refs[0]),
@@ -4075,7 +4150,7 @@ mod tests {
         assert_eq!(
             verify_materialized_ref(run.path(), &first_ref)
                 .unwrap()
-                .certification_bytes,
+                .certification_bytes(),
             first_certification
         );
 
@@ -4155,7 +4230,10 @@ mod tests {
             retained.package_imports_bytes,
             original.package_imports_bytes
         );
-        assert_eq!(retained.certification_bytes, original.certification_bytes);
+        assert_eq!(
+            retained.certification_bytes(),
+            original.certification_bytes()
+        );
     }
 
     #[test]

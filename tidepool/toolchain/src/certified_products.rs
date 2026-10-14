@@ -2,6 +2,7 @@
 //! Worker receipts describe GHC's selected owners; stored product bytes and
 //! dependency witnesses remain independent inputs to this check.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3859,7 +3860,8 @@ pub struct InheritedProductInput<'a> {
     pub artifact: &'a crate::recovery_artifacts::VerifiedRecoveryArtifact,
 }
 
-struct HomeCertification {
+#[derive(Debug)]
+pub(crate) struct HomeCertification {
     owner: CachedHomeOwner,
     execution_source_sha256: Option<[u8; 32]>,
     finalized_module_sha256: Option<[u8; 32]>,
@@ -5223,16 +5225,58 @@ pub(crate) fn bind_home_execution_source(
     encode_home_witness(&witness)
 }
 
-pub(crate) fn home_certification_digests_with_validation(
-    bytes: &[u8],
-    owner: &CachedHomeOwner,
-    validation: &mut PackageInterfaceValidation,
-) -> CertResult<(Option<[u8; 32]>, Option<[u8; 32]>)> {
-    let witness = verify_home_witness_with_validation(bytes, owner, validation)?;
-    Ok((
-        witness.execution_source_sha256,
-        witness.finalized_module_sha256,
-    ))
+/// The exact physical certificate and the decoded facts admitted from it.
+/// Fresh external package observations remain the consuming operation's work.
+#[derive(Debug)]
+pub(crate) struct VerifiedHomeCertification {
+    bytes: Vec<u8>,
+    witness: HomeCertification,
+}
+
+impl VerifiedHomeCertification {
+    pub(crate) fn capture(
+        bytes: Vec<u8>,
+        owner: &CachedHomeOwner,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        let witness = verify_home_witness_with_validation(&bytes, owner, validation)?;
+        Ok(Self { bytes, witness })
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn owner(&self) -> &CachedHomeOwner {
+        &self.witness.owner
+    }
+
+    pub(crate) fn execution_source_digest(&self) -> Option<[u8; 32]> {
+        self.witness.execution_source_sha256
+    }
+
+    pub(crate) fn module_certificate_digest(&self) -> Option<[u8; 32]> {
+        self.witness.finalized_module_sha256
+    }
+
+    pub(crate) fn bind_module(
+        &self,
+        interface: &CertifiedModuleInterface,
+        actual_interface: &[u8],
+        actual_packages: &[u8],
+    ) -> CertResult<ValidatedModuleBinding> {
+        validate_module_binding(
+            &self.witness,
+            interface,
+            actual_interface,
+            actual_packages,
+            None,
+        )
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, HomeCertification) {
+        (self.bytes, self.witness)
+    }
 }
 
 pub(crate) fn home_execution_source_digest_with_validation(
@@ -5463,7 +5507,7 @@ pub(crate) fn certify_inherited_products_with_validation(
     let mut modules = BTreeSet::new();
     let mut parsed = Vec::new();
     for input in inputs {
-        let reference = &input.artifact.reference;
+        let reference = input.artifact.reference();
         if !modules.insert((reference.unit.clone(), reference.module.clone())) {
             return Err(CertificationError::Mismatch("duplicate inherited module"));
         }
@@ -5474,33 +5518,33 @@ pub(crate) fn certify_inherited_products_with_validation(
     certify_inherited_inventory_with_validation(parsed, current_groups, validation)
 }
 
-fn capture_inherited_product_with_validation(
-    input: &InheritedProductInput<'_>,
+fn capture_inherited_product_with_validation<'a>(
+    input: &InheritedProductInput<'a>,
     validation: &mut PackageInterfaceValidation,
-) -> CertResult<(RawModuleProduct, HomeCertification)> {
+) -> CertResult<(RawModuleProduct, &'a HomeCertification)> {
+    let artifact = input.artifact;
+    let witness = &artifact.certification().witness;
+    // A retained certificate authenticates immutable bytes, never the current
+    // contents of the external package interfaces named by its witnesses.
+    for package in witness.packages.values() {
+        verify_package_interface(validation, package)?;
+    }
     let requirements = crate::prepared_artifact::production_requirements()
         .map_err(|_| CertificationError::Mismatch("production requirements"))?;
-    let artifact = input.artifact;
-    let reference = &artifact.reference;
-    let owner = CachedHomeOwner {
-        unit: reference.unit.clone(),
-        module: reference.module.clone(),
-        module_version: ModuleVersion(reference.module_version),
-        skinny_iface_sha256: reference.skinny_iface_sha256,
-        product_sha256: reference.product_sha256,
-    };
-    if sha(&artifact.certification_bytes) != reference.certification_sha256 {
-        return Err(CertificationError::Mismatch("inherited artifact bytes"));
-    }
-    capture_original_product_with_validation(
-        &owner,
-        &artifact.interface_bytes,
-        &artifact.product_bytes,
-        &artifact.package_imports_bytes,
-        &artifact.certification_bytes,
+    let product = capture_original_product_bytes_with_validation(
+        artifact.certification().owner(),
+        artifact.interface_bytes(),
+        artifact.product_bytes(),
         &requirements,
         validation,
-    )
+    )?;
+    check_direct_package_agreement_with_validation(
+        artifact.package_imports_bytes(),
+        &witness.owner,
+        &witness.packages,
+        validation,
+    )?;
+    Ok((product, witness))
 }
 
 /// Scratch materialization writes already-owned certified bytes. Reuse those
@@ -5976,6 +6020,30 @@ fn capture_original_product_with_validation(
     requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<(RawModuleProduct, HomeCertification)> {
+    let product = capture_original_product_bytes_with_validation(
+        owner,
+        interface_bytes,
+        product_bytes,
+        requirements,
+        validation,
+    )?;
+    let witness = verify_home_witness_with_validation(certification_bytes, owner, validation)?;
+    check_direct_package_agreement_with_validation(
+        package_imports_bytes,
+        owner,
+        &witness.packages,
+        validation,
+    )?;
+    Ok((product, witness))
+}
+
+fn capture_original_product_bytes_with_validation(
+    owner: &CachedHomeOwner,
+    interface_bytes: &[u8],
+    product_bytes: &[u8],
+    requirements: &tidepool_repr::execution_schema::ProgramRequirements,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<RawModuleProduct> {
     if sha(interface_bytes) != owner.skinny_iface_sha256
         || sha(product_bytes) != owner.product_sha256
     {
@@ -5998,14 +6066,7 @@ fn capture_original_product_with_validation(
             "inherited interface/product pair",
         ));
     }
-    let witness = verify_home_witness_with_validation(certification_bytes, owner, validation)?;
-    check_direct_package_agreement_with_validation(
-        package_imports_bytes,
-        owner,
-        &witness.packages,
-        validation,
-    )?;
-    Ok((product, witness))
+    Ok(product)
 }
 
 /// Authenticate every retained original once. Different lexical views may
@@ -6047,11 +6108,14 @@ pub(crate) fn certify_recovery_products_with_validation(
         .iter()
         .map(|(product, witness)| authenticate_original_imports(product, witness, validation))
         .collect::<CertResult<Vec<_>>>()?;
+    let raw_products = parsed.into_iter().map(|(raw, _)| raw).collect::<Vec<_>>();
     artifacts
         .into_iter()
-        .zip(parsed)
+        .zip(raw_products)
         .zip(resolved)
-        .map(|((artifact, (raw, witness)), imports)| {
+        .map(|((artifact, raw), imports)| {
+            let producer_sha256 = artifact.reference().toolchain_identity_sha256;
+            let (product, witness) = artifact.into_original()?;
             let requirements = RecoveryOriginalRequirements {
                 owner: witness.owner.clone(),
                 sources: witness.sources.values().cloned().collect(),
@@ -6076,23 +6140,6 @@ pub(crate) fn certify_recovery_products_with_validation(
                     imports: imports.into(),
                 })
                 .collect();
-            let producer_sha256 = artifact.reference.toolchain_identity_sha256;
-            let mut product =
-                crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-                    witness.owner.clone(),
-                    artifact.interface_bytes,
-                    artifact.product_bytes,
-                    artifact.package_imports_bytes,
-                    artifact.certification_bytes,
-                );
-            product = product
-                .with_module_interface_with_validation(artifact.module_interface, validation)
-                .map_err(|_| CertificationError::Mismatch("recovered canonical module"))?;
-            if let Some(graph) = artifact.execution_source {
-                product = product
-                    .with_execution_source_with_validation(graph, validation)
-                    .map_err(|_| CertificationError::Mismatch("execution source owner"))?;
-            }
             let product = retain_authenticated_original_native(product, groups, witness)?;
             Ok(CertifiedRecoveredOriginal {
                 producer_sha256,
@@ -6309,8 +6356,8 @@ fn certify_inherited_inventory(
     )
 }
 
-fn certify_inherited_inventory_with_validation(
-    parsed: Vec<(RawModuleProduct, HomeCertification)>,
+fn certify_inherited_inventory_with_validation<W: Borrow<HomeCertification>>(
+    parsed: Vec<(RawModuleProduct, W)>,
     current_groups: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
@@ -6330,6 +6377,7 @@ fn certify_inherited_inventory_with_validation(
         }
     }
     for (product, witness) in &parsed {
+        let witness: &HomeCertification = witness.borrow();
         let owner = &witness.owner;
         let key = (owner.unit.clone(), owner.module.clone());
         if !inherited_seen.insert(key.clone()) {
@@ -6375,6 +6423,7 @@ fn certify_inherited_inventory_with_validation(
     }
     let mut result = Vec::new();
     for (product, witness) in parsed {
+        let witness: &HomeCertification = witness.borrow();
         for source in witness.sources.values() {
             if homes.get(&(source.unit.clone(), source.module.clone())) != Some(source) {
                 return Err(CertificationError::Mismatch(
@@ -6409,8 +6458,7 @@ fn certify_inherited_inventory_with_validation(
                     )?;
                     match import {
                         source @ ReceiptImportOwner::Source { .. } => {
-                            let resolved =
-                                resolve_cold_recovery_source(source, &witness, &product)?;
+                            let resolved = resolve_cold_recovery_source(source, witness, &product)?;
                             let PendingImportOwner::Source {
                                 owner,
                                 original_ordinal,
@@ -8462,8 +8510,8 @@ pub(crate) mod tests {
     mod sparse_interface_selection_properties;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
-    use tidepool_repr::execution_schema::InventoryDecodeLimits;
     use tidepool_repr::execution_schema::testing;
+    use tidepool_repr::execution_schema::InventoryDecodeLimits;
 
     #[test]
     fn bounded_evidence_read_preserves_path_reason_and_operation_budget() {
@@ -11942,6 +11990,353 @@ pub(crate) mod tests {
         assert!(!packet.contains_original(&recaptured));
     }
 
+    fn recovery_graph_original(
+        source: &Path,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        let (graph, originals) = crate::execution_source::test_prepared_graph(source);
+        let original = originals.into_iter().next().unwrap();
+        let certificate =
+            encode_home_certification(&original.owner, &[], &BTreeMap::new()).unwrap();
+        let certificate = bind_home_execution_source(
+            &certificate,
+            &original.owner,
+            graph.digest(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        fixture_finalized_product(
+            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                original.owner,
+                original.interface,
+                original.product,
+                Vec::new(),
+                certificate,
+            ),
+            [7; 32],
+        )
+        .with_execution_source(graph)
+        .unwrap()
+    }
+
+    #[test]
+    fn acquired_recovery_companions_reject_fresh_tampering_without_redecoding_retained_certificates(
+    ) {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let original = recovery_graph_original(source.path());
+        let references = crate::recovery_artifacts::materialize_certified_products(
+            root.path(),
+            [7; 32],
+            std::slice::from_ref(&original),
+        )
+        .unwrap();
+        let reference = &references[0];
+        let canonical = reference.module_interface.as_ref().unwrap();
+        let paths = [
+            &canonical.certificate_path,
+            &canonical.core.as_ref().unwrap().path,
+            &reference.execution_source.as_ref().unwrap().path,
+        ];
+        for path in paths {
+            let path = root.path().join(path);
+            let bytes = std::fs::read(&path).unwrap();
+            let acquired =
+                crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).unwrap();
+            let mut changed = bytes.clone();
+            changed[0] ^= 1;
+            std::fs::write(&path, changed).unwrap();
+            assert!(
+                crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).is_err()
+            );
+            let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+            let retained = certify_recovery_products_with_validation(
+                vec![acquired],
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+                before
+            );
+            assert_eq!(retained[0].product.owner(), original.owner());
+            assert_eq!(
+                retained[0].product.execution_source().unwrap().digest(),
+                original.execution_source().unwrap().digest()
+            );
+            assert_eq!(
+                retained[0]
+                    .product
+                    .module_interface()
+                    .unwrap()
+                    .certificate_bytes(),
+                original.module_interface().unwrap().certificate_bytes()
+            );
+            assert_eq!(
+                retained[0].product.module_interface().unwrap().core_bytes(),
+                original.module_interface().unwrap().core_bytes()
+            );
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_native_cohort_refuses_a_late_original_with_inconsistent_group_headers() {
+        let first = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "First",
+                vec![(7, vec![])],
+                7,
+                &BTreeMap::new(),
+                b"first native interface".to_vec(),
+            ),
+            [7; 32],
+        );
+        let second = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "Second",
+                vec![(11, vec![])],
+                9,
+                &BTreeMap::new(),
+                b"second native interface".to_vec(),
+            ),
+            [7; 32],
+        );
+        // The certificate remains closed and canonical, but claims another
+        // native ordinal. Physical acquisition cannot decide this relation.
+        let mut witness = decode_home_witness(second.certification_bytes()).unwrap();
+        witness.groups[0].0 = 12;
+        let second = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            second.owner().clone(),
+            second.interface_bytes().to_vec(),
+            second.product_bytes().to_vec(),
+            second.package_imports_bytes().to_vec(),
+            encode_home_witness(&witness).unwrap(),
+        )
+        .with_module_interface(second.module_interface().unwrap().clone())
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let references = crate::recovery_artifacts::materialize_certified_products(
+            root.path(),
+            [7; 32],
+            &[first.clone(), second],
+        )
+        .unwrap();
+        let acquire = |index| {
+            crate::recovery_artifacts::verify_materialized_ref(root.path(), &references[index])
+                .unwrap()
+        };
+        let valid_first = certify_recovery_products_with_validation(
+            vec![acquire(0)],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(valid_first[0].product.owner(), first.owner());
+        let acquired = vec![acquire(0), acquire(1)];
+        let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        assert!(matches!(
+            certify_recovery_products_with_validation(
+                acquired,
+                &mut PackageInterfaceValidation::default()
+            ),
+            Err(CertificationError::Mismatch(
+                "inherited original group/globals"
+            ))
+        ));
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            before
+        );
+        let first_after_refusal = certify_recovery_products_with_validation(
+            vec![acquire(0)],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(first_after_refusal[0].product.owner(), first.owner());
+    }
+
+    #[test]
+    fn recovery_acquisition_and_native_certification_decode_each_home_once() {
+        let mut originals = vec![
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    "First",
+                    vec![(7, vec![])],
+                    7,
+                    &BTreeMap::new(),
+                    b"first native interface".to_vec(),
+                ),
+                [7; 32],
+            ),
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    "Second",
+                    vec![(11, vec![])],
+                    9,
+                    &BTreeMap::new(),
+                    b"second native interface".to_vec(),
+                ),
+                [7; 32],
+            ),
+        ];
+        let source = tempfile::tempdir().unwrap();
+        originals.push(recovery_graph_original(source.path()));
+        let root = tempfile::tempdir().unwrap();
+        let references = crate::recovery_artifacts::materialize_certified_products(
+            root.path(),
+            [7; 32],
+            &originals,
+        )
+        .unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        let acquired = references
+            .iter()
+            .map(|reference| {
+                crate::recovery_artifacts::verify_materialized_ref_with_validation(
+                    root.path(),
+                    reference,
+                    &mut validation,
+                )
+                .unwrap()
+            })
+            .collect();
+        let recovered =
+            certify_recovery_products_with_validation(acquired, &mut validation).unwrap();
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get) - before,
+            originals.len()
+        );
+        assert_eq!(validation.home_witness_validations, originals.len());
+        for ((original, recovered), expected_ordinal) in
+            originals
+                .iter()
+                .zip(&recovered)
+                .zip([Some(7), Some(11), None])
+        {
+            assert_eq!(recovered.product.owner(), original.owner());
+            assert_eq!(
+                recovered.product.certification_bytes(),
+                original.certification_bytes()
+            );
+            let groups = &recovered.product.original_native().unwrap().groups;
+            assert_eq!(groups.len(), usize::from(expected_ordinal.is_some()));
+            if let Some(ordinal) = expected_ordinal {
+                assert_eq!(groups[0].group().original_ordinal(), ordinal);
+            }
+            assert_eq!(
+                recovered
+                    .product
+                    .execution_source()
+                    .map(|graph| graph.digest()),
+                original.execution_source().map(|graph| graph.digest())
+            );
+            assert_eq!(recovered.requirements.owner, *original.owner());
+            assert!(recovered.requirements.sources.is_empty());
+            assert!(recovered.requirements.packages.is_empty());
+        }
+        let borrowed_before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        for recovered in &recovered {
+            original_native_requirements(&recovered.product).unwrap();
+        }
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            borrowed_before
+        );
+    }
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 24, ..proptest::test_runner::Config::default() })]
+        #[test]
+        fn recovery_certificate_histories_preserve_retained_bytes_and_fresh_acquisition(
+            history in proptest::collection::vec((0usize..5, 0u8..5), 1..16)
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let package = external.path().join("External.hi");
+            let package_bytes = b"external-package-interface";
+            std::fs::write(&package, package_bytes).unwrap();
+            let packages = BTreeMap::from([(("external-package".into(), "External".into()),
+                PackageInterfaceWitness { selected_path: package.clone(), sha256: sha(package_bytes) })]);
+            let original = fixture_finalized_product(original_groups_fixture_with_interface(
+                "Retained", vec![(7, vec![PendingImportOwner::Package {
+                    unit: "external-package".into(), module: "External".into(),
+                    binder: SymbolIdentity { unit: "external-package".into(),
+                        ..testing::identity("External", "entry") },
+                    interface_digest: sha(package_bytes),
+                }])], 9, &packages, b"retained-original-interface".to_vec(),
+            ), [1; 32]);
+            let references = crate::recovery_artifacts::materialize_certified_products(
+                root.path(), [1; 32], std::slice::from_ref(&original),
+            ).unwrap();
+            let reference = &references[0];
+            let acquired = crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).unwrap();
+            let paths = [root.path().join(&reference.certification_path),
+                root.path().join(&reference.interface_path), root.path().join(&reference.product_path),
+                root.path().join(&reference.package_imports_path), package];
+            let originals = paths.iter().map(|path| std::fs::read(path).unwrap()).collect::<Vec<_>>();
+            let controls = [(0, 1), (4, 2), (4, 0), (0, 0)];
+            for (index, operation) in controls.into_iter().chain(history) {
+                let path = &paths[index];
+                if std::fs::symlink_metadata(path).is_ok() { std::fs::remove_file(path).unwrap(); }
+                match operation {
+                    0 => std::fs::write(path, &originals[index]).unwrap(),
+                    1 => { let mut changed = originals[index].clone(); changed[0] ^= 1;
+                        std::fs::write(path, changed).unwrap(); },
+                    2 => {},
+                    3 => { let target = external.path().join("redirect");
+                        std::fs::write(&target, &originals[index]).unwrap();
+                        std::os::unix::fs::symlink(target, path).unwrap(); },
+                    4 => { let replacement = path.with_extension("replacement");
+                        std::fs::write(&replacement, &originals[index]).unwrap();
+                        std::fs::rename(replacement, path).unwrap(); },
+                    _ => unreachable!(),
+                }
+                // Exact issued bytes and physical path kinds are the oracle;
+                // it does not reuse production's digests or decoded certificate.
+                let fresh_oracle = paths.iter().zip(&originals).enumerate().all(|(i, (path, bytes))| {
+                    std::fs::read(path).is_ok_and(|actual| &actual == bytes)
+                        && (i == 4 || std::fs::symlink_metadata(path)
+                            .is_ok_and(|metadata| !metadata.file_type().is_symlink()))
+                });
+                let fresh = crate::recovery_artifacts::verify_materialized_ref(root.path(), reference);
+                proptest::prop_assert_eq!(fresh.is_ok(), fresh_oracle, "operation={} file={}", operation, index);
+                let package_oracle = std::fs::read(&paths[4]).is_ok_and(|actual| actual == originals[4]);
+                let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+                let retained = certify_inherited_products(&[InheritedProductInput { artifact: &acquired }], &[]);
+                proptest::prop_assert_eq!(retained.is_ok(), package_oracle,
+                    "retained observation operation={} file={}", operation, index);
+                proptest::prop_assert_eq!(HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get), before);
+                proptest::prop_assert_eq!(acquired.certification_bytes(), original.certification_bytes());
+                if let Ok(groups) = retained {
+                    proptest::prop_assert_eq!(groups.len(), 1);
+                    proptest::prop_assert_eq!(groups[0].group().original_ordinal(), 7);
+                    proptest::prop_assert_eq!(groups[0].owner(), original.owner());
+                }
+                if let Ok(fresh) = fresh {
+                    let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+                    let recovered = certify_recovery_products_with_validation(vec![fresh],
+                        &mut PackageInterfaceValidation::default()).unwrap();
+                    proptest::prop_assert_eq!(recovered[0].product.owner(), original.owner());
+                    proptest::prop_assert_eq!(HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get), before);
+                }
+            }
+            for (path, bytes) in paths.iter().zip(&originals) {
+                if std::fs::symlink_metadata(path).is_ok() { std::fs::remove_file(path).unwrap(); }
+                std::fs::write(path, bytes).unwrap();
+            }
+            let fresh = crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).unwrap();
+            let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+            let restored = certify_recovery_products_with_validation(vec![fresh],
+                &mut PackageInterfaceValidation::default()).unwrap();
+            proptest::prop_assert_eq!(restored[0].product.owner(), original.owner());
+            proptest::prop_assert_eq!(HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get), before);
+        }
+    }
+
     #[test]
     fn candidate_original_issuer_matches_cold_recovery_and_refuses_seal_drift() {
         let fixture = fixture_finalized_product(
@@ -12892,16 +13287,16 @@ pub(crate) mod tests {
             }],
         )
         .unwrap();
-        let mut artifact =
+        let artifact =
             crate::recovery_artifacts::verify_materialized_ref(run.path(), &refs[0]).unwrap();
         let owned = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner.clone(),
-            artifact.interface_bytes.clone(),
-            artifact.product_bytes.clone(),
-            artifact.package_imports_bytes.clone(),
-            artifact.certification_bytes.clone(),
+            artifact.interface_bytes().to_vec(),
+            artifact.product_bytes().to_vec(),
+            artifact.package_imports_bytes().to_vec(),
+            artifact.certification_bytes().to_vec(),
         )
-        .with_module_interface(artifact.module_interface.clone())
+        .with_module_interface(finalized.module_interface().unwrap().clone())
         .unwrap();
         assert_eq!(
             certify_owned_products_with_validation(
@@ -12926,10 +13321,10 @@ pub(crate) mod tests {
         .is_err());
         let corrupt = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner.clone(),
-            artifact.interface_bytes.clone(),
+            artifact.interface_bytes().to_vec(),
             vec![0],
-            artifact.package_imports_bytes.clone(),
-            artifact.certification_bytes.clone(),
+            artifact.package_imports_bytes().to_vec(),
+            artifact.certification_bytes().to_vec(),
         );
         assert!(certify_owned_products_with_validation(
             &[&corrupt],
@@ -12974,35 +13369,43 @@ pub(crate) mod tests {
         let mut wrong_owner = owner.clone();
         wrong_owner.module_version = ModuleVersion([9; 32]);
         let wrong_seal = encode_home_certification(&wrong_owner, &[], &BTreeMap::new()).unwrap();
-        artifact.certification_bytes = wrong_seal;
+        let certificate_path = run.path().join(&refs[0].certification_path);
+        std::fs::write(&certificate_path, &wrong_seal).unwrap();
+        assert!(crate::recovery_artifacts::verify_materialized_ref(run.path(), &refs[0]).is_err());
+        // The prior acquisition still owns its exact immutable certificate.
         assert!(certify_inherited_products(
             &[InheritedProductInput {
                 artifact: &artifact
             }],
             &[]
         )
-        .is_err());
-        artifact.certification_bytes = seal.clone();
-        artifact.reference.certification_sha256 = [0; 32];
-        assert!(certify_inherited_products(
-            &[InheritedProductInput {
-                artifact: &artifact
-            }],
-            &[]
-        )
-        .is_err());
-        artifact.reference.certification_sha256 = sha(&seal);
+        .unwrap()
+        .is_empty());
+        std::fs::write(&certificate_path, &seal).unwrap();
+        let mut wrong_reference = refs[0].clone();
+        wrong_reference.certification_sha256 = [0; 32];
+        assert!(
+            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference)
+                .is_err()
+        );
         let mut witness = decode_home_witness(&seal).unwrap();
         witness.owner.skinny_iface_sha256 = [0; 32];
-        artifact.certification_bytes = encode_home_witness(&witness).unwrap();
-        artifact.reference.certification_sha256 = sha(&artifact.certification_bytes);
-        assert!(certify_inherited_products(
-            &[InheritedProductInput {
-                artifact: &artifact
-            }],
-            &[]
+        let wrong_bytes = encode_home_witness(&witness).unwrap();
+        wrong_reference.certification_sha256 = sha(&wrong_bytes);
+        wrong_reference.certification_path = PathBuf::from("artifacts").join(format!(
+            "{}.owners",
+            hex(&wrong_reference.certification_sha256)
+        ));
+        std::fs::write(
+            run.path().join(&wrong_reference.certification_path),
+            wrong_bytes,
         )
-        .is_err());
+        .unwrap();
+        assert!(
+            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference)
+                .is_err()
+        );
+        assert!(crate::recovery_artifacts::verify_materialized_ref(run.path(), &refs[0]).is_ok());
     }
 
     fn sidecar() -> Vec<u8> {
@@ -16327,10 +16730,10 @@ pub(crate) mod tests {
         .unwrap();
         let verified =
             crate::recovery_artifacts::verify_materialized_ref(directory.path(), &refs[0]).unwrap();
-        assert_eq!(verified.product_bytes, bytes);
-        assert!(!verified.package_imports_bytes.is_empty());
+        assert_eq!(verified.product_bytes(), bytes);
+        assert!(!verified.package_imports_bytes().is_empty());
         assert_eq!(
-            verified.reference.certification_path.extension().unwrap(),
+            verified.reference().certification_path.extension().unwrap(),
             "owners"
         );
         let mut substituted = evidence.clone();
@@ -17792,11 +18195,9 @@ pub(crate) mod tests {
         let cold = decode_home_witness(&encoded).unwrap();
         assert_eq!(cold.interface_requirements, requirements);
         assert!(cold.sources.is_empty());
-        assert!(
-            native_requirements_from_witness(&cold)
-                .artifact_edges
-                .is_empty()
-        );
+        assert!(native_requirements_from_witness(&cold)
+            .artifact_edges
+            .is_empty());
         let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner.clone(),
             fixture.interface_bytes().to_vec(),
