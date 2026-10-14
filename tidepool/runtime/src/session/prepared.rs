@@ -286,7 +286,7 @@ pub enum PreparedRuntimeError {
     #[error("certified source owner differs from the selected original group for {0:?}")]
     InvalidCertifiedSourceOwner(SourceBinder),
     #[error("prepared execution failed: {0}")]
-    Run(ExecutionError),
+    Run(#[from] ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
     UnknownBinding(SessionVarId),
     #[error(
