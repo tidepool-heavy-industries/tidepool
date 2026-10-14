@@ -531,28 +531,31 @@ impl OriginalCompilerInputs {
         if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
         {
             let missing = advertised.iter().find_map(|key| {
-                originals
-                    .get(&key.artifact)?
-                    .original_native()?
-                    .group(key.original_ordinal)?
-                    .imports()
+                let entry = metadata.artifacts.get(&key.artifact)?;
+                entry
+                    .native_requirements
+                    .get(&key.original_ordinal)?
                     .iter()
-                    .find_map(|import| {
-                        let crate::certified_products::PendingImportOwner::Source {
-                            owner,
-                            original_ordinal,
+                    .find_map(|(owner, dependency)| {
+                        let crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                            required_ordinal,
                             ..
-                        } = import
+                        } = dependency
                         else {
                             return None;
                         };
+                        let required_owner = entry.native_owners.get(owner)?;
                         let artifact = originals
                             .iter()
-                            .find(|(_, product)| product.owner() == owner)?
+                            .find(|(_, product)| {
+                                crate::artifact_inventory::NativeOwnerKey::from_owner(
+                                    product.owner(),
+                                ) == *required_owner
+                            })?
                             .0;
                         let required = crate::artifact_inventory::NativeGroupKey {
                             artifact: *artifact,
-                            original_ordinal: *original_ordinal,
+                            original_ordinal: *required_ordinal,
                         };
                         (!advertised.contains(&required)).then_some((*key, required))
                     })
