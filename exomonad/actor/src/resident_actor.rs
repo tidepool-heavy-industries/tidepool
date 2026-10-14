@@ -12173,7 +12173,7 @@ where
                     });
                 }
             };
-            if !awaiting.surface().iter().any(|tool| {
+            if !awaiting.declarations.iter().any(|tool| {
                 tool.name == invocation.name && tool.accepts_arguments(&invocation.arguments)
             }) {
                 self.set_standing(context.actor, ResidentStanding::Tools(awaiting));

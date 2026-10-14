@@ -117,8 +117,8 @@ where
                 .installation
                 .tools()
                 .expect("selected source installation")
-                .declarations,
-            &candidate.declarations,
+                .surface(),
+            &candidate.surface(),
         );
         if !changes.is_empty() {
             return Ok(SrReloadOutcome::ReloadRejected(

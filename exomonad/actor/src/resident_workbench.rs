@@ -1247,7 +1247,7 @@ pub(crate) struct ResidentWorkbenchTools {
     code: InstalledToolCode,
     pub(crate) after_tool: Option<crate::tool_contract::AfterToolEntry>,
     pub(crate) initial_context: Option<crate::tool_contract::InitialContextEntry>,
-    dispatcher_effects: HaskellTypeSource,
+    dispatcher_effects: tidepool_runtime::session::HaskellTypeSource,
     /// How the spec was found, and where. Reported in status and in every
     /// reload receipt.
     pub(crate) origin: crate::agent_spec::SpecOrigin,
