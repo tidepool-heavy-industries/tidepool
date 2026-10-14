@@ -2032,7 +2032,7 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                 let retained = committed(
                     campaign,
                     &format!(
-                        "display (Cmd.stdout normal == Right \"result\" && Cmd.stdout silent == Right \"result\" && Cmd.stdout again == Right \"result\" && case {captured} () of Right output -> Cmd.outputText (Cmd.commandStdout output) == \"result\"; Left _ -> False)"
+                        "display (Cmd.stdout normal == Right \"result\" && Cmd.stdout silent == Right \"result\" && Cmd.stdout again == Right \"result\" && Cmd.pageText ({captured} ()) == \"result\")"
                     ),
                 )
                 .await;
