@@ -552,13 +552,21 @@ fn replay_removal_history(ops: &[RemovalOp]) {
                 }
             }
             RemovalOp::Remove => {
-                if reg.remove(id, "generated removal").is_some() {
+                let was_registered = model_epoch.is_some();
+                let removed = reg.remove(id, "generated removal");
+                assert_eq!(removed.is_some(), was_registered);
+                drop(removed);
+                if was_registered {
                     model_epoch = None;
                     model_drops += 1;
                 }
             }
             RemovalOp::Reinsert(value) => {
-                if reg.insert_idle(id, machine(9, *value, &drops)).is_some() {
+                let was_registered = model_epoch.is_some();
+                let replaced = reg.insert_idle(id, machine(9, *value, &drops));
+                assert_eq!(replaced.is_some(), was_registered);
+                drop(replaced);
+                if was_registered {
                     model_drops += 1;
                 }
                 next_epoch += 1;
@@ -570,9 +578,10 @@ fn replay_removal_history(ops: &[RemovalOp]) {
                     next_epoch += 1;
                     model_epoch = Some(next_epoch);
                 }
-                if let Ok(checkout) = reg.checkout_run(id) {
-                    checkout.restore_suspended(Vec::new());
-                }
+                assert!(model_epoch.is_some(), "the model admitted the session");
+                reg.checkout_run(id)
+                    .expect("registered idle model session checks out")
+                    .restore_suspended(Vec::new());
             }
             RemovalOp::StaleSettle(value) => {
                 if model_epoch.is_none() {
@@ -580,14 +589,16 @@ fn replay_removal_history(ops: &[RemovalOp]) {
                     next_epoch += 1;
                     model_epoch = Some(next_epoch);
                 }
-                if let Ok(checkout) = reg.checkout_run(id) {
-                    let (stale_machine, receipt) = checkout.into_parts();
-                    drop(reg.insert_idle(id, machine(9, *value, &drops)));
-                    next_epoch += 1;
-                    model_epoch = Some(next_epoch);
-                    reg.settle_suspended(receipt, stale_machine, Vec::new());
-                    model_drops += 1;
-                }
+                assert!(model_epoch.is_some(), "the model admitted the session");
+                let (stale_machine, receipt) = reg
+                    .checkout_run(id)
+                    .expect("registered idle model session checks out")
+                    .into_parts();
+                assert!(reg.insert_idle(id, machine(9, *value, &drops)).is_some());
+                next_epoch += 1;
+                model_epoch = Some(next_epoch);
+                reg.settle_suspended(receipt, stale_machine, Vec::new());
+                model_drops += 1;
             }
             RemovalOp::CancelObserver => {
                 if let Some((_, observer)) = observers.pop() {
@@ -617,8 +628,7 @@ fn replay_removal_history(ops: &[RemovalOp]) {
             };
             let actual = rt.block_on(observer.wait(std::time::Duration::ZERO));
             assert_eq!(
-                std::mem::discriminant(&actual),
-                std::mem::discriminant(&expected),
+                actual, expected,
                 "observer outcome follows the independent registration model"
             );
         }
