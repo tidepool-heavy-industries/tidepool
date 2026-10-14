@@ -217,7 +217,7 @@ fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
         name: "worktreeId",
         ctor: Some("WorktreeLookup"),
         doc: &[],
-        visibility: tidepool_protocol::schema::HelperVisibility::Public,
+        substrate: false,
         body: HelperBody::Projection {
             binder: "h",
             arg: HsType::Named("WorktreeHandle"),
@@ -237,7 +237,7 @@ fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
         name: "createWorktree",
         ctor: None,
         doc: &[],
-        visibility: tidepool_protocol::schema::HelperVisibility::Public,
+        substrate: false,
         body: HelperBody::Pointfree,
     }];
     let errs = eff

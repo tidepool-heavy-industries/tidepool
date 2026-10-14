@@ -41,11 +41,15 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
     assert_eq!(
         helpers
             .iter()
-            .map(|h| (h.name, h.visibility, h.source.to_owned()))
+            .map(|h| (
+                h.name,
+                h.visibility == tidepool_mcp::HelperVisibility::Substrate,
+                h.source.to_owned()
+            ))
             .collect::<Vec<_>>(),
         eff.helpers
             .iter()
-            .map(|h| (Some(h.name), h.visibility, h.render(eff)))
+            .map(|h| (Some(h.name), h.substrate, h.render(eff)))
             .collect::<Vec<_>>(),
         "helpers"
     );

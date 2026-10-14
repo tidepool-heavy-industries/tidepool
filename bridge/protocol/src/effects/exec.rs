@@ -151,7 +151,7 @@ pub fn exec() -> Effect {
             Helper {
                 name: "run",
                 ctor: Some("Run"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &[
                     "Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
                     "(use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left",
@@ -167,14 +167,14 @@ pub fn exec() -> Effect {
             Helper {
                 name: "runIn",
                 ctor: Some("RunIn"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &[],
                 body: HelperBody::Applied(&["dir", "cmd"]),
             },
             Helper {
                 name: "runArgv",
                 ctor: Some("RunArgv"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &[],
                 body: HelperBody::Pointfree,
             },

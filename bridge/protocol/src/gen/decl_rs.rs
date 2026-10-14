@@ -224,9 +224,13 @@ fn body(e: &Effect) -> String {
         out.push_str("        helpers: &[\n");
         for helper in &e.helpers {
             out.push_str(&format!(
-                "            crate::effect_defs::helper_decl!(@ Some({}), {:?}, {{ raw [{}] }}),\n",
+                "            crate::effect_defs::helper_decl!(@ Some({}), {}, {{ raw [{}] }}),\n",
                 rust_string_literal(helper.name),
-                helper.visibility,
+                if helper.substrate {
+                    "Substrate"
+                } else {
+                    "Public"
+                },
                 rust_string_literal(&helper.render(e)),
             ));
         }

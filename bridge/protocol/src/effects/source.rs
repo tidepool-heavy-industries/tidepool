@@ -233,7 +233,7 @@ pub fn source() -> Effect {
             Helper {
                 name: "reloadSource",
                 ctor: Some("SourceReloadWith"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &[
                     "Capture and validate edited source and prompts, then publish one coherent generation.",
                     "The list selects additional modules to check. Changed configuration starts a fresh",
@@ -245,7 +245,7 @@ pub fn source() -> Effect {
             Helper {
                 name: "sourceStatus",
                 ctor: Some("SourceStatusWith"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &[
                     "The revision this request captured, and the revision your",
                     "own source roots hold right now. Compare `revisionIdentity`s to tell whether an",

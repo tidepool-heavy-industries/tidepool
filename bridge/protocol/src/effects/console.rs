@@ -114,14 +114,14 @@ pub fn console() -> Effect {
             Helper {
                 name: "say",
                 ctor: Some("Print"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &["Emit a line of console output."],
                 body: HelperBody::Pointfree,
             },
             Helper {
                 name: "displayViewRaw",
                 ctor: Some("DisplayViewWith"),
-                visibility: crate::schema::HelperVisibility::Substrate,
+                substrate: true,
                 doc: &[],
                 body: HelperBody::Applied(&["view"]),
             },

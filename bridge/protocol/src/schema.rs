@@ -15,13 +15,6 @@ pub use crate::types::{
     TypeShape, Validation, VariantFields, WireDerive, WireDerives,
 };
 
-/// Whether a helper belongs in the recommended callable index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HelperVisibility {
-    Public,
-    Substrate,
-}
-
 // ---------------------------------------------------------------------------
 // Effect
 // ---------------------------------------------------------------------------
@@ -1026,9 +1019,9 @@ pub struct Helper {
     /// `runArgv` needed the raw escape hatch under the old grammar, and is the
     /// one-line affordance that retires it.
     pub doc: &'static [&'static str],
-    /// Visibility in the recommended callable index; source remains available
-    /// for compilation and detailed browsing in either case.
-    pub visibility: HelperVisibility,
+    /// Whether the helper is omitted from the recommended callable index;
+    /// source remains available for compilation and detailed browsing.
+    pub substrate: bool,
     /// The wrapper's shape.
     pub body: HelperBody,
 }

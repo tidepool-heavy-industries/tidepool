@@ -173,7 +173,7 @@ pub fn ask_user() -> Effect {
             .map(|(ctor, _, name, _, _, arguments)| Helper {
                 name,
                 ctor: Some(ctor),
-                visibility: crate::schema::HelperVisibility::Substrate,
+                substrate: true,
                 doc: &[],
                 body: HelperBody::Applied(arguments),
             })

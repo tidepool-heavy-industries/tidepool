@@ -10,7 +10,12 @@
 // Effect metadata — lives next to the handler, discovered via trait
 // ---------------------------------------------------------------------------
 
-pub use tidepool_protocol::schema::HelperVisibility;
+/// Whether a helper belongs in the recommended callable index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperVisibility {
+    Public,
+    Substrate,
+}
 
 /// One helper's identity, index visibility, and compilable Haskell source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

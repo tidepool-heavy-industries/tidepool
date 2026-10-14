@@ -1114,7 +1114,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "createWorktree",
             ctor: Some("WorktreeCreate"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Create a managed worktree. `Left (SourceDirty summary)` when the",
                 "source is dirty and the spec did not opt in; case-match the error",
@@ -1125,7 +1125,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "lookupWorktree",
             ctor: Some("WorktreeLookup"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Look a retained worktree up by durable id. Survives restart:",
                 "resolution reads on-disk registry state, not process memory.",
@@ -1136,7 +1136,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "boundWorktree",
             ctor: Some("WorktreeBound"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Observe the managed worktree bound to the executing actor.",
                 "This is custody lookup, not ambient current-directory inference.",
@@ -1146,7 +1146,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "listWorktrees",
             ctor: Some("WorktreeList"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Every registered worktree, present or lost. A lost tree is listed",
                 "with `present = False` rather than failing the whole listing.",
@@ -1156,7 +1156,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "worktreeId",
             ctor: None,
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "The durable identity of a managed worktree. Pure: the handle",
                 "already carries its receipt, so this reads no git state.",
@@ -1174,7 +1174,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "tryMerge",
             ctor: Some("WorktreeTryMerge"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Attempt the ordinary merge named by a `MergeRequest`.",
                 "The exact source commit is authoritative; an optional source branch is checked",
@@ -1187,7 +1187,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "observeSubmission",
             ctor: Some("WorktreeObserveSubmission"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "Observe a candidate checkout through one bounded Worktree operation.",
                 "This reports submitted HEAD, dirty state, and in-progress operation",

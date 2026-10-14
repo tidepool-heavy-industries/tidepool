@@ -60,7 +60,7 @@ pub fn read_state() -> Effect {
         helpers: vec![Helper {
             name: "getStateJson",
             ctor: Some("ReadStateWith"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[],
             body: HelperBody::Nullary,
         }],

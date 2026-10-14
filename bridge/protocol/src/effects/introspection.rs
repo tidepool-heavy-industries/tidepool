@@ -48,14 +48,14 @@ pub fn introspection() -> Effect {
             Helper {
                 name: "info",
                 ctor: Some("IntrospectionInfoWith"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &["Inspect a name and return its structured declaration."],
                 body: HelperBody::Pointfree,
             },
             Helper {
                 name: "typeOf",
                 ctor: Some("IntrospectionTypeOfWith"),
-                visibility: crate::schema::HelperVisibility::Public,
+                substrate: false,
                 doc: &["Inspect a name's canonical type."],
                 body: HelperBody::Pointfree,
             },

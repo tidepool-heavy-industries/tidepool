@@ -208,7 +208,7 @@ pub fn reflect() -> Effect {
         helpers: vec![Helper {
             name: "reflect",
             ctor: Some("ReflectWith"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &[
                 "`reflect n` reads your OWN latest n conversation turns including the active",
                 "turn, oldest first, each carrying recorded messages, tool calls and tool",

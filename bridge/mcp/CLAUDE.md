@@ -16,6 +16,10 @@ Each effect has one definition:
   generated Rust and Haskell projections;
 - effects awaiting migration remain in `src/effect_defs.rs`.
 
+Protocol schemas are build-time inputs; `tidepool-protocol` is a dev-dependency
+here. Runtime declaration types belong in this crate; generators project schema
+facts into them.
+
 Do not hardcode union-tag positions. Derive them from the same declaration list
 used for compilation. Do not copy generated preamble or declaration strings
 into tests; use the protocol goldens.

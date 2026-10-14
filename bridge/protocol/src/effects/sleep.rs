@@ -47,7 +47,7 @@ pub fn sleep() -> Effect {
         helpers: vec![Helper {
             name: "sleep",
             ctor: Some("SleepWith"),
-            visibility: crate::schema::HelperVisibility::Public,
+            substrate: false,
             doc: &["Suspend this evaluation for at least the requested monotonic duration."],
             body: HelperBody::Pointfree,
         }],
