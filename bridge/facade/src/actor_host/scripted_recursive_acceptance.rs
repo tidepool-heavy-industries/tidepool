@@ -416,7 +416,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
     .expect("production preparation and host startup succeed");
     host.run_scenario(|host| {
         Box::pin(async move {
-            host.assert_fresh_prepared_workspace_original().await;
+            host.assert_prepared_workspace_original_handoff().await;
             let root_actor = host.context.actor.identity();
             let root_path = AgentPath("/root".into());
             let mut pending = VecDeque::new();
@@ -625,7 +625,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
     .await
     .expect("the shipped workspace prepares its exact original");
     host.run_scenario(|host| { Box::pin(async move {
-        host.assert_fresh_prepared_workspace_original().await;
+        host.assert_prepared_workspace_original_handoff().await;
         host.http_input("Exercise a fresh full-default child and its typed Text reply.").await.unwrap();
         let root_actor = host.context.actor.identity();
         let root_path = AgentPath("/root".into());

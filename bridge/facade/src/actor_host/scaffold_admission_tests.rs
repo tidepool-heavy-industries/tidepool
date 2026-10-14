@@ -56,7 +56,7 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
     .expect("the shipped workspace must prepare and select its completed deployment");
     host.run_scenario(|host| {
         Box::pin(async move {
-            host.assert_fresh_prepared_workspace_original().await;
+            host.assert_prepared_workspace_original_handoff().await;
             host.input("Inspect and fork the prepared default workspace.")
                 .await
                 .unwrap();
