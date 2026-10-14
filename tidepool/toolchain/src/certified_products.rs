@@ -3234,6 +3234,34 @@ impl SourceModuleIndex {
     }
 }
 
+#[track_caller]
+fn source_closure_mismatch(
+    reason: &'static str,
+    owner: Option<&CachedHomeOwner>,
+    ordinal: u32,
+    binder: &SymbolIdentity,
+    sources: Option<&SourceGroupMap>,
+) -> CertificationError {
+    if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+    {
+        let caller = std::panic::Location::caller();
+        let candidates = sources
+            .into_iter()
+            .flat_map(SourceGroupMap::iter)
+            .filter(|((candidate, candidate_ordinal, symbol), _)| {
+                candidate.unit == binder.unit
+                    && candidate.module == binder.module
+                    && (*candidate_ordinal == ordinal || symbol == binder)
+            })
+            .take(16)
+            .collect::<Vec<_>>();
+        tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+            reason, caller = %caller, ?owner, ordinal, ?binder, ?candidates,
+            "compiler source binder/group closure refused");
+    }
+    CertificationError::Mismatch("source binder/group closure")
+}
+
 impl SourceGroupMap {
     fn new() -> Self {
         Self::default()
@@ -3398,7 +3426,15 @@ fn resolve_receipt_owner_with_validation(
                 sources
                     .get(&(selected.owner.clone(), original_ordinal, binder.clone()))
                     .map(|(owner, _)| owner)
-                    .ok_or(CertificationError::Mismatch("source binder/group closure"))?
+                    .ok_or_else(|| {
+                        source_closure_mismatch(
+                            "receipt_selected_source",
+                            Some(&selected.owner),
+                            original_ordinal,
+                            &binder,
+                            Some(sources),
+                        )
+                    })?
             } else {
                 // Versioned legacy/original receipts can identify their native
                 // generation; an unversioned receipt requires a request issuer.
@@ -3417,9 +3453,15 @@ fn resolve_receipt_owner_with_validation(
                         && *ordinal == original_ordinal
                         && candidate == &binder
                 });
-                let (key, _) = matches
-                    .next()
-                    .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
+                let (key, _) = matches.next().ok_or_else(|| {
+                    source_closure_mismatch(
+                        "receipt_unselected_source",
+                        None,
+                        original_ordinal,
+                        &binder,
+                        Some(sources),
+                    )
+                })?;
                 if matches.next().is_some() {
                     return Err(CertificationError::Mismatch(
                         "ambiguous source original identity",
@@ -3530,7 +3572,13 @@ fn validate_original_group_receipts(
                     .get(&(owner.clone(), *original_ordinal, binder.clone()))
                     .is_none()
                 {
-                    return Err(CertificationError::Mismatch("source binder/group closure"));
+                    return Err(source_closure_mismatch(
+                        "shared_home_source",
+                        Some(owner),
+                        *original_ordinal,
+                        binder,
+                        Some(sources),
+                    ));
                 }
             }
             _ => {
@@ -3655,7 +3703,13 @@ fn resolve_cold_recovery_source(
             group.original_ordinal() == original_ordinal && group.binders().contains(&binder)
         })
     {
-        return Err(CertificationError::Mismatch("source binder/group closure"));
+        return Err(source_closure_mismatch(
+            "recovery_self_source",
+            Some(owner),
+            original_ordinal,
+            &binder,
+            None,
+        ));
     }
     if binder.unit != unit || binder.module != module {
         return Err(CertificationError::Mismatch("home source witness"));
@@ -5769,8 +5823,12 @@ fn validate_owned_originals_with_validation(
                             .get(&(owner.clone(), *original_ordinal, binder.clone()))
                             .is_none_or(|(selected, _)| selected != owner)
                         {
-                            return Err(CertificationError::Mismatch(
-                                "source binder/group closure",
+                            return Err(source_closure_mismatch(
+                                "inherited_original_source",
+                                Some(owner),
+                                *original_ordinal,
+                                binder,
+                                Some(&sources),
                             ));
                         }
                     }
@@ -5931,9 +5989,15 @@ fn validate_selected_originals_with_validation(
                     original_ordinal,
                     binder,
                 } => {
-                    let artifact = native_ids
-                        .get(owner)
-                        .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
+                    let artifact = native_ids.get(owner).ok_or_else(|| {
+                        source_closure_mismatch(
+                            "selected_original_carrier",
+                            Some(owner),
+                            *original_ordinal,
+                            binder,
+                            None,
+                        )
+                    })?;
                     let required = NativeGroupKey {
                         artifact: *artifact,
                         original_ordinal: *original_ordinal,
@@ -5941,7 +6005,13 @@ fn validate_selected_originals_with_validation(
                     if originals.get(&required).is_none_or(|(original, _)| {
                         original.owner != *owner || !original.group.binders().contains(binder)
                     }) {
-                        return Err(CertificationError::Mismatch("source binder/group closure"));
+                        return Err(source_closure_mismatch(
+                            "selected_original_group",
+                            Some(owner),
+                            *original_ordinal,
+                            binder,
+                            None,
+                        ));
                     }
                 }
                 PendingImportOwner::Package {
@@ -6473,8 +6543,12 @@ fn certify_inherited_inventory_with_validation<W: Borrow<HomeCertification>>(
                                 .get(&(owner.clone(), *original_ordinal, binder.clone()))
                                 .is_none()
                             {
-                                return Err(CertificationError::Mismatch(
-                                    "source binder/group closure",
+                                return Err(source_closure_mismatch(
+                                    "recovery_inventory_source",
+                                    Some(owner),
+                                    *original_ordinal,
+                                    binder,
+                                    Some(&sources),
                                 ));
                             }
                             Ok(resolved)
