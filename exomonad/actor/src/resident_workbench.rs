@@ -23486,6 +23486,16 @@ pub(crate) mod request_tests {
         tempfile::TempDir,
     );
 
+    #[tokio::test]
+    async fn repeated_activation_fixtures_preserve_exact_nominal_constructor_identity() {
+        with_test_compiler_owner(async {
+            for _ in 0..2 {
+                drop(activation_session_fixture(|_| {}));
+            }
+        })
+        .await;
+    }
+
     pub(crate) fn activation_session_fixture(
         configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
     ) -> ActivationSessionFixture {
@@ -23762,6 +23772,28 @@ pub(crate) mod request_tests {
             panic!("native receiver must install retained bindings");
         };
         assert_eq!(bound.len(), 2, "receiver and original native Unit reply");
+        for (role, compiled) in [("producer", producer), ("receiver", &receiver)] {
+            for constructor in compiled
+                .table()
+                .iter()
+                .filter(|constructor| constructor.identity.symbol.occurrence == "RunRequest")
+            {
+                eprintln!(
+                    "activation fixture {role} RunRequest table id={:?} identity={:?}",
+                    constructor.id, constructor.identity,
+                );
+            }
+            for (identity, host_id) in compiled
+                .prepared()
+                .definition_facts()
+                .constructors
+                .iter()
+                .filter(|(identity, _)| identity.symbol.occurrence == "RunRequest")
+            {
+                eprintln!("activation fixture {role} RunRequest prepared id={host_id:?} identity={identity:?}");
+            }
+        }
+
         let receiver_interface = receiver
             .certification()
             .unwrap()
