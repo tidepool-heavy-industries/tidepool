@@ -82,7 +82,7 @@ struct SourceGraphReference {
     prompts: PromptReference,
     entries: EntryReference,
     revision: SourceRevision,
-    helper_branch: Option<String>,
+    helper_branch: String,
 }
 
 impl SourceGraphReference {
@@ -226,6 +226,7 @@ impl ExomonadSourceReload {
         manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
         entries: exomonad_actor::SourceEntryStorage,
         prompts: Option<PromptReference>,
+        helper_branch: &str,
     ) -> Result<CheckpointSourceLayer> {
         if include_paths.len() != manifests.len() {
             return Err("source graph has incomplete ordered root evidence".into());
@@ -236,7 +237,7 @@ impl ExomonadSourceReload {
         };
         let revision = source_revision(self.frozen.identity(), &manifests);
         let reference = SourceGraphReference {
-            version: 1,
+            version: 2,
             domain: self.frozen.identity().into(),
             identities: identities.clone(),
             roots: include_paths
@@ -253,13 +254,7 @@ impl ExomonadSourceReload {
             prompts,
             entries: EntryReference::capture(&entries),
             revision,
-            helper_branch: include_paths.iter().find_map(|path| {
-                path.strip_prefix(self.helper_root.join("layers"))
-                    .ok()
-                    .and_then(|relative| relative.components().next())
-                    .and_then(|component| component.as_os_str().to_str())
-                    .map(str::to_owned)
-            }),
+            helper_branch: helper_branch.to_owned(),
         };
         let evidence = SourceGenerationEvidence {
             configuration_digest: reference.configuration_digest()?,
@@ -282,7 +277,7 @@ impl ExomonadSourceReload {
         reference: &GenerationArtifactReference,
     ) -> Result<CheckpointSourceLayer> {
         let graph: SourceGraphReference = serde_json::from_slice(reference.bytes())?;
-        if graph.version != 1 || graph.domain != self.frozen.identity() {
+        if graph.version != 2 || graph.domain != self.frozen.identity() {
             return Err("source graph reference belongs to another run selection".into());
         }
         let configuration_digest = graph.configuration_digest()?;
@@ -292,7 +287,8 @@ impl ExomonadSourceReload {
         reference.validate()?;
         let mut expected_paths = Vec::new();
         let mut expected_identities = Vec::new();
-        if let Some(branch) = &graph.helper_branch {
+        {
+            let branch = &graph.helper_branch;
             if Path::new(branch).components().count() != 1
                 || !matches!(
                     Path::new(branch).components().next(),
@@ -307,16 +303,26 @@ impl ExomonadSourceReload {
                 .and_then(|identity| identity.strip_prefix("helpers:"))
                 .ok_or("source reference lacks helper revision ownership")?;
             let layer = self.helper_layer(branch);
-            let retained = inspect_retained_revision(
-                self.frozen.identity(),
-                identity,
-                &layer.revisions().join(identity),
-                1,
-            )?;
+            let retained = if graph
+                .roots
+                .first()
+                .is_some_and(|root| root.path.starts_with(layer.revisions()))
+            {
+                inspect_retained_revision(
+                    self.frozen.identity(),
+                    identity,
+                    &layer.revisions().join(identity),
+                    1,
+                )?
+            } else {
+                self.prepared_helper_revision()?
+                    .filter(|helper| helper.identity == identity)
+                    .ok_or("source reference does not select this deployment's original helper")?
+            };
             expected_identities.push(format!("helpers:{identity}"));
             expected_paths.extend(retained.paths);
         }
-        let run_index = usize::from(graph.helper_branch.is_some());
+        let run_index = 1;
         let identity = graph
             .identities
             .get(run_index)
@@ -623,6 +629,7 @@ impl ExomonadSourceReload {
                 manifests,
                 entries,
                 Some(prompt_reference),
+                &helper_branch,
             )
             .map_err(unavailable)?;
         let composer = self
@@ -783,9 +790,7 @@ impl ExomonadSourceReload {
                         );
                         Ok(())
                     };
-                if let Some(branch) = &graph.helper_branch {
-                    add(&[self.helper_draft(branch)])?;
-                }
+                add(&[self.helper_draft(&graph.helper_branch)])?;
                 add(&run_roots)?;
                 manifests.push(source_root_manifest(&self.frozen.workspace_resources())?);
                 for root in self.shared_roots()? {

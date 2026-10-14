@@ -226,6 +226,17 @@ impl SourceLayer {
     /// into existence: every compile in the run needs it to resolve.
     pub(crate) fn ensure_active(&self, frozen: &FrozenWorkspace) -> Result<SourceRevision> {
         if let Some(revision) = frozen.prepared_source_revision()? {
+            if self.read_active()?.is_none() {
+                let initial = frozen
+                    .prepared_initial_source()
+                    .ok_or("prepared run has no initial source selection")?;
+                inspect_retained_revision(
+                    frozen.identity(),
+                    &initial.run_revision,
+                    &revision,
+                    frozen.captured_source_roots().len(),
+                )?;
+            }
             return self.ensure_active_from_prepared(frozen.identity(), &revision);
         }
         self.ensure_active_from(frozen.identity(), frozen.captured_source_roots())
@@ -640,6 +651,9 @@ fn inspect_retained_revision(
     directory: &Path,
     roots: usize,
 ) -> Result<RetainedRevision> {
+    if revision_root_count(directory)? != roots {
+        return Err("immutable source revision differs from its selected root count".into());
+    }
     let paths = revision_include_paths(directory, roots)
         .into_iter()
         .map(std::fs::canonicalize)
@@ -654,6 +668,27 @@ fn inspect_retained_revision(
         paths,
         manifests: manifests.into(),
     })
+}
+
+/// Validate both owner-selected immutable originals without initializing a run.
+pub(crate) fn validate_prepared_initial_source(frozen: &FrozenWorkspace) -> Result<()> {
+    let initial = frozen
+        .prepared_initial_source()
+        .ok_or("completed preparation has no initial source selection")?;
+    let run = frozen
+        .prepared_source_revision()?
+        .ok_or("completed preparation has no original run resource")?;
+    let helper = frozen
+        .prepared_helper_revision()?
+        .ok_or("completed preparation has no original helper resource")?;
+    inspect_retained_revision(
+        frozen.identity(),
+        &initial.run_revision,
+        &run,
+        frozen.captured_source_roots().len(),
+    )?;
+    inspect_retained_revision(frozen.identity(), &initial.helper_revision, &helper, 1)?;
+    Ok(())
 }
 
 /// Which layer one actor's own source calls act on.
@@ -859,7 +894,10 @@ impl ExomonadSourceReload {
             }
             _ => fresh_entry_storage.clone(),
         };
-        let helper_root = run_root.join("helpers");
+        let helper_root = match &owner {
+            SourceRootOwner::Prepared(_) => run_root.join("workspace/helpers"),
+            _ => run_root.join("helpers"),
+        };
         let layer = SourceLayer::new(&run_root);
         Ok(Self {
             source_issuer: exomonad_actor::SourceLayerIssuer::default(),
@@ -1000,19 +1038,17 @@ impl ExomonadSourceReload {
         let Some(directory) = self.frozen.prepared_source_revision()? else {
             return Ok(None);
         };
-        let directory = std::fs::canonicalize(directory)?;
-        let roots = revision_root_count(&directory)?;
-        let manifests = source_manifests(&directory, roots)?;
-        let identity = source_revision(self.frozen.identity(), &manifests[..roots]);
-        validate_revision_resource(&directory, roots, &identity.identity, &manifests)?;
-        Ok(Some(RetainedRevision {
-            identity: identity.identity,
-            paths: revision_include_paths(&directory, roots)
-                .into_iter()
-                .map(std::fs::canonicalize)
-                .collect::<std::io::Result<Vec<_>>>()?,
-            manifests: manifests.into(),
-        }))
+        let initial_source = self
+            .frozen
+            .prepared_initial_source()
+            .ok_or("prepared run has no initial source selection")?;
+        inspect_retained_revision(
+            self.frozen.identity(),
+            &initial_source.run_revision,
+            &directory,
+            self.frozen.captured_source_roots().len(),
+        )
+        .map(Some)
     }
 
     /// The deployment's promised recipes belong to this original immutable
@@ -1021,9 +1057,58 @@ impl ExomonadSourceReload {
         let revision = self
             .prepared_run_revision()?
             .ok_or("source owner has no completed deployment revision")?;
-        let mut identities = vec![format!("run:{}", revision.identity)];
-        let mut include_paths = revision.paths;
-        let mut manifests = revision.manifests.iter().cloned().collect();
+        let helper = self
+            .prepared_helper_revision()?
+            .ok_or("source owner has no completed deployment helper revision")?;
+        self.compose_graph("run", helper, revision)
+    }
+
+    fn prepared_helper_revision(&self) -> Result<Option<RetainedRevision>> {
+        let Some(directory) = self.frozen.prepared_helper_revision()? else {
+            return Ok(None);
+        };
+        let initial_source = self
+            .frozen
+            .prepared_initial_source()
+            .ok_or("prepared helper has no initial source selection")?;
+        inspect_retained_revision(
+            self.frozen.identity(),
+            &initial_source.helper_revision,
+            &directory,
+            1,
+        )
+        .map(Some)
+    }
+
+    pub(crate) fn prepared_initial_source(
+        &self,
+    ) -> Result<super::workspace::PreparedInitialSource> {
+        Ok(super::workspace::PreparedInitialSource {
+            run_revision: self
+                .layer
+                .checkpoint_revision(self.frozen.identity())?
+                .identity,
+            helper_revision: self
+                .helper_layer("run")
+                .checkpoint_revision(self.frozen.identity())?
+                .identity,
+        })
+    }
+
+    fn compose_graph(
+        &self,
+        helper_branch: &str,
+        helper: RetainedRevision,
+        run: RetainedRevision,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer> {
+        let mut identities = vec![
+            format!("helpers:{}", helper.identity),
+            format!("run:{}", run.identity),
+        ];
+        let mut include_paths = helper.paths;
+        include_paths.extend(run.paths);
+        let mut manifests = helper.manifests.iter().cloned().collect::<Vec<_>>();
+        manifests.extend(run.manifests.iter().cloned());
         self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
         self.append_shared_roots(&mut include_paths, &mut manifests)?;
         self.issue_graph(
@@ -1032,6 +1117,7 @@ impl ExomonadSourceReload {
             manifests,
             self.entry_storage.clone(),
             None,
+            helper_branch,
         )
     }
 
@@ -1040,26 +1126,11 @@ impl ExomonadSourceReload {
         helper_branch: &str,
     ) -> Result<exomonad_actor::CheckpointSourceLayer> {
         self.layer.ensure_active(&self.frozen)?;
-        let mut identities = Vec::new();
-        let mut include_paths = Vec::new();
-        let mut manifests = Vec::new();
-        let mut add = |layer: &SourceLayer, kind: &str| -> Result<()> {
-            let revision = layer.checkpoint_revision(self.frozen.identity())?;
-            identities.push(format!("{kind}:{}", revision.identity));
-            include_paths.extend(revision.paths);
-            manifests.extend(revision.manifests.iter().cloned());
-            Ok(())
-        };
-        add(&self.helper_layer(helper_branch), "helpers")?;
-        add(&self.layer, "run")?;
-        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
-        self.append_shared_roots(&mut include_paths, &mut manifests)?;
-        self.issue_graph(
-            identities,
-            include_paths,
-            manifests,
-            self.entry_storage.clone(),
-            None,
+        self.compose_graph(
+            helper_branch,
+            self.helper_layer(helper_branch)
+                .checkpoint_revision(self.frozen.identity())?,
+            self.layer.checkpoint_revision(self.frozen.identity())?,
         )
     }
 
@@ -1075,10 +1146,20 @@ impl ExomonadSourceReload {
         let seed = self.helper_root.join("empty");
         std::fs::create_dir_all(&seed)?;
         let draft = self.helper_draft(branch);
-        if branch == "run" {
-            crate::actor_host::initialize_helper_draft(&self.workspace, &draft)?;
+        if !matches!(self.source_owner.as_ref(), SourceRootOwner::Prepared(_)) {
+            if branch == "run" {
+                crate::actor_host::initialize_helper_draft(&self.workspace, &draft)?;
+            }
+            std::fs::create_dir_all(&draft)?;
         }
-        std::fs::create_dir_all(&draft)?;
+        let layer = self.helper_layer(branch);
+        if let Some(active) = layer.read_active()? {
+            return Ok(active);
+        }
+        if let Some(prepared) = self.frozen.prepared_helper_revision()? {
+            self.prepared_helper_revision()?;
+            return layer.ensure_active_from_prepared(self.frozen.identity(), &prepared);
+        }
         self.helper_layer(branch)
             .ensure_active_from(self.frozen.identity(), &[seed])
     }
@@ -1172,35 +1253,13 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         if let ActorSourceScope::Checkpoint(layer) = self.scope(actor) {
             return self.toolset_layer_from(&layer);
         }
-        if self
-            .layer
-            .read_record()
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
-            self.layer
-                .ensure_active(&self.frozen)
-                .map_err(|error| error.to_string())?;
-        }
-        let revision = self
-            .layer
-            .checkpoint_revision(self.frozen.identity())
+        let helper = self
+            .helper_branch_for(actor)
+            .unwrap_or_else(|| "run".to_owned());
+        self.ensure_helper_active(&helper)
             .map_err(|error| error.to_string())?;
-        let mut identities = vec![format!("run:{}", revision.identity)];
-        let mut include_paths = revision.paths;
-        let mut manifests = revision.manifests.iter().cloned().collect();
-        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)
-            .map_err(|error| error.to_string())?;
-        self.append_shared_roots(&mut include_paths, &mut manifests)
-            .map_err(|error| error.to_string())?;
-        self.issue_graph(
-            identities,
-            include_paths,
-            manifests,
-            self.entry_storage.clone(),
-            None,
-        )
-        .map_err(|error| error.to_string())
+        self.pinned_checkpoint_graph(&helper)
+            .map_err(|error| error.to_string())
     }
 
     fn validate_source_authority(
@@ -1616,7 +1675,10 @@ mod tests {
                 frozen.prepared_deployment = Some(Arc::clone(&anchor));
                 WorkspacePreparation::Completed {
                     original,
-                    revision: "a".repeat(64),
+                    initial_source: super::super::workspace::PreparedInitialSource {
+                        run_revision: "a".repeat(64),
+                        helper_revision: "b".repeat(64),
+                    },
                     // This is source selection metadata, not a compiled entry
                     // or a claim that the deployment is ready to execute.
                     coverage: vec![super::super::workspace::PreparedToolsetCoverage {
@@ -2037,10 +2099,20 @@ mod tests {
         // These selections exercise source/recipe observation only; no
         // compiled entry or compiler authority is manufactured by this case.
         let original_selection = uuid::Uuid::new_v4();
+        let helper_seed = tempfile::tempdir().unwrap();
+        let helper_layer =
+            SourceLayer::helpers(&deployment.path().join("workspace/helpers"), "run");
+        let original_helper = helper_layer
+            .ensure_active_from(frozen.identity(), &[helper_seed.path().to_owned()])
+            .unwrap();
+        let retained_helper = helper_layer.checkpoint_revision(frozen.identity()).unwrap();
         let mut deployed = frozen.clone();
         deployed.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
             original: original_selection,
-            revision: original.identity.clone(),
+            initial_source: super::super::workspace::PreparedInitialSource {
+                run_revision: original.identity.clone(),
+                helper_revision: original_helper.identity.clone(),
+            },
             coverage: vec![super::super::workspace::PreparedToolsetCoverage {
                 requested_effects: exomonad_actor::ActorCapabilities::default()
                     .effect_keys()
@@ -2101,14 +2173,19 @@ mod tests {
             .identities()
             .contains(&format!("run:{}", updated.identity)));
         assert_eq!(
-            preflight.include_paths()[..retained.paths.len()],
+            preflight.include_paths()
+                [retained_helper.paths.len()..retained_helper.paths.len() + retained.paths.len()],
             retained.paths
         );
-        assert_eq!(current.include_paths()[..live.paths.len()], live.paths);
+        assert_eq!(
+            current.include_paths()
+                [retained_helper.paths.len()..retained_helper.paths.len() + live.paths.len()],
+            live.paths
+        );
         for (expected, actual) in retained
             .manifests
             .iter()
-            .zip(preflight.source_manifests().unwrap())
+            .zip(&preflight.source_manifests().unwrap()[retained_helper.paths.len()..])
         {
             assert!(same_source_manifest(expected, actual));
         }
@@ -2969,6 +3046,353 @@ mod tests {
         assert_eq!(edited.changed_modules, vec!["Project.Work".to_string()]);
         drop(run);
     }
+    struct PreparedSourceFixture {
+        project: exomonad_worktree::testing::TestRepo,
+        files: Arc<tempfile::TempDir>,
+        deployment: Arc<tidepool_atomic_write::DirectoryAnchor>,
+        selected: super::super::workspace::PreparedWorkspaceSelection,
+    }
+
+    impl PreparedSourceFixture {
+        async fn prepare() -> Self {
+            tidepool_testing::eval_harness::require_extract();
+            let files = Arc::new(tempfile::tempdir().unwrap());
+            let project = exomonad_worktree::testing::TestRepo::init().unwrap();
+            let settings =
+                crate::actor_host::test_campaign::hosted_test_settings(files.as_ref(), 1);
+            let authored = project.path().join(".exomonad");
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |config| {
+                config.launch.embedded = Some(settings);
+                config.haskell.source_roots = vec![PathBuf::from(".")];
+            });
+            std::fs::create_dir_all(authored.join("Project")).unwrap();
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                "module Project.Work where\nwork :: Int\nwork = 1\n",
+            )
+            .unwrap();
+            let git = exomonad_worktree::GitCli::new();
+            git.try_run(project.path(), &["add", "--all"]).unwrap();
+            git.try_run(
+                project.path(),
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "prepared source fixture",
+                ],
+            )
+            .unwrap();
+            let deployment = Arc::new(
+                tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+                    .unwrap()
+                    .child("prepared")
+                    .unwrap(),
+            );
+            let selected =
+                super::super::workspace::prepare_workspace(project.path(), Arc::clone(&deployment))
+                    .await
+                    .unwrap();
+            Self {
+                project,
+                files,
+                deployment,
+                selected,
+            }
+        }
+
+        fn new_run(&self) -> (Arc<tempfile::TempDir>, Arc<ExomonadSourceReload>) {
+            // Each generated history begins at the same authored baseline and
+            // receives independent mutable publication and draft owners.
+            std::fs::write(
+                self.project.path().join(".exomonad/Project/Work.hs"),
+                "module Project.Work where\nwork :: Int\nwork = 1\n",
+            )
+            .unwrap();
+            let run = Arc::new(tempfile::tempdir().unwrap());
+            let frozen = self
+                .selected
+                .select_for_run(self.project.path(), run.path())
+                .unwrap();
+            let reload = Arc::new(
+                ExomonadSourceReload::new_owned(
+                    frozen.clone(),
+                    self.project.path().to_owned(),
+                    run.path().to_owned(),
+                    frozen.runtime_actors(),
+                    SourceRootOwner::Temporary(Arc::clone(&run)),
+                )
+                .unwrap(),
+            );
+            (run, reload)
+        }
+
+        fn make_writable(&self) {
+            fn restore(path: &Path) {
+                use std::os::unix::fs::PermissionsExt;
+                let metadata = std::fs::symlink_metadata(path).unwrap();
+                if metadata.file_type().is_symlink() {
+                    return;
+                }
+                std::fs::set_permissions(
+                    path,
+                    std::fs::Permissions::from_mode(
+                        metadata.permissions().mode()
+                            | if metadata.is_dir() { 0o700 } else { 0o600 },
+                    ),
+                )
+                .unwrap();
+                if metadata.is_dir() {
+                    for entry in std::fs::read_dir(path).unwrap() {
+                        restore(&entry.unwrap().path());
+                    }
+                }
+            }
+            restore(self.files.path());
+        }
+    }
+
+    impl Drop for PreparedSourceFixture {
+        fn drop(&mut self) {
+            self.make_writable();
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_source_histories_keep_original_pair_and_restore_published_helpers() {
+        use exomonad_actor::ActorSourceLayers;
+        use proptest::prelude::*;
+        let fixture = PreparedSourceFixture::prepare().await;
+        let requests = tidepool_extract_cmd::extract_spawn_count();
+        let mut config = proptest::test_runner::Config::default();
+        config.cases = 16;
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::prepared_source_histories_keep_original_pair_and_restore_published_helpers"
+        ));
+        let mut runner = proptest::test_runner::TestRunner::new(config);
+        let publications = std::cell::RefCell::new([0usize; 2]);
+        let restores = std::cell::Cell::new(0usize);
+        runner
+            .run(&proptest::collection::vec(0u8..4, 0..8), |random| {
+                let (run, reload) = fixture.new_run();
+                let project = &fixture.project;
+                let original = reload.prepared_toolset_layer().unwrap();
+                let initial = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+                prop_assert_eq!(initial.semantic_digest(), original.semantic_digest());
+                let mut helper = reload.prepared_helper_revision().unwrap().unwrap();
+                let mut authored = reload.prepared_run_revision().unwrap().unwrap();
+                let mut captures = vec![initial];
+                for (step, action) in [0u8, 1, 2, 3].into_iter().chain(random).enumerate() {
+                    match action {
+                        0 => {
+                            std::fs::write(
+                                project.path().join(".exomonad/Project/Work.hs"),
+                                format!(
+                                    "module Project.Work where\nwork :: Int\nwork = {}\n",
+                                    step + 2
+                                ),
+                            )
+                            .unwrap();
+                            let pending = reload
+                                .layer
+                                .capture_from_workspace(&reload.frozen, project.path())
+                                .unwrap();
+                            reload.layer.publish(pending).unwrap();
+                            authored = reload
+                                .layer
+                                .checkpoint_revision(reload.frozen.identity())
+                                .unwrap();
+                            publications.borrow_mut()[0] += 1;
+                        }
+                        1 => {
+                            let draft = reload.helper_draft("run");
+                            std::fs::write(
+                                draft.join("SessionHelpers.hs"),
+                                format!(
+                                    "module SessionHelpers where\nhelper :: Int\nhelper = {}\n",
+                                    step + 2
+                                ),
+                            )
+                            .unwrap();
+                            let layer = reload.helper_layer("run");
+                            let pending = layer
+                                .capture_from_roots(reload.frozen.identity(), &[draft])
+                                .unwrap();
+                            layer.publish(pending).unwrap();
+                            helper = layer.checkpoint_revision(reload.frozen.identity()).unwrap();
+                            publications.borrow_mut()[1] += 1;
+                        }
+                        2 => {
+                            let before =
+                                reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+                            let pending = reload
+                                .layer
+                                .capture_from_workspace(&reload.frozen, project.path())
+                                .unwrap();
+                            reload.layer.publish(pending).unwrap();
+                            let layer = reload.helper_layer("run");
+                            let pending = layer
+                                .capture_from_roots(
+                                    reload.frozen.identity(),
+                                    &[reload.helper_draft("run")],
+                                )
+                                .unwrap();
+                            layer.publish(pending).unwrap();
+                            let after =
+                                reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+                            prop_assert_eq!(before.semantic_digest(), after.semantic_digest());
+                            captures.push(after);
+                        }
+                        3 => {
+                            let cold = ExomonadSourceReload::new_owned(
+                                reload.frozen.clone(),
+                                project.path().to_owned(),
+                                run.path().to_owned(),
+                                reload.frozen.runtime_actors(),
+                                SourceRootOwner::Temporary(Arc::clone(&run)),
+                            )
+                            .unwrap();
+                            for capture in &captures {
+                                let restored = cold
+                                    .restore_graph(
+                                        &capture.generation_evidence().unwrap().reference,
+                                    )
+                                    .unwrap();
+                                prop_assert_eq!(restored.include_paths(), capture.include_paths());
+                                prop_assert_eq!(
+                                    restored.generation_evidence().unwrap().configuration_digest,
+                                    capture.generation_evidence().unwrap().configuration_digest
+                                );
+                                restores.set(restores.get() + 1);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    let current = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+                    // Oracle: retain each lower-level publication separately, then
+                    // concatenate the expected precedence independently of composer.
+                    let mut expected = helper.paths.clone();
+                    expected.extend(authored.paths.iter().cloned());
+                    expected.push(reload.frozen.workspace_resources().canonicalize().unwrap());
+                    for shared in reload.shared_roots().unwrap() {
+                        if !expected.contains(&shared) {
+                            expected.push(shared);
+                        }
+                    }
+                    prop_assert_eq!(current.include_paths(), expected.as_slice());
+                    for (path, actual) in expected.iter().zip(current.source_manifests().unwrap()) {
+                        prop_assert!(same_source_manifest(
+                            actual,
+                            &source_root_manifest(path).unwrap()
+                        ));
+                    }
+                    prop_assert_eq!(
+                        reload.prepared_toolset_layer().unwrap().semantic_digest(),
+                        original.semantic_digest()
+                    );
+                    prop_assert_ne!(
+                        current.generation_evidence().unwrap().configuration_digest,
+                        original.generation_evidence().unwrap().configuration_digest
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        eprintln!(
+            "prepared histories cases=16 run_publications={} helper_publications={} restores={}",
+            publications.borrow()[0],
+            publications.borrow()[1],
+            restores.get()
+        );
+        assert!(publications.borrow().iter().all(|count| *count >= 16));
+        assert!(restores.get() >= 32);
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+    }
+
+    #[tokio::test]
+    async fn prepared_initial_pair_refuses_missing_corrupt_and_wrong_helper_or_run() {
+        let fixture = PreparedSourceFixture::prepare().await;
+        let (_run, reload) = fixture.new_run();
+        fixture.make_writable();
+        assert!(reload
+            .frozen
+            .prepared_helper_revision()
+            .unwrap()
+            .unwrap()
+            .starts_with(fixture.deployment.path().join("workspace/helpers")));
+        let original = reload.prepared_toolset_layer().unwrap();
+        let reference = &original.generation_evidence().unwrap().reference;
+        assert!(reload.restore_graph(reference).is_ok());
+        for legacy in [false, true] {
+            let mut graph: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+            if legacy {
+                graph["version"] = serde_json::json!(1);
+            } else {
+                graph["helper_branch"] = serde_json::Value::Null;
+            }
+            let altered = tidepool_runtime::session::GenerationArtifactReference::capture(
+                serde_json::to_vec(&graph).unwrap(),
+            );
+            assert!(
+                reload.restore_graph(&altered).is_err(),
+                "helper-free or legacy graphs refuse"
+            );
+        }
+        let assert_refused = || {
+            assert!(reload.prepared_toolset_layer().is_err());
+            assert!(reload.restore_graph(reference).is_err());
+            let new_run = tempfile::tempdir().unwrap();
+            assert!(fixture
+                .selected
+                .select_for_run(fixture.project.path(), new_run.path())
+                .is_err());
+            assert!(!new_run.path().join("workspace-prepared.json").exists());
+        };
+        for (selected, layer, wrong_file, wrong_source) in [
+            (
+                reload.frozen.prepared_helper_revision().unwrap().unwrap(),
+                reload.helper_layer("run"),
+                "SessionHelpers.hs",
+                "module SessionHelpers where\nwrong = 3\n",
+            ),
+            (
+                reload.frozen.prepared_source_revision().unwrap().unwrap(),
+                reload.layer.clone(),
+                "Project/Work.hs",
+                "module Project.Work where\nwrong = 4\n",
+            ),
+        ] {
+            let retained = selected.with_extension("retained");
+            std::fs::rename(&selected, &retained).unwrap();
+            assert_refused();
+            let seed = tempfile::tempdir().unwrap();
+            let wrong_path = seed.path().join(wrong_file);
+            std::fs::create_dir_all(wrong_path.parent().unwrap()).unwrap();
+            std::fs::write(wrong_path, wrong_source).unwrap();
+            let wrong = layer
+                .capture_from_roots(reload.frozen.identity(), &[seed.path().to_owned()])
+                .unwrap();
+            copy_revision_tree(&wrong.directory, &selected).unwrap();
+            assert_refused();
+            std::fs::remove_dir_all(&selected).unwrap();
+            copy_revision_tree(&retained, &selected).unwrap();
+            let resource = selected.join("resources/Exomonad/Source/Revision.hs");
+            std::fs::write(&resource, "corrupt revision resource").unwrap();
+            assert_refused();
+            std::fs::remove_dir_all(&selected).unwrap();
+            std::fs::rename(retained, selected).unwrap();
+            assert_eq!(
+                reload.prepared_toolset_layer().unwrap().semantic_digest(),
+                original.semantic_digest()
+            );
+        }
+    }
+
     fn generation_owner() -> (tempfile::TempDir, Arc<ExomonadSourceReload>) {
         let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
         let config = project.path().join(".exomonad/config.toml");

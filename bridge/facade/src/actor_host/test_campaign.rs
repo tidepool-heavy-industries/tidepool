@@ -2042,7 +2042,7 @@ pub(super) fn hosted_browser_assets() -> std::path::PathBuf {
     )
 }
 
-pub(super) fn hosted_test_settings(
+pub(crate) fn hosted_test_settings(
     files: &tempfile::TempDir,
     concurrent_jobs: usize,
 ) -> crate::exomonad::EmbeddedLaunchConfig {

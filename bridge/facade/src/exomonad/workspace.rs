@@ -146,9 +146,31 @@ pub(crate) enum WorkspacePreparation {
     Preparing { original: uuid::Uuid },
     Completed {
         original: uuid::Uuid,
-        revision: String,
+        initial_source: PreparedInitialSource,
         coverage: Vec<PreparedToolsetCoverage>,
     },
+}
+
+/// The exact immutable source pair selected by completed preparation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedInitialSource {
+    pub(crate) run_revision: String,
+    pub(crate) helper_revision: String,
+}
+
+impl PreparedInitialSource {
+    fn validate(&self) -> Result<()> {
+        if [&self.run_revision, &self.helper_revision]
+            .iter()
+            .any(|revision| {
+                revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err("completed preparation lacks its initial run/helper selection; prepare a new deployment".into());
+        }
+        Ok(())
+    }
 }
 
 /// The root's requested effects and the exact specialization its producer
@@ -289,14 +311,12 @@ pub(crate) async fn prepare_workspace(
             workspace,
             &directory,
             frozen.clone(),
-            source,
+            source.clone(),
         )
         .await?;
         prepared_toolset = Some(ready);
-        let revision = super::source::SourceLayer::new(directory.path())
-            .read_active()?
-            .ok_or("workspace preparation did not settle its original source revision")?;
-        frozen.complete_preparation(&directory, revision.identity, entries)?;
+        let initial_source = source.prepared_initial_source()?;
+        frozen.complete_preparation(&directory, initial_source, entries)?;
     }
     Ok(PreparedWorkspaceSelection {
         directory,
@@ -404,10 +424,12 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(8) {
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(9) {
                 return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
-            let mut frozen: Self = serde_json::from_value(selection)?;
+            let mut frozen: Self = serde_json::from_value(selection).map_err(|error| {
+                format!("invalid frozen workspace selection; prepare a new deployment and start a new run: {error}")
+            })?;
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
@@ -494,13 +516,10 @@ impl FrozenWorkspace {
             {
                 return Err("frozen workspace orchestration differs from this build".into());
             }
-            if let Some(WorkspacePreparation::Completed { revision, .. }) = &frozen.preparation {
-                if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(
-                        "completed workspace preparation lacks its original revision or entries"
-                            .into(),
-                    );
-                }
+            if let Some(WorkspacePreparation::Completed { initial_source, .. }) =
+                &frozen.preparation
+            {
+                initial_source.validate()?;
                 frozen.validate_prepared_toolset_promises()?;
                 if deployment_files(&directory)? != frozen.files {
                     return Err("prepared workspace deployment inventory changed".into());
@@ -508,6 +527,7 @@ impl FrozenWorkspace {
                 frozen.prepared_deployment = Some(std::sync::Arc::new(
                     tidepool_atomic_write::DirectoryAnchor::open_existing(run_root)?,
                 ));
+                super::source::validate_prepared_initial_source(&frozen)?;
             }
             return Ok(frozen);
         }
@@ -655,7 +675,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 8,
+            version: 9,
             identity,
             include,
             modules: config.haskell.modules,
@@ -760,22 +780,18 @@ impl FrozenWorkspace {
     fn complete_preparation(
         &mut self,
         directory: &tidepool_atomic_write::DirectoryAnchor,
-        revision: String,
+        initial_source: PreparedInitialSource,
         coverage: Vec<PreparedToolsetCoverage>,
     ) -> Result<()> {
         let Some(WorkspacePreparation::Preparing { original }) = &self.preparation else {
             return Err("only an admitted workspace preparation can complete".into());
         };
-        if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(
-                "workspace preparation must settle original native entries and revision".into(),
-            );
-        }
+        initial_source.validate()?;
         self.validate_toolset_coverage(&coverage)?;
         self.files = deployment_files(&directory.path().join("workspace"))?;
         self.preparation = Some(WorkspacePreparation::Completed {
             original: *original,
-            revision,
+            initial_source,
             coverage,
         });
         self.write_selection(directory.path())?;
@@ -875,15 +891,43 @@ impl FrozenWorkspace {
             .clone()
     }
 
+    pub(crate) fn prepared_initial_source(&self) -> Option<&PreparedInitialSource> {
+        match &self.preparation {
+            Some(WorkspacePreparation::Completed { initial_source, .. }) => Some(initial_source),
+            _ => None,
+        }
+    }
+
     pub(crate) fn prepared_source_revision(&self) -> Result<Option<PathBuf>> {
         match &self.preparation {
-            Some(WorkspacePreparation::Completed { revision, .. }) => {
+            Some(WorkspacePreparation::Completed { initial_source, .. }) => {
                 let deployment = self
                     .prepared_deployment
                     .as_ref()
                     .ok_or("completed preparation has no acquired deployment owner")?;
                 Ok(Some(
-                    deployment.path().join("workspace/revisions").join(revision),
+                    deployment
+                        .path()
+                        .join("workspace/revisions")
+                        .join(&initial_source.run_revision),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn prepared_helper_revision(&self) -> Result<Option<PathBuf>> {
+        match &self.preparation {
+            Some(WorkspacePreparation::Completed { initial_source, .. }) => {
+                let deployment = self
+                    .prepared_deployment
+                    .as_ref()
+                    .ok_or("completed preparation has no acquired deployment owner")?;
+                Ok(Some(
+                    deployment
+                        .path()
+                        .join("workspace/helpers/layers/run/revisions")
+                        .join(&initial_source.helper_revision),
                 ))
             }
             _ => Ok(None),
@@ -1849,7 +1893,10 @@ mod tests {
         }];
         frozen.preparation = Some(WorkspacePreparation::Completed {
             original,
-            revision: "b".repeat(64),
+            initial_source: PreparedInitialSource {
+                run_revision: "b".repeat(64),
+                helper_revision: "c".repeat(64),
+            },
             coverage,
         });
         let admitted = serde_json::to_vec(&frozen.preparation).unwrap();
@@ -2086,7 +2133,7 @@ mod tests {
         let manifest = directory.path().join("workspace/selection.json");
         let mut selected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        for version in [4, 5, 6, 7] {
+        for version in [4, 5, 6, 7, 8] {
             selected["version"] = serde_json::json!(version);
             // An old completed inventory must be refused by its version,
             // before decoding its missing current coverage fields.
@@ -2098,8 +2145,41 @@ mod tests {
             assert!(error
                 .to_string()
                 .contains("unsupported frozen workspace format"));
+            assert!(error.to_string().contains("prepare a new deployment"));
             assert!(!run.path().join("workspace-prepared.json").exists());
         }
+    }
+
+    #[test]
+    fn completed_preparation_requires_the_paired_initial_source_selection() {
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let directory = tempfile::tempdir().unwrap();
+        FrozenWorkspace::load(project.path(), directory.path()).unwrap();
+        let path = directory.path().join("workspace/selection.json");
+        let mut selection: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        selection["preparation"] = serde_json::json!({
+            "state": "completed", "original": uuid::Uuid::new_v4(),
+            "revision": "a".repeat(64), "coverage": []
+        });
+        std::fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("prepare a new deployment"),
+            "{error}"
+        );
+        selection["preparation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("revision");
+        selection["preparation"]["initial_source"] =
+            serde_json::json!({"run_revision": "a".repeat(64)});
+        std::fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("prepare a new deployment"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2364,7 +2444,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 8);
+        assert_eq!(selection["version"], 9);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();

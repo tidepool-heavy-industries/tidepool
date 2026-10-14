@@ -2495,6 +2495,91 @@ mod tests {
         assert!(!second.path().join("workspace").exists());
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
 
+        use exomonad_actor::ActorSourceLayers;
+        let mut original_configuration = None;
+        let mut original_recipe = None;
+        for (run, inputs) in [(&first, &first_inputs), (&second, &second_inputs)] {
+            let lease = Arc::new(super::super::HostIncarnationLease::claim(run).unwrap());
+            let source = crate::exomonad::source::ExomonadSourceReload::new_owned(
+                inputs.clone(),
+                repository.path().to_owned(),
+                run.path().to_owned(),
+                inputs.runtime_actors(),
+                crate::exomonad::source::SourceRootOwner::Host(lease),
+            )
+            .unwrap();
+            let promised = source.prepared_toolset_layer().unwrap();
+            assert!(
+                !run.path().join("helpers").exists(),
+                "preflight does not initialize live helper state"
+            );
+            let live = source
+                .freeze_checkpoint_layer(tidepool_repr::PrincipalId::SYSTEM)
+                .unwrap();
+            let initial = inputs.prepared_initial_source().unwrap();
+            let helper = inputs.prepared_helper_revision().unwrap().unwrap();
+            let authored = inputs.prepared_source_revision().unwrap().unwrap();
+            let mut expected = vec![helper.join("0"), helper.join("resources")];
+            expected.extend(
+                (0..inputs.captured_source_roots().len())
+                    .map(|index| authored.join(index.to_string())),
+            );
+            expected.push(authored.join("resources"));
+            expected.push(inputs.workspace_resources());
+            let expected = expected
+                .into_iter()
+                .map(|path| path.canonicalize().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(&live.include_paths()[..expected.len()], expected);
+            assert_eq!(promised.include_paths(), live.include_paths());
+            assert_eq!(promised.semantic_digest(), live.semantic_digest());
+            assert_eq!(
+                std::fs::read_dir(&expected[0]).unwrap().count(),
+                0,
+                "initial helper is empty"
+            );
+            let helper_revision =
+                std::fs::read_to_string(expected[1].join("Exomonad/Source/Revision.hs")).unwrap();
+            assert!(helper_revision.contains(&initial.helper_revision));
+            let run_revision = std::fs::read_to_string(
+                expected[expected.len() - 2].join("Exomonad/Source/Revision.hs"),
+            )
+            .unwrap();
+            assert!(run_revision.contains(&initial.run_revision));
+            let configuration = live.generation_evidence().unwrap().configuration_digest;
+            assert_eq!(
+                configuration,
+                promised.generation_evidence().unwrap().configuration_digest
+            );
+            if let Some(original) = original_configuration.replace(configuration) {
+                assert_eq!(original, configuration);
+            }
+            let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
+            let effects = [exomonad_actor::ActorEffectKey::Source];
+            let support = [exomonad_tool::ToolEffectKey::Actor(
+                exomonad_actor::ActorEffectKey::Source,
+            )];
+            let recipe = workbench
+                .source_toolset_recipe(&live, &effects, &support)
+                .unwrap()
+                .program;
+            assert_eq!(
+                recipe,
+                workbench
+                    .source_toolset_recipe(&promised, &effects, &support)
+                    .unwrap()
+                    .program
+            );
+            if let Some(original) = original_recipe.replace(recipe.clone()) {
+                assert_eq!(original, recipe);
+            }
+            let restored = source
+                .restore_source(&live.generation_evidence().unwrap().reference)
+                .unwrap();
+            assert_eq!(restored.semantic_digest(), live.semantic_digest());
+        }
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+
         std::fs::write(&prompt, "changed after preparation").unwrap();
         let refused = crate::exomonad::workspace::prepare_workspace(
             repository.path(),

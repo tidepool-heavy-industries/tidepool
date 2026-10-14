@@ -56,8 +56,10 @@ Workspace overrides, unmatched ordered rows and explicit live policies keep
 their existing routes.
 
 Named source snapshot metadata is version 2, qualification descriptors are
-version 3, and prepared workspace selections are version 8. Rebuild, refreeze
-and reprepare with this reader; it does not infer missing named-entry provenance.
+version 3, and prepared workspace selections are version 9. Completed preparation
+retains the exact initial run and helper revisions in its authenticated workspace
+inventory. Rebuild, refreeze and reprepare with this reader; it does not infer
+missing named-entry provenance or an original helper for older selections.
 Pointer version 2 and native catalog version 4 retain their existing contracts.
 Production entries use version 4. Preserve older frozen bundles with their own readers.
 Immediate preparation/start carries only issuer-owned immutable entry/images;
