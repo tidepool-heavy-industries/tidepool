@@ -437,7 +437,16 @@ impl NativeOriginalRequirement {
             }
             let groups = ordinals
                 .iter()
-                .map(|ordinal| index.resolve(*carrier, *ordinal))
+                .map(|ordinal| {
+                    index.resolve(*carrier, *ordinal).map_err(|error| {
+                        view.trace_binding_ambiguity(
+                            original,
+                            Some(*ordinal),
+                            "private_availability_carrier_census_resolution",
+                        );
+                        error
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             complete.push((*carrier, groups));
         }
@@ -445,6 +454,13 @@ impl NativeOriginalRequirement {
             return Ok(None);
         };
         if !complete.is_empty() {
+            view.trace_binding_ambiguity(
+                original,
+                None,
+                "private_availability_multiple_complete_carriers",
+            );
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?carrier, ?groups, other_carriers = ?complete,
+                canonical_namespace = ?canonical_binding, "private availability competing complete carriers");
             return Err(admission_failure(
                 ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
             ));
@@ -882,7 +898,13 @@ impl std::fmt::Display for ArtifactInventoryError {
 
 impl std::error::Error for ArtifactInventoryError {}
 
+#[track_caller]
 pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileError {
+    if let ArtifactInventoryFailure::BindingAmbiguity { artifact } = &failure {
+        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+            artifact = ?artifact, refusal_site = %std::panic::Location::caller(),
+            "artifact inventory ambiguity refusal site");
+    }
     ArtifactInventoryError {
         failure,
         diagnostic_artifacts: None,
@@ -2061,6 +2083,7 @@ pub(crate) struct BoundArtifactSelection {
 }
 
 impl BoundArtifactSelection {
+    #[track_caller]
     fn resolve_binding(
         &self,
         id: ArtifactId,
@@ -2387,13 +2410,26 @@ impl ArtifactInventory {
                 .contains_key(&group.artifact)
                 || issued.groups.is_empty()
             {
-                fixed.resolve_binding(group.artifact, &state)?
+                fixed.resolve_binding(group.artifact, &state).map_err(|error| {
+                    fixed.view.trace_binding_ambiguity(group.artifact, Some(group.original_ordinal),
+                        "bound_demand_artifact_carrier_resolution");
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?group, ?issued_nodes,
+                        "bound demand artifact carrier candidates");
+                    error
+                })?
             } else {
                 // A hidden original has no compiler namespace choice. Its
                 // uniquely issued Group still owns an exact carrier edge.
                 let mut carriers = issued.groups.keys().map(|(carrier, _)| *carrier);
                 let carrier = carriers.next().expect("nonempty issued group index");
                 if carriers.next().is_some() {
+                    fixed.view.trace_binding_ambiguity(
+                        group.artifact,
+                        Some(group.original_ordinal),
+                        "bound_demand_multiple_recorded_group_carriers",
+                    );
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?group, ?issued_nodes,
+                        "bound demand ambiguous issued group candidates");
                     return Err(admission_failure(
                         ArtifactInventoryFailure::BindingAmbiguity {
                             artifact: group.artifact,
@@ -2406,7 +2442,13 @@ impl ArtifactInventory {
                 .groups
                 .contains_key(&(carrier, group.original_ordinal))
             {
-                let binding = issued.resolve(carrier, group.original_ordinal)?;
+                let binding = issued.resolve(carrier, group.original_ordinal).map_err(|error| {
+                    fixed.view.trace_binding_ambiguity(group.artifact, Some(group.original_ordinal),
+                        "bound_demand_selected_carrier_group_resolution");
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?group, ?carrier, ?issued_nodes,
+                        "bound demand selected carrier group candidates");
+                    error
+                })?;
                 resolved_groups.insert(group, binding);
                 reused.insert(group);
                 continue;
@@ -2968,6 +3010,26 @@ impl ArtifactInventory {
                     historical_groups.insert(*group);
                     continue;
                 }
+                let trace_state = &*state;
+                let choice_edges = choices
+                    .iter()
+                    .flat_map(|choice| {
+                        trace_state
+                            .graph
+                            .edges(trace_state.indices[&InventoryNodeKey::Group(*choice)])
+                            .map(move |edge| {
+                                (
+                                    InventoryNodeKey::Group(*choice),
+                                    trace_state.graph[edge.target()],
+                                    edge.weight().clone(),
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", reason = "admission_required_group_choices",
+                    ?group, ?choices, roots = ?required_roots.get(group), ?choice_edges,
+                    namespace_selected = ?namespace_ids.as_ref().map(|ids| ids.contains(&group.artifact)),
+                    "artifact admission ambiguous group proof");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::BindingAmbiguity {
                         artifact: group.artifact,
@@ -3102,6 +3164,14 @@ impl ArtifactInventory {
             for (target, _) in edges {
                 if let LogicalNodeKey::Group(group) = target {
                     if historical_groups.contains(group) {
+                        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", reason = "admission_new_row_requires_ambiguous_historical_group",
+                            ?key, ?group, choices = ?required_groups.get(group), roots = ?required_roots.get(group),
+                            "artifact admission historical group refusal");
+                        parent.trace_binding_ambiguity(
+                            group.artifact,
+                            Some(group.original_ordinal),
+                            "admission_new_row_requires_ambiguous_historical_group",
+                        );
                         return Err(admission_failure(
                             ArtifactInventoryFailure::BindingAmbiguity {
                                 artifact: group.artifact,
@@ -3654,6 +3724,7 @@ impl NativeSelectionIndex {
         index
     }
 
+    #[track_caller]
     fn resolve(
         &self,
         carrier: ArtifactBinding,
@@ -3661,11 +3732,16 @@ impl NativeSelectionIndex {
     ) -> Result<NativeGroupBinding, CompileError> {
         match self.groups.get(&(carrier, ordinal)) {
             Some(NativeGroupResolution::Unique(group)) => Ok(*group),
-            Some(NativeGroupResolution::Ambiguous) => Err(admission_failure(
-                ArtifactInventoryFailure::BindingAmbiguity {
-                    artifact: carrier.artifact,
-                },
-            )),
+            Some(NativeGroupResolution::Ambiguous) => {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?carrier, ordinal,
+                    reason = "native_selection_index_same_carrier_group_ambiguity",
+                    "native group index ambiguity");
+                Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: carrier.artifact,
+                    },
+                ))
+            }
             None => Err(admission_failure(
                 ArtifactInventoryFailure::NativeGroupUnavailable {
                     artifact: carrier.artifact,
@@ -4774,6 +4850,62 @@ impl ArtifactView {
         let lease = Arc::get_mut(&mut self.lease).expect("new selection lease");
         replace_snapshot_namespace(Arc::make_mut(&mut lease.selection), namespace);
     }
+    fn trace_binding_ambiguity(&self, id: ArtifactId, ordinal: Option<u32>, reason: &str) {
+        if !tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+        {
+            return;
+        }
+        let projection = self.reads.read_projection.get();
+        let owner = projection.and_then(|projection| {
+            projection
+                .entries
+                .iter()
+                .find(|entry| entry.descriptor.id == id)
+                .map(|entry| &entry.descriptor.owner)
+        });
+        let nodes = projection.map(|projection| {
+            projection
+                .nodes
+                .iter()
+                .copied()
+                .filter(|node| node.artifact() == id)
+                .collect::<Vec<_>>()
+        });
+        let edges = self
+            .lease
+            .selection
+            .scopes
+            .values()
+            .flat_map(|scope| scope.proof().dependencies.iter())
+            .filter(|(from, _, _)| {
+                from.artifact() == id
+                    && projection.is_some_and(|projection| projection.nodes.contains(from))
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let roots = self
+            .lease
+            .selection
+            .roots
+            .keys()
+            .copied()
+            .filter(|node| node.artifact() == id)
+            .collect::<Vec<_>>();
+        let custody = self
+            .lease
+            .selection
+            .custody_roots
+            .keys()
+            .copied()
+            .filter(|node| node.artifact() == id)
+            .collect::<Vec<_>>();
+        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+            artifact = ?id, reason, ?ordinal, ?owner, ?nodes,
+            namespace = ?self.lease.selection.namespace.get(&id), ?roots, ?custody, ?edges,
+            "artifact inventory ambiguity exact owned graph");
+    }
+
+    #[track_caller]
     fn resolve_binding(
         &self,
         id: ArtifactId,
@@ -4792,6 +4924,7 @@ impl ArtifactView {
             .next()
             .ok_or_else(|| failure("selected artifact is outside retained view"))?;
         if candidates.next().is_some() {
+            self.trace_binding_ambiguity(id, None, "resolver_multiple_owned_artifact_bindings");
             return Err(admission_failure(
                 ArtifactInventoryFailure::BindingAmbiguity { artifact: id },
             ));
