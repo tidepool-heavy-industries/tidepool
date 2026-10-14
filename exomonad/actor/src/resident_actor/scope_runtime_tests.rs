@@ -1051,6 +1051,13 @@ async fn public_scope_outer_cancellation_retains_real_cleanup_without_resuming_b
 
 #[tokio::test]
 async fn native_queued_cancellation_preserves_receiver_and_accepts_later_request() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
     let mut fixture = ScopeFixture::new(734, Vec::new()).await;
     let parent = fixture.parent().await;
     assert_committed(
