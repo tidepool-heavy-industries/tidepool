@@ -127,3 +127,247 @@ proptest::proptest! {
         });
     }
 }
+
+struct StartupExecutorState {
+    lifecycle: LifecycleHandle,
+    events: tokio::sync::mpsc::UnboundedSender<crate::SourceDelivery>,
+    attached: Option<tokio::sync::mpsc::UnboundedSender<RactorRef<KernelMessage>>>,
+    ready: Option<tokio::sync::oneshot::Receiver<bool>>,
+}
+
+struct StartupExecutor;
+impl Actor for StartupExecutor {
+    type Msg = KernelMessage;
+    type State = StartupExecutorState;
+    type Arguments = Self::State;
+
+    async fn pre_start(
+        &self,
+        myself: RactorRef<Self::Msg>,
+        mut state: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        state.lifecycle.attach_executor(myself.clone()).await?;
+        state.attached.take().unwrap().send(myself)?;
+        if !state.ready.take().unwrap().await? {
+            return Err(std::io::Error::other("startup refused before readiness").into());
+        }
+        state.lifecycle.executor_started().await?;
+        Ok(state)
+    }
+
+    async fn handle(
+        &self,
+        _: RactorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let (message, lease) = match message {
+            KernelMessage::Admitted(envelope) => {
+                let (message, lease) = envelope.into_parts(state.lifecycle.identity())?;
+                (message, Some(lease))
+            }
+            message => (message, None),
+        };
+        if let KernelMessage::Source(delivery) = message {
+            state.events.send(delivery)?;
+        }
+        drop(lease);
+        Ok(())
+    }
+
+    async fn post_stop(
+        &self,
+        _: RactorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.lifecycle.close().await?;
+        state.lifecycle.executor_retired();
+        Ok(())
+    }
+}
+async fn source_receipt(
+    owner: &LifecycleHandle,
+    delivery: crate::SourceDelivery,
+) -> Result<(), KernelCallFailure> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    owner
+        .address
+        .cast(LifecycleCommand::Source {
+            delivery,
+            reply: Some(send.into()),
+        })
+        .unwrap();
+    receive.await.unwrap()
+}
+
+#[tokio::test]
+async fn startup_source_snapshot_keeps_fifo_and_releases_on_failed_readiness() {
+    use crate::request::sources::{RequestSourceKind, SourceEvent, SourceTarget};
+    use crate::SourceDelivery;
+    use tokio::sync::mpsc;
+    let actor = |id| ActorRef::first(crate::ActorId(id));
+    let registry = crate::request::RequestRegistry::default();
+    let request = registry.reserve_native(actor(100), actor(101));
+    registry
+        .mark_queued(actor(100), actor(101), request)
+        .unwrap();
+    registry.present(actor(101), request).unwrap();
+    let claim = registry.begin_reply(actor(101), request).unwrap();
+    for success in [false, true] {
+        let snapshot = crate::request::test_support::snapshot(&claim);
+        let payload = Arc::downgrade(&snapshot);
+        let lifecycle =
+            crate::kernel::LifecycleHandle::start(actor(120), crate::RetainedActorExit::new())
+                .await
+                .unwrap();
+        let closed = || SourceDelivery {
+            slot: 9,
+            target: SourceTarget::Request(request, RequestSourceKind::Progress),
+            event: SourceEvent::ProgressClosed,
+        };
+        assert!(
+            matches!(
+                source_receipt(&lifecycle, closed()).await,
+                Err(KernelCallFailure::TargetUnavailable(_))
+            ),
+            "a source cannot enter startup before executor attachment"
+        );
+        let (send, mut events) = mpsc::unbounded_channel();
+        let (attached, mut address) = mpsc::unbounded_channel();
+        let (ready, wait_ready) = tokio::sync::oneshot::channel();
+        let spawn_lifecycle = lifecycle.clone();
+        let started = tokio::spawn(async move {
+            StartupExecutor::spawn(
+                None,
+                StartupExecutor,
+                StartupExecutorState {
+                    lifecycle: spawn_lifecycle,
+                    events: send,
+                    attached: Some(attached),
+                    ready: Some(wait_ready),
+                },
+            )
+            .await
+        });
+        let address = address.recv().await.unwrap();
+        assert_eq!(lifecycle.observation().phase, LifecyclePhase::Starting);
+        assert!(
+            matches!(
+                lifecycle.enqueue(KernelMessage::DrainMailbox).await,
+                Err(crate::KernelCallFailure::TargetUnavailable(_))
+            ),
+            "ordinary ingress remains closed before readiness"
+        );
+        assert!(
+            source_receipt(
+                &lifecycle,
+                SourceDelivery {
+                    slot: 0,
+                    target: SourceTarget::Request(request, RequestSourceKind::Settlement),
+                    event: SourceEvent::Settled(Ok(snapshot)),
+                }
+            )
+            .await
+            .is_ok(),
+            "an installed source snapshot must queue during startup"
+        );
+        assert!(
+            payload.upgrade().is_some(),
+            "the queued mailbox owns the live publication"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "Ractor must not run a queued source before startup completes"
+        );
+        if !success {
+            lifecycle.close().await.unwrap();
+            assert!(matches!(
+                source_receipt(&lifecycle, closed()).await,
+                Err(KernelCallFailure::MailboxClosed(_))
+            ));
+            ready.send(false).unwrap();
+            assert!(started.await.unwrap().is_err());
+            assert!(events.try_recv().is_err());
+            assert!(
+                payload.upgrade().is_none(),
+                "failed startup releases the publication owner"
+            );
+            assert!(matches!(
+                lifecycle.enqueue(KernelMessage::DrainMailbox).await,
+                Err(crate::KernelCallFailure::MailboxClosed(_))
+            ));
+        } else {
+            ready.send(true).unwrap();
+            let (_, task) = started.await.unwrap().unwrap();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.slot, 0);
+            let SourceEvent::Settled(Ok(snapshot)) = first.event else {
+                panic!("current source snapshot changed across startup");
+            };
+            assert!(std::sync::Weak::ptr_eq(
+                &Arc::downgrade(&snapshot),
+                &payload
+            ));
+            assert_eq!(crate::request::test_support::force(&snapshot), 41);
+            for (slot, event) in [
+                (
+                    1,
+                    SourceEvent::Lifecycle(crate::ActorLifecycle::Paused("update".into())),
+                ),
+                (2, SourceEvent::ProgressClosed),
+                (3, SourceEvent::Settled(Ok(snapshot.clone()))),
+            ] {
+                lifecycle
+                    .dispatch_source(SourceDelivery {
+                        slot,
+                        target: match slot {
+                            1 => SourceTarget::Lifecycle(actor(100)),
+                            2 => SourceTarget::Request(request, RequestSourceKind::Progress),
+                            _ => SourceTarget::Request(request, RequestSourceKind::Settlement),
+                        },
+                        event,
+                    })
+                    .unwrap();
+            }
+            for slot in 1..=3 {
+                let observed =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(
+                    observed.slot, slot,
+                    "source update, closure and result keep the existing ingress FIFO"
+                );
+                match (slot, observed.event) {
+                    (1, SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(detail))) => {
+                        assert_eq!(detail, "update")
+                    }
+                    (2, SourceEvent::ProgressClosed) => {}
+                    (3, SourceEvent::Settled(Ok(value))) => assert!(Arc::ptr_eq(&value, &snapshot)),
+                    _ => panic!("source event changed across startup"),
+                }
+            }
+            lifecycle.close().await.unwrap();
+            assert!(matches!(
+                source_receipt(&lifecycle, closed()).await,
+                Err(KernelCallFailure::MailboxClosed(_))
+            ));
+            assert!(
+                events.try_recv().is_err(),
+                "each accepted source is delivered exactly once"
+            );
+            drop(snapshot);
+            address.stop(None);
+            task.await.unwrap();
+            assert!(
+                payload.upgrade().is_none(),
+                "retirement releases the last publication owner"
+            );
+        }
+        lifecycle.address.stop(None);
+    }
+}

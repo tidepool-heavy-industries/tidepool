@@ -90,6 +90,11 @@ struct NativeProvider {
     sequence: Option<u64>,
 }
 
+enum IngressKind {
+    Ordinary,
+    Source,
+}
+
 pub(super) struct LifecycleState {
     pub(super) identity: ActorRef,
     terminal: RetainedActorExit,
@@ -974,6 +979,10 @@ impl LifecycleState {
     }
 
     fn refusal(&self) -> Option<KernelCallFailure> {
+        self.ingress_refusal(IngressKind::Ordinary)
+    }
+
+    fn ingress_refusal(&self, kind: IngressKind) -> Option<KernelCallFailure> {
         if self.transfer.unconfirmed.is_some() {
             return Some(KernelCallFailure::TargetUnavailable(self.identity));
         }
@@ -994,6 +1003,13 @@ impl LifecycleState {
                 Some(KernelCallFailure::InstallationPending(self.identity))
             }
             LifecyclePhase::IdleCheck => Some(KernelCallFailure::RetirementPending(self.identity)),
+            // Startup installs sources before readiness. The attached executor's
+            // existing mailbox retains these deliveries until pre_start returns.
+            LifecyclePhase::Starting
+                if matches!(kind, IngressKind::Source) && self.executor.is_some() =>
+            {
+                None
+            }
             LifecyclePhase::Starting => Some(KernelCallFailure::TargetUnavailable(self.identity)),
             LifecyclePhase::Closing => Some(KernelCallFailure::MailboxClosed(self.identity)),
             LifecyclePhase::Retired => Some(KernelCallFailure::TargetExited(self.identity)),
@@ -1008,7 +1024,12 @@ impl LifecycleState {
         control: bool,
     ) -> Result<(), KernelCallFailure> {
         if !control {
-            if let Some(refusal) = self.refusal() {
+            let kind = if matches!(message, KernelMessage::Source(_)) {
+                IngressKind::Source
+            } else {
+                IngressKind::Ordinary
+            };
+            if let Some(refusal) = self.ingress_refusal(kind) {
                 return Err(refusal);
             }
         }
