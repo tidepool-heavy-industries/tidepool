@@ -12527,6 +12527,123 @@ mod tests {
     }
 
     #[test]
+    fn accepted_view_merge_preserves_later_exact_native_dependency_binding() {
+        let wire = Arc::new(issued_native_groups(
+            "Wire",
+            vec![(5, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let inspection = Arc::new(issued_native_groups(
+            "Inspection",
+            vec![(0, Vec::new()), (118, vec![issued_source(&wire, 5)])],
+            &[&wire],
+            &BTreeMap::new(),
+        ));
+        for cross_inventory in [false, true] {
+            let issuer = ArtifactInventory::default();
+            let entries = vec![inspection.clone(), wire.clone()];
+            let available = issuer
+                .admit_shared_with_demand(
+                    &issuer.empty_view(),
+                    entries.clone(),
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let selection = bound_selection_for_entries(&available, &entries);
+            let mut fixed = issuer
+                .bind_segment(&available, entries, &selection)
+                .unwrap();
+            let mut cursor = issuer.empty_view();
+            for ordinal in [0, 118] {
+                cursor = issuer
+                    .admit_bound_target(
+                        &mut fixed,
+                        &cursor,
+                        NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
+                            &inspection,
+                            ordinal,
+                        )]),
+                        vec![],
+                        &selection,
+                    )
+                    .unwrap()
+                    .artifacts;
+            }
+            let selected = cursor.select_roots(vec![inspection.descriptor.id]).unwrap();
+            let before = selected.binding_dependencies();
+            let exact_edge = before
+                .iter()
+                .find(|(source, target, label)| {
+                    matches!(source, ArtifactBindingNode::Group(group)
+                        if group.binding.artifact == inspection.descriptor.id
+                            && group.original_ordinal == 118)
+                        && matches!(target, ArtifactBindingNode::Group(group)
+                            if group.binding.artifact == wire.descriptor.id
+                                && group.original_ordinal == 5)
+                        && *label
+                            == ArtifactDependency::NativeGroup {
+                                dependent_ordinal: 118,
+                                required_ordinal: 5,
+                            }
+                })
+                .expect("issuer-bound Inspection118 to Wire5 edge")
+                .clone();
+            let destination = ArtifactInventory::default();
+            let inventory = if cross_inventory {
+                &destination
+            } else {
+                &issuer
+            };
+            let unrelated = inventory
+                .admit(&inventory.empty_view(), vec![entry("Unrelated", &[])])
+                .unwrap();
+            let merged = selected.merge(&unrelated).unwrap();
+            assert!(merged.binding_dependencies().contains(&exact_edge));
+            assert!(before
+                .iter()
+                .all(|edge| merged.binding_dependencies().contains(edge)));
+            let projection = CompilerInputProjection::from_issued_entries(&[
+                inspection.clone(),
+                Arc::new(entry("Unrelated", &[])),
+            ])
+            .unwrap();
+            let requirements =
+                NativeOriginalRequirement::for_projection(&projection, &merged, &[]).unwrap();
+            let projected = merged
+                .inventory()
+                .admit_projected_with_native_requirements(
+                    &merged,
+                    vec![],
+                    &projection,
+                    &requirements,
+                )
+                .unwrap();
+            assert!(projected.binding_dependencies().contains(&exact_edge));
+            assert!(!projected.namespace().contains_key(&wire.descriptor.id));
+            let reopened_inventory = ArtifactInventory::default();
+            let reopened = reopened_inventory
+                .recover_selection(
+                    &reopened_inventory.empty_view(),
+                    projected.entries(),
+                    &projected.capture_graph_selection(),
+                    &projected.binding_dependencies(),
+                )
+                .unwrap();
+            assert_eq!(
+                reopened.binding_dependencies(),
+                projected.binding_dependencies()
+            );
+            assert!(reopened
+                .native_groups_for_target(None, &[issued_source(&inspection, 118)])
+                .unwrap()
+                .iter()
+                .any(|group| group.binding.artifact == inspection.descriptor.id
+                    && group.original_ordinal == 118));
+        }
+    }
+
+    #[test]
     fn compiler_namespace_extension_separates_selected_native_roots_from_custody() {
         let native = Arc::new(issued_native_groups(
             "Root",
