@@ -556,14 +556,29 @@ async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
                     summary["fields"]["execution"],
                     waits[0]["fields"]["execution"]
                 );
-                assert!(
-                    rows.iter().any(|row| row["fields"]["message"]
-                        == "compiler request identified"
-                        && row["spans"].as_array().is_some_and(|spans| spans
-                            .iter()
-                            .any(|span| &span["preparation"] == preparation))),
-                    "producer span must correlate its actual compiler request: {captured}"
-                );
+                let admissions = rows
+                    .iter()
+                    .filter(|row| {
+                        row["fields"]["phase"] == "compiler_transaction_admission"
+                            && row["spans"].as_array().is_some_and(|spans| {
+                                spans.iter().any(|span| {
+                                    span["name"] == "toolset_preparation"
+                                        && &span["preparation"] == preparation
+                                })
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(admissions.len(), 1, "{captured}");
+                for field in ["producer", "endpoint"] {
+                    let identity = admissions[0]["fields"][field]
+                        .as_str()
+                        .expect("the admitted compiler transaction retains its exact identity");
+                    assert_eq!(identity.len(), 64, "{captured}");
+                    assert!(
+                        identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "{captured}"
+                    );
+                }
                 assert!(
                     probe(policy).await.contains("two"),
                     "coherent reload installs the new handler"
@@ -1171,60 +1186,50 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        super::test_campaign::configure_command_path(config);
-        let owner = exomonad_node::command_resources::CommandResources::delegated(
-            exomonad_node::command_resources::CommandResourcePolicy {
-                general_bytes: 2 * exomonad_node::command_resources::GIB,
-                protected_bytes: 0,
-                swap_max_bytes: 0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        config.command_resources = Some(
-            exomonad_node::command_resources::CommandResourceClient::local(
-                owner,
-                exomonad_node::command_resources::CommandRunIdentity::new(
-                    "isolated-test".into(),
-                    1,
+    let host = HostedTestRuntime::start_configured_with_command_resources(
+        &settings,
+        &provider,
+        exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 2 * exomonad_node::command_resources::GIB,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        },
+        |config| {
+            super::test_campaign::configure_command_path(config);
+            write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
+            write_spec_config(
+                &config.workspace.join(".exomonad"),
+                &["Project.Tools", "AgentSpec"],
+                Some("AgentSpec.agentSpec"),
+            );
+            std::fs::write(
+                config.workspace.join(".exomonad/AgentSpec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/after_tool_delivery_spec.hs",
+                ),
+            )
+            .unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
-            )
-            .unwrap(),
-        );
-        write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
-        write_spec_config(
-            &config.workspace.join(".exomonad"),
-            &["Project.Tools", "AgentSpec"],
-            Some("AgentSpec.agentSpec"),
-        );
-        std::fs::write(
-            config.workspace.join(".exomonad/AgentSpec.hs"),
-            tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/after_tool_delivery_spec.hs",
-            ),
-        )
-        .unwrap();
-        super::test_campaign::commit_workspace(&config.workspace);
-        config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(
-                &config.workspace,
-                &config.run_directory.path(),
-            )
-            .unwrap(),
-        );
-    })
-    .await
-    .unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        host.context.config.workspace.join("after-tool-release"),
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            );
+        },
     )
+    .await
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                host.context.config.workspace.join("after-tool-release"),
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .unwrap();
             host.input("Exercise awaited after-tool presentation.")
                 .await
                 .unwrap();
@@ -1291,10 +1296,7 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
                 .expect("the host remains live through the original operation")
                 .expect("the original operation remains owned");
             assert!(
-                matches!(
-                    &completed,
-                    harness::turn::JobOutput::Completed(Ok(_))
-                ),
+                matches!(&completed, harness::turn::JobOutput::Completed(Ok(_))),
                 "the exact operation must succeed after its hook: {completed:?}"
             );
             if let Some(round) = acknowledgement {

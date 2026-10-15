@@ -221,8 +221,10 @@ impl std::fmt::Display for OperationBarrierFailure {
                 operation,
                 terminal,
             } => {
-                write!(formatter,
-                "original operation {operation:?} settled before expected progress: {terminal:?}")
+                write!(
+                    formatter,
+                    "original operation {operation:?} settled before expected progress: {terminal:?}"
+                )
             }
         }
     }
@@ -1407,7 +1409,10 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
             Some(policy),
         )
         .await
@@ -1429,7 +1434,10 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1451,7 +1459,10 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1473,7 +1484,10 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1511,7 +1525,10 @@ impl HostedTestRuntime {
             child_machines,
             None,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1520,11 +1537,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-                &ActorHostConfig,
-            ) -> Arc<dyn harness::engine::ResponsesTransport>
-            + Send
-            + 'static,
+            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+            &ActorHostConfig,
+        ) -> Arc<dyn harness::engine::ResponsesTransport>
+        + Send
+        + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             true,
@@ -1537,7 +1554,10 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+<<<<<<< HEAD
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1560,6 +1580,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             Some(assembled),
             None,
+<<<<<<< HEAD
             None,
         )
         .await
@@ -1583,6 +1604,8 @@ impl HostedTestRuntime {
             None,
             Some(source_layers),
             None,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1597,7 +1620,10 @@ impl HostedTestRuntime {
         diagnostics_root_override: Option<std::path::PathBuf>,
         child_machines: HostedChildMachines,
         mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
+<<<<<<< HEAD
         source_layers: Option<HostSourceLayersTransform>,
+=======
+>>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
@@ -2455,10 +2481,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(scheduler.wait(&operation).await.unwrap(), output);
-            assert!(store
-                .replay_tool_output_operation(&operation)
-                .unwrap()
-                .is_none());
+            assert!(
+                store
+                    .replay_tool_output_operation(&operation)
+                    .unwrap()
+                    .is_none()
+            );
             assert_eq!(
                 observe_operation_barrier(
                     &store,
@@ -2755,9 +2783,11 @@ mod tests {
         .await;
         assert!(matches!(refused, Err(error) if error.to_string().contains("prompt changed")));
         let refused_run = root.child("refused-run").unwrap();
-        assert!(prepared
-            .select_for_run(repository.path(), refused_run.path())
-            .is_err());
+        assert!(
+            prepared
+                .select_for_run(repository.path(), refused_run.path())
+                .is_err()
+        );
         assert!(!refused_run.path().join("workspace-prepared.json").exists());
         assert_eq!(std::fs::read(selection).unwrap(), completed);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
@@ -3616,13 +3646,14 @@ mod tests {
             exomonad_actor::ActorExitKind::Cancelled,
             "recovery shutdown must not turn into an ordinary unexpected actor failure"
         );
-        assert!(host
-            .context
-            .actor
-            .terminal()
-            .cleanup()
-            .unwrap()
-            .is_confirmed());
+        assert!(
+            host.context
+                .actor
+                .terminal()
+                .cleanup()
+                .unwrap()
+                .is_confirmed()
+        );
         assert!(pending.is_empty());
         assert!(
             requests.try_recv().is_err(),
