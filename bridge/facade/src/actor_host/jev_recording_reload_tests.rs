@@ -61,8 +61,8 @@ async fn displayed(
             result
         })
         .await;
-    // Runaway safeguards for this one diagnostic scalar: at most 64 default
-    // 8-KiB ASCII pages; the byte bound also limits encoded Unicode text.
+    // Bound failure observation independently of the model's page budget.
+    // Successful values fit one page; diagnostics retain each page verbatim.
     const MAX_PAGES: usize = 64;
     const MAX_BYTES: usize = 512 * 1024;
     let mut text = String::new();
@@ -102,25 +102,19 @@ async fn displayed(
             keys.len(),
             text.len()
         );
-        // The notice describes this page and is not part of the retained suffix.
-        // Only a page with a continuation can have this owner-added notice.
-        // A lone ellipsis could also be actual content at a one-character
-        // allowance; report that ambiguity instead of silently deleting it.
-        let content = if keys.is_empty() {
-            page.as_str()
-        } else {
-            ["[truncated; expand handle key for retained detail]", "[…]", "…"]
-                .iter().find_map(|notice| page.strip_suffix(*notice)
-                    .filter(|prefix| *notice != "…" || !prefix.is_empty()))
-                .or_else(|| page.is_empty().then_some(""))
-                .unwrap_or_else(|| panic!("diagnostic observation incomplete: unrecognized continuation notice after {page_number} pages/{} bytes; partial: {text}; page: {page}", text.len()))
-        };
-        let observed_bytes = text.len().saturating_add(content.len());
+        let separator = usize::from(page_number > 1);
+        let observed_bytes = text
+            .len()
+            .saturating_add(separator)
+            .saturating_add(page.len());
         assert!(
             observed_bytes <= MAX_BYTES,
             "diagnostic observation incomplete: {observed_bytes} bytes exceeds {MAX_BYTES}-byte bound after {page_number} pages; partial: {text}"
         );
-        text.push_str(content);
+        if page_number > 1 {
+            text.push('\n');
+        }
+        text.push_str(&page);
         let Some(key) = keys.first() else {
             return text;
         };
