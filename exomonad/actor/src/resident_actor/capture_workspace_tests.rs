@@ -956,7 +956,26 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .await
         .expect("cancelled bootstrap retires");
     assert_eq!(terminal, first);
-    let _reply = call.await.expect("failed spawn caller task");
+    let reply: tidepool_runtime::session::WorkbenchResponse =
+        serde_json::from_value(call.await.expect("failed spawn caller task"))
+            .expect("actual parent notebook receipt");
+    assert_eq!(reply.items.len(), 1, "{reply:?}");
+    assert_eq!(
+        reply.items[0].status,
+        WorkbenchItemStatus::Stopped,
+        "{reply:?}"
+    );
+    assert!(
+        matches!(
+            reply.publication,
+            Some(
+                tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                    reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                }
+            )
+        ),
+        "{reply:?}"
+    );
     let (retired, observed) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             match fixture.deployments.recv().await.expect("deployment owner") {

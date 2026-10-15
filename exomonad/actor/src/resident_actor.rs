@@ -8459,8 +8459,6 @@ where
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        #[cfg(test)]
-        capture_workspace_tests::installation_gate(context.placement.session, kernel, false).await;
         self.bind_initial_generation(context, &installation).await?;
         self.check_application_readiness(kernel, context).await?;
         kernel
@@ -11963,9 +11961,20 @@ where
                     }
                 }
             }
-            if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_))) {
-                // Admission must return before the host starts consuming deployment
-                // events. Keep prepared effects in their original custody until Resume.
+            if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+                || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
+                    && self.explicit_installer.is_some())
+            {
+                // Resume is queued before executor_started acknowledges readiness.
+                // Only then may bootstrap publish a provider-consumable installation.
+                // Prepared effects retain their original custody until that turn.
+                #[cfg(test)]
+                capture_workspace_tests::installation_gate(
+                    context.placement.session,
+                    kernel,
+                    false,
+                )
+                .await;
                 return Ok(KernelStep::ContinueLater(()));
             }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
@@ -13113,13 +13122,15 @@ where
             }
             let context = self.context(kernel.identity());
             if self.root_startup.is_none()
-                && self.descriptor.checkpoint_boundary().is_none()
-                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+                && ((self.descriptor.checkpoint_boundary().is_none()
+                    && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_))))
+                    || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
+                        && self.explicit_installer.is_some()))
             {
                 let boot = self
                     .boot
                     .take()
-                    .expect("prepared startup retained until resume");
+                    .expect("deferred startup retained until resume");
                 return self
                     .initialize(kernel, &context, boot)
                     .await
