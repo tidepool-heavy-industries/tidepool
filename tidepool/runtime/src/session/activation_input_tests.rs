@@ -3107,11 +3107,11 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         command.bind().unwrap(),
     )
     .unwrap();
-    let make_offer = || {
+    let make_offer = |offer_root: &std::path::Path| {
         ModuleCandidateOffer::select_activation_preview(
             &endpoint,
             &fixture.recipe.include,
-            scratch.path(),
+            offer_root,
             admission.original_display_context().unwrap().clone(),
             admission.input_interface().prototype().clone(),
             ActivationPreviewSpecification {
@@ -3123,23 +3123,29 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         )
         .unwrap()
     };
-    let offer = make_offer();
+    let offer = make_offer(scratch.path());
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
+    let original_request = command.clone();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     let offer = offer
         .apply_to(command, scratch.path())
         .expect("genuine preview offer accepts its original retained context");
-    let mut command = offer.command().clone();
     assert!(
-        tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
+        tidepool_extract_cmd::ExtractRequest::decode(&offer.command().request_bytes())
             .unwrap()
             .retained_generations()
             .is_empty(),
         "successful pure preview transports no retained-generation fields"
     );
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
+    let refusal_scratch = tempfile::tempdir().unwrap();
+    let refusal_offer = make_offer(refusal_scratch.path());
+    let mut command = original_request;
+    if let Some(root) = refusal_offer.checked_value_root() {
+        command.session_root(root);
+    }
     command.retained_generation(
         tidepool_extract_cmd::SymbolIdentity {
             unit: retained.0.unit,
@@ -3152,8 +3158,8 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     );
     let refused_request = command.request_bytes();
     assert!(
-        make_offer()
-            .apply_to(command.clone(), scratch.path())
+        refusal_offer
+            .apply_to(command.clone(), refusal_scratch.path())
             .is_err(),
         "genuine preview offer refuses an explicit retained heap input"
     );
