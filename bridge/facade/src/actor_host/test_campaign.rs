@@ -1747,6 +1747,25 @@ impl HostedScriptRound {
             .expect("production provider request remains live");
     }
 
+    /// One actual provider response, preserving function-call order so the
+    /// production scheduler registers all queued siblings before execution.
+    pub fn functions(self, calls: &[(&str, &str, serde_json::Value)]) {
+        assert!(!calls.is_empty());
+        let mut ids = std::collections::HashSet::new();
+        let items = calls.iter().map(|(call_id, name, arguments)| {
+            assert!(ids.insert(*call_id), "distinct submitted calls need distinct identities");
+            self.assert_advertised(call_id, name, "function");
+            harness::item::Item(serde_json::json!({
+                "type":"function_call", "call_id":call_id, "name":name,
+                "arguments":serde_json::to_string(arguments).unwrap(),
+            }))
+        }).collect();
+        self.reply.send(harness::transport::ResponsesTurn {
+            response_id: format!("script-batch-{}", calls[0].0),
+            items, usage: Default::default(),
+        }).expect("production provider request remains live");
+    }
+
     pub fn settled_output(&self, call_id: &str) -> serde_json::Value {
         serde_json::from_str(self.settled_text(call_id)).unwrap()
     }
