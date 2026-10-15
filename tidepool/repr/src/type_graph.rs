@@ -1672,6 +1672,157 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_difference_reaches_nested_forms_through_recursive_templates() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let fixture = |form, restriction| {
+            let (mut graph, root, _) = recursive_graph(ConstructorId(0), &inventory, false);
+            let argument = graph
+                .node_indices()
+                .find(|node| matches!(graph[*node], TypeNode::Bound(0)))
+                .unwrap();
+            graph[argument] = TypeNode::NominalApplication;
+            let nested = graph.add_node(TypeNode::Declaration {
+                identity: crate::execution_schema::testing::type_identity(identity(
+                    "Nested", "type",
+                )),
+                parameters: vec![],
+                form,
+                restriction,
+            });
+            graph.add_edge(argument, nested, TypeEdge::Head);
+            (publish(graph, &inventory), root, nested)
+        };
+        let (first, root, nested) = fixture(DeclarationForm::Data, SyntaxRestriction::None);
+        let (second, second_root, second_nested) = fixture(
+            DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "layout refused".into(),
+            },
+            SyntaxRestriction::None,
+        );
+        let difference = first
+            .first_evidence_difference(root, &second, second_root, &mut TypeWorkBudget::new(10_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (difference.existing, difference.incoming),
+            (nested, second_nested)
+        );
+        assert!(difference.path.contains(&TypeEdge::Constructor(1)));
+        assert!(difference
+            .path
+            .iter()
+            .any(|role| matches!(role, TypeEdge::Field { .. })));
+        assert!(difference.path.contains(&TypeEdge::Argument(0)));
+        assert_eq!(difference.edges, None);
+        assert!(!difference.path_truncated);
+        assert_eq!(
+            first
+                .first_evidence_difference(root, &first, root, &mut TypeWorkBudget::new(10_000))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            first.first_evidence_difference(
+                root,
+                &second,
+                second_root,
+                &mut TypeWorkBudget::new(0)
+            ),
+            Err(TypeGraphError::TraversalWork)
+        );
+        let (restricted, restricted_root, _) =
+            fixture(DeclarationForm::Data, SyntaxRestriction::EffectHead);
+        assert_eq!(
+            first
+                .first_evidence_difference(
+                    root,
+                    &restricted,
+                    restricted_root,
+                    &mut TypeWorkBudget::new(10_000)
+                )
+                .unwrap()
+                .unwrap()
+                .existing,
+            nested
+        );
+    }
+
+    #[test]
+    fn diagnostic_difference_reports_edge_roles_and_caps_deep_paths() {
+        let fixture = |value: &str, flag| {
+            let mut graph = GraphStorage::new();
+            let root = root(
+                &mut graph,
+                RootDomain::Closed,
+                vec![],
+                "diagnostic rendering",
+            );
+            let mut body = graph.add_node(TypeNode::Literal(TypeLiteral::Natural(value.into())));
+            let kind = kind(&mut graph);
+            for _ in 0..40 {
+                let next = graph.add_node(TypeNode::ForAll(flag));
+                graph.add_edge(next, body, TypeEdge::Body);
+                graph.add_edge(next, kind, TypeEdge::Kind);
+                body = next;
+            }
+            graph.add_edge(root, body, TypeEdge::Body);
+            (publish(graph, &[]), root)
+        };
+        let (first, first_root) = fixture("0", ForAllFlag::Specified);
+        let (second, second_root) = fixture("1", ForAllFlag::Specified);
+        let difference = first
+            .first_evidence_difference(
+                first_root,
+                &second,
+                second_root,
+                &mut TypeWorkBudget::new(10_000),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(difference.path.len(), 32);
+        assert!(difference.path_truncated);
+        assert!(
+            matches!(&first.graph()[difference.existing], TypeNode::Literal(TypeLiteral::Natural(value)) if value == "0")
+        );
+
+        let first_inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (graph, first_root, _) = recursive_graph(ConstructorId(0), &first_inventory, false);
+        let first = publish(graph, &first_inventory);
+        let second_inventory = vec![physical(vec![RuntimeRep::Int(64); 2])];
+        let (mut graph, second_root, _) =
+            recursive_graph(ConstructorId(0), &second_inventory, false);
+        for role in graph.edge_weights_mut() {
+            if let TypeEdge::Field { source_rep, .. } = role {
+                *source_rep = RuntimeRep::Int(64);
+            }
+        }
+        let second = publish(graph, &second_inventory);
+        let difference = first
+            .first_evidence_difference(
+                first_root,
+                &second,
+                second_root,
+                &mut TypeWorkBudget::new(10_000),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            difference.edges,
+            Some((
+                Some(TypeEdge::Field {
+                    ordinal: 0,
+                    source_rep: RuntimeRep::LiftedRef
+                }),
+                Some(TypeEdge::Field {
+                    ordinal: 0,
+                    source_rep: RuntimeRep::Int(64)
+                })
+            ))
+        );
+    }
+
+    #[test]
     fn recursive_templates_are_finite_but_expression_cycles_are_rejected() {
         let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
         let (mut graph, root, template) = recursive_graph(ConstructorId(0), &inventory, false);

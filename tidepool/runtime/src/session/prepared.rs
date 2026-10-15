@@ -12328,6 +12328,51 @@ pub(super) mod tests {
         }
     }
 
+    #[test]
+    fn site_refusal_reports_the_graph_owner_difference() {
+        let (engine, _) = PreparedEngine::bootstrap(typed_site_program(
+            7,
+            closed_reply_type(DeclarationForm::Text),
+            0,
+            &[],
+        ))
+        .unwrap();
+        let incoming = typed_site_program(7, closed_reply_type(DeclarationForm::Integer), 0, &[]);
+        let error = engine.plan_sites(&ProgramFacts::of(&incoming)).unwrap_err();
+        let PreparedRuntimeError::SiteConflict { evidence, .. } = error else {
+            panic!("site admission must refuse the changed graph")
+        };
+        let Some(SiteGraphComparison::Difference {
+            path,
+            path_truncated,
+            edges,
+            existing,
+            incoming,
+        }) = evidence.graph
+        else {
+            panic!("refusal must carry the graph owner's first difference")
+        };
+        assert_eq!(path, vec![TypeEdge::Body, TypeEdge::Head]);
+        assert!(!path_truncated);
+        assert_eq!(edges, None);
+        assert!(matches!(
+            existing.metadata,
+            GraphTypeNode::Declaration {
+                form: GraphDeclarationForm::Text,
+                restriction: SyntaxRestriction::None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            incoming.metadata,
+            GraphTypeNode::Declaration {
+                form: GraphDeclarationForm::Integer,
+                restriction: SyntaxRestriction::None,
+                ..
+            }
+        ));
+    }
+
     fn versioned_reply_program(revision: u8, image: u64) -> PreparedProgram {
         let mut wire = prepared_data::wire_from_prepared(&producer_program());
         let leaf = &mut wire.constructors[0];
