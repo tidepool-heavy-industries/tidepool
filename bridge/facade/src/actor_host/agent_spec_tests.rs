@@ -377,14 +377,15 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
 
 #[tokio::test]
 async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() {
-    let campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
             // The authored spec shadows a pinned shared package on a second
             // source root. The shared tool record still uses Project.Shell
             // after the root spec drops its Watchdog import.
-            let shared = super::test_campaign::declared_workspace_package().join(".exomonad");
+            let package = super::test_campaign::declared_workspace_package();
+            let shared = package.join(".exomonad");
             fn copy_haskell_sources(source: &Path, destination: &Path) {
                 std::fs::create_dir_all(destination).unwrap();
                 for entry in std::fs::read_dir(source).unwrap() {
@@ -451,16 +452,9 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 ),
             )
             .unwrap();
-            std::fs::write(
-                config.workspace.join("flake.nix"),
-                include_str!("fixtures/spec_reload_flake.nix"),
-            )
-            .unwrap();
-            std::fs::write(
-                config.workspace.join("flake.lock"),
-                include_str!("fixtures/spec_reload_flake.lock"),
-            )
-            .unwrap();
+            for name in ["flake.nix", "flake.lock"] {
+                std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+            }
             commit(&config.workspace, "capture reload fixture inputs");
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
@@ -470,6 +464,9 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 .unwrap(),
             );
         },
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await;
     campaign
@@ -852,17 +849,24 @@ async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
                 );
 
                 let child_status = status(child.policy.as_ref()).await;
-                assert!(child_status.contains("run module"), "{child_status}");
                 assert!(
-                    child_status.contains("AgentSpec.agentSpec"),
-                    "{child_status}"
+                    child.toolset_acquisition().is_none(),
+                    "the child installs its explicit live spec"
                 );
-                assert!(child_status.contains("AgentSpec.hs"), "{child_status}");
+                assert_eq!(
+                    child
+                        .policy
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name())
+                        .collect::<Vec<_>>(),
+                    ["status", "probe", "haskell", "haskell_sync", "reload_spec"],
+                );
                 // One compile, two products: the declared surface, and the slot the same
                 // spec filled, retained beside the tools it sits with.
                 assert!(child_status.contains("slots=[afterTool]"), "{child_status}");
 
-                // Root and child resolve the same run module.
+                // The root resolves the run module; the child retains the explicitly supplied spec.
                 let root_status = status(root.as_ref()).await;
                 assert!(root_status.contains("run module"), "{root_status}");
 
@@ -1392,8 +1396,23 @@ async fn status_bypasses_presentation_and_cells_reach_the_slot_unmatched() {
                     "{status_before_cell}"
                 );
 
-                let cell = dispatch_haskell_script(policy, "display (1 + 1 :: Int)").await;
-                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let cell = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(policy, "display (1 + 1 :: Int)"),
+                    )
+                    .await;
+                assert_eq!(cell["status"], "committed", "{cell}");
+                let displays = cell["items"][0]["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|operation| operation.get("display"))
+                    .collect::<Vec<_>>();
+                assert_eq!(displays.len(), 1, "{cell}");
+                assert_eq!(displays[0]["text"], "2", "{cell}");
 
                 // The cell's receipt still reached the slot — as `haskell`, which this
                 // spec's `noted` does not match — so the log carries a silent invocation.
