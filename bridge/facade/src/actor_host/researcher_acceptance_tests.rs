@@ -117,7 +117,10 @@ async fn research_history(child_machines: HostedChildMachines) {
         let tutorial = initial.operation("researcher-tutorial");
         initial.call("researcher-tutorial", &tidepool_testing::fixture_source("exomonad/examples/workspace/.exomonad/checks/researcher-two-replies.hs"));
         let first = host.while_operation_succeeds(&tutorial,
-            select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
+            select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::Any)).await.unwrap();
+        if first.host_identity().actor == root {
+            panic!("tutorial settled before child inference: {}", first.settled_output("researcher-tutorial"));
+        }
         let child = first.host_identity();
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let selected = graph.iter().filter(|node| host.context.binding(node.actor)

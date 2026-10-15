@@ -2044,6 +2044,7 @@ pub(super) fn hosted_script_provider_with_envelopes() -> (
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum HostedScriptSelection<'a> {
+    Any,
     Actor(&'a harness::model::AgentPath),
     OtherThan(&'a harness::model::AgentPath),
 }
@@ -2052,6 +2053,7 @@ impl HostedScriptSelection<'_> {
     fn matches(self, round: &HostedScriptRound) -> bool {
         let origin = round.origin();
         match self {
+            Self::Any => true,
             Self::Actor(actor) => origin.actor() == actor,
             Self::OtherThan(actor) => origin.actor() != actor,
         }
