@@ -745,6 +745,7 @@ pub(crate) struct HostTestHooks {
     pub(super) owner_admission: Arc<Mutex<HostOwnerAdmission>>,
     pub(super) child_machines: HostedChildMachines,
     pub(super) source_layers: Option<HostSourceLayersTransform>,
+    pub(super) web_transport: Option<Arc<dyn tidepool_handlers::WebTransport>>,
 }
 
 impl HostTestHooks {
@@ -767,6 +768,7 @@ impl HostTestHooks {
                 owner_admission: Arc::new(Mutex::new(HostOwnerAdmission::NotAdmitted)),
                 child_machines: HostedChildMachines::Shared,
                 source_layers: None,
+                web_transport: None,
             },
             stop,
             assembly,
@@ -1411,6 +1413,7 @@ impl HostedTestRuntime {
             None,
             None,
             Some(policy),
+            None,
         )
         .await
     }
@@ -1429,6 +1432,7 @@ impl HostedTestRuntime {
             false,
             None,
             HostedChildMachines::Shared,
+            None,
             None,
             None,
             None,
@@ -1454,6 +1458,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1473,6 +1478,7 @@ impl HostedTestRuntime {
             false,
             Some(diagnostics_root),
             HostedChildMachines::Shared,
+            None,
             None,
             None,
             None,
@@ -1514,6 +1520,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1540,6 +1547,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1561,6 +1569,7 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             Some(assembled),
+            None,
             None,
             None,
         )
@@ -1585,6 +1594,33 @@ impl HostedTestRuntime {
             None,
             Some(source_layers),
             None,
+            None,
+        )
+        .await
+    }
+
+    /// Replace network transport while retaining the production Web interpreter
+    /// and the exact same dependency in root and dedicated child machines.
+    pub(super) async fn start_configured_with_web(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        web: Arc<dyn tidepool_handlers::WebTransport>,
+        child_machines: HostedChildMachines,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            true,
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            child_machines,
+            None,
+            None,
+            None,
+            Some(web),
         )
         .await
     }
@@ -1601,6 +1637,7 @@ impl HostedTestRuntime {
         mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
         source_layers: Option<HostSourceLayersTransform>,
         command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
+        web_transport: Option<Arc<dyn tidepool_handlers::WebTransport>>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1753,6 +1790,7 @@ impl HostedTestRuntime {
             owner_admission: Arc::clone(&owner_admission),
             child_machines,
             source_layers,
+            web_transport,
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();

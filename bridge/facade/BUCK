@@ -1077,6 +1077,8 @@ rust_filegroup(
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "bridge/facade/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "src/actor_host/fixtures/recipe_unbound_restart.hs": "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "src/actor_host/fixtures/researcher_agent_spec.hs": "bridge/facade/src/actor_host/fixtures/researcher_agent_spec.hs",
+        "src/actor_host/fixtures/researcher_preflight.hs": "bridge/facade/src/actor_host/fixtures/researcher_preflight.hs",
         "src/actor_host/fixtures/review_fresh_consumer.hs": "bridge/facade/src/actor_host/fixtures/review_fresh_consumer.hs",
         "src/actor_host/fixtures/review_fresh_consumer_reply.hs": "bridge/facade/src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "src/actor_host/fixtures/review_named_final_acceptance.hs": "bridge/facade/src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -1162,6 +1164,7 @@ rust_filegroup(
         "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/recipe_checks/prepared_contract_tests.rs": "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs",
+        "src/actor_host/researcher_acceptance_tests.rs": "bridge/facade/src/actor_host/researcher_acceptance_tests.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scaffold_admission_tests.rs": "bridge/facade/src/actor_host/scaffold_admission_tests.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -3050,6 +3053,8 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "bridge/facade/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs": "src/actor_host/fixtures/recipe_unbound_restart.hs",
+        "bridge/facade/src/actor_host/fixtures/researcher_agent_spec.hs": "src/actor_host/fixtures/researcher_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/researcher_preflight.hs": "src/actor_host/fixtures/researcher_preflight.hs",
         "bridge/facade/src/actor_host/fixtures/review_fresh_consumer.hs": "src/actor_host/fixtures/review_fresh_consumer.hs",
         "bridge/facade/src/actor_host/fixtures/review_fresh_consumer_reply.hs": "src/actor_host/fixtures/review_fresh_consumer_reply.hs",
         "bridge/facade/src/actor_host/fixtures/review_named_final_acceptance.hs": "src/actor_host/fixtures/review_named_final_acceptance.hs",
@@ -3135,6 +3140,7 @@ filegroup(
         "bridge/facade/src/actor_host/provider_attachment.rs": "src/actor_host/provider_attachment.rs",
         "bridge/facade/src/actor_host/recipe_checks.rs": "src/actor_host/recipe_checks.rs",
         "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs": "src/actor_host/recipe_checks/prepared_contract_tests.rs",
+        "bridge/facade/src/actor_host/researcher_acceptance_tests.rs": "src/actor_host/researcher_acceptance_tests.rs",
         "bridge/facade/src/actor_host/root_declaration_recovery.rs": "src/actor_host/root_declaration_recovery.rs",
         "bridge/facade/src/actor_host/scaffold_admission_tests.rs": "src/actor_host/scaffold_admission_tests.rs",
         "bridge/facade/src/actor_host/scoped_custody.rs": "src/actor_host/scoped_custody.rs",
@@ -4153,6 +4159,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726571756573745f72656c6f61645f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/request_reload_agent_spec.hs",
     out = "request_reload_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f6167656e745f737065632e6873",
+    src = "src/actor_host/fixtures/researcher_agent_spec.hs",
+    out = "researcher_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f707265666c696768742e6873",
+    src = "src/actor_host/fixtures/researcher_preflight.hs",
+    out = "researcher_preflight.hs",
     visibility = ["PUBLIC"],
 )
 

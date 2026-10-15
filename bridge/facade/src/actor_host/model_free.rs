@@ -142,6 +142,7 @@ impl ModelFreeSession {
                     &worktree_directory,
                     worktrees.clone(),
                     authority.clone(),
+                    tidepool_handlers::WebHandler::default(),
                     source_layers.as_ref(),
                     Arc::clone(&host_incarnation),
                     super::JournalOpenMode::Create,

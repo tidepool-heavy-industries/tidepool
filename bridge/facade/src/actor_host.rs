@@ -140,6 +140,8 @@ mod jev_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
+mod researcher_acceptance_tests;
+#[cfg(test)]
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
@@ -260,6 +262,7 @@ fn host_handlers(
     journal: tidepool_handlers::JournalHandler,
     events: RepoEventHandler,
     worktrees: ActorWorktreeHandler,
+    web: tidepool_handlers::WebHandler,
 ) -> ExomonadHandlerStack {
     hlist![
         journal,
@@ -269,7 +272,7 @@ fn host_handlers(
         ActorWorktreeAllocationHandler::new(worktrees.clone()),
         ActorWorktreeIntegrationHandler::new(worktrees.clone()),
         worktrees,
-        tidepool_handlers::WebHandler,
+        web,
         tidepool_handlers::FsReadHandler::new(workspace_root.to_owned()),
         tidepool_handlers::FsWriteHandler::new(workspace_root.to_owned()),
     ]
@@ -2037,6 +2040,13 @@ async fn run_owned(
         manifest: None,
     };
     let startup_observation = embedded_startup.observe_manifest(startup_records);
+    let web = tidepool_handlers::WebHandler::default();
+    #[cfg(test)]
+    let web = test_hooks
+        .as_mut()
+        .and_then(|hooks| hooks.web_transport.take())
+        .map(tidepool_handlers::WebHandler::with_transport)
+        .unwrap_or(web);
     let CompiledRoot {
         source,
         root,
@@ -2051,6 +2061,7 @@ async fn run_owned(
             &worktree_directory,
             worktrees.clone(),
             worktree_authority.clone(),
+            web,
             source_layers.as_ref(),
             Arc::clone(&host_incarnation),
             run_journal_mode,
@@ -3525,6 +3536,7 @@ fn compile_root(
     worktree_directory: &tidepool_atomic_write::DirectoryAnchor,
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
+    web: tidepool_handlers::WebHandler,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     host_incarnation: Arc<HostIncarnationLease>,
     run_journal_mode: JournalOpenMode,
@@ -3619,6 +3631,7 @@ fn compile_root(
     let child_include = include.clone();
     let child_journal = journal.clone();
     let child_worktree_handler = worktree_handler.clone();
+    let child_web = web.clone();
     let child_run_root = run_root.to_path_buf();
     let child_run_lease = Arc::clone(&host_incarnation);
     let child_recovery_store = Arc::clone(&recovery_store);
@@ -3673,6 +3686,7 @@ fn compile_root(
                 child_journal.clone(),
                 child_event_handler,
                 child_worktree_handler,
+                child_web.clone(),
             ),
             CapturedOutput::new(),
             DEFAULT_NURSERY_SIZE,
@@ -3688,7 +3702,13 @@ fn compile_root(
         Ok(Box::new(machine))
     });
     let mut machine = ResidentSession::unbootstrapped(
-        host_handlers(&config.workspace, journal, event_handler, worktree_handler),
+        host_handlers(
+            &config.workspace,
+            journal,
+            event_handler,
+            worktree_handler,
+            web,
+        ),
         CapturedOutput::new(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
@@ -3889,6 +3909,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         )?)?,
         events,
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), authority),
+        tidepool_handlers::WebHandler::default(),
     );
     let mut supported = host_context_support();
     supported.extend(tidepool_mcp::InstalledEffectSupport::installed_effect_support(&handlers));

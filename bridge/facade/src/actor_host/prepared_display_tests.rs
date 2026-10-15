@@ -68,6 +68,7 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
                     EventConfig::default(),
                 ),
                 worktree,
+                tidepool_handlers::WebHandler::default(),
             ),
             CapturedOutput::new(),
             DEFAULT_NURSERY_SIZE,
