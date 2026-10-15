@@ -1409,10 +1409,7 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
             Some(policy),
         )
         .await
@@ -1434,10 +1431,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1459,10 +1453,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1484,10 +1475,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1525,10 +1513,7 @@ impl HostedTestRuntime {
             child_machines,
             None,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1554,10 +1539,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
-<<<<<<< HEAD
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1580,7 +1562,6 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             Some(assembled),
             None,
-<<<<<<< HEAD
             None,
         )
         .await
@@ -1604,8 +1585,6 @@ impl HostedTestRuntime {
             None,
             Some(source_layers),
             None,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         )
         .await
     }
@@ -1620,10 +1599,7 @@ impl HostedTestRuntime {
         diagnostics_root_override: Option<std::path::PathBuf>,
         child_machines: HostedChildMachines,
         mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
-<<<<<<< HEAD
         source_layers: Option<HostSourceLayersTransform>,
-=======
->>>>>>> 0bafd94b35 (Use admitted command resources and exact compiler transactions in hook controls)
         command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
