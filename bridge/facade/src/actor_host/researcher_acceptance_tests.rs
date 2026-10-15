@@ -115,6 +115,7 @@ async fn research_history(child_machines: HostedChildMachines) {
         let first = host.while_operation_succeeds(&tutorial,
             select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
         let child = first.host_identity();
+        let installed_requests = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(reply_properties(&first), ["question", "sources", "summary"]);
         let names = first.request.tools.iter().filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
         assert!(names.contains(&"search") && names.contains(&"open"));
@@ -127,6 +128,8 @@ async fn research_history(child_machines: HostedChildMachines) {
         opened.function("open-moss", "open", json!({"url":PAGE}));
         let first_reply = host.while_operation_succeeds(&tutorial,
             next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), installed_requests,
+            "installed search/open handlers submit no extractor requests");
         let open = first_reply.settled_output("open-moss");
         let evidence = &open["items"][0]["value"]["Right"];
         assert_eq!(evidence["content"], BODY, "{open}");
