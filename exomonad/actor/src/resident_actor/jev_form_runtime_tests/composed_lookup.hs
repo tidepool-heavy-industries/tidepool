@@ -16,4 +16,4 @@ _ <- do
         Right decision | not (J.settledValue decision) -> pure ()
         _ -> error "confident insufficiency lost its distinct result"
     _ -> error "primary refusal or complete reassessment was lost"
-True
+say "True"

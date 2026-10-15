@@ -32,4 +32,4 @@ _ <- do
   result <- Composed.runSelection selection
   require (result == "replacement-original") "replay did not retain replacement payload"
   pure ()
-True
+say "True"

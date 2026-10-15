@@ -77,7 +77,7 @@ async fn installed_batch_notebook_example_executes_against_mocked_provider() {
     let source =
         std::fs::read_to_string(PathBuf::from(workspace).join("checks/jev-batch-example.hs"))
             .unwrap();
-    fixture.execute(&format!("{source}\nTrue")).await;
+    fixture.execute(&format!("{source}\nsay \"True\"\n")).await;
     assert_eq!(backend.0.lock().len(), 1);
     fixture.finish().await;
 }
