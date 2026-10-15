@@ -1236,6 +1236,31 @@ fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
 
 #[test]
 fn latest_root_resumability_preserves_terminal_distinctions() {
+    fn startup_record(
+        actor: ActorRef,
+        predecessor: Option<ActorRef>,
+        bound: bool,
+    ) -> exomonad_actor::DurableActorRecord {
+        let mut record = durable_root(actor);
+        record.admission.actor_path = Some("root".into());
+        let application = record.application.as_mut().unwrap();
+        let conversation = application.conversation.clone().unwrap();
+        application.intended_conversation = Some(conversation.clone());
+        if !bound {
+            application.conversation = None;
+        }
+        record.startup = Some(exomonad_actor::RootStartupIntent {
+            bootstrap_identity: "bootstrap".into(),
+            predecessor,
+            manifest_predecessor: None,
+            manifest: None,
+            store_predecessor: None,
+            binding_path: application.binding_path.clone(),
+            accepted_source: application.accepted_source.clone(),
+            conversation,
+        });
+        record
+    }
     let first = ActorRef::first(exomonad_actor::ActorId(7));
     let latest_actor = ActorRef {
         id: first.id,
@@ -1248,29 +1273,16 @@ fn latest_root_resumability_preserves_terminal_distinctions() {
             ActorExitKind::Failed,
             ActorExitKind::Interrupted,
         ] {
-            let mut latest = durable_root(latest_actor);
-            if !bound {
-                let application = latest.application.as_mut().unwrap();
-                let conversation = application.conversation.take().unwrap();
-                application.intended_conversation = Some(conversation.clone());
-                latest.startup = Some(exomonad_actor::RootStartupIntent {
-                    bootstrap_identity: "bootstrap".into(),
-                    predecessor: Some(first),
-                    manifest_predecessor: None,
-                    manifest: None,
-                    store_predecessor: None,
-                    binding_path: application.binding_path.clone(),
-                    accepted_source: application.accepted_source.clone(),
-                    conversation,
-                });
-            }
+            let mut latest = startup_record(latest_actor, Some(first), bound);
             latest.terminal = Some(exomonad_actor::DurableActorTerminal::new(
                 kind,
                 "same rendered reason",
             ));
-            let observed =
-                durable_root_identity(&[durable_root(first), latest], Some("source-revision"))
-                    .unwrap();
+            let observed = durable_root_identity(
+                &[startup_record(first, None, true), latest],
+                Some("source-revision"),
+            )
+            .unwrap();
             assert_eq!(
                 observed,
                 (kind == ActorExitKind::Interrupted).then_some((
