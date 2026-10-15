@@ -1199,16 +1199,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         &run_id,
         &compiler_log_path,
         &configuration.compiler,
+        &selected_environment,
     );
-    compiler_launch
-        .environment
-        .extend(selected_environment.clone());
-    // Timing lines are debug-level and cheap (log_compile_timing in
-    // tidepool/extract-cmd/src/daemon.rs forwards them to the compiler log);
-    // keep phase timing on unconditionally for Exomonad runs.
-    compiler_launch
-        .environment
-        .insert(tidepool_toolchain::timing::TIMING_ENV.into(), "1".into());
     let scoped_compiler = slice.scope(slice.verified_command(
         &executable,
         exomonad_node::ProcessInvocation {
@@ -1404,8 +1396,8 @@ pub async fn restart(run_id: &str) -> Result<(), Box<dyn std::error::Error>> {
             run_id,
             &exomonad_compiler_log_path(&coordinates.workspace, run_id),
             &configuration.compiler,
+            &selected_environment,
         );
-        launch.environment.extend(selected_environment.clone());
         let scoped = slice.scope(slice.verified_command(
             &executable,
             exomonad_node::ProcessInvocation {
@@ -1638,8 +1630,13 @@ fn compiler_daemon_launch(
     run_id: &str,
     log_path: &Path,
     compiler: &CompilerConfig,
+    selected_environment: &std::collections::BTreeMap<String, String>,
 ) -> TmuxLaunch {
-    let environment = pane_environment();
+    let mut environment = pane_environment();
+    environment.extend(selected_environment.clone());
+    // Compiler phase timing is enabled for both initial launch and recovery.
+    // Derive removals only after the complete environment has been selected.
+    environment.insert(tidepool_toolchain::timing::TIMING_ENV.into(), "1".into());
     let unset_environment = deployment_environment_unsets(&environment);
     TmuxLaunch {
         window_name: "Compiler".into(),
@@ -4377,8 +4374,19 @@ mod tests {
             "run-1",
             log_path,
             &CompilerConfig::default(),
+            &std::collections::BTreeMap::new(),
         );
 
+        assert_eq!(
+            launch
+                .environment
+                .get("TIDEPOOL_TIMING")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(launch
+            .unset_environment
+            .is_disjoint(&launch.environment.keys().cloned().collect()));
         assert_eq!(launch.window_name, "Compiler");
         assert_eq!(launch.cwd, workspace);
         assert_eq!(launch.program, "/tmp/tidepool-extract");
@@ -4410,7 +4418,31 @@ mod tests {
             "run-1",
             log_path,
             &configured.compiler,
+            &std::collections::BTreeMap::from([
+                ("TIDEPOOL_TIMING".to_owned(), "0".to_owned()),
+                (
+                    tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT.to_owned(),
+                    "/bundle/compiler.json".to_owned(),
+                ),
+            ]),
         );
+        assert_eq!(
+            configured_launch
+                .environment
+                .get("TIDEPOOL_TIMING")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            configured_launch
+                .environment
+                .get(tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT)
+                .map(String::as_str),
+            Some("/bundle/compiler.json")
+        );
+        assert!(configured_launch
+            .unset_environment
+            .is_disjoint(&configured_launch.environment.keys().cloned().collect()));
         assert!(configured_launch
             .args
             .windows(2)
