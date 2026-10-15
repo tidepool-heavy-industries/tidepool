@@ -197,7 +197,7 @@ tidepool_rust_library(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -341,7 +341,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -485,7 +485,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -629,7 +629,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -773,7 +773,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -941,7 +941,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/src/bin/exomonad.rs",
@@ -1267,7 +1267,7 @@ tidepool_rust_binary(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs",
@@ -1275,7 +1275,6 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs",
-        "bridge/facade/src/actor_host/fixtures/saved-account-test.json",
         "bridge/facade/src/actor_host/m1_cancel_performance.rs",
         "bridge/facade/src/actor_host/m1_chat_projection_tests.rs",
         "bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs",
@@ -2427,7 +2426,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/tests/bridge_decl_guard.rs",
@@ -2530,7 +2529,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_action_surface.rs",
@@ -2631,7 +2630,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_namespace_entry.rs",
@@ -2721,7 +2720,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_workspace_check.rs",
