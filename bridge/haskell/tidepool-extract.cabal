@@ -812,6 +812,8 @@ test-suite model-turn-test
     Persona.FileTools
     Persona.Patch
     Tidepool.Text.Navigation
+    ResearcherSpecTest
+    Project.Researcher
     Persona.Memory
     Persona.Web
     Persona.Spec
