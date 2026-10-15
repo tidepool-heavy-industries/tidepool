@@ -41,7 +41,7 @@ async fn provider_fixture_failure_interrupts_pending_round_observation() {
         runtime: std::sync::Weak::new(),
         inputs: Arc::new(Mutex::new(Vec::new())),
         calls: Arc::new(AtomicUsize::new(0)),
-        emit_call: false,
+        interruption: InterruptedResponse::EmptyEof,
         effect_path: None,
         failure: Mutex::new(Some(failure)),
     };
@@ -135,12 +135,14 @@ async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_
     let retained = wait_head(&host, Some(&first)).await;
     assert!(host.runtime.store().unread("/root").unwrap().is_empty());
     let predecessor = conversation.identity().clone();
+    let retained_run_id = host.context.config.run_id.clone();
     drop(conversation);
     host.stop().await.unwrap();
     drop(provider);
 
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+    let host = HostedTestRuntime::start_existing_configured(&settings, &provider, |config| {
+        config.run_id = retained_run_id;
         retained_config(config, repository.path(), &run_root)
     })
     .await
@@ -191,11 +193,24 @@ async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_
     host.stop().await.unwrap();
 }
 
+#[derive(Clone, Copy)]
+enum InterruptedResponse {
+    EmptyEof,
+    CompletedCallEof,
+    Incomplete,
+}
+
+#[derive(Clone, Copy)]
+enum ContinuationAction {
+    Send,
+    Retry,
+}
+
 struct InterruptedStream {
     runtime: std::sync::Weak<EmbeddedHarnessRuntime>,
-    inputs: Arc<Mutex<Vec<ResponsesRequest>>>,
+    inputs: Arc<Mutex<Vec<(RequestId, ResponsesRequest)>>>,
     calls: Arc<AtomicUsize>,
-    emit_call: bool,
+    interruption: InterruptedResponse,
     effect_path: Option<std::path::PathBuf>,
     failure: Mutex<Option<oneshot::Sender<String>>>,
 }
@@ -245,13 +260,33 @@ impl ResponsesTransport for InterruptedStream {
         request: PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        self.inputs.lock().push(request.request().clone());
+        self.inputs
+            .lock()
+            .push((request.request_id().clone(), request.request().clone()));
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-        if attempt > 0 {
+        let failed_attempts = match self.interruption {
+            InterruptedResponse::EmptyEof => 3,
+            InterruptedResponse::CompletedCallEof | InterruptedResponse::Incomplete => 1,
+        };
+        if attempt >= failed_attempts {
             return Ok(final_turn());
         }
         let mut response = harness::transport::sse::ResponseAssembly::default();
-        if self.emit_call {
+        if matches!(self.interruption, InterruptedResponse::Incomplete) {
+            return response
+                .accept(
+                    &json!({
+                        "type": "response.incomplete",
+                        "response": {
+                            "id": "retire-incomplete",
+                            "incomplete_details": {"reason": "content_filter"},
+                        },
+                    })
+                    .to_string(),
+                )
+                .map(|_| unreachable!("response.incomplete must return its typed error"));
+        }
+        if matches!(self.interruption, InterruptedResponse::CompletedCallEof) {
             let event = response
                 .accept(
                     &json!({"type":"response.output_item.done", "output_index":0, "item": {
@@ -310,9 +345,105 @@ impl ResponsesTransport for InterruptedStream {
     }
 }
 
+async fn browser_session(host: &HostedTestRuntime) -> String {
+    let settings = host.context.config.embedded.as_ref().unwrap();
+    let secret = std::fs::read_to_string(settings.session_secret_file.as_ref().unwrap()).unwrap();
+    let login = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap()
+        .post(format!("http://{}/api/session", host.address))
+        .header(reqwest::header::ORIGIN, format!("https://{}", host.address))
+        .json(&json!({"secret": secret.trim()}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::OK);
+    login.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+async fn observe_second_automatic_retry(
+    host: &HostedTestRuntime,
+    identity: &harness::embedding::HostIdentity,
+    cookie: &str,
+) {
+    host.while_host_running(host.context.while_root_live(
+        "second automatic retry projection",
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state = host
+                    .runtime
+                    .store()
+                    .embedded_inference_state(identity)
+                    .unwrap();
+                if let harness::embedding::HostInferenceState::AutoRetry {
+                    ref block,
+                    attempt: 2,
+                    maximum: 2,
+                    delay_ms: 3000,
+                } = state
+                {
+                    let request = host
+                        .runtime
+                        .store()
+                        .request(&block.request)
+                        .unwrap()
+                        .unwrap();
+                    let previous = request
+                        .parent
+                        .expect("second retry follows first automatic request");
+                    assert!(host
+                        .runtime
+                        .store()
+                        .events(Some(&previous))
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.kind == "model_interrupted"));
+                    let (mut socket, snapshot) =
+                        super::m1_host_tests::browser_snapshot(host.address, cookie).await;
+                    let snapshot: harness::server::browser_contract::Snapshot =
+                        serde_json::from_value(snapshot["snapshot"].clone()).unwrap();
+                    let projected = snapshot
+                        .actors
+                        .iter()
+                        .find(|actor| actor.identity == *identity)
+                        .expect("actual root missing from browser snapshot");
+                    let matches = projected.inference.as_ref() == Some(&(&state).into());
+                    socket.close(None).await.unwrap();
+                    if matches {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }),
+    ))
+    .await
+    .unwrap()
+    .unwrap()
+    .expect("second Store retry must reach the browser through normal host polling");
+}
+
 #[tokio::test]
 async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches_admitted_call() {
-    for emit_call in [false, true] {
+    for (interruption, action) in [
+        (InterruptedResponse::EmptyEof, ContinuationAction::Send),
+        (
+            InterruptedResponse::CompletedCallEof,
+            ContinuationAction::Send,
+        ),
+        (
+            InterruptedResponse::CompletedCallEof,
+            ContinuationAction::Retry,
+        ),
+    ] {
+        let emit_call = matches!(interruption, InterruptedResponse::CompletedCallEof);
         let files = tempfile::tempdir().unwrap();
         let settings = hosted_test_settings(&files, 1);
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
@@ -339,8 +470,17 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                         },
                     )
                     .expect("the isolated test delegates production command resources");
-                    config.command_resources =
-                        Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
+                    config.command_resources = Some(
+                        exomonad_node::command_resources::CommandResourceClient::local(
+                            owner,
+                            exomonad_node::command_resources::CommandRunIdentity::new(
+                                "isolated-test".into(),
+                                1,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap(),
+                    );
                 }
             },
             {
@@ -352,7 +492,7 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                         runtime: Arc::downgrade(runtime),
                         inputs,
                         calls,
-                        emit_call,
+                        interruption,
                         effect_path: Some(effect_path),
                         failure: Mutex::new(Some(failure)),
                     })
@@ -363,7 +503,8 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
         .unwrap();
         host.run_scenario(|host| {
             Box::pin(async move {
-                host.input("first explicit input").await.unwrap();
+                let cookie = browser_session(host).await;
+                host.http_input("first explicit input").await.unwrap();
                 let conversation = host
                     .context
                     .binding(host.context.actor.identity())
@@ -373,6 +514,9 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                 let interrupted = observe_provider_round(
                     observed_failure,
                     tokio::time::timeout(Duration::from_secs(300), async {
+                        if matches!(interruption, InterruptedResponse::EmptyEof) {
+                            observe_second_automatic_retry(host, conversation.identity(), &cookie).await;
+                        }
                         loop {
                             let frontier = host
                                 .runtime
@@ -381,6 +525,7 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                                 .unwrap();
                             if frontier.pending_interruption.is_some()
                                 && conversation.active_round().is_none()
+                                && matches!(host.runtime.store().embedded_inference_state(conversation.identity()).unwrap(), harness::embedding::HostInferenceState::Blocked { .. })
                             {
                                 break frontier;
                             }
@@ -401,68 +546,68 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                     .unwrap()
                     .iter()
                     .any(|event| event.kind == "model_interrupted"));
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let failed_attempts = if emit_call { 1 } else { 3 };
+                assert_eq!(calls.load(Ordering::SeqCst), failed_attempts);
                 assert_eq!(
-                    host.runtime
-                        .store()
-                        .embedded_round_frontier(conversation.identity())
-                        .unwrap()
-                        .pending_head,
+                    host.runtime.store().embedded_round_frontier(conversation.identity()).unwrap().pending_head,
                     Some(pending.clone())
                 );
                 assert!(host.context.actor.terminal().get().is_none());
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
-                conversation
-                    .input("explicit-next", "operator", "continue explicitly")
-                    .await
-                    .unwrap();
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                assert_eq!(
-                    calls.load(Ordering::SeqCst),
-                    1,
-                    "ordinary input must not release the durable inference block"
-                );
                 let harness::embedding::HostInferenceState::Blocked { block } = host
                     .runtime
                     .store()
                     .embedded_inference_state(conversation.identity())
                     .unwrap()
                 else {
-                    panic!("the actual interruption must remain blocked");
+                    panic!("exhausted retries or completed-item interruption must remain blocked");
                 };
+                assert_eq!(block.request, pending);
                 let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
-                let command = harness::server::HostCommand::Recover {
-                    target: conversation.identity().clone(),
-                    expected_block: block,
-                    mode: harness::embedding::RecoveryMode::Exact,
+                let command = match action {
+                    ContinuationAction::Send => harness::server::HostCommand::Input {
+                        target: conversation.identity().clone(),
+                        text: "continue explicitly".into(),
+                    },
+                    ContinuationAction::Retry => harness::server::HostCommand::Recover {
+                        target: conversation.identity().clone(),
+                        expected_block: block.clone(),
+                        mode: harness::embedding::RecoveryMode::Exact,
+                    },
                 };
-                host.http_command(operation_id, command.clone())
-                    .await
-                    .unwrap();
-                assert!(matches!(
-                    host.command_receipt(&conversation.identity().run, operation_id)
-                        .await
-                        .unwrap(),
-                    harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
-                ));
+                host.http_command(operation_id, command.clone()).await.unwrap();
+                let receipt = host.command_receipt(&conversation.identity().run, operation_id).await.unwrap();
+                match (&action, &receipt) {
+                    (ContinuationAction::Send, harness::server::CommandReceiptOutcome::Admitted {
+                        continuation: Some(harness::embedding::InputContinuation::Granted { block: granted }),
+                        wake_error: None,
+                        ..
+                    }) => assert_eq!(granted, &block),
+                    (ContinuationAction::Retry, harness::server::CommandReceiptOutcome::RecoveryAuthorized {
+                        block: granted,
+                        mode: harness::embedding::RecoveryMode::Exact,
+                        ..
+                    }) => assert_eq!(granted, &block),
+                    _ => panic!("unexpected continuation receipt: {receipt:?}"),
+                }
                 let successor = wait_head(&host, None).await;
-                host.http_command(operation_id, command.clone())
-                    .await
-                    .unwrap();
+                host.http_command(operation_id, command.clone()).await.unwrap();
+                assert_eq!(host.command_receipt(&conversation.identity().run, operation_id).await.unwrap(), receipt);
                 let stale_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
-                host.http_command(stale_operation, command).await.unwrap();
+                host.http_command(stale_operation, harness::server::HostCommand::Recover {
+                    target: conversation.identity().clone(),
+                    expected_block: block.clone(),
+                    mode: harness::embedding::RecoveryMode::Exact,
+                }).await.unwrap();
                 assert!(matches!(
-                    host.command_receipt(&conversation.identity().run, stale_operation)
-                        .await
-                        .unwrap(),
-                    harness::server::CommandReceiptOutcome::Refused { .. }
+                    host.command_receipt(&conversation.identity().run, stale_operation).await.unwrap(),
+                    harness::server::CommandReceiptOutcome::ContinuationRefused {
+                        block: refused,
+                        reason: harness::embedding::ContinuationRefusal::Stale,
+                        ..
+                    } if refused == block
                 ));
-                assert_eq!(
-                    calls.load(Ordering::SeqCst),
-                    2,
-                    "retrying recovery must only return its retained receipt"
-                );
+                assert_eq!(calls.load(Ordering::SeqCst), failed_attempts + 1,
+                    "duplicate and stale operations must not request the provider");
                 assert_eq!(
                     host.runtime
                         .store()
@@ -472,20 +617,28 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                         .parent,
                     Some(pending)
                 );
-                assert_eq!(calls.load(Ordering::SeqCst), 2);
                 let retained_inputs = inputs.lock();
-                let continued = &retained_inputs[1];
-                for text in ["first explicit input", "continue explicitly"] {
+                assert_eq!(retained_inputs.len(), failed_attempts + 1);
+                let continued = &retained_inputs[failed_attempts].1;
+                for (text, expected) in [
+                    ("first explicit input", 1),
+                    ("continue explicitly", usize::from(matches!(action, ContinuationAction::Send))),
+                ] {
+                    assert_eq!(continued.input.iter().filter(|item| item.0["content"] == text).count(), expected);
+                }
+                for pair in retained_inputs.windows(2) {
+                    assert_eq!(host.runtime.store().request(&pair[1].0).unwrap().unwrap().parent, Some(pair[0].0.clone()));
+                }
+                assert_eq!(
+                    host.runtime.store().claims(&harness::model::CallId("effect-before-eof".into())).unwrap().len(),
+                    usize::from(emit_call),
+                    "continuation must preserve the original invocation ownership"
+                );
+                if emit_call {
                     assert_eq!(
-                        continued
-                            .input
-                            .iter()
-                            .filter(|item| item.0["content"] == text)
-                            .count(),
+                        continued.input.iter().filter(|item| item.0["type"] == "custom_tool_call" && item.0["call_id"] == "effect-before-eof").count(),
                         1
                     );
-                }
-                if emit_call {
                     assert_eq!(
                         continued
                             .input
@@ -523,7 +676,7 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
                 runtime: Arc::downgrade(runtime),
                 inputs: Arc::new(Mutex::new(Vec::new())),
                 calls: Arc::clone(&provider_calls),
-                emit_call: false,
+                interruption: InterruptedResponse::Incomplete,
                 effect_path: None,
                 failure: Mutex::new(None),
             })
@@ -549,7 +702,15 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
                                 .store()
                                 .embedded_inference_state(conversation.identity())
                                 .unwrap(),
-                            harness::embedding::HostInferenceState::Blocked { .. }
+                            harness::embedding::HostInferenceState::Blocked {
+                                block: harness::embedding::InferenceBlock {
+                                    reason: harness::embedding::InferenceBlockReason::ResponseIncomplete {
+                                        reason: Some(harness::transport::IncompleteReason::ContentFilter),
+                                        ..
+                                    },
+                                    ..
+                                }
+                            }
                         ) && conversation.active_round().is_none()
                         {
                             break;
@@ -562,9 +723,6 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
             .unwrap()
             .unwrap()
             .unwrap();
-            host.http_input("this remains queued while inference is blocked")
-                .await
-                .unwrap();
             let interrupted = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
             host.http_command(
                 interrupted,
