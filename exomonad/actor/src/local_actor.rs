@@ -2382,7 +2382,9 @@ fn start_workbench<B: KernelBehavior>(
         state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, &invocation),
         "workbench admission requires an independent owned-task lane"
     );
-    let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
+    let control = control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
+    let invocation = invocation.issue_execution_identity(state.context.identity, &control);
+    let control = Some(control);
     let Some(generation) = state.next_task_generation.checked_add(1) else {
         let failure = Err(KernelInvocationFailure::Failed {
             receipts: Vec::new(),
@@ -4359,6 +4361,9 @@ mod tests {
         owned_successor_source: Option<String>,
         owned_successor_panics: bool,
         dispatch_panics: bool,
+        observed_execution_ids:
+            Option<Arc<Mutex<Vec<Option<tidepool_runtime::session::WorkbenchExecutionId>>>>>,
+        reconcile_retires_scope: bool,
         kernel_probe: Option<KernelProbe>,
     }
 
@@ -4731,12 +4736,33 @@ mod tests {
             })
         }
 
+        fn reconcile_workbench_boundary<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: tidepool_runtime::session::ContextCheckpointBoundary,
+        ) -> BoxFuture<'a, Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>>
+        {
+            Box::pin(async move {
+                if self.reconcile_retires_scope {
+                    self.calls.lock().push("boundary-retired");
+                    Ok(crate::WorkbenchBoundaryReconciliation::Settled)
+                } else {
+                    Ok(crate::WorkbenchBoundaryReconciliation::Pending)
+                }
+            })
+        }
+
         fn dispatch_workbench(
             &mut self,
             context: &KernelContext,
             invocation: crate::ActorWorkbenchInvocation,
             control: Option<Arc<crate::WorkbenchExecutionControl>>,
         ) -> WorkbenchDispatch<Self> {
+            if let Some(observed) = &self.observed_execution_ids {
+                observed
+                    .lock()
+                    .push(invocation.request().execution_id().cloned());
+            }
             if self.dispatch_panics {
                 panic!("workbench dispatch probe panic");
             }
@@ -5056,6 +5082,8 @@ mod tests {
                 owned_successor_source: None,
                 owned_successor_panics: false,
                 dispatch_panics: false,
+                observed_execution_ids: None,
+                reconcile_retires_scope: false,
                 kernel_probe: None,
             },
             calls,
@@ -5825,6 +5853,8 @@ mod tests {
             ]
         );
     }
+
+    mod execution_identity_history;
 
     #[tokio::test]
     async fn independent_workbench_admission_fences_parked_execution_by_full_step() {

@@ -442,6 +442,20 @@ impl ActorWorkbenchInvocation {
         }
     }
 
+    /// Fix the execution identity before the scheduler records its pending step.
+    /// An already-issued identity remains the correlation authority.
+    pub(crate) fn issue_execution_identity(
+        self,
+        actor: ActorRef,
+        control: &crate::WorkbenchExecutionControl,
+    ) -> Self {
+        if self.request.execution_id().is_some() {
+            self
+        } else {
+            self.with_execution_id(control.execution_id(actor))
+        }
+    }
+
     pub(crate) fn with_execution_id(
         mut self,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
