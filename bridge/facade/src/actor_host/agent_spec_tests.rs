@@ -507,11 +507,8 @@ async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
     let log = super::call_timing_tests::CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
     let subscriber = tracing_subscriber::fmt().json().with_writer(log.clone())
         .with_env_filter("warn,exomonad_actor::toolset_preparation=info,exomonad_actor::call_timing=info,tidepool_extract_cmd::endpoint=info").finish();
-    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ _ -> True; _ -> False })").with_subscriber(subscriber).await;
-    assert!(
-        source_reload.to_string().contains("True"),
-        "{source_reload}"
-    );
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\n_ <- display (case outcome of { ReloadPublished _ _ _ -> True; _ -> False })").with_subscriber(subscriber).await;
+    assert_eq!(super::test_campaign::committed_display_text(&source_reload), "True");
     let captured = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
     let rows = captured.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
     let waits = rows.iter().filter(|row| row["fields"]["message"] == "toolset preparation wait").collect::<Vec<_>>();
