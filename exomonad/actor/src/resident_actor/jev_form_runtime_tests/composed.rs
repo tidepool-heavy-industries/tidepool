@@ -45,7 +45,11 @@ async fn installed_composition_retains_full_distribution_replays_and_runs_only_e
     let mut fixture = Fixture::new(782, false).await;
     let backend = Arc::new(BatchBackend::default());
     fixture.forest.set_jev_backend(backend.clone());
-    fixture.execute(include_str!("composed.hs")).await;
+    fixture
+        .execute(&tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs",
+        ))
+        .await;
     assert_eq!(
         backend.0.lock().len(),
         1,
@@ -68,10 +72,63 @@ async fn installed_batch_notebook_example_executes_against_mocked_provider() {
     let mut fixture = Fixture::new(783, false).await;
     let backend = Arc::new(BatchBackend::default());
     fixture.forest.set_jev_backend(backend.clone());
-    let source = include_str!(
-        "../../../../../exomonad/examples/workspace/.exomonad/checks/jev-batch-example.hs"
-    );
+    let workspace =
+        std::env::var_os("TIDEPOOL_JEV_WORKSPACE_DIR").expect("declared workspace input");
+    let source =
+        std::fs::read_to_string(PathBuf::from(workspace).join("checks/jev-batch-example.hs"))
+            .unwrap();
     fixture.execute(&format!("{source}\nTrue")).await;
     assert_eq!(backend.0.lock().len(), 1);
+    fixture.finish().await;
+}
+
+#[derive(Default)]
+struct UnavailableBackend(Mutex<usize>);
+
+impl JevBackend for UnavailableBackend {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let state = &request["state"];
+        assert_eq!(state["primary_issue"], "fixture primary unavailable");
+        assert_eq!(state["selection_status"], "primary unavailable");
+        assert_eq!(
+            state["primary_receipt_status"]["disposition"],
+            "not executed"
+        );
+        assert!(
+            state["declarations"]
+                .as_str()
+                .unwrap()
+                .contains("fixture primary unavailable")
+        );
+        assert_eq!(state["capture_report_truncated"], false);
+        assert_eq!(state["declarations_truncated"], false);
+        let questions = request["questions"].as_object().unwrap();
+        assert_eq!(questions.len(), 1);
+        let question = questions.keys().next().unwrap();
+        *self.0.lock() += 1;
+        let response = serde_json::json!({"answers":{question:{"type":"noul","noul":0.1}},"model":"insufficient-fixture"}).to_string();
+        Box::pin(async move { Ok(response) })
+    }
+}
+
+#[tokio::test]
+async fn installed_lookup_reassessment_retains_unavailable_primary_and_insufficient_result() {
+    let mut fixture = Fixture::new(784, false).await;
+    let backend = Arc::new(UnavailableBackend::default());
+    fixture.forest.set_jev_backend(backend.clone());
+    fixture
+        .execute(&tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
+        ))
+        .await;
+    assert_eq!(
+        *backend.0.lock(),
+        1,
+        "unavailable primary skips ranking but reassesses once"
+    );
     fixture.finish().await;
 }

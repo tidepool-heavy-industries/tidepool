@@ -227,7 +227,7 @@ reviewPending = traverseOf (traversed . _2)
   (runStar (lmap (view helperReport) assessReport))
 
 -- If evidence is incomplete, observe which expansion would help. Speculation
--- can ask both questions in one call without executing the carried IO actions.
+-- can ask both questions in one call without executing the carried Eff actions.
 inspectOrContinue :: J.State ReportState -> [(Text, Text, Eff effects ())] -> J.Program (Eff effects ())
 inspectOrContinue world sources = ifS
   (J.liftQuery (J.holds J.careful <$> J.question world #complete (J.noul "Does the evidence suffice?")))
