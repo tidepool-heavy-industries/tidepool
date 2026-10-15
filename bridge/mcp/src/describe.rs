@@ -63,6 +63,33 @@ pub fn authored_helpers(decl: &EffectDecl) -> Vec<HelperDecl> {
         .collect()
 }
 
+/// Leading semantic contract from an authored helper owned by generated Core.
+/// Call only with the defining module and declaration returned by inspection;
+/// aliases and re-exports resolve there, while local shadows have another owner.
+#[must_use]
+pub fn authored_helper_contract(module: &str, name: &str) -> Option<String> {
+    if module != "Tidepool.Effects.Core" {
+        return None;
+    }
+    let helper = crate::all_decls()
+        .iter()
+        .flat_map(authored_helpers)
+        .find(|helper| {
+            helper.name == Some(name) && helper.visibility == HelperVisibility::Public
+        })?;
+    let mut lines = helper.source.lines();
+    let first = lines.next()?.strip_prefix("-- | ")?;
+    let mut contract = first.to_owned();
+    for line in lines {
+        let Some(line) = line.strip_prefix("--") else {
+            break;
+        };
+        contract.push('\n');
+        contract.push_str(line.strip_prefix(' ').unwrap_or(line));
+    }
+    Some(contract)
+}
+
 /// The leading sentence used by compact indexes; the declaration retains
 /// the complete description for detailed inspection.
 pub fn first_sentence(desc: &str) -> &str {
@@ -107,6 +134,36 @@ pub fn describe_effects_index(decls: &[EffectDecl]) -> String {
 mod tests {
     use super::*;
     use crate::standard_decls;
+
+    #[test]
+    fn helper_contract_is_the_leading_doc_of_the_compiled_owner_source() {
+        let source = crate::effects_core_module_source();
+        for (decl, name) in [
+            (crate::fs_write_decl(), "writeCheckedIf"),
+            (crate::fs_read_decl(), "fileHash"),
+        ] {
+            let helper = decl
+                .helpers
+                .iter()
+                .find(|helper| helper.name == Some(name))
+                .unwrap();
+            assert!(source.contains(helper.source));
+            let doc = helper.source.split_once(&format!("\n{name} ::")).unwrap().0;
+            let expected = doc
+                .lines()
+                .enumerate()
+                .map(|(index, line)| {
+                    line.strip_prefix(if index == 0 { "-- | " } else { "-- " })
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                authored_helper_contract("Tidepool.Effects.Core", name),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn first_sentence_takes_leading_sentence() {

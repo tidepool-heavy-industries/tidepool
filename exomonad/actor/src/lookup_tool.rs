@@ -254,6 +254,7 @@ pub(crate) struct LookupEntry {
     /// `crate::usage_pointer`. Not populated for non-callable kinds (types,
     /// constructors, coercions, documentation).
     pub(crate) usage_pointer: Option<String>,
+    pub(crate) contract: Option<String>,
 }
 
 fn availability_rank(availability: InspectionAvailability) -> u8 {
@@ -516,6 +517,17 @@ impl LookupResponse {
     }
 }
 
+fn resolved_contract(module: Option<&str>, name: &str, live_modules: &[String]) -> Option<String> {
+    let module = module?;
+    if live_modules.iter().any(|live| live == module) {
+        return None;
+    }
+    // Inspection's name can be qualified; its nominal defining module remains
+    // authoritative even when the query used a facade or an import alias.
+    let name = qualifier_and_identifier(name).map_or(name, |(_, name)| name);
+    tidepool_mcp::authored_helper_contract(module, name)
+}
+
 pub(crate) fn resolve(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
     inspected: Vec<InspectionResult>,
@@ -546,6 +558,7 @@ pub(crate) fn resolve(
                             availability:
                                 tidepool_runtime::session::InspectionAvailability::Unknown,
                             usage_pointer: None,
+                            contract: None,
                         }],
                         MATCH_LIMIT,
                     ),
@@ -659,6 +672,11 @@ pub(crate) fn resolve(
                     matches
                         .into_iter()
                         .map(|entry| LookupEntry {
+                            contract: resolved_contract(
+                                entry.module.as_deref(),
+                                &entry.name,
+                                live_modules,
+                            ),
                             name: entry.name.clone(),
                             defining_module: entry.module.clone(),
                             kind: LookupEntryKind::Value,
@@ -714,6 +732,7 @@ pub(crate) fn resolve(
         };
         let usage_pointer = crate::usage_pointer::pointer_for(usage_pointers, &entry.name);
         LookupEntry {
+            contract: resolved_contract(entry.module.as_deref(), &entry.name, live_modules),
             name: entry.name,
             defining_module: entry.module.clone(),
             kind,
@@ -800,7 +819,37 @@ mod tests {
             quality,
             availability: InspectionAvailability::Available,
             usage_pointer: None,
+            contract: None,
         }
+    }
+
+    #[test]
+    fn contracts_follow_defining_helper_owner_and_exclude_live_shadows() {
+        let owner = "Tidepool.Effects.Core";
+        let contract = tidepool_mcp::authored_helper_contract(owner, "writeCheckedIf");
+        assert!(contract.is_some());
+        assert_eq!(
+            resolved_contract(Some(owner), "writeCheckedIf", &[]),
+            contract
+        );
+        assert_eq!(
+            resolved_contract(Some(owner), "Fs.writeCheckedIf", &[]),
+            contract
+        );
+        assert_eq!(
+            resolved_contract(Some("Cell_17"), "writeCheckedIf", &["Cell_17".into()]),
+            None
+        );
+        assert_eq!(
+            resolved_contract(Some(owner), "writeCheckedIf", &[owner.into()]),
+            None
+        );
+        assert_eq!(resolved_contract(None, "writeCheckedIf", &[]), None);
+        assert_eq!(
+            resolved_contract(Some("Tidepool.Effects"), "writeCheckedIf", &[]),
+            None
+        );
+        assert_eq!(resolved_contract(Some(owner), "Written", &[]), None);
     }
 
     #[test]

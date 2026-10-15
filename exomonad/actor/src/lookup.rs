@@ -166,6 +166,7 @@ pub(crate) struct LookupEntry {
     origin: LookupOrigin,
     quality: LookupQuality,
     usage: Option<String>,
+    pub(crate) contract: Option<String>,
     example: Option<crate::usage_pointer::LookupExample>,
 }
 #[derive(ToHaskell)]
@@ -251,6 +252,7 @@ impl From<lookup_tool::LookupEntry> for LookupEntry {
                 lookup_tool::MatchQuality::Usable => LookupQuality::Usable,
             },
             usage: e.usage_pointer,
+            contract: e.contract,
             example: None,
         }
     }

@@ -136,6 +136,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("lookupOrigin", HsType::Named("LookupOrigin")),
                 field("lookupQuality", HsType::Named("LookupQuality")),
                 field("lookupUsage", HsType::maybe(HsType::Text)),
+                field("lookupContract", HsType::maybe(HsType::Text)),
                 field(
                     "lookupExample",
                     HsType::maybe(HsType::Named("LookupExample")),

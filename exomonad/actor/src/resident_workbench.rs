@@ -16015,11 +16015,19 @@ pub(crate) mod request_tests {
         // Aliases deliberately leave the original qualified constructor name
         // outside reader scope. Its parent export browse must still resolve it.
         let preamble = insert_preamble_imports(&source.preamble,
-            "qualified LookupPlanParent as Parent\nqualified LookupPlanParent.Choice as Child\nqualified LookupPlanParent.ModuleOnly as ModuleOnly");
+            "qualified LookupPlanParent as Parent\nqualified LookupPlanParent.Choice as Child\nqualified LookupPlanParent.ModuleOnly as ModuleOnly\nqualified Tidepool.Effects as Fs");
         let mut include = source.base_include.to_vec();
         include.push(modules.path().to_owned());
         let source = ActorWorkbenchSource::new(preamble, include);
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        workbench
+            .execute_cell_for_test(context.clone(), "writeCheckedIf = 17 :: Int")
+            .await
+            .unwrap();
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -16045,6 +16053,9 @@ pub(crate) mod request_tests {
                 "LookupPlanParent.ConstructorOnly".into(),
                 "LookupApi.lookupRaw".into(),
                 "doc workbench".into(),
+                "Fs.writeCheckedIf".into(),
+                "Fs.fileHash".into(),
+                "writeCheckedIf".into(),
             ]),
             "view".into(),
             &prepared.imports,
@@ -16118,6 +16129,22 @@ pub(crate) mod request_tests {
             matches!(&answer.results[4].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
             "documentation resolves alongside compiler queries"
         );
+        for (index, name) in [(5, "writeCheckedIf"), (6, "fileHash")] {
+            let LookupOutcome::Found(entries, false) = &answer.results[index].outcome else {
+                panic!("qualified facade helper must resolve");
+            };
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                entries[0].contract,
+                tidepool_mcp::authored_helper_contract("Tidepool.Effects.Core", name)
+            );
+            assert!(entries[0].contract.is_some());
+        }
+        let LookupOutcome::Found(shadows, false) = &answer.results[7].outcome else {
+            panic!("the resident local shadow must resolve");
+        };
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].contract, None);
         let before_docs = compiler_trace_started_ids(&trace);
         let docs = crate::lookup::execute(
             real_lookup_request(vec!["doc workbench".into()]),
