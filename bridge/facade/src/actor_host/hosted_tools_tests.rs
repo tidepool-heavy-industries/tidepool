@@ -147,19 +147,15 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         .await
         .unwrap();
     assert_eq!(next["items"][0]["output"], "frozen:after-failure");
+    let huge_value = format!("frozen:{}", "λ".repeat(32000));
     let huge = call("raw_echo", ToolArguments::Raw("λ".repeat(32000)))
         .await
-        .expect_err("oversized semantic output cannot publish a partial dispatcher envelope");
-    let exomonad_actor::ResidentToolError::Invocation(
-        exomonad_actor::KernelInvocationFailure::Workbench(huge_failure),
-    ) = huge else { panic!("expected output observation workbench failure: {huge}") };
-    assert_eq!(huge_failure.point, tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 });
-    assert_eq!(huge_failure.total, 1);
-    assert!(huge_failure.receipts.is_empty(), "{huge_failure:?}");
-    assert_eq!(huge_failure.publication,
-        Some(tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
-            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
-        }), "{huge_failure:?}");
+        .expect("a complete dispatcher envelope is independent of model display limits");
+    assert_eq!(huge["status"], "committed", "{huge}");
+    assert_eq!(huge["items"][0]["value"], huge_value);
+    let shown = huge["items"][0]["output"].as_str().unwrap();
+    assert!(shown.len() <= 28 * 1024, "{}", shown.len());
+    assert_ne!(shown, huge_value, "presentation is bounded independently");
     let unicode = "λ".repeat(256);
     let recovered = call("raw_echo", ToolArguments::Raw(unicode.clone())).await.unwrap();
     assert_eq!(recovered["status"], "committed", "{recovered}");
@@ -206,4 +202,79 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     let haskell = dispatch_haskell_script(policy.as_ref(), "answer <- pure (40 + 2 :: Int)\nif answer == 42 then pure () else error \"notebook contract failed\"").await;
     assert_eq!(haskell["status"], "committed", "{haskell}");
 })).await;
+}
+
+#[tokio::test]
+async fn oversized_presented_results_preserve_semantics_and_effects_across_sync_and_async_handlers()
+{
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            let directory = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(directory.join("state")).unwrap();
+            for name in [
+                "ordinary",
+                "synchronous",
+                "after-ordinary",
+                "after-synchronous",
+            ] {
+                std::fs::write(directory.join("state").join(name), b"").unwrap();
+            }
+            std::fs::write(
+                directory.join("AgentSpec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/oversized_dispatch_spec.hs",
+                ),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&directory, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["AgentSpec".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let full = "λ".repeat(70000);
+                for name in ["ordinary", "synchronous"] {
+                    let result = campaign
+                        .root_installation
+                        .policy
+                        .dispatch_json_boxed(ToolInvocation {
+                            context: None,
+                            name: name.into(),
+                            arguments: ToolArguments::Structured(
+                                serde_json::json!({"text":"λ","copies":70000}),
+                            ),
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(result["status"], "committed", "{result}");
+                    assert_eq!(result["items"][0]["value"], full);
+                    assert_eq!(result["items"][0]["output"], format!("{name} complete"));
+                    let state = campaign._repository.path().join(".exomonad/state");
+                    assert_eq!(
+                        std::fs::read(state.join(name)).unwrap(),
+                        b"x",
+                        "the producing effect ran once"
+                    );
+                    assert_eq!(
+                        std::fs::read(state.join(format!("after-{name}"))).unwrap(),
+                        b"x",
+                        "afterTool consumed the full semantic value once"
+                    );
+                }
+            })
+        })
+        .await;
 }

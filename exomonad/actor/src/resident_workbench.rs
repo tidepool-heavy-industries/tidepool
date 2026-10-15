@@ -6505,8 +6505,7 @@ where
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let outcome = session
-                    .run_rooted_entry_borrowed(
-                        "hosted_tool",
+                    .run_protocol_entry_borrowed(
                         &dispatch,
                         entry,
                         context.placement.resource_scope,

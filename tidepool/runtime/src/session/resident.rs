@@ -2044,6 +2044,7 @@ impl Drop for CustodyTransfer {
 pub struct PlainHole {
     id: String,
     checked: Option<Arc<CheckedTurnCompletion>>,
+    observation: ResultObservation,
 }
 
 /// See [`ResidentHole`]'s doc — the `Binding` variant's payload.
@@ -2097,7 +2098,11 @@ impl ResidentHole {
             checked,
         } = seed;
         match obligation {
-            HoleObligation::Plain => ResidentHole::Plain(PlainHole { id, checked }),
+            HoleObligation::Plain(observation) => ResidentHole::Plain(PlainHole {
+                id,
+                checked,
+                observation,
+            }),
             HoleObligation::Binding {
                 binder,
                 generation,
@@ -2131,7 +2136,7 @@ impl ResidentHole {
     /// whichever one finally completes.
     fn seed(&self) -> HoleSeed {
         let (obligation, checked) = match self {
-            ResidentHole::Plain(h) => (HoleObligation::Plain, h.checked.clone()),
+            ResidentHole::Plain(h) => (HoleObligation::Plain(h.observation), h.checked.clone()),
             ResidentHole::Binding(h) => (
                 HoleObligation::Binding {
                     binder: h.binder.clone(),
@@ -2172,6 +2177,7 @@ impl ResidentHole {
         ResidentHole::Plain(PlainHole {
             id: cont_id.into(),
             checked: None,
+            observation: ResultObservation::Presentation,
         })
     }
 }
@@ -2187,7 +2193,7 @@ struct HoleSeed {
 
 #[derive(Clone)]
 enum HoleObligation {
-    Plain,
+    Plain(ResultObservation),
     Binding {
         binder: BoundBinder,
         generation: Generation,
@@ -2489,10 +2495,18 @@ impl ValueInterfaceSource {
     }
 }
 
+/// Complete protocol values feed typed native decoders; presentation values
+/// remain bounded observations. The purpose follows a parked continuation.
+#[derive(Clone, Copy, Debug)]
+enum ResultObservation {
+    Presentation,
+    Protocol,
+}
+
 /// What the prepared arm of a resident turn does with its settled value.
 enum PreparedTurnMode<'a> {
-    /// Observe the value and return it as the turn's result.
-    Value,
+    /// Observe the value for its admitted consumer and return it.
+    Value(ResultObservation),
     /// Observe the value and bind it into the persistent binding store as `binder`.
     Binding {
         binder: &'a BoundBinder,
@@ -2530,7 +2544,7 @@ pub enum PendingPreparedMode {
 impl PendingPreparedMode {
     fn as_mode(&self) -> PreparedTurnMode<'_> {
         match self {
-            PendingPreparedMode::Value => PreparedTurnMode::Value,
+            PendingPreparedMode::Value => PreparedTurnMode::Value(ResultObservation::Presentation),
             PendingPreparedMode::Binding {
                 binder,
                 generation,
@@ -2617,7 +2631,7 @@ fn checked_turn_plan(
         .validate_checked_table(table)
         .map_err(SessionError::Compile)?;
     let (generation, binders) = match mode {
-        PreparedTurnMode::Value => (
+        PreparedTurnMode::Value(_) => (
             certification
                 .checked_execution()
                 .map_or(0, |execution| execution.generation()),
@@ -2645,7 +2659,7 @@ fn checked_turn_plan(
 
 fn binding_ids_of(mode: &PreparedTurnMode<'_>) -> Vec<SessionVarId> {
     match mode {
-        PreparedTurnMode::Value => Vec::new(),
+        PreparedTurnMode::Value(_) => Vec::new(),
         PreparedTurnMode::Binding { binder, .. } => vec![SessionVarId::from_extract(binder.var_id)],
         PreparedTurnMode::Projected { binders, .. } => binders
             .iter()
@@ -2798,7 +2812,7 @@ fn hole_seed_of(
     checked: Option<Arc<CheckedTurnCompletion>>,
 ) -> HoleSeed {
     let obligation = match mode {
-        PreparedTurnMode::Value => HoleObligation::Plain,
+        PreparedTurnMode::Value(observation) => HoleObligation::Plain(*observation),
         PreparedTurnMode::Binding {
             binder,
             generation,
@@ -2827,7 +2841,8 @@ fn hole_seed_of(
 /// The eval-thread preparation plan for a turn run in `mode`.
 fn settle_plan_of(mode: &PreparedTurnMode<'_>) -> SettlePlan {
     match mode {
-        PreparedTurnMode::Value => SettlePlan::Observe,
+        PreparedTurnMode::Value(ResultObservation::Presentation) => SettlePlan::Observe,
+        PreparedTurnMode::Value(ResultObservation::Protocol) => SettlePlan::Protocol,
         PreparedTurnMode::Binding { binder, .. } => SettlePlan::Bind(binder.tier),
         PreparedTurnMode::Projected { binders, .. } => {
             SettlePlan::Project(binders.iter().map(|binder| binder.tier).collect())
@@ -2842,6 +2857,8 @@ fn settle_plan_of(mode: &PreparedTurnMode<'_>) -> SettlePlan {
 pub(crate) enum SettlePlan {
     /// Observe the value and return it as the turn's result.
     Observe,
+    /// Materialize a complete internal protocol value for typed decoding.
+    Protocol,
     /// One binder at this tier.
     Bind(ValueTier),
     /// A projected tuple: one binder per field, each at its tier.
@@ -3214,6 +3231,7 @@ fn settle_rooted_entry<H: DispatchEffect<O>, O>(
     entry: ValueHandle,
     argument: i64,
     realm: RealmId,
+    observation: ResultObservation,
     park: ParkPolicy,
     table: &DataConTable,
     handlers: &mut H,
@@ -3227,7 +3245,7 @@ fn settle_rooted_entry<H: DispatchEffect<O>, O>(
         engine,
         program,
         realm,
-        SettlePlan::Observe,
+        settle_plan_of(&PreparedTurnMode::Value(observation)),
         park,
         table,
         handlers,
@@ -3367,6 +3385,13 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // budget. Cuts use the oversize sentinel without invalidating completed
         // effects; persistent bindings use Bind or Project below.
         SettlePlan::Observe => match engine.observe_bounded(program, handle) {
+            Ok(value) => Ok(PreparedRun::Done { handle, value }),
+            Err(error) => {
+                engine.release(handle);
+                Err(error)
+            }
+        },
+        SettlePlan::Protocol => match engine.observe_protocol(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) => {
                 engine.release(handle);
@@ -5348,7 +5373,7 @@ where
                 "checked"
             } else {
                 match &seed.obligation {
-                    HoleObligation::Plain => "plain",
+                    HoleObligation::Plain(_) => "plain",
                     HoleObligation::Binding { .. } => "binding",
                     HoleObligation::ProjectedBinding { .. } => "projected-binding",
                 }
@@ -6730,7 +6755,12 @@ where
             .get(binding)
             .ok_or(BindingAliasError::MissingSource(binding))?;
         let BoundValue { handle, .. } = &entry.value;
-        self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle), settlement)
+        self.run_prepared_with_argument(
+            code,
+            PreparedTurnMode::Value(ResultObservation::Presentation),
+            Some(*handle),
+            settlement,
+        )
     }
 
     fn validate_mounted_activation_input(
@@ -6907,7 +6937,7 @@ where
         let provenance = self.provenance_for(&compiled.renderer.compiled.code())?;
         self.run_prepared_for_purpose(
             compiled.renderer.compiled.code(),
-            PreparedTurnMode::Value,
+            PreparedTurnMode::Value(ResultObservation::Presentation),
             Some(mounted.handle),
             PreparedExecutionPurpose::HostActivationPreview {
                 lease: admission.scope_lease.clone(),
@@ -7269,7 +7299,7 @@ where
         }
         self.complete_prepared(
             run,
-            PreparedTurnMode::Value,
+            PreparedTurnMode::Value(ResultObservation::Presentation),
             program,
             scope,
             provenance,
@@ -7512,7 +7542,7 @@ where
             PreparedRun::Done { handle, value } => {
                 let engine = self.state.require_prepared()?;
                 match mode {
-                    PreparedTurnMode::Value => {
+                    PreparedTurnMode::Value(_) => {
                         engine.release(handle);
                     }
                     PreparedTurnMode::Binding {
@@ -7756,7 +7786,11 @@ where
         code: TurnCode<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_prepared(code, PreparedTurnMode::Value, settlement)
+        self.run_prepared(
+            code,
+            PreparedTurnMode::Value(ResultObservation::Presentation),
+            settlement,
+        )
     }
 
     /// Run a persistent-binding BIND turn (`x <- e`): seed the env from prior bindings,
@@ -7923,6 +7957,46 @@ where
         run_table: Option<&DataConTable>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_rooted_entry_observed(
+            entry,
+            argument,
+            realm,
+            run_table,
+            ResultObservation::Presentation,
+            settlement,
+        )
+    }
+
+    /// Invoke an installed internal dispatcher whose result feeds a typed
+    /// native decoder. Keep its complete result across every suspension;
+    /// model-facing presentation is bounded by the frontend afterward.
+    pub fn run_protocol_entry_borrowed(
+        &mut self,
+        entry: &RootCustody,
+        argument: i64,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_rooted_entry_observed(
+            entry,
+            argument,
+            realm,
+            run_table,
+            ResultObservation::Protocol,
+            settlement,
+        )
+    }
+
+    fn run_rooted_entry_observed(
+        &mut self,
+        entry: &RootCustody,
+        argument: i64,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+        observation: ResultObservation,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&entry.cleanup.0, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
@@ -7932,7 +8006,15 @@ where
             unreachable!("live custody contains its handle");
         };
 
-        self.run_rooted_entry_prepared(entry, argument, realm, run_table, provenance, settlement)
+        self.run_rooted_entry_prepared(
+            entry,
+            argument,
+            realm,
+            run_table,
+            provenance,
+            observation,
+            settlement,
+        )
     }
 
     /// Apply one rooted Haskell function to one rooted Haskell argument and
@@ -8026,6 +8108,7 @@ where
         realm: RealmId,
         run_table: Option<&DataConTable>,
         provenance: Arc<ProgramProvenance>,
+        observation: ResultObservation,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let table = run_table
@@ -8038,11 +8121,19 @@ where
         };
         let ran = self.on_eval_thread(move |engine, _table, handlers, captured| {
             Ok(settle_rooted_entry(
-                engine, entry, argument, realm, park, &table, handlers, captured,
+                engine,
+                entry,
+                argument,
+                realm,
+                observation,
+                park,
+                &table,
+                handlers,
+                captured,
             ))
         })?;
         let (program, run) = ran?;
-        self.finish_rooted_prepared(run, program, provenance, settlement)
+        self.finish_rooted_prepared(run, program, provenance, observation, settlement)
     }
 
     /// [`Self::run_rooted_entry_prepared`], but applying one rooted value to
@@ -8071,7 +8162,13 @@ where
             ))
         })?;
         let (program, run) = ran?;
-        self.finish_rooted_prepared(run, program, provenance, settlement)
+        self.finish_rooted_prepared(
+            run,
+            program,
+            provenance,
+            ResultObservation::Presentation,
+            settlement,
+        )
     }
 
     /// Finish a rooted apply's settled layer through the same
@@ -8088,12 +8185,13 @@ where
         run: PreparedRun,
         program: ProgramId,
         provenance: Arc<ProgramProvenance>,
+        observation: ResultObservation,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let lexical_scope = self.run_context.lexical_scope;
         self.complete_prepared(
             run,
-            PreparedTurnMode::Value,
+            PreparedTurnMode::Value(observation),
             program,
             lexical_scope,
             provenance,
@@ -8538,7 +8636,10 @@ where
         // The hole's own obligation says how the resumed run completes; the
         // frame carries the runner whose entry re-enters the continuation.
         let (lexical_scope, mode) = match &obligation {
-            HoleObligation::Plain => (self.run_context.lexical_scope, PreparedTurnMode::Value),
+            HoleObligation::Plain(observation) => (
+                self.run_context.lexical_scope,
+                PreparedTurnMode::Value(*observation),
+            ),
             HoleObligation::Binding {
                 binder,
                 generation,
@@ -8883,7 +8984,7 @@ mod custody_release_tests {
         let hole = ResidentHole::mint(
             "not-a-parked-hole".into(),
             HoleSeed {
-                obligation: HoleObligation::Plain,
+                obligation: HoleObligation::Plain(ResultObservation::Presentation),
                 checked: None,
             },
         );
@@ -9097,7 +9198,7 @@ mod custody_release_tests {
         let hole = ResidentHole::mint(
             "not-a-parked-hole".into(),
             HoleSeed {
-                obligation: HoleObligation::Plain,
+                obligation: HoleObligation::Plain(ResultObservation::Presentation),
                 checked: None,
             },
         );

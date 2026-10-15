@@ -6112,6 +6112,19 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
+    /// Materialize an internal protocol value without a display-sized cut.
+    /// Its decoder requires the complete shape; execution cancellation and
+    /// machine resource ownership remain unchanged.
+    pub fn observe_protocol(
+        &mut self,
+        program: ProgramId,
+        handle: PreparedHandle,
+    ) -> Result<HaskellValue, PreparedRuntimeError> {
+        self.machine
+            .observe_handle(program, handle, usize::MAX)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// The managed fields of one constructor layer of a retained value,
     /// each retained as its own handle under the given resource scope, without forcing. The
     /// pattern-bind lane reads a settled tuple this way: the extractor

@@ -1355,7 +1355,7 @@ fn bounded_tool_error_message(
         .into_tool_failure()
         .message()
         .len();
-    const OMITTED: &str = "\n[Detail or receipt output omitted from this message. Inspect the issued native settlement for originalOperation via ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).terminal(). This native API reference does not establish admission, application success or release. Do not resubmit source to retrieve retained evidence.]";
+    const OMITTED: &str = "\n[Detail or receipt output omitted. Any retained native settlement evidence is for operator inspection; it is not a model-callable tool. Completed effects are not rolled back. Do not repeat effects to retrieve omitted evidence.]";
     let mut out = BoundedErrorMessage {
         text: String::new(),
         limit: TOOL_ERROR_MESSAGE_BYTE_BUDGET - OMITTED.len() - provider_framing_bytes,

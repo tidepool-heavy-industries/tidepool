@@ -4112,6 +4112,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f76657273697a65645f64697370617463685f737065632e6873",
+    src = "src/actor_host/fixtures/oversized_dispatch_spec.hs",
+    out = "oversized_dispatch_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f7265706c795f6279706173732e6873",
     src = "src/actor_host/fixtures/persona_file_tools_reply_bypass.hs",
     out = "persona_file_tools_reply_bypass.hs",

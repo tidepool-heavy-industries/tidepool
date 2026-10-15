@@ -244,6 +244,15 @@ fn configure_workshop(
     judgments: Arc<UnexpectedJudgment>,
     spec: Option<&str>,
 ) {
+    configure_workshop_inventory(config, judgments, spec, 0);
+}
+
+fn configure_workshop_inventory(
+    config: &mut super::ActorHostConfig,
+    judgments: Arc<UnexpectedJudgment>,
+    spec: Option<&str>,
+    inventory_modules: usize,
+) {
     config.jev = Some(judgments.clone());
     super::startup_persona_acceptance_tests::configure_persona(
         config,
@@ -261,6 +270,18 @@ fn configure_workshop(
             std::fs::create_dir_all(&inputs).unwrap();
             if let Some(spec) = spec {
                 std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+            }
+            if inventory_modules != 0 {
+                let inventory = authored.join("Inventory");
+                std::fs::create_dir_all(&inventory).unwrap();
+                for ordinal in 0..inventory_modules {
+                    let name = format!("M{ordinal:04}");
+                    std::fs::write(
+                        inventory.join(format!("{name}.hs")),
+                        format!("module Inventory.{name} where\nvalue :: Int\nvalue = {ordinal}\n"),
+                    )
+                    .unwrap();
+                }
             }
             for (name, body) in [
                 ("spec-b.txt", include_str!("fixtures/sync_reload_spec_b.hs")),
@@ -548,6 +569,88 @@ async fn authored_reload(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn standard_reload_retains_complete_large_source_receipts_after_publication() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        // Source inventory is issued by the production capture owner. These
+        // unchanged modules enlarge the receipt without adding compilation work.
+        configure_workshop_inventory(
+            config,
+            judgments.clone(),
+            Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            450,
+        );
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        let root = harness::model::AgentPath("/root".into());
+        let mut pending = VecDeque::new();
+        host.input("Publish this source edit once and retain its complete receipt.").await.unwrap();
+        let round = host.while_host_running(
+            next_hosted_script_round(&mut requests, &mut pending, &root),
+        ).await.unwrap();
+        let operation = round.operation("large-reload");
+        let context = super::embedded_harness::embedded_invocation_context(
+            &round.host_identity(), &operation,
+        ).unwrap();
+        let tools_a = authored_tool_names(&round.request);
+        let instructions_a = round.request.instructions.clone();
+        let generation_a = selected_root_generation(host).await;
+        let installation_a = host.context.observer.installation(host.context.actor.identity()).await;
+        let authored = host.context.config.workspace.join(".exomonad");
+        std::fs::write(authored.join("Project/Work.hs"),
+            include_str!("fixtures/coherent_reload_work_b.hs")).unwrap();
+        std::fs::write(authored.join("prompts/agent.md"),
+            include_str!("fixtures/coherent_reload_prompt_b.md")).unwrap();
+        round.function("large-reload", "apply_draft", serde_json::json!({}));
+        let round = host.while_operation_succeeds(&operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+        let model = round.settled_output("large-reload");
+        assert_eq!(model["status"], "committed");
+        assert_reload_disposition(&model,
+            tidepool_runtime::session::WorkbenchOperationDisposition::Committed);
+        let shown = model["items"][0]["output"].as_str().unwrap();
+        assert!(shown.starts_with("Published source "), "{shown}");
+        assert!(shown.len() < 1024);
+        assert!(model["items"][0].get("value").is_none());
+        assert_eq!(model["items"][0]["valueOmitted"], serde_json::json!({
+            "reason":"modelBudget", "limitBytes":28 * 1024,
+            "nativeReceipt":{"availability":"nativeOnly","operation":context},
+        }));
+        assert!(serde_json::to_vec(&model).unwrap().len() < 28 * 1024,
+            "the provider sees the compact presentation and omission receipt, not the full inventories");
+        let native = installation_a.policy.retained_operation(context).unwrap().terminal();
+        let exomonad_actor::HostedOperationTerminal::Settled(
+            exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled {
+                reply: Ok(receipt), ..
+            },
+        ) = native else { panic!("the issued native reload must retain its successful terminal receipt") };
+        let value = receipt.items[0].value.as_ref().expect("full native semantic value");
+        let bytes = serde_json::to_vec(value).unwrap().len();
+        assert!(bytes > 100_000, "receipt must exceed the former display observation budget: {bytes}");
+        let contents = &value["Right"]["contents"];
+        assert_eq!(value["Right"]["tag"], "ReloadPublished");
+        for revision in [0, 1] {
+            let modules = contents[revision]["revisionModules"].as_array().unwrap();
+            assert!(modules.len() >= 450);
+            assert!(modules.iter().any(|module| module["sourceModuleName"] == "Inventory.M0449"));
+        }
+        assert_ne!(contents[0]["revisionIdentity"], contents[1]["revisionIdentity"]);
+        assert!(contents[2].as_array().unwrap().contains(&serde_json::json!("Project.Work")));
+        assert_ne!(selected_root_generation(host).await, generation_a);
+        assert_eq!(authored_tool_names(&round.request), tools_a);
+        assert_ne!(round.request.instructions, instructions_a);
+        assert!(round.request.instructions.contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
+        assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+        round.finish();
+    })).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

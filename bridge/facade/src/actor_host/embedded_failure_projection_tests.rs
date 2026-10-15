@@ -224,10 +224,12 @@ fn many_operations_and_diagnostics_keep_recovery_and_distinct_effect_outcomes() 
     ] {
         assert_eq!(metadata["operationOutcomes"][disposition], 1024);
     }
-    assert!(failure.message().contains("durability is unconfirmed"));
-    assert!(failure.message().contains(
-        "native API reference does not establish admission, application success or release"
-    ));
+    assert!(failure
+        .message()
+        .contains("database commit outcome requires authenticated recovery"));
+    assert!(failure
+        .message()
+        .contains("it is not a model-callable tool"));
 }
 
 #[test]
