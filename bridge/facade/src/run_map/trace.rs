@@ -215,6 +215,8 @@ pub struct CallTiming {
     pub checkout_hold_ms: u64,
     pub compile_ms: u64,
     pub compile_count: u64,
+    pub preparation_wait_ms: Option<u64>,
+    pub preparation_wait_count: Option<u64>,
     pub jev_ms: u64,
     pub jev_count: u64,
     pub exec_ms: u64,
@@ -371,6 +373,8 @@ impl TraceEvents {
                         checkout_hold_ms: number("checkout_hold_ms"),
                         compile_ms: number("compile_ms"),
                         compile_count: number("compile_count"),
+                        preparation_wait_ms: lenient_u64(&fields["preparation_wait_ms"]),
+                        preparation_wait_count: lenient_u64(&fields["preparation_wait_count"]),
                         jev_ms: number("jev_ms"),
                         jev_count: number("jev_count"),
                         exec_ms: number("exec_ms"),
@@ -1001,6 +1005,55 @@ mod tests {
         assert!(summary.dispatch_failures.is_empty());
         assert!(summary.actor_lifecycle.contains_key("2@1"));
         assert!(!summary.host_tools.contains_key("bash"));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn call_timing_preserves_preparation_wait_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.jsonl");
+        let records =
+            [(None, None), (Some(0), Some(0)), (Some(31), Some(1))].map(|(wait_ms, wait_count)| {
+                let mut fields = serde_json::json!({
+                    "message": "call timing", "actor": 1, "incarnation": 1,
+                    "tool": "haskell", "total_ms": 40, "outcome": "Committed"
+                });
+                if let Some(value) = wait_ms {
+                    fields["preparation_wait_ms"] = value.into();
+                }
+                if let Some(value) = wait_count {
+                    fields["preparation_wait_count"] = value.into();
+                }
+                serde_json::json!({"timestamp": "2026-09-23T10:00:00Z", "fields": fields})
+            });
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+        let (_, events) = read_trace(
+            &path,
+            Limits::default(),
+            TimeWindow::default(),
+            &mut diagnostics,
+            &TimelineFilter::default(),
+        );
+        let observed = events
+            .calls
+            .iter()
+            .map(|call| (call.preparation_wait_ms, call.preparation_wait_count))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [(None, None), (Some(0), Some(0)), (Some(31), Some(1))]
+        );
+        let serialized = serde_json::to_value(&events.calls).unwrap();
+        assert!(serialized[0]["preparation_wait_ms"].is_null());
+        assert_eq!(serialized[1]["preparation_wait_ms"], 0);
         assert!(diagnostics.is_empty());
     }
 

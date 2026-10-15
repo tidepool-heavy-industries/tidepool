@@ -1337,12 +1337,12 @@ impl Review {
         );
         render(
             &mut output,
-            "slowest calls (time actor tool total wait hold compile(n) jev(n) exec outcome):",
+            "slowest calls (time actor tool total wait hold compile(n) preparation_wait(n) jev(n) exec outcome):",
             &self.slowest_calls,
             |output, calls| {
                 for call in &calls.slowest {
                     output.push_str(&format!(
-                        "\n  {} {} {} total={} wait={} hold={} compile={}({}) jev={}({}) exec={} {}",
+                        "\n  {} {} {} total={} wait={} hold={} compile={}({}) preparation_wait={}({}) jev={}({}) exec={} {}",
                         clock(call.at_unix_ms),
                         call.actor,
                         call.tool,
@@ -1351,6 +1351,8 @@ impl Review {
                         call.checkout_hold_ms,
                         call.compile_ms,
                         call.compile_count,
+                        call.preparation_wait_ms.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
+                        call.preparation_wait_count.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
                         call.jev_ms,
                         call.jev_count,
                         call.exec_ms,
