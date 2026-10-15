@@ -1677,14 +1677,6 @@ impl HostedTestRuntime {
                     .select_for_run(&config.workspace, config.run_directory.path())
                     .map_err(|error| error.to_string())?,
             );
-            crate::exomonad::source::SourceLayer::new(config.run_directory.path())
-                .ensure_active(
-                    config
-                        .workspace_inputs
-                        .as_ref()
-                        .expect("selected preparation"),
-                )
-                .map_err(|error| error.to_string())?;
         }
         if let Some(diagnostics) = &mut diagnostics {
             diagnostics.workspace = config.workspace.clone();
@@ -1692,6 +1684,11 @@ impl HostedTestRuntime {
             diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
         }
         if admit_journals {
+            if let Some(workspace) = &config.workspace_inputs {
+                crate::exomonad::source::SourceLayer::new(config.run_directory.path())
+                    .ensure_active(workspace)
+                    .map_err(|error| error.to_string())?;
+            }
             super::admit_run_journals(&config.run_directory, &config.workspace, &config.run_id)
                 .await
                 .map_err(|error| error.to_string())?;
