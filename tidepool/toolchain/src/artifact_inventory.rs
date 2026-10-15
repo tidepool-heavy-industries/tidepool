@@ -6428,6 +6428,45 @@ mod tests {
 
     proptest::proptest! {
         #[test]
+        fn demotion_retains_undemanded_exact_native_dependency_custody(
+            late in 1u32..8, repeats in 1usize..9,
+        ) {
+            let inventory = ArtifactInventory::default();
+            let dependency = Arc::new(issued_native_groups("DeferredDependency",
+                vec![(5, Vec::new())], &[], &BTreeMap::new()));
+            let original = Arc::new(issued_native_groups("DeferredConsumer",
+                vec![(0, Vec::new()), (late, vec![issued_source(&dependency, 5)])],
+                &[&dependency], &BTreeMap::new()));
+            let owner = original.descriptor.owner.clone();
+            let available = inventory.admit_shared_with_demand(
+                &inventory.empty_view(), vec![original.clone(), dependency.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            ).unwrap();
+            let mut view = inventory.admit_shared_with_demand(
+                &available, vec![original.clone()],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, 0)]),
+            ).unwrap();
+            proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id));
+            for _ in 0..repeats {
+                view = view.interface_projection(&[owner.clone()]).unwrap();
+                proptest::prop_assert!(view.artifact_ids().contains(&original.descriptor.id));
+                proptest::prop_assert!(view.artifact_ids().contains(&dependency.descriptor.id),
+                    "projection dropped exact dependency {:?}; retained {:?}",
+                    dependency.descriptor.id, view.artifact_ids());
+                proptest::prop_assert!(!view.namespace().contains_key(&dependency.descriptor.id));
+                proptest::prop_assert!(view.selected_native_groups().is_empty());
+            }
+            let demanded = inventory.admit_shared_with_demand(
+                &view, vec![original.clone()],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, late)]),
+            ).unwrap();
+            proptest::prop_assert!(demanded.dependencies().contains(&(
+                original.descriptor.id, dependency.descriptor.id,
+                ArtifactDependency::NativeGroup { dependent_ordinal: late, required_ordinal: 5 },
+            )));
+        }
+
+        #[test]
         fn complete_native_group_custody_survives_demotion_histories(
             count in 1u32..7, repeats in 1usize..12,
         ) {
