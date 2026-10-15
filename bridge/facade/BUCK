@@ -1155,6 +1155,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/packaged_catalog_tests.rs": "bridge/facade/src/actor_host/packaged_catalog_tests.rs",
+        "src/actor_host/persona_file_tools_acceptance_tests.rs": "bridge/facade/src/actor_host/persona_file_tools_acceptance_tests.rs",
         "src/actor_host/prepared_display_tests.rs": "bridge/facade/src/actor_host/prepared_display_tests.rs",
         "src/actor_host/prepared_runtime_acceptance.rs": "bridge/facade/src/actor_host/prepared_runtime_acceptance.rs",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
@@ -3129,6 +3130,7 @@ filegroup(
         "bridge/facade/src/actor_host/overlay_resource.rs": "src/actor_host/overlay_resource.rs",
         "bridge/facade/src/actor_host/overlay_resource/worker.sh": "src/actor_host/overlay_resource/worker.sh",
         "bridge/facade/src/actor_host/packaged_catalog_tests.rs": "src/actor_host/packaged_catalog_tests.rs",
+        "bridge/facade/src/actor_host/persona_file_tools_acceptance_tests.rs": "src/actor_host/persona_file_tools_acceptance_tests.rs",
         "bridge/facade/src/actor_host/prepared_display_tests.rs": "src/actor_host/prepared_display_tests.rs",
         "bridge/facade/src/actor_host/prepared_runtime_acceptance.rs": "src/actor_host/prepared_runtime_acceptance.rs",
         "bridge/facade/src/actor_host/prompt_catalog.rs": "src/actor_host/prompt_catalog.rs",
@@ -4106,6 +4108,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6c6f6f6b75705f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
     out = "notebook_lookup_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f726571756573742e6873",
+    src = "src/actor_host/fixtures/persona_file_tools_request.hs",
+    out = "persona_file_tools_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f737061776e2e6873",
+    src = "src/actor_host/fixtures/persona_file_tools_spawn.hs",
+    out = "persona_file_tools_spawn.hs",
     visibility = ["PUBLIC"],
 )
 

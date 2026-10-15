@@ -78,6 +78,8 @@ pub(super) fn configure_persona(
     std::fs::create_dir_all(authored.join("Persona")).unwrap();
     std::fs::create_dir_all(authored.join("Jev")).unwrap();
     let sources = [
+        ("Persona/FileTools.hs", tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/FileTools.hs")),
+        ("Persona/Patch.hs", tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Patch.hs")),
         (
             "Persona/Memory.hs",
             tidepool_testing::fixture_source(
@@ -144,6 +146,8 @@ pub(super) fn configure_persona(
         project.prompts.api_guide = Some("prompts/api-guide.md".into());
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec![
+            "Persona.FileTools".into(),
+            "Persona.Patch".into(),
             "Persona.Memory".into(),
             "Persona.Web".into(),
             "Persona.Spec".into(),

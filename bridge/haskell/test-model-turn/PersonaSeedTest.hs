@@ -129,6 +129,25 @@ personaSeedTests = testGroup "persona seed"
         (map actorEffectName (effectKeys (knownEffects @Spec.HelperEffects)))
       Spec.agentSpec @ActorEffects `seq`
         Contract.installSpec @Spec.HelperEffects Spec.helperSpec `seq` pure ()
+  , testCase "installed file tools use object inputs and precede the notebook" $ do
+      let field name (Object fields) = Map.findWithDefault Null name fields
+          field _ _ = Null
+      case Contract.prepareAgentSpec (Spec.agentSpec @Spec.PersonaEffects) of
+        Left problem -> fail (show problem)
+        Right prepared -> case field "tools" (Contract.preparedAgentSpecMetadata prepared) of
+          Array tools -> do
+            assertEqual "explicit ordinary tool order"
+              (map String ["read_file", "write_file", "edit_file", "preview_edit", "haskell", "reload"])
+              (map (field "name") tools)
+            mapM_ (\tool -> assertEqual "hosted function input root" (String "object")
+              (field "type" (field "inputSchema" tool)))
+              [tool | tool <- tools, field "name" tool /= String "haskell"]
+            case [field "inputSchema" tool | tool <- tools, field "name" tool == String "write_file"] of
+              [schema] -> case field "oneOf" (field "operation" (field "properties" schema)) of
+                Array variants -> assertEqual "typed create/replace intent is nested" 2 (length variants)
+                other -> fail (show other)
+              other -> fail (show other)
+          other -> fail (show other)
   , testCase "startup seeds preserve authored order and distinguish absent from empty caller input" $ do
       let first = Contract.contextSection "first" (Just "memory/a.md") "A"
           second = Contract.contextSection "second" Nothing "B"
