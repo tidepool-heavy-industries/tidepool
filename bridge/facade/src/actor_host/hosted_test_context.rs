@@ -806,6 +806,18 @@ impl std::fmt::Display for RootExitedBeforeBarrier {
 impl std::error::Error for RootExitedBeforeBarrier {}
 
 impl HostedActorContext {
+    pub(crate) fn store(&self) -> Arc<harness::store::Store> {
+        self.runtime.store()
+    }
+
+    pub(crate) fn conversation_identity(&self) -> Result<harness::embedding::HostIdentity, String> {
+        self.binding(self.actor.identity())
+            .ok_or_else(|| "assembled root has no production binding".to_owned())?
+            .conversation()
+            .map(|conversation| conversation.identity().clone())
+            .ok_or_else(|| "assembled root has no production conversation".to_owned())
+    }
+
     pub(crate) async fn http_command(
         &self,
         operation_id: harness::embedding::ClientOperationId,
@@ -1383,6 +1395,28 @@ impl HostedTestRuntime {
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            HostedChildMachines::Shared,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Reopen an already admitted run without reissuing either durable journal.
+    pub(super) async fn start_existing_configured(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            false,
             settings,
             configure,
             Some(Arc::clone(transport)),
@@ -1403,6 +1437,7 @@ impl HostedTestRuntime {
         diagnostics_root: std::path::PathBuf,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
             settings,
             configure,
             Some(Arc::clone(transport)),
@@ -1439,6 +1474,7 @@ impl HostedTestRuntime {
         child_machines: HostedChildMachines,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
             settings,
             configure,
             Some(Arc::clone(transport)),
@@ -1463,6 +1499,7 @@ impl HostedTestRuntime {
             + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
             settings,
             configure,
             None,
@@ -1484,6 +1521,7 @@ impl HostedTestRuntime {
         assembled: oneshot::Sender<HostedActorContext>,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
             settings,
             configure,
             Some(Arc::clone(transport)),
@@ -1504,6 +1542,7 @@ impl HostedTestRuntime {
         source_layers: HostSourceLayersTransform,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
+            true,
             settings,
             configure,
             Some(Arc::clone(transport)),
@@ -1518,6 +1557,7 @@ impl HostedTestRuntime {
     }
 
     async fn start_owned(
+        admit_journals: bool,
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
@@ -1650,6 +1690,11 @@ impl HostedTestRuntime {
             diagnostics.workspace = config.workspace.clone();
             diagnostics.run_root = config.run_directory.path().to_path_buf();
             diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
+        }
+        if admit_journals {
+            super::admit_run_journals(&config.run_directory, &config.workspace, &config.run_id)
+                .await
+                .map_err(|error| error.to_string())?;
         }
         let lease = HostIncarnationLease::claim(&config.run_directory)
             .map_err(|error| error.to_string())?;
