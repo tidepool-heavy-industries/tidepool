@@ -1,9 +1,11 @@
-module TypeEvidenceChecks (runTypeEvidenceChecks) where
+module TypeEvidenceChecks
+  ( runTypeEvidenceChecks, runTypeIdentityParityChecks ) where
 
 import Control.Monad (unless, forM_)
 import Control.Monad.State.Strict (runStateT, lift)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC.Builtin.Types (boolTy, tupleTyCon)
 import GHC.Types.Basic (Boxity(Boxed))
@@ -24,44 +26,23 @@ import GHC.Driver.Env (hsc_HPT)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext)
+import Tidepool.ConstructorIdentity (captureIdentityResolver, resolveTypeIdentity)
+import Tidepool.EffectSchema (ysSite)
 import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
 import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules, pprFinalizedModules
   , prHscEnv, finalizedHomeModInfo, runPipelineSelected )
-import Tidepool.PreparedSites (requestReplyIndex)
-import Tidepool.PreparedStg (pmModule)
+import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
+import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph)
 import Tidepool.TypePolicy qualified as Policy
 
 -- Two genuine compiler results test alpha and same-layout field semantics. They remain different
 -- source originals; graph equality never admits one as the other's certificate.
 runTypeEvidenceChecks :: FilePath -> IO ()
 runTypeEvidenceChecks directory = do
-  let target = directory </> "TypeEvidence.hs"
-  createDirectoryIfMissing True (directory </> "Tidepool" </> "Effects")
-  writeFile (directory </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
-    [ "{-# LANGUAGE ExplicitForAll, GADTs #-}"
-    , "module Tidepool.Effects.Core where"
-    , "data AgentSession a where"
-    , "  AgentAttachWith :: Maybe String -> AgentSession ()"
-    , "data AgentTools a where"
-    , "  AgentToolsInstallWith :: AgentTools ()" ])
-  createDirectoryIfMissing True (directory </> "Tidepool" </> "Internal")
-  readFile "lib/Tidepool/Internal/RequestSite.hs" >>= writeFile
-    (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
-  writeFile (directory </> "Tidepool" </> "Actor.hs") (unlines
-    [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
-    , "module Tidepool.Actor where"
-    , "import Tidepool.Internal.RequestSite (RequestSite)"
-    , "{-# OPAQUE receive #-}"
-    , "receive :: forall answer. String -> Maybe answer"
-    , "receive _ = Nothing"
-    , "{-# OPAQUE receiveSited #-}"
-    , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
-    , "receiveSited _ _ = Nothing" ])
-  fixture <- readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs"
-  writeFile target fixture
+  (target, fixture) <- writeTypeEvidenceFixture directory
   original <- runPipelineSelected PreparedStg target [directory]
   assert (length [() | line <- lines fixture, line == "  Echo :: a -> Console a"] == 1)
     "alpha control must change exactly one actual constructor declaration"
@@ -227,11 +208,122 @@ runTypeEvidenceChecks directory = do
   assert (case runStateT (mapM (Policy.internType . mkNumLitTy) [0 .. 32767]) Policy.emptyTypeGraphBuilder of
     Left Policy.TypeGraphNodeLimit -> True; _ -> False)
     "one shared aggregate node budget was reset across independent roots"
+
+
+-- Each call runs a new compiler capture; source text equality is not used to
+-- reconstruct a type version or stand in for the selected interface resolver.
+runTypeIdentityParityChecks :: FilePath -> IO ()
+runTypeIdentityParityChecks directory = do
+  (target, fixture) <- writeTypeEvidenceFixture directory
+  original <- runPipelineSelected PreparedStg target [directory]
+  repeated <- runPipelineSelected PreparedStg target [directory]
+  let edited = unlines [if line == "payloadOffset = 7" then "payloadOffset = 31" else line
+        | line <- lines fixture]
+  assert (length [() | line <- lines fixture, line == "payloadOffset = 7"] == 1)
+    "body control must change exactly one authored offset"
+  writeFile target edited
+  changedBody <- runPipelineSelected PreparedStg target [directory]
+  wires <- mapM projectNestedSite [original, repeated, changedBody]
+  forM_ (zip [original, repeated, changedBody] wires) $ \(result, wire) -> do
+    verifyHydratedSiteIdentities result wire
+  case wires of
+    first : rest -> forM_ rest $ \wire -> do
+      assert (siteId (onlySite first) == siteId (onlySite wire))
+        "identical capture or body-only edit changed the issued site identity"
+      assert (siteIdentities first == siteIdentities wire)
+        ("identical capture or body-only edit changed reachable nominal evidence: "
+          ++ show (siteIdentities first, siteIdentities wire))
+    _ -> fail "identity parity control did not capture its three compiler results"
+
+projectNestedSite :: PreparedPipelineResult -> IO WireProgram
+projectNestedSite result = do
+  context <- contextFor result
+  requireRight (projectPreparedTarget
+    (context { projectionEntry = (projectionEntry context) { symbolOccurrence = "nestedVersion" } })
+    (pprModules result))
+
+onlySite :: WireProgram -> SiteRow
+onlySite wire = case programSites wire of
+  [site] -> site
+  sites -> error ("nested identity fixture expected one selected site: " ++ show sites)
+
+siteIdentities :: WireProgram -> Map.Map SymbolIdentity TypeIdentity
+siteIdentities wire = Map.fromList
+  [(typeSymbol identity, identity) | identity <- reachableDeclarations (programTypes wire)
+    (siteWire (onlySite wire) : siteInputs (onlySite wire))]
+
+-- Follow issued roots and graph edges rather than a module-wide type inventory.
+reachableDeclarations :: TypeGraphF constructor identity rep -> [TypeNodeId] -> [identity]
+reachableDeclarations graph = go Set.empty
  where
-  contextFor result = case [pmModule prepared | prepared <- pprModules result,
-    moduleNameString (moduleName (pmModule prepared)) == "TypeEvidence"] of
-      [owner] -> prepareCompilerProjectionContext result mempty owner "unrelated" [] Nothing
-      _ -> fail "type evidence fixture lacks its unique original module"
+  go _ [] = []
+  go visited (node@(TypeNodeId raw) : pending)
+    | node `Set.member` visited = go visited pending
+    | otherwise = let next = map snd (IntMap.findWithDefault [] (fromIntegral raw) (typeGraphEdges graph))
+                      rest = go (Set.insert node visited) (next ++ pending)
+                  in case IntMap.lookup (fromIntegral raw) (typeGraphNodes graph) of
+                    Just (TypeDeclaration identity _ _ _) -> identity : rest
+                    Just _ -> rest
+                    Nothing -> error "issued type graph contains a missing reachable node"
+
+verifyHydratedSiteIdentities :: PreparedPipelineResult -> WireProgram -> IO ()
+verifyHydratedSiteIdentities result wire = do
+  prepared <- case [value | value <- pprModules result
+    , moduleNameString (moduleName (pmModule value)) == "TypeEvidence"] of
+      [value] -> pure value
+      _ -> fail "identity parity lacks its original prepared module"
+  site <- case [value | value <- pmPreparedSites prepared
+    , ysSite (psSite value) == siteId (onlySite wire)] of
+      [value] -> pure value
+      _ -> fail "identity parity lacks the compiler-issued site graph roots"
+  let infos = map finalizedHomeModInfo (Map.elems (pprFinalizedModules result))
+      environment = prHscEnv (pprPipelineResult result)
+      types = reachableDeclarations (pmTypeGraph prepared) (psWireNode site : psInputNodes site)
+  isolated <- freshExactState environment
+  hydrated <- hydrateOriginalInterfaces isolated (map hm_iface infos)
+  hydratedResolver <- captureIdentityResolver hydrated Nothing
+  source <- mapM (requireRight . resolveTypeIdentity (pmIdentityResolver prepared)) types
+  restored <- mapM (requireRight . resolveTypeIdentity hydratedResolver) types
+  let inventory identities = Map.fromList [(typeSymbol identity, identity) | identity <- identities]
+  assert (not (null source) && inventory source == siteIdentities wire)
+    "projected reachable nominal identities differ from their issuing prepared resolver"
+  assert (inventory source == inventory restored)
+    ("exact interface hydration changed reachable compiler-issued nominal identities: "
+      ++ show (inventory source, inventory restored))
+
+contextFor :: PreparedPipelineResult -> IO ProjectionContext
+contextFor result = case [pmModule prepared | prepared <- pprModules result,
+  moduleNameString (moduleName (pmModule prepared)) == "TypeEvidence"] of
+    [owner] -> prepareCompilerProjectionContext result mempty owner "unrelated" [] Nothing
+    _ -> fail "type evidence fixture lacks its unique original module"
+
+writeTypeEvidenceFixture :: FilePath -> IO (FilePath, String)
+writeTypeEvidenceFixture directory = do
+  let target = directory </> "TypeEvidence.hs"
+  createDirectoryIfMissing True (directory </> "Tidepool" </> "Effects")
+  writeFile (directory </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
+    [ "{-# LANGUAGE ExplicitForAll, GADTs #-}"
+    , "module Tidepool.Effects.Core where"
+    , "data AgentSession a where"
+    , "  AgentAttachWith :: Maybe String -> AgentSession ()"
+    , "data AgentTools a where"
+    , "  AgentToolsInstallWith :: AgentTools ()" ])
+  createDirectoryIfMissing True (directory </> "Tidepool" </> "Internal")
+  readFile "lib/Tidepool/Internal/RequestSite.hs" >>= writeFile
+    (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+  writeFile (directory </> "Tidepool" </> "Actor.hs") (unlines
+    [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
+    , "module Tidepool.Actor where"
+    , "import Tidepool.Internal.RequestSite (RequestSite)"
+    , "{-# OPAQUE receive #-}"
+    , "receive :: forall answer. String -> Maybe answer"
+    , "receive _ = Nothing"
+    , "{-# OPAQUE receiveSited #-}"
+    , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
+    , "receiveSited _ _ = Nothing" ])
+  fixture <- readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs"
+  writeFile target fixture
+  pure (target, fixture)
 
 -- Source and genuine original-interface hydration share one builder. This
 -- tests producer semantics, not Rust certificate admission; frozen M2 checks

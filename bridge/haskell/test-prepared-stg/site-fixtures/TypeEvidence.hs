@@ -26,6 +26,12 @@ data Chain = End | Link Chain
 data Nest a = Nest (Nest [a])
 data Nest2 a = Nest2 (Nest2 [[a]])
 data SameLayout = SameLayout Int
+
+payloadOffset :: Int
+payloadOffset = 7
+
+nestedVersion :: Maybe (Either () SameLayout)
+nestedVersion = receive @(Either () SameLayout) (show payloadOffset)
 data Packed = Packed {-# UNPACK #-} !Int
 data Progress progress
   = ProgressPending

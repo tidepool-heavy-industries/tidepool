@@ -86,7 +86,8 @@ import Tidepool.PreparedSites
 import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
 import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
-import TypeEvidenceChecks (runTypeEvidenceChecks)
+import TypeEvidenceChecks
+  ( runTypeEvidenceChecks, runTypeIdentityParityChecks )
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 import Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..), resolveHostBindingAuthorities
@@ -862,6 +863,8 @@ tests :: TestTree
 tests = testGroup "prepared-stg-pipeline"
   [ testCase "original constructor reply identities and type evidence" $
       withCaseScratch "constructor-reply-identity" runTypeEvidenceChecks
+  , testCase "source and hydrated site nominal identities survive independent and body-only captures" $
+      withCaseScratch "site-identity-parity" runTypeIdentityParityChecks
   , testCase "recovered typed sites and intrinsic refusal" $
       withCaseScratch "recovered-typed-sites" verifyRecoveredTypedPreparation
   , testCase "prepared products reuse unchanged site dependencies across cells" $
