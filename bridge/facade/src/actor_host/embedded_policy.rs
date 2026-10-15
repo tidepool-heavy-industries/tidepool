@@ -367,11 +367,13 @@ fn project_model_result(
             if item.status != WorkbenchItemStatus::Committed {
                 continue;
             }
-            for (operation, encoded) in item
-                .operations
-                .iter()
-                .zip(encoded["operations"].as_array_mut().into_iter().flatten())
-            {
+            for (operation, encoded) in item.operations.iter().zip(
+                encoded
+                    .get_mut("operations")
+                    .and_then(Value::as_array_mut)
+                    .into_iter()
+                    .flatten(),
+            ) {
                 if matches!(
                     operation.display_publication,
                     Some(WorkbenchDisplayPublication::Published { .. })
@@ -522,12 +524,21 @@ mod tests {
     #[test]
     fn model_success_projects_display_content_once_and_preserves_receipt_facts() {
         use tidepool_runtime::session::*;
-        let response = display_response();
+        let mut response = display_response();
+        let mut declaration = response.items[0].clone();
+        declaration.index = 1;
+        declaration.kind = Some(WorkbenchCellItemKind::Declaration);
+        declaration.output = "accepted declaration".into();
+        declaration.operations.clear();
+        response.items.push(declaration);
+        response.next_index = 2;
+        response.total = 2;
         let page = WorkbenchDisplayPublicationIdentity {
             display: (1, 2, 3),
             page_ordinal: 1,
         };
         let full = serde_json::to_value(&response).unwrap();
+        assert!(full["items"][1].get("operations").is_none());
         let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
             response.clone(),
         ))
@@ -539,6 +550,7 @@ mod tests {
             .remove("text");
         expected["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
         assert_eq!(projected, expected);
+        assert!(projected["items"][1].get("operations").is_none());
         assert_eq!(
             full["items"][0]["operations"][0]["display"]["text"],
             "observed value"
