@@ -18,6 +18,7 @@ pub(super) struct Queue {
     small: u64,
     general_used: u64,
     protected_used: u64,
+    retained_custody: u64,
 }
 
 impl Queue {
@@ -30,6 +31,7 @@ impl Queue {
             small,
             general_used: 0,
             protected_used: 0,
+            retained_custody: 0,
         }
     }
 
@@ -60,13 +62,27 @@ impl Queue {
         Ok(())
     }
 
+    pub(super) fn retain_external_custody(&mut self, bytes: u64) {
+        self.retained_custody = bytes;
+    }
+
     pub(super) fn next(&mut self) -> Option<(Key, u64)> {
+        let remaining = self
+            .general
+            .saturating_add(self.protected)
+            .saturating_sub(self.general_used)
+            .saturating_sub(self.protected_used)
+            .saturating_sub(self.retained_custody);
         let protected = self.waiting.iter().position(|(_, bytes)| {
-            *bytes <= self.small && *bytes <= self.protected - self.protected_used
+            *bytes <= remaining
+                && *bytes <= self.small
+                && *bytes <= self.protected - self.protected_used
         });
         let (position, pool) = if let Some(position) = protected {
             (position, Pool::Protected)
-        } else if self.waiting.front()?.1 <= self.general - self.general_used {
+        } else if self.waiting.front()?.1 <= remaining
+            && self.waiting.front()?.1 <= self.general - self.general_used
+        {
             (0, Pool::General)
         } else {
             return None;

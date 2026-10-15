@@ -27,7 +27,10 @@ pub struct CommandRunIdentity {
 impl CommandRunIdentity {
     pub fn new(run: String, host_epoch: u64) -> std::io::Result<Self> {
         if !valid_key(&run) || host_epoch == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid command run identity"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid command run identity",
+            ));
         }
         Ok(Self { run, host_epoch })
     }
@@ -189,6 +192,7 @@ pub enum CommandResourceStatus {
     Completed,
     ResourceExhausted,
     CancelledBeforeStart,
+    Cancelled,
     CleanupUnconfirmed {
         detail: String,
     },
@@ -250,6 +254,7 @@ struct Entry {
     bytes: Option<u64>,
     allocation: Option<AllocationCustody>,
     started: bool,
+    cancellation_requested: bool,
 }
 impl Entry {
     fn new(status: CommandResourceStatus, bytes: Option<u64>) -> Self {
@@ -258,6 +263,7 @@ impl Entry {
             bytes,
             allocation: None,
             started: false,
+            cancellation_requested: false,
         }
     }
 
@@ -834,6 +840,20 @@ impl CommandResources {
                         state.queue.push(key, requested_bytes);
                     }
                 }
+                JournalEvent::CancellationRequested {
+                    producer,
+                    actor,
+                    command,
+                } => {
+                    if producer != actor {
+                        return Err(io_error("unsupported cancellation producer identity"));
+                    }
+                    let key = validate_key(&actor, &command)?;
+                    if !state.entries.contains_key(&key) {
+                        return Err(io_error("cancellation request without admission"));
+                    }
+                    state.update_entry(&key, |entry| entry.cancellation_requested = true);
+                }
                 JournalEvent::CancellationFence {
                     producer,
                     actor,
@@ -1184,17 +1204,20 @@ impl CommandResources {
     fn check_run(state: &State, identity: &CommandRunIdentity) -> std::io::Result<()> {
         identity.validate()?;
         if state.run_epochs.get(&identity.run) != Some(&identity.host_epoch) {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "resource host epoch is not current"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "resource host epoch is not current",
+            ));
         }
         if state.producers.values().any(|record| {
             record.identity.run.run == identity.run
                 && record.identity.run.host_epoch < identity.host_epoch
                 && record.state == ProducerState::Retiring
         }) {
-            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "predecessor resource cleanup is not confirmed"));
-        }
-        if !state.orphan_custody.is_empty() {
-            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "unknown resource custody prevents admission"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "predecessor resource cleanup is not confirmed",
+            ));
         }
         Ok(())
     }
@@ -1203,7 +1226,23 @@ impl CommandResources {
         if let Some(record) = state.producers.get(key) {
             Self::check_run(state, &record.identity.run)?;
             if record.state != ProducerState::Open {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "resource producer is retired"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "resource producer is retired",
+                ));
+            }
+        } else {
+            // Direct mechanism fixtures predate typed run admission. Production
+            // callers can reach this function only through a registered producer.
+            #[cfg(not(test))]
+            return Err(io_error(
+                "resource producer was not registered by its run owner",
+            ));
+            #[cfg(test)]
+            if !state.run_epochs.is_empty() {
+                return Err(io_error(
+                    "resource producer was not registered by its run owner",
+                ));
             }
         }
         Ok(())
@@ -1222,7 +1261,10 @@ impl CommandResources {
             let mut state = self.state.lock();
             match state.run_epochs.get(&identity.run) {
                 Some(epoch) if *epoch > identity.host_epoch => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "stale resource host epoch"))
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "stale resource host epoch",
+                    ))
                 }
                 Some(epoch) if *epoch == identity.host_epoch => {}
                 _ => {
@@ -1283,18 +1325,27 @@ impl CommandResources {
         identity.run.validate()?;
         let key = identity.key();
         if !valid_key(&key) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid resource producer identity"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid resource producer identity",
+            ));
         }
         if issuance {
             let mut state = self.state.lock();
             self.journal.lock().ensure_certain()?;
             Self::check_run(&state, &identity.run)?;
             if state.sealed_producers.contains(&key) {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "resource producer is sealed"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "resource producer is sealed",
+                ));
             }
             if let Some(record) = state.producers.get(&key) {
                 if record.identity != *identity || record.state != ProducerState::Open {
-                    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "resource producer is retired"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "resource producer is retired",
+                    ));
                 }
             } else {
                 self.journal.lock().append(JournalEvent::ProducerOpened {
@@ -1319,7 +1370,7 @@ impl CommandResources {
         self.actor_directory(&key)
     }
 
-    pub(crate) fn actor_directory(&self, actor: &str) -> std::io::Result<PathBuf> {
+    fn actor_directory(&self, actor: &str) -> std::io::Result<PathBuf> {
         if !valid_key(actor) {
             return Err(io_error("invalid actor resource identity"));
         }
@@ -1334,22 +1385,13 @@ impl CommandResources {
     }
 
     /// Acceptance is retained independently of every observing transport future.
-    pub(crate) fn submit(
-        &self,
-        actor: &str,
-        id: &str,
-        bytes: u64,
-    ) -> std::io::Result<CommandResourceStatus> {
+    fn submit(&self, actor: &str, id: &str, bytes: u64) -> std::io::Result<CommandResourceStatus> {
         self.submit_inner(actor, id, Some(bytes))
     }
 
     /// Native launches may claim a hosted job's existing grant. New identities
     /// always receive the small-command limit; native input cannot choose it.
-    pub(crate) fn submit_native(
-        &self,
-        actor: &str,
-        id: &str,
-    ) -> std::io::Result<CommandResourceStatus> {
+    fn submit_native(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         self.submit_inner(actor, id, None)
     }
 
@@ -1367,7 +1409,10 @@ impl CommandResources {
         let mut state = self.state.lock();
         self.check_issuance(&state, actor)?;
         if state.sealed_producers.contains(actor) {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "resource producer is sealed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "resource producer is sealed",
+            ));
         }
         if let Some(entry) = state.entries.get(&key) {
             if requested.is_some() && entry.bytes.is_some_and(|previous| previous != bytes) {
@@ -1394,9 +1439,12 @@ impl CommandResources {
     }
 
     /// Permanently fence new command identities from a retired producer.
-    pub(crate) fn seal_producer(&self, producer: &str) -> std::io::Result<()> {
+    fn seal_producer(&self, producer: &str) -> std::io::Result<()> {
         if !valid_key(producer) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid resource producer identity"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid resource producer identity",
+            ));
         }
         let mut state = self.state.lock();
         if state.sealed_producers.contains(producer) {
@@ -1413,14 +1461,20 @@ impl CommandResources {
             state.producers.get_mut(producer).unwrap().state = ProducerState::Retiring;
         }
         if state.active.iter().any(|key| key.0 == producer) {
-            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "cannot seal a producer with active commands"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "cannot seal a producer with active commands",
+            ));
         }
         if state
             .entries
             .iter()
             .any(|(key, entry)| key.0 == producer && entry.allocation.is_some())
         {
-            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "cannot seal a producer with retained allocations"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "cannot seal a producer with retained allocations",
+            ));
         }
         self.journal.lock().append(JournalEvent::ProducerSealed {
             producer: producer.to_owned(),
@@ -1445,7 +1499,7 @@ impl CommandResources {
 
     /// Acknowledge that the producer no longer needs a terminal result's detail.
     /// The identity tombstone remains, so a delayed submission cannot revive it.
-    pub(crate) fn acknowledge(&self, actor: &str, id: &str) -> std::io::Result<()> {
+    fn acknowledge(&self, actor: &str, id: &str) -> std::io::Result<()> {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         if !state.entries.contains_key(&key) {
@@ -1471,11 +1525,7 @@ impl CommandResources {
         Ok(())
     }
 
-    pub(crate) async fn wait(
-        &self,
-        actor: &str,
-        id: &str,
-    ) -> std::io::Result<CommandResourceStatus> {
+    async fn wait(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         let mut changes = self
             .state
             .lock()
@@ -1487,6 +1537,9 @@ impl CommandResources {
         loop {
             let status = changes.borrow_and_update().clone();
             if !status.is_queued() {
+                if matches!(status, CommandResourceStatus::Admitted { .. }) {
+                    self.check_issuance(&self.state.lock(), actor)?;
+                }
                 return Ok(status);
             }
             changes
@@ -1497,6 +1550,12 @@ impl CommandResources {
     }
 
     fn admit_waiters(&self, state: &mut State) {
+        state.queue.retain_external_custody(
+            state
+                .orphan_custody
+                .values()
+                .fold(0u64, |sum, bytes| sum.saturating_add(*bytes)),
+        );
         while let Some((key, bytes)) = state.queue.next() {
             if self.check_issuance(state, &key.0).is_err() {
                 // Retired work remains in owner custody until retirement publishes its terminal event.
@@ -1658,7 +1717,7 @@ impl CommandResources {
         Ok(dir)
     }
 
-    pub(crate) fn started(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
+    fn started(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         self.check_issuance(&state, actor)?;
@@ -1680,7 +1739,7 @@ impl CommandResources {
         Ok(state.entries[&key].current())
     }
 
-    pub(crate) fn status(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
+    fn status(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         self.observe();
         self.state
             .lock()
@@ -1690,7 +1749,7 @@ impl CommandResources {
             .ok_or_else(|| io_error("unknown command"))
     }
 
-    pub(crate) fn cancel(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
+    fn cancel(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         // A tombstone prevents a delayed submission after cancellation from starting.
@@ -1708,6 +1767,18 @@ impl CommandResources {
                 false,
             );
             return Ok(CommandResourceStatus::CancelledBeforeStart);
+        }
+        if !state.entries[&key].cancellation_requested
+            && (state.active.contains(&key) || state.entries[&key].allocation.is_some())
+        {
+            self.journal
+                .lock()
+                .append(JournalEvent::CancellationRequested {
+                    producer: actor.to_owned(),
+                    actor: actor.to_owned(),
+                    command: id.to_owned(),
+                })?;
+            state.update_entry(&key, |entry| entry.cancellation_requested = true);
         }
         if matches!(
             state.entries[&key].allocation,
@@ -1735,7 +1806,7 @@ impl CommandResources {
                     }
                     Ok(_) => {}
                 }
-                if !started && read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
+                if read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
                     match std::fs::remove_dir(&directory) {
                         Ok(()) => return Ok(true),
                         Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {}
@@ -1755,19 +1826,22 @@ impl CommandResources {
             released |= directory_removed;
         }
         if released {
+            let disposition = if started {
+                CommandResourceStatus::Cancelled
+            } else {
+                CommandResourceStatus::CancelledBeforeStart
+            };
             self.journal.lock().append(JournalEvent::Terminal {
                 producer: actor.to_owned(),
                 actor: actor.to_owned(),
                 command: id.to_owned(),
-                disposition: CommandResourceStatus::CancelledBeforeStart,
+                disposition: disposition.clone(),
             })?;
             state.update_entry(&key, |entry| {
                 if directory_removed {
                     entry.allocation = None;
                 }
-                entry
-                    .status
-                    .send_replace(CommandResourceStatus::CancelledBeforeStart);
+                entry.status.send_replace(disposition);
             });
             state.release_active(&key);
             self.admit_waiters(&mut state);
@@ -1775,7 +1849,8 @@ impl CommandResources {
         Ok(state.entries[&key].current())
     }
 
-    pub(super) fn has_unknown_orphan_custody(&self) -> bool {
+    #[cfg(test)]
+    fn has_unknown_orphan_custody(&self) -> bool {
         self.observe();
         !self.state.lock().orphan_custody.is_empty()
     }
@@ -1833,10 +1908,18 @@ impl CommandResources {
                     "active command has no retained ownership entry");
                 continue;
             };
+            if matches!(
+                entry.current(),
+                CommandResourceStatus::CleanupUnconfirmed { .. }
+            ) && !entry.cancellation_requested
+            {
+                continue;
+            }
             let Some(dir) = entry.directory().cloned() else {
                 continue;
             };
             let started = entry.started;
+            let cancellation_requested = entry.cancellation_requested;
             let result = (|| -> std::io::Result<bool> {
                 let populated = read_counter(&dir.join("cgroup.events"), "populated")?;
                 let oom = read_counter(&dir.join("memory.events"), "oom_kill")?;
@@ -1866,13 +1949,15 @@ impl CommandResources {
                     });
                     return Ok(false);
                 }
-                if !started {
+                if !started && !cancellation_requested {
                     return Ok(false);
                 }
                 // Removal invalidates retained join descriptors, fencing a late spawn.
                 std::fs::remove_dir(dir)?;
                 let disposition = if oom > 0 {
                     CommandResourceStatus::ResourceExhausted
+                } else if cancellation_requested {
+                    CommandResourceStatus::Cancelled
                 } else {
                     CommandResourceStatus::Completed
                 };
@@ -2408,6 +2493,42 @@ mod tests {
         assert_eq!(observation.cleanup_failures, 1);
     }
 
+    #[tokio::test]
+    async fn unknown_orphan_charges_capacity_without_claiming_an_unrelated_producer() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "unknown-owner", "unknown-command", 1);
+        let owner = Arc::new(owner(root.path()));
+        let bytes = owner.policy.capacity() - MIB;
+        std::fs::write(
+            root.path().join("unknown-owner/unknown-command/memory.max"),
+            bytes.to_string(),
+        )
+        .unwrap();
+        owner.reconcile(Vec::new()).unwrap();
+        let client = CommandResourceClient::local(
+            owner.clone(),
+            CommandRunIdentity::new("unrelated".into(), 1).unwrap(),
+        )
+        .unwrap();
+        let actor = CommandActorIdentity::new(0, 1);
+        assert!(matches!(
+            client.submit(&actor, "fits", MIB).await.unwrap(),
+            CommandResourceStatus::Admitted { .. }
+        ));
+        assert_eq!(
+            client.submit(&actor, "waits", MIB).await.unwrap(),
+            CommandResourceStatus::Queued
+        );
+        let state = owner.state.lock();
+        assert_eq!(state.orphan_custody.len(), 1);
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.producers.len(), 1);
+        assert!(state
+            .producers
+            .values()
+            .all(|record| record.identity.run.run == "unrelated"));
+    }
+
     #[test]
     fn orphan_cleanup_retries_and_replays_without_command_admission() {
         let directory = tempfile::tempdir().unwrap();
@@ -2452,7 +2573,7 @@ mod tests {
         owner.reconcile(allocated_events(true)).unwrap();
         assert_eq!(
             owner.cancel("actor-1", "command-1").unwrap(),
-            CommandResourceStatus::CancelledBeforeStart
+            CommandResourceStatus::Cancelled
         );
         assert_eq!(owner.observation().retained_allocations, 0);
     }
@@ -2713,7 +2834,7 @@ mod epoch_tests {
                 .await
                 .err()
                 .expect("stale actor admission denied");
-            assert!(error.to_string().contains("epoch"), "{error}");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             client.observation().await.unwrap();
             assert_eq!(
                 client
@@ -2746,25 +2867,172 @@ mod epoch_tests {
         owner.producer_key(&producer(identity, 2), true).unwrap();
     }
 
-    proptest! {
-        #[test]
-        fn run_epoch_histories_never_reopen_an_older_producer(history in prop::collection::vec((0u8..3, 1u64..25), 1..80)) {
-            let temporary = tempfile::tempdir().unwrap();
-            let owner = owner(temporary.path());
-            let mut maximum = [0u64; 3];
-            for (selected, epoch) in history {
-                let selected = selected as usize;
-                let identity = run(&format!("run-{selected}"), epoch);
-                let expected = epoch >= maximum[selected];
-                prop_assert_eq!(owner.admit_run(&identity).is_ok(), expected);
-                if expected { maximum[selected] = epoch; }
-                prop_assert_eq!(owner.producer_key(&producer(identity, 0), true).is_ok(), expected);
-                for (other, current) in maximum.iter().enumerate() {
-                    if *current > 0 {
-                        prop_assert!(owner.producer_key(&producer(run(&format!("run-{}", other), *current), 1), true).is_ok(), "unrelated run remains admitted");
+    #[test]
+    fn run_epoch_histories_never_reopen_an_older_producer() {
+        use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 96;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::run_epoch_histories_never_reopen_an_older_producer"
+        ));
+        let cases = config.cases;
+        let mut runner = TestRunner::new(config);
+        let callbacks = std::cell::Cell::new(0usize);
+        let coverage = std::cell::RefCell::new([0usize; 3]);
+        let result = runner.run(
+            &prop::collection::vec((0u8..3, 1u64..25), 1..80),
+            |history| {
+                callbacks.set(callbacks.get() + 1);
+                let temporary = tempfile::tempdir().unwrap();
+                let owner = owner(temporary.path());
+                let mut maximum = [0u64; 3];
+                for (selected, epoch) in history {
+                    let selected = selected as usize;
+                    let identity = run(&format!("run-{selected}"), epoch);
+                    let expected = epoch >= maximum[selected];
+                    coverage.borrow_mut()[if epoch < maximum[selected] {
+                        0
+                    } else if epoch == maximum[selected] {
+                        1
+                    } else {
+                        2
+                    }] += 1;
+                    prop_assert_eq!(owner.admit_run(&identity).is_ok(), expected);
+                    if expected {
+                        maximum[selected] = epoch;
+                    }
+                    prop_assert_eq!(
+                        owner.producer_key(&producer(identity, 0), true).is_ok(),
+                        expected
+                    );
+                    for (other, current) in maximum.iter().enumerate() {
+                        if *current > 0 {
+                            prop_assert!(
+                                owner
+                                    .producer_key(
+                                        &producer(run(&format!("run-{}", other), *current), 1),
+                                        true
+                                    )
+                                    .is_ok(),
+                                "unrelated run remains admitted"
+                            );
+                        }
                     }
                 }
-            }
+                Ok(())
+            },
+        );
+        eprintln!("epoch campaign: configured_cases={cases}, callbacks_including_shrinking={}, stale_same_advanced={:?}", callbacks.get(), coverage.borrow());
+        result.unwrap();
+        assert!(
+            coverage.borrow().iter().all(|count| *count > 0),
+            "epoch transition coverage: {coverage:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_unknown_completion_remains_unknown_until_explicit_cancellation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("commands");
+        let journal = temporary.path().join("ownership.jsonl");
+        let owner = owner_with_journal(&root, journal.clone());
+        let identity = run("interrupted", 1);
+        owner.admit_run(&identity).unwrap();
+        let key = owner.producer_key(&producer(identity, 0), true).unwrap();
+        let CommandResourceStatus::Admitted { cgroup } = owner.submit(&key, "job", MIB).unwrap()
+        else {
+            panic!("admitted")
+        };
+        std::fs::write(cgroup.join("cgroup.events"), "populated 0\n").unwrap();
+        std::fs::write(cgroup.join("memory.events"), "oom_kill 0\n").unwrap();
+        owner.started(&key, "job").unwrap();
+        drop(owner);
+        let recovered = owner_with_journal(&root, journal.clone());
+        assert!(matches!(
+            recovered.status(&key, "job").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        // The exact issued allocation was removed, but no exit result was retained.
+        for entry in std::fs::read_dir(&cgroup).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
         }
+        std::fs::remove_dir(&cgroup).unwrap();
+        assert_eq!(
+            recovered.cancel(&key, "job").unwrap(),
+            CommandResourceStatus::Cancelled
+        );
+        drop(recovered);
+        let replayed = owner_with_journal(&root, journal);
+        assert_eq!(
+            replayed.status(&key, "job").unwrap(),
+            CommandResourceStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_and_policy_refusals_are_permanent_typed_errors() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let temporary = tempfile::tempdir().unwrap();
+        let owner = Arc::new(owner(temporary.path()));
+        let socket = temporary.path().join("resource.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(service::serve(listener, owner.clone()));
+        let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        stream
+            .write_all(b"{\"version\":1,\"request\":{\"operation\":\"policy\"}}\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::io::BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"], "error");
+        assert_eq!(response["value"]["kind"], "invalid_data");
+        let mut different_policy = owner.policy().clone();
+        different_policy.protected_bytes += MIB;
+        let error =
+            CommandResourceClient::connect(socket.clone(), run("policy", 1), &different_policy)
+                .await
+                .err()
+                .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        CommandResourceClient::connect(socket.clone(), run("policy", 2), owner.policy())
+            .await
+            .unwrap();
+        let error = CommandResourceClient::connect(socket, run("policy", 1), owner.policy())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn uncertain_journal_cannot_reissue_an_existing_launch_grant() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("commands");
+        let journal = temporary.path().join("ownership.jsonl");
+        let owner = owner_with_journal(&root, journal);
+        let identity = run("uncertain", 1);
+        owner.admit_run(&identity).unwrap();
+        let producer = producer(identity.clone(), 0);
+        let key = owner.producer_key(&producer, true).unwrap();
+        owner.submit(&key, "first", MIB).unwrap();
+        owner.journal.lock().fail_next_allocation_append();
+        owner.submit(&key, "uncertain", MIB).unwrap();
+        assert!(owner.submit(&key, "first", MIB).is_err());
+        assert!(owner.producer_directory(&producer).is_err());
+        assert!(owner.admit_run(&identity).is_err());
     }
 }

@@ -1663,7 +1663,7 @@ tidepool_buildscript_run(
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         extra = runtime_arguments(env, resources, worker)
         if package_name == "exomonad-node" and target["name"] == "command_resources":
-            extra += '\n    ignored = True,\n    delegated_service = True,\n    expected_count = 3,\n    jobs = 1,'
+            extra += '\n    ignored = True,\n    delegated_service = True,\n    expected_count = 4,\n    jobs = 1,'
         if package_name == "exomonad-worktree" and target["name"] == "worktree":
             extra += '\n    companion_executables = {"exomonad-view-helper": "//exomonad/node:view_helper_fixture"},'
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":

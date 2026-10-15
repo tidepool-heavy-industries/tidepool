@@ -17,6 +17,15 @@ choices.
   acquisition; admission records own recovery identity when controls are incomplete.
   Unissued leaves release command memory admission, but acknowledgement and
   producer sealing require confirmed removal and terminal publication.
+- Command resource clients carry the verified run, leased host epoch and exact
+  actor identity. The command owner journals epoch advancement before retiring
+  older producers; successful connection confirms their recorded allocations
+  are removed. Reconnection in the same held epoch resumes retirement. Stale
+  clients retain observation/cancellation access, never new launch grants.
+- Persist cancellation intent before killing a command tree. Confirmed cleanup
+  does not establish successful execution. Unknown orphan custody has its own
+  replayable cleanup events and consumes capacity without acquiring a producer
+  identity or fencing unrelated runs.
 - `ProcessMountBoundary` presents one real checkout at a stable model-visible
   path. Worker composition makes its linked working tree writable while
   protecting source and sibling working files; shared Git metadata remains

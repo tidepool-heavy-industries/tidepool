@@ -233,7 +233,7 @@ async fn command_oom_and_queue_preserve_the_control_process() {
                 .status(&CommandActorIdentity::new(0, 1), "background")
                 .await
                 .unwrap(),
-            CommandResourceStatus::Completed
+            CommandResourceStatus::Cancelled
         ) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -418,4 +418,74 @@ async fn shared_clients_retain_queued_work_after_observer_disconnect() {
     server.abort();
     // best-effort: aborted tasks resolve to a cancellation error, not a value we act on.
     server.await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh delegated systemd cgroup scope"]
+async fn successor_epoch_drains_live_process_before_issuing_new_work() {
+    use tidepool_atomic_write::DirectoryAnchor;
+    let directory = tempfile::tempdir().unwrap();
+    let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+    let owner = CommandResources::delegated_with_journal(
+        CommandResourcePolicy::default(),
+        &anchor,
+        "ownership.jsonl",
+    )
+    .unwrap();
+    let old_identity = CommandRunIdentity::new("epoch-test".into(), 1).unwrap();
+    let next_identity = CommandRunIdentity::new("epoch-test".into(), 2).unwrap();
+    let old = CommandResourceClient::local(owner.clone(), old_identity).unwrap();
+    let actor = CommandActorIdentity::new(0, 1);
+    let status = old
+        .submit(&actor, "old-job", 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    let CommandResourceStatus::Admitted { cgroup } = status else {
+        panic!("{status:?}")
+    };
+    let mut child = spawn_in(&cgroup, "import time; time.sleep(30)");
+    old.started(&actor, "old-job").await.unwrap();
+    // The first attempt may complete cleanup immediately; either result must
+    // prevent all further issuance through the predecessor client.
+    let initial = CommandResourceClient::local(owner.clone(), next_identity.clone());
+    assert!(old
+        .submit(&actor, "stale-job", 64 * 1024 * 1024)
+        .await
+        .is_err());
+    assert!(!tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+    let next = match initial {
+        Ok(client) => client,
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match CommandResourceClient::local(owner.clone(), next_identity.clone()) {
+                        Ok(client) => break client,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            tokio::time::sleep(Duration::from_millis(20)).await
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert!(!cgroup.exists());
+    assert!(matches!(
+        old.status(&actor, "old-job").await.unwrap(),
+        CommandResourceStatus::Retired | CommandResourceStatus::Cancelled
+    ));
+    assert!(matches!(
+        next.submit(&actor, "new-job", 64 * 1024 * 1024)
+            .await
+            .unwrap(),
+        CommandResourceStatus::Admitted { .. }
+    ));
+    next.cancel(&actor, "new-job").await.unwrap();
 }

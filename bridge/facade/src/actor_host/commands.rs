@@ -85,7 +85,10 @@ impl HostCommandBackend {
     ) -> Self {
         Self {
             resources,
-            actor: exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0),
+            actor: exomonad_node::command_resources::CommandActorIdentity::new(
+                actor.id.0,
+                actor.incarnation.0,
+            ),
             roots,
             bubblewrap,
             running: parking_lot::Mutex::new(None),
@@ -145,7 +148,10 @@ impl HostCommandBackend {
             _ = wait_until_set(&mut cancelled) => self.resources.cancel(&self.actor, id).await.map_err(detail)?,
             result = self.resources.wait(&self.actor, id) => result.map_err(detail)?,
         };
-        if matches!(resource, Resource::CancelledBeforeStart) {
+        if matches!(
+            resource,
+            Resource::CancelledBeforeStart | Resource::Cancelled
+        ) {
             return Ok(CommandResult {
                 outcome: CommandOutcome::CommandCancelled,
                 cleanup: CommandCleanup::CommandClean,
@@ -186,7 +192,7 @@ impl HostCommandBackend {
                     .await);
             }
         };
-        tracing::debug!(actor = %self.actor, ?directory, custody = self.roots.custody,
+        tracing::debug!(actor = ?self.actor, ?directory, custody = self.roots.custody,
             argv = ?spec.argv, "resident actor command");
         let command = match HostCommand::spawn(HostCommandSpec {
             argv: &spec.argv,
@@ -233,9 +239,10 @@ impl HostCommandBackend {
             .await
             .map_err(detail)?;
         let cleanup = match &resource {
-            Resource::Completed | Resource::ResourceExhausted | Resource::CancelledBeforeStart => {
-                CommandCleanup::CommandClean
-            }
+            Resource::Completed
+            | Resource::ResourceExhausted
+            | Resource::CancelledBeforeStart
+            | Resource::Cancelled => CommandCleanup::CommandClean,
             Resource::CleanupUnconfirmed { detail } => {
                 CommandCleanup::CommandCleanupUnknown(detail.clone())
             }
@@ -243,7 +250,7 @@ impl HostCommandBackend {
         };
         let outcome = if matches!(resource, Resource::ResourceExhausted) {
             CommandOutcome::CommandOutOfMemory(memory_mib(spec.memory))
-        } else if stop_sent {
+        } else if stop_sent || matches!(resource, Resource::Cancelled) {
             CommandOutcome::CommandCancelled
         } else {
             match exit {
@@ -398,7 +405,8 @@ impl CommandBackend for HostCommandBackend {
                 Ok(
                     Resource::Completed
                     | Resource::ResourceExhausted
-                    | Resource::CancelledBeforeStart,
+                    | Resource::CancelledBeforeStart
+                    | Resource::Cancelled,
                 ) => CommandCleanup::CommandClean,
                 Ok(Resource::CleanupUnconfirmed { detail }) => {
                     CommandCleanup::CommandCleanupUnknown(detail)
@@ -429,14 +437,20 @@ mod readiness_tests {
                 let mut stream = tokio::io::BufReader::new(stream);
                 let mut request = String::new();
                 stream.read_line(&mut request).await.unwrap();
-                let mut response = serde_json::to_vec(&response).unwrap(); response.push(b'\n');
+                let mut response = serde_json::to_vec(&response).unwrap();
+                response.push(b'\n');
                 stream.get_mut().write_all(&response).await.unwrap();
             }
             listener
         });
-        let resources = CommandResourceClient::connect(socket,
-            exomonad_node::command_resources::CommandRunIdentity::new("terminal-refusal".into(),1).unwrap(),
-            &Default::default()).await.unwrap();
+        let resources = CommandResourceClient::connect(
+            socket,
+            exomonad_node::command_resources::CommandRunIdentity::new("terminal-refusal".into(), 1)
+                .unwrap(),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         let listener = handshake.await.unwrap();
         let backend = HostCommandBackend::new(
             resources,

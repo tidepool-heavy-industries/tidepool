@@ -72,12 +72,21 @@ enum Response {
     Status(CommandResourceStatus),
     ActorAdmitted,
     Acknowledged,
-    Error { kind: WireErrorKind, message: String },
+    Error {
+        kind: WireErrorKind,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum WireErrorKind { InvalidInput, InvalidData, PermissionDenied, WouldBlock, Other }
+enum WireErrorKind {
+    InvalidInput,
+    InvalidData,
+    PermissionDenied,
+    WouldBlock,
+    Other,
+}
 impl WireErrorKind {
     fn from_io(kind: std::io::ErrorKind) -> Self {
         match kind {
@@ -100,7 +109,10 @@ impl WireErrorKind {
 }
 impl Response {
     fn error(error: std::io::Error) -> Self {
-        Self::Error { kind: WireErrorKind::from_io(error.kind()), message: error.to_string() }
+        Self::Error {
+            kind: WireErrorKind::from_io(error.kind()),
+            message: error.to_string(),
+        }
     }
 }
 fn invalid_response(message: &str) -> std::io::Error {
@@ -137,7 +149,9 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
             if request.version != PROTOCOL_VERSION {
                 send(
                     &mut stream,
-                    &Response::error(invalid_response("unsupported command resource protocol version")),
+                    &Response::error(invalid_response(
+                        "unsupported command resource protocol version",
+                    )),
                 )
                 .await
                 .ok();
@@ -155,9 +169,7 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                     }
                     Err(error) => {
                         // best-effort: the client may already have disconnected.
-                        send(&mut stream, &Response::error(error))
-                            .await
-                            .ok();
+                        send(&mut stream, &Response::error(error)).await.ok();
                     }
                 }
                 return;
@@ -252,7 +264,7 @@ impl CommandResourceClient {
         });
         match client.rpc(Request::Policy {}).await? {
             Response::Policy(actual) if actual == *policy => {}
-            Response::Policy(_) => return Err(io_error(
+            Response::Policy(_) => return Err(invalid_response(
                 "shared command resource policy differs; drain allocations before service upgrade",
             )),
             _ => return Err(invalid_response("invalid resource service policy response")),
@@ -264,7 +276,9 @@ impl CommandResourceClient {
             .await?
         {
             Response::Acknowledged => Ok(client),
-            _ => Err(invalid_response("invalid resource epoch admission response")),
+            _ => Err(invalid_response(
+                "invalid resource epoch admission response",
+            )),
         }
     }
 
@@ -290,7 +304,9 @@ impl CommandResourceClient {
             )
             .await?;
             match receive(&mut stream).await? {
-                Response::Error { kind, message } => Err(std::io::Error::new(kind.into_io(), message)),
+                Response::Error { kind, message } => {
+                    Err(std::io::Error::new(kind.into_io(), message))
+                }
                 response => Ok(response),
             }
         })
@@ -326,7 +342,9 @@ impl CommandResourceClient {
         }
         match self.rpc(Request::Observe {}).await? {
             Response::Observation(observation) => Ok(observation),
-            _ => Err(invalid_response("invalid command resource observation response")),
+            _ => Err(invalid_response(
+                "invalid command resource observation response",
+            )),
         }
     }
 
@@ -492,7 +510,9 @@ impl CommandResourceClient {
                 .await?;
                 match receive(&mut stream).await? {
                     Response::ActorAdmitted => Ok(StartupLease::Remote(stream)),
-                    Response::Error { kind, message } => Err(std::io::Error::new(kind.into_io(), message)),
+                    Response::Error { kind, message } => {
+                        Err(std::io::Error::new(kind.into_io(), message))
+                    }
                     _ => Err(invalid_response("invalid actor admission response")),
                 }
             }

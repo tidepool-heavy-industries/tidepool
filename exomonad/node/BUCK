@@ -197,7 +197,7 @@ tidepool_rust_isolated_test(
 
     ignored = True,
     delegated_service = True,
-    expected_count = 3,
+    expected_count = 4,
     jobs = 1,
     visibility = ["PUBLIC"],
 )

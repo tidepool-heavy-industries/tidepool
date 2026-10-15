@@ -12,5 +12,6 @@ exec bash "$repo_root/scripts/buck2-run.sh" run --local-only -c remote.enabled=f
   --exact command_oom_and_queue_preserve_the_control_process \
   --exact actor_admission_times_out_without_starting \
   --exact shared_clients_retain_queued_work_after_observer_disconnect \
-  --expected-count 3 --ignored --jobs 1 --delegated-service \
+  --exact successor_epoch_drains_live_process_before_issuing_new_work \
+  --expected-count 4 --ignored --jobs 1 --delegated-service \
   --service-slice "${TIDEPOOL_TEST_SLICE:-app.slice}" --output-dir "$output"

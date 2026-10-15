@@ -31,6 +31,11 @@ pub(super) enum EventKind {
         command: String,
         requested_bytes: u64,
     },
+    CancellationRequested {
+        producer: String,
+        actor: String,
+        command: String,
+    },
     CancellationFence {
         producer: String,
         actor: String,
@@ -141,7 +146,9 @@ impl Journal {
 
     pub(super) fn ensure_certain(&self) -> std::io::Result<()> {
         if self.uncertain {
-            return Err(std::io::Error::other("command ownership journal has an uncertain append; reopen it exclusively"));
+            return Err(std::io::Error::other(
+                "command ownership journal has an uncertain append; reopen it exclusively",
+            ));
         }
         Ok(())
     }
