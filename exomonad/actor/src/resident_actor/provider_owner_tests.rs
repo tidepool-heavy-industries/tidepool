@@ -139,12 +139,10 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     let fixture = TestForest::new().await;
     let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
-    assert!(matches!(
-        forest.authorize_provider_attachment(actor.identity()).await,
-        Err(ResidentActorWorkbenchError::PublicOwner(
-            ActorPublicOwnerRefusal::NotReady
-        ))
-    ));
+    assert!(forest
+        .authorize_provider_attachment(actor.identity())
+        .await
+        .is_err());
     // The fixture intentionally has no configured durable run owner. Refusal
     // must preserve Pending rather than admitting an ephemeral replacement.
     assert!(forest

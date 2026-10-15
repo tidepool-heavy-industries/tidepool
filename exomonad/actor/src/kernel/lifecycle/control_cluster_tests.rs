@@ -647,6 +647,20 @@ async fn queued_owner_observation_preserves_publication_uncertainty_through_clos
         )
         .await
         .unwrap();
+    assert!(
+        matches!(
+            owner.resident_snapshot().unwrap().public_owner,
+            crate::resident_actor::ActorPublicOwnerPlane::DurablePending(_)
+        ),
+        "the real configured producer has not published a ready owner"
+    );
+    assert!(
+        matches!(
+            owner.public_owner(None, true).await,
+            Err(crate::ActorPublicOwnerRefusal::NotReady)
+        ),
+        "pending publication is not a closed or failed lifecycle"
+    );
     let publishing = {
         let owner = owner.clone();
         tokio::spawn(async move { owner.publish_public_owner(None).await })
