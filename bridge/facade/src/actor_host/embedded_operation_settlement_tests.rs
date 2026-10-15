@@ -239,65 +239,69 @@ fn operation(actor: ActorRef, call: &str) -> (HostIdentity, OperationId, ToolInv
 
 #[tokio::test]
 async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_operations() {
-    let campaign = super::test_campaign::TestCampaign::start_with_shell().await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let actor = campaign.actor.clone();
-    let policy = campaign.root_installation.policy.clone();
-    let installation = Arc::new(EmbeddedPolicyInstallation::new(actor.identity(), policy.clone()));
-    let snapshot = installation.request_snapshot().expect("genuine installed shell snapshot");
-    let (identity, _, _) = operation(actor.identity(), "schema");
-    let (wakes, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let host = AdmissionHost {
-        identity,
-        actor: actor.clone(),
-        installation,
-        wakes,
-        round_control: Arc::new(EmbeddedRoundControl::default()),
-        fixed_surface: None,
-    };
-    for (call, name, arguments) in [
-        (
-            "schema",
-            "bash",
-            ToolArguments::Structured(json!("not an object")),
-        ),
-        (
-            "argument",
-            "bash",
-            ToolArguments::Raw("wrong kind".into()),
-        ),
-        (
-            "selected",
-            "unknown",
-            ToolArguments::Raw("unknown tool".into()),
-        ),
-    ] {
-        let (_, operation, invocation) = operation(actor.identity(), call);
-        let error = snapshot
-            .dispatch(name.into(), arguments, invocation.clone(), None, None)
-            .await
-            .expect_err("invalid input must not enter the installed handler");
-        let expected = match call {
-            "schema" | "argument" => matches!(&error,
-                ResidentToolError::Declaration(exomonad_tool::ToolDeclarationError::InvalidArguments { name }) if name == "bash"),
-            "selected" => matches!(&error, ResidentToolError::InvalidInvocation(_)),
-            _ => unreachable!(),
-        };
-        assert!(expected, "case {call}, tool {name}: {error:?}");
-        let owner = policy.retained_operation(invocation).unwrap();
-        assert!(matches!(
-            owner.finalization(),
-            exomonad_actor::HostedOperationFinalization::Settled(Ok(
-                exomonad_actor::ProviderFinalizationKind::NotAdmitted
-            ))
-        ));
-        host.output_committed(&operation).await.unwrap();
-        host.output_committed(&operation).await.unwrap();
-        host.output_aborted(&operation).await.unwrap();
-    }
-    let (_, unknown, _) = operation(actor.identity(), "never-issued");
-    assert!(host.output_committed(&unknown).await.is_err());
-    })).await;
+    let campaign = crate::actor_host::test_campaign::TestCampaign::start_with_shell().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let actor = campaign.actor.clone();
+                let policy = campaign.root_installation.policy.clone();
+                let installation = Arc::new(EmbeddedPolicyInstallation::new(actor.identity(), policy.clone()));
+                let snapshot = installation.request_snapshot().expect("genuine installed shell snapshot");
+                let (identity, _, _) = operation(actor.identity(), "schema");
+                let (wakes, _receiver) = tokio::sync::mpsc::unbounded_channel();
+                let host = AdmissionHost {
+                    identity,
+                    actor: actor.clone(),
+                    installation,
+                    wakes,
+                    round_control: Arc::new(EmbeddedRoundControl::default()),
+                    fixed_surface: None,
+                };
+                for (call, name, arguments) in [
+                    (
+                        "schema",
+                        "bash",
+                        ToolArguments::Structured(json!("not an object")),
+                    ),
+                    (
+                        "argument",
+                        "bash",
+                        ToolArguments::Raw("wrong kind".into()),
+                    ),
+                    (
+                        "selected",
+                        "unknown",
+                        ToolArguments::Raw("unknown tool".into()),
+                    ),
+                ] {
+                    let (_, operation, invocation) = operation(actor.identity(), call);
+                    let error = snapshot
+                        .dispatch(name.into(), arguments, invocation.clone(), None, None)
+                        .await
+                        .expect_err("invalid input must not enter the installed handler");
+                    let expected = match call {
+                        "schema" | "argument" => matches!(&error,
+                            ResidentToolError::Declaration(exomonad_tool::ToolDeclarationError::InvalidArguments { name }) if name == "bash"),
+                        "selected" => matches!(&error, ResidentToolError::InvalidInvocation(_)),
+                        _ => unreachable!(),
+                    };
+                    assert!(expected, "case {call}, tool {name}: {error:?}");
+                    let owner = policy.retained_operation(invocation).unwrap();
+                    assert!(matches!(
+                        owner.finalization(),
+                        exomonad_actor::HostedOperationFinalization::Settled(Ok(
+                            exomonad_actor::ProviderFinalizationKind::NotAdmitted
+                        ))
+                    ));
+                    host.output_committed(&operation).await.unwrap();
+                    host.output_committed(&operation).await.unwrap();
+                    host.output_aborted(&operation).await.unwrap();
+                }
+                let (_, unknown, _) = operation(actor.identity(), "never-issued");
+                assert!(host.output_committed(&unknown).await.is_err());
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
