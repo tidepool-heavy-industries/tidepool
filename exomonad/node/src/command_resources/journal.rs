@@ -4,11 +4,27 @@ use std::path::{Path, PathBuf};
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum EventKind {
+    EpochFence {
+        identity: super::CommandRunIdentity,
+    },
+    ProducerOpened {
+        identity: super::CommandProducerIdentity,
+    },
+    ProducerRetiring {
+        producer: String,
+    },
+    OrphanCustody {
+        allocation: String,
+        requested_bytes: u64,
+    },
+    OrphanReleased {
+        allocation: String,
+    },
     Admission {
         producer: String,
         actor: String,
@@ -121,6 +137,13 @@ impl Journal {
             },
             events,
         ))
+    }
+
+    pub(super) fn ensure_certain(&self) -> std::io::Result<()> {
+        if self.uncertain {
+            return Err(std::io::Error::other("command ownership journal has an uncertain append; reopen it exclusively"));
+        }
+        Ok(())
     }
 
     pub(super) fn append(&mut self, event: EventKind) -> std::io::Result<()> {

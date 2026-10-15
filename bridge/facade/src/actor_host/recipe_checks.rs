@@ -685,7 +685,7 @@ impl Driver {
                     Some(resources) => Ok(Arc::clone(resources)),
                     None => crate::exomonad::resources::connect_existing(
                         self.resource_policy.clone(),
-                        &self.resource_run,
+                        exomonad_node::command_resources::CommandRunIdentity::new(self.resource_run.clone(), self.session.as_ref().ok_or("recipe session unavailable")?.host_incarnation.incarnation().0)?,
                     )
                     .await
                     .map(|resources| {
@@ -927,8 +927,8 @@ impl Driver {
     }
 }
 
-fn producer(actor: ActorRef) -> String {
-    format!("{}-{}", actor.id.0, actor.incarnation.0)
+fn producer(actor: ActorRef) -> exomonad_node::command_resources::CommandActorIdentity {
+    exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0)
 }
 
 fn retained_actor_evidence(actor: &exomonad_actor::LocalActorRef) -> String {

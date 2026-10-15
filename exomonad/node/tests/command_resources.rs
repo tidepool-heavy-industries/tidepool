@@ -6,7 +6,8 @@
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
 use exomonad_node::command_resources::{
-    CommandResourcePolicy, CommandResourceStatus, CommandResources,
+    CommandActorIdentity, CommandResourceClient, CommandResourcePolicy, CommandResourceStatus,
+    CommandResources, CommandRunIdentity,
 };
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::process::{Child, Command};
@@ -30,9 +31,16 @@ fn spawn_in(path: &Path, script: &str) -> Child {
     }
     command.spawn().unwrap()
 }
-async fn admitted(owner: &Arc<CommandResources>, id: &str) -> std::path::PathBuf {
-    owner.submit("test", id, 64 * 1024 * 1024).unwrap();
-    match owner.wait("test", id).await.unwrap() {
+async fn admitted(owner: &Arc<CommandResourceClient>, id: &str) -> std::path::PathBuf {
+    owner
+        .submit(&CommandActorIdentity::new(0, 1), id, 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    match owner
+        .wait(&CommandActorIdentity::new(0, 1), id)
+        .await
+        .unwrap()
+    {
         CommandResourceStatus::Admitted { cgroup } => cgroup,
         other => panic!("unexpected {other:?}"),
     }
@@ -48,39 +56,77 @@ async fn command_oom_and_queue_preserve_the_control_process() {
         ..Default::default()
     };
     let owner = CommandResources::delegated(policy).unwrap();
+    let owner = CommandResourceClient::local(
+        owner,
+        CommandRunIdentity::new("test-run".into(), 1).unwrap(),
+    )
+    .unwrap();
     let first = admitted(&owner, "first").await;
     let mut sibling = spawn_in(&first, "import time; time.sleep(30)");
-    owner.started("test", "first").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "first")
+        .await
+        .unwrap();
     let second = admitted(&owner, "oom").await;
     let mut child = spawn_in(&second, "a=bytearray(128*1024*1024)");
-    owner.started("test", "oom").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "oom")
+        .await
+        .unwrap();
     assert!(!child.wait().await.unwrap().success());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(matches!(
-        owner.status("test", "oom").unwrap(),
+        owner
+            .status(&CommandActorIdentity::new(0, 1), "oom")
+            .await
+            .unwrap(),
         CommandResourceStatus::ResourceExhausted
     ));
     assert!(sibling.try_wait().unwrap().is_none());
     let third = admitted(&owner, "third").await;
     let mut command = spawn_in(&third, "import time; time.sleep(30)");
-    owner.started("test", "third").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "third")
+        .await
+        .unwrap();
     assert_eq!(
-        owner.submit("test", "retained", 64 * 1024 * 1024).unwrap(),
+        owner
+            .submit(
+                &CommandActorIdentity::new(0, 1),
+                "retained",
+                64 * 1024 * 1024
+            )
+            .await
+            .unwrap(),
         CommandResourceStatus::Queued
     );
-    owner.cancel("test", "retained").unwrap();
+    owner
+        .cancel(&CommandActorIdentity::new(0, 1), "retained")
+        .await
+        .unwrap();
     let queued = owner.clone();
     let waiter = tokio::spawn(async move {
         {
             queued
-                .submit("test", "cancelled", 64 * 1024 * 1024)
+                .submit(
+                    &CommandActorIdentity::new(0, 1),
+                    "cancelled",
+                    64 * 1024 * 1024,
+                )
+                .await
                 .unwrap();
-            queued.wait("test", "cancelled").await.unwrap()
+            queued
+                .wait(&CommandActorIdentity::new(0, 1), "cancelled")
+                .await
+                .unwrap()
         }
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(matches!(
-        owner.cancel("test", "cancelled").unwrap(),
+        owner
+            .cancel(&CommandActorIdentity::new(0, 1), "cancelled")
+            .await
+            .unwrap(),
         CommandResourceStatus::CancelledBeforeStart
     ));
     assert!(matches!(
@@ -88,10 +134,18 @@ async fn command_oom_and_queue_preserve_the_control_process() {
         CommandResourceStatus::CancelledBeforeStart
     ));
     // Cancellation arriving first must prevent a later admission with this identity.
-    owner.cancel("test", "cancel-first").unwrap();
+    owner
+        .cancel(&CommandActorIdentity::new(0, 1), "cancel-first")
+        .await
+        .unwrap();
     assert!(matches!(
         owner
-            .submit("test", "cancel-first", 64 * 1024 * 1024)
+            .submit(
+                &CommandActorIdentity::new(0, 1),
+                "cancel-first",
+                64 * 1024 * 1024
+            )
+            .await
             .unwrap(),
         CommandResourceStatus::CancelledBeforeStart
     ));
@@ -100,19 +154,32 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     let abandoned = tokio::spawn(async move {
         {
             abandoned_owner
-                .submit("test", "abandoned", 64 * 1024 * 1024)
+                .submit(
+                    &CommandActorIdentity::new(0, 1),
+                    "abandoned",
+                    64 * 1024 * 1024,
+                )
+                .await
                 .unwrap();
-            abandoned_owner.wait("test", "abandoned").await
+            abandoned_owner
+                .wait(&CommandActorIdentity::new(0, 1), "abandoned")
+                .await
         }
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
     assert!(matches!(
-        owner.status("test", "abandoned").unwrap(),
+        owner
+            .status(&CommandActorIdentity::new(0, 1), "abandoned")
+            .await
+            .unwrap(),
         CommandResourceStatus::Queued
     ));
-    owner.cancel("test", "abandoned").unwrap();
+    owner
+        .cancel(&CommandActorIdentity::new(0, 1), "abandoned")
+        .await
+        .unwrap();
     command.kill().await.unwrap();
     sibling.kill().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -121,7 +188,10 @@ async fn command_oom_and_queue_preserve_the_control_process() {
         &background_group,
         "import os,time; pid=os.fork(); time.sleep(2) if pid==0 else None",
     );
-    owner.started("test", "background").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "background")
+        .await
+        .unwrap();
     assert!(background.wait().await.unwrap().success());
     assert!(
         background_group.exists(),
@@ -129,23 +199,40 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     );
     let occupied = admitted(&owner, "occupied").await;
     let mut occupied_child = spawn_in(&occupied, "import time; time.sleep(30)");
-    owner.started("test", "occupied").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "occupied")
+        .await
+        .unwrap();
     assert_eq!(
         owner
-            .submit("test", "descendant-wait", 64 * 1024 * 1024)
+            .submit(
+                &CommandActorIdentity::new(0, 1),
+                "descendant-wait",
+                64 * 1024 * 1024
+            )
+            .await
             .unwrap(),
         CommandResourceStatus::Queued
     );
-    owner.cancel("test", "descendant-wait").unwrap();
+    owner
+        .cancel(&CommandActorIdentity::new(0, 1), "descendant-wait")
+        .await
+        .unwrap();
     occupied_child.kill().await.unwrap();
     assert_eq!(
-        owner.cancel("test", "background").unwrap(),
+        owner
+            .cancel(&CommandActorIdentity::new(0, 1), "background")
+            .await
+            .unwrap(),
         CommandResourceStatus::Running,
         "the resource owner retains custody until the descendant is gone"
     );
     tokio::time::timeout(Duration::from_secs(5), async {
         while !matches!(
-            owner.status("test", "background").unwrap(),
+            owner
+                .status(&CommandActorIdentity::new(0, 1), "background")
+                .await
+                .unwrap(),
             CommandResourceStatus::Completed
         ) {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -156,11 +243,17 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     assert!(!background_group.exists());
     let final_group = admitted(&owner, "after").await;
     let mut final_command = spawn_in(&final_group, "print('control survived')");
-    owner.started("test", "after").unwrap();
+    owner
+        .started(&CommandActorIdentity::new(0, 1), "after")
+        .await
+        .unwrap();
     assert!(final_command.wait().await.unwrap().success());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(matches!(
-        owner.status("test", "after").unwrap(),
+        owner
+            .status(&CommandActorIdentity::new(0, 1), "after")
+            .await
+            .unwrap(),
         CommandResourceStatus::Completed
     ));
 }
@@ -173,6 +266,11 @@ async fn actor_admission_times_out_without_starting() {
         actor_start_timeout_seconds: 1,
         ..Default::default()
     })
+    .unwrap();
+    let owner = CommandResourceClient::local(
+        owner,
+        CommandRunIdentity::new("test-run".into(), 1).unwrap(),
+    )
     .unwrap();
     let attempted = owner.clone();
     let start = tokio::spawn(async move { attempted.admit_actor().await.map(|_| ()) });
@@ -204,47 +302,92 @@ async fn shared_clients_retain_queued_work_after_observer_disconnect() {
     let socket = directory.path().join("resources.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let server = tokio::spawn(service::serve(listener, owner));
-    let first = CommandResourceClient::connect(socket.clone(), "run-a".into(), &policy)
-        .await
-        .unwrap();
-    let second = CommandResourceClient::connect(socket, "run-b".into(), &policy)
-        .await
-        .unwrap();
+    let first = CommandResourceClient::connect(
+        socket.clone(),
+        exomonad_node::command_resources::CommandRunIdentity::new("run-a".into(), 1).unwrap(),
+        &policy,
+    )
+    .await
+    .unwrap();
+    let second = CommandResourceClient::connect(
+        socket,
+        exomonad_node::command_resources::CommandRunIdentity::new("run-b".into(), 1).unwrap(),
+        &policy,
+    )
+    .await
+    .unwrap();
     let status = first
-        .submit("0-1", "same-id", 64 * 1024 * 1024)
+        .submit(
+            &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+            "same-id",
+            64 * 1024 * 1024,
+        )
         .await
         .unwrap();
     let CommandResourceStatus::Admitted { cgroup } = status else {
         panic!("{status:?}")
     };
     let mut command = spawn_in(&cgroup, "import time; time.sleep(30)");
-    first.started("0-1", "same-id").await.unwrap();
+    first
+        .started(
+            &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+            "same-id",
+        )
+        .await
+        .unwrap();
     assert_eq!(
         second
-            .submit("0-1", "same-id", 64 * 1024 * 1024)
+            .submit(
+                &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+                "same-id",
+                64 * 1024 * 1024
+            )
             .await
             .unwrap(),
         CommandResourceStatus::Queued
     );
     let observer = second.clone();
-    let abandoned = tokio::spawn(async move { observer.wait("0-1", "same-id").await });
+    let abandoned = tokio::spawn(async move {
+        observer
+            .wait(
+                &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+                "same-id",
+            )
+            .await
+    });
     tokio::time::sleep(Duration::from_millis(50)).await;
     abandoned.abort();
     // best-effort: aborted tasks resolve to a cancellation error, not a value we act on.
     abandoned.await.ok();
     assert_eq!(
-        second.status("0-1", "same-id").await.unwrap(),
+        second
+            .status(
+                &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+                "same-id"
+            )
+            .await
+            .unwrap(),
         CommandResourceStatus::Queued
     );
     assert!(second
-        .submit("0-1", "same-id", 32 * 1024 * 1024)
+        .submit(
+            &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+            "same-id",
+            32 * 1024 * 1024
+        )
         .await
         .is_err());
     command.kill().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), second.wait("0-1", "same-id"))
-        .await
-        .unwrap()
-        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        second.wait(
+            &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+            "same-id",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let CommandResourceStatus::Admitted {
         cgroup: second_group,
     } = result
@@ -253,11 +396,23 @@ async fn shared_clients_retain_queued_work_after_observer_disconnect() {
     };
     assert_ne!(second_group, cgroup);
     let mut next = spawn_in(&second_group, "print('admitted without a model retry')");
-    second.started("0-1", "same-id").await.unwrap();
+    second
+        .started(
+            &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+            "same-id",
+        )
+        .await
+        .unwrap();
     assert!(next.wait().await.unwrap().success());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        second.status("0-1", "same-id").await.unwrap(),
+        second
+            .status(
+                &exomonad_node::command_resources::CommandActorIdentity::new(0, 1),
+                "same-id"
+            )
+            .await
+            .unwrap(),
         CommandResourceStatus::Completed
     );
     server.abort();

@@ -64,7 +64,7 @@ const PAGE_BYTES: u64 = 64 * 1024;
 /// or worktree does not supply authority to the issuing actor.
 pub(super) struct HostCommandBackend {
     resources: Arc<CommandResourceClient>,
-    actor: String,
+    actor: exomonad_node::command_resources::CommandActorIdentity,
     roots: super::ResidentCommandRoots,
     bubblewrap: std::path::PathBuf,
     running: parking_lot::Mutex<Option<Arc<HostCommand>>>,
@@ -85,7 +85,7 @@ impl HostCommandBackend {
     ) -> Self {
         Self {
             resources,
-            actor: format!("{}-{}", actor.id.0, actor.incarnation.0),
+            actor: exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0),
             roots,
             bubblewrap,
             running: parking_lot::Mutex::new(None),
@@ -419,11 +419,27 @@ mod readiness_tests {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("resources.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let handshake = tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            for response in [
+                serde_json::json!({"result":"policy", "value": exomonad_node::command_resources::CommandResourcePolicy::default()}),
+                serde_json::json!({"result":"acknowledged"}),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = tokio::io::BufReader::new(stream);
+                let mut request = String::new();
+                stream.read_line(&mut request).await.unwrap();
+                let mut response = serde_json::to_vec(&response).unwrap(); response.push(b'\n');
+                stream.get_mut().write_all(&response).await.unwrap();
+            }
+            listener
+        });
+        let resources = CommandResourceClient::connect(socket,
+            exomonad_node::command_resources::CommandRunIdentity::new("terminal-refusal".into(),1).unwrap(),
+            &Default::default()).await.unwrap();
+        let listener = handshake.await.unwrap();
         let backend = HostCommandBackend::new(
-            Arc::new(CommandResourceClient::Remote {
-                socket,
-                run: "terminal-refusal".into(),
-            }),
+            resources,
             exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1)),
             super::super::ResidentCommandRoots {
                 directory: directory.path().to_owned(),

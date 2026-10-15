@@ -374,7 +374,7 @@ async fn command_cleanup(host: &HostedTestRuntime, actor: ActorRef) {
         .command_resources
         .as_ref()
         .unwrap()
-        .seal_producer(&format!("{}-{}", actor.id.0, actor.incarnation.0))
+        .seal_producer(&exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0))
         .await
         .expect("the exact actor has no active commands or retained resource allocations");
 }
@@ -392,7 +392,7 @@ fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
     )
     .expect("the isolated test cgroup delegates production command resources");
     config.command_resources =
-        Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+        Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
     config.model = "gpt-6.1-sol".into();
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {

@@ -1145,7 +1145,7 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
         )
         .unwrap();
         config.command_resources =
-            Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+            Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
         write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
         write_spec_config(
             &config.workspace.join(".exomonad"),

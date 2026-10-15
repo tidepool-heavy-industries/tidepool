@@ -340,7 +340,7 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                     )
                     .expect("the isolated test delegates production command resources");
                     config.command_resources =
-                        Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+                        Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
                 }
             },
             {

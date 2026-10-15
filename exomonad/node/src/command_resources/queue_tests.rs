@@ -444,8 +444,8 @@ fn check_queue_case(case: &QueueCase) -> Result<QueueCoverage, TestCaseError> {
                 let expected = ledger.reserve(target, bytes).is_some();
                 let actual = queue.recover_active(queue_key(target), bytes).is_ok();
                 prop_assert_eq!(actual, expected);
-                coverage.active_recovery_repeats += (repeated as usize);
-                coverage.orphan_recoveries += ((!repeated) as usize);
+                coverage.active_recovery_repeats += repeated as usize;
+                coverage.orphan_recoveries += (!repeated) as usize;
                 if !expected {
                     coverage.failed_recoveries += 1;
                 }

@@ -1157,7 +1157,7 @@ async fn retire_interactive_application(
     };
     embedded_lifecycle_tx.publish(actor, lifecycle);
     if let Some(resources) = command_resources {
-        let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
+        let producer = exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0);
         if let Err(error) = resources.seal_producer(&producer).await {
             tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
         }

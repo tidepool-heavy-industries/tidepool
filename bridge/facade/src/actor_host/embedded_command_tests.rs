@@ -1167,7 +1167,7 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         },
     )
     .expect("the admitted test service delegates cgroups");
-    let resources = exomonad_node::command_resources::CommandResourceClient::local(owner);
+    let resources = exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap();
     let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let mut bindings = Vec::new();
     for text in ["embedded-host-command", "second-embedded-command"] {
