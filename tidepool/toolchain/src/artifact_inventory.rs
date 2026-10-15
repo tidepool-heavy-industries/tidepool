@@ -6460,10 +6460,11 @@ mod tests {
                 &view, vec![original.clone()],
                 NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&original, late)]),
             ).unwrap();
-            proptest::prop_assert!(demanded.dependencies().contains(&(
+            let expected = (
                 original.descriptor.id, dependency.descriptor.id,
                 ArtifactDependency::NativeGroup { dependent_ordinal: late, required_ordinal: 5 },
-            )));
+            );
+            proptest::prop_assert!(demanded.dependencies().contains(&expected));
         }
 
         #[test]
