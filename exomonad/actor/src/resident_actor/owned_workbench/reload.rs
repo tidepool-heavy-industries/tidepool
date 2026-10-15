@@ -255,11 +255,7 @@ where
             ));
         }
         Ok(CoherentReloadOperation {
-            workbench: self
-                .environment
-                .runner
-                .application_workbench()
-                .with_intrinsic_effect_support(self.environment.intrinsic_effect_support()),
+            workbench: self.environment.application_workbench(),
             layers: self.environment.source_layers.clone().ok_or_else(|| {
                 SourceError::SourceUnavailable("actor has no editable source owner".into())
             })?,

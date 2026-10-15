@@ -168,7 +168,8 @@ impl CaptureFixture {
             reject: std::sync::atomic::AtomicBool::new(false),
         });
         let (forest, deployments) = ResidentForest::new(
-            ActorWorkbenchSource::new(preamble, include),
+            ActorWorkbenchSource::new(preamble, include)
+                .with_installed_effect_support(vec![exomonad_tool::ToolEffectKey::ContextReadWrite]),
             session,
             machine,
             Some(workspaces.clone()),

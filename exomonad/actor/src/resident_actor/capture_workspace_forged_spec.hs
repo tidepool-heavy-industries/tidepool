@@ -1,14 +1,24 @@
+import qualified Tidepool.Actors.Spawn as Spawn
 do
-  let validSpec :: AgentSpec CaptureTools '[]
-      validSpec = defaultSpec { specTools = CaptureTools
-        { ping = presentWith presentDisplay (tool "Object input" (\_ -> pure (1 :: Int)))
-        , haskell = haskellTool @'Asynchronous @'[] @'[] "Retained notebook"
-        } }
+  let validSpec :: AgentSpec CaptureSyncTools '[]
+      validSpec = defaultSpec { specTools = CaptureSyncTools
+        { syncPing = presentWith presentDisplay (syncTool "Object input" (\_ -> pure (1 :: Int))) } }
+      invalidSyncSpec :: AgentSpec InvalidCaptureSyncTools '[]
+      invalidSyncSpec = defaultSpec { specTools = InvalidCaptureSyncTools
+        { scalarSyncPing = presentWith presentDisplay (syncTool "Invalid scalar input" (\_ -> pure (2 :: Int))) } }
       invalidSpec :: AgentSpec InvalidCaptureTools '[]
       invalidSpec = defaultSpec { specTools = InvalidCaptureTools
         { scalarPing = presentWith presentDisplay (tool "Invalid scalar function input" (\_ -> pure (2 :: Int))) } }
       Right validPrepared = prepareAgentSpec validSpec
       Right invalidPrepared = prepareAgentSpec invalidSpec
+  checked <- Spawn.validateAgentSpec validSpec
+  case checked of
+    Right _ -> pure ()
+    Left failure -> Tidepool.Effects.error ("environment-owned intrinsic support missing: " <> tshow failure)
+  rejected <- Spawn.validateAgentSpec invalidSyncSpec
+  case rejected of
+    Left (Core.SpecInputSchemaInvalid _) -> pure ()
+    other -> Tidepool.Effects.error ("expected object schema refusal after intrinsic support admission: " <> tshow (either Left (const (Right ())) other))
   started <- send (Core.AgentLaunchSpawnWith
     (Core.CapturedSpawn "CHECKPOINT_TOKEN")
     (\_ -> installPreparedSpec invalidPrepared >> Agents.installRequestReceiver)

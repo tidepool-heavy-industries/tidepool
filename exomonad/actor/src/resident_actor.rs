@@ -2170,10 +2170,7 @@ where
     {
         return Err(crate::SpecReplacementError::Unauthorized);
     }
-    let workbench = environment
-        .runner
-        .application_workbench()
-        .with_intrinsic_effect_support(environment.intrinsic_effect_support());
+    let workbench = environment.application_workbench();
     let installer = Arc::new(
         environment
             .runner
@@ -5158,17 +5155,22 @@ where
             .as_ref()
             .filter(|_| live_standing)
         {
-            return Some(self.environment.runner.workbench(
-                outstanding.response.clone(),
-                outstanding.request,
-                outstanding.type_evidence.clone(),
-            ));
+            return Some(
+                self.environment
+                    .runner
+                    .workbench(
+                        outstanding.response.clone(),
+                        outstanding.request,
+                        outstanding.type_evidence.clone(),
+                    )
+                    .with_intrinsic_effect_support(self.environment.intrinsic_effect_support()),
+            );
         }
         match &self.standing {
             ResidentStanding::Workbench | ResidentStanding::Receiving(_)
                 if self.policy_installed =>
             {
-                Some(self.environment.runner.application_workbench())
+                Some(self.environment.application_workbench())
             }
             _ => None,
         }
@@ -5810,7 +5812,7 @@ where
         let observation = self.runtime_observation.snapshot();
         let workbench = self
             .active_workbench()
-            .unwrap_or_else(|| environment.runner.application_workbench());
+            .unwrap_or_else(|| environment.application_workbench());
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
         let interaction_control = effect_owner.interaction_control();
@@ -5833,13 +5835,30 @@ where
                 );
                 return Box::pin(std::future::ready(Ok(operation)));
             }
-            ResidentActorBoundary::SpecValidation { continuation, metadata, effects } => {
+            ResidentActorBoundary::SpecValidation {
+                continuation,
+                metadata,
+                effects,
+            } => {
                 let runner = self.environment.runner.clone();
+                let workbench = self.environment.application_workbench();
                 let allowed = self.descriptor.capabilities().effect_keys().to_vec();
-                let operation: futures_util::future::BoxFuture<'static, commands::CommandResolution> = Box::pin(async move {
-                    let answer = runner.validate_agent_spec(context.clone(), metadata, effects, allowed).await;
-                    let disposition = if answer.is_ok() { WorkbenchOperationDisposition::Read } else { WorkbenchOperationDisposition::Rejected };
-                    commands::CommandResolution::settled(disposition, runner.resume_value(context, continuation, answer).await)
+                let operation: futures_util::future::BoxFuture<
+                    'static,
+                    commands::CommandResolution,
+                > = Box::pin(async move {
+                    let answer = workbench
+                        .validate_agent_spec(context.clone(), metadata, effects, allowed)
+                        .await;
+                    let disposition = if answer.is_ok() {
+                        WorkbenchOperationDisposition::Read
+                    } else {
+                        WorkbenchOperationDisposition::Rejected
+                    };
+                    commands::CommandResolution::settled(
+                        disposition,
+                        runner.resume_value(context, continuation, answer).await,
+                    )
                 });
                 return Box::pin(std::future::ready(Ok(operation)));
             }
@@ -8426,9 +8445,7 @@ where
         .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let application_workbench = Arc::new(
             self.environment
-                .runner
                 .application_workbench()
-                .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
                 .with_compilation_authority(authority),
         );
         let compiler_owner =

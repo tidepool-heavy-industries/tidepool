@@ -8435,7 +8435,7 @@ fn decode_activation_observation(
     }
 }
 
-impl<H, O> ResidentActorRunner<H, O>
+impl<H, O> ResidentActorWorkbench<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -8448,24 +8448,43 @@ where
         metadata: serde_json::Value,
         effects: Vec<crate::ActorEffectKey>,
         allowed: Vec<crate::ActorEffectKey>,
-    ) -> Result<crate::tool_contract::SpecValidationReceipt, crate::tool_contract::SpecValidationError> {
+    ) -> Result<
+        crate::tool_contract::SpecValidationReceipt,
+        crate::tool_contract::SpecValidationError,
+    > {
         use crate::tool_contract::SpecValidationError;
         let support = self.access.source.installed_effect_support().to_vec();
         let observer = self.access.handler_effect_support.clone();
         let validate_surface = self.access.source.tool_surface_validator.clone();
-        self.access.with_machine(context, move |session, _, _| {
-            let answer = (|| {
-                if effects.iter().any(|key| !allowed.contains(key)) {
-                    return Err(SpecValidationError::SpecEffectMismatch("child effects exceed parent authority".into()));
-                }
-                let mut support = support;
-                support.extend(observer(session.handlers()));
-                crate::tool_contract::preflight_spec_metadata(metadata, &effects, &support, validate_surface.as_deref())
-            })();
-            Ok(answer)
-        }).await.map_err(|error| SpecValidationError::SpecInterpreterUnavailable(error.to_string()))?
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = (|| {
+                    if effects.iter().any(|key| !allowed.contains(key)) {
+                        return Err(SpecValidationError::SpecEffectMismatch(
+                            "child effects exceed parent authority".into(),
+                        ));
+                    }
+                    let mut support = support;
+                    support.extend(observer(session.handlers()));
+                    crate::tool_contract::preflight_spec_metadata(
+                        metadata,
+                        &effects,
+                        &support,
+                        validate_surface.as_deref(),
+                    )
+                })();
+                Ok(answer)
+            })
+            .await
+            .map_err(|error| SpecValidationError::SpecInterpreterUnavailable(error.to_string()))?
     }
+}
 
+impl<H, O> ResidentActorRunner<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     /// Move only the returned actor-program successor out of a hosted cell's
     /// cleanup set. The target guard is established before the source releases
     /// its exact id; all other cell continuations remain owned by the cell.

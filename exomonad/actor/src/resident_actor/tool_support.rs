@@ -4,6 +4,12 @@ use super::{DispatchEffect, OutputSink, ResidentEnvironment, ResidentForest};
 use exomonad_tool::{ActorEffectKey, ToolEffectKey};
 
 impl<H, O> ResidentEnvironment<H, O> {
+    pub(super) fn application_workbench(&self) -> crate::ResidentActorWorkbench<H, O> {
+        self.runner
+            .application_workbench()
+            .with_intrinsic_effect_support(self.intrinsic_effect_support())
+    }
+
     pub(super) fn intrinsic_effect_support(&self) -> Vec<ToolEffectKey> {
         crate::resident_workbench::intrinsic_effect_families()
             .into_iter()

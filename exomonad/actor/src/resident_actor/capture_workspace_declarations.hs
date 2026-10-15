@@ -10,3 +10,9 @@ data CaptureTools mode = CaptureTools
 
 data InvalidCaptureTools mode = InvalidCaptureTools
   { scalarPing :: mode :- Call Text Int }
+
+data CaptureSyncTools mode = CaptureSyncTools
+  { syncPing :: mode :- Sync (Call CaptureRead Int) }
+
+data InvalidCaptureSyncTools mode = InvalidCaptureSyncTools
+  { scalarSyncPing :: mode :- Sync (Call Text Int) }
