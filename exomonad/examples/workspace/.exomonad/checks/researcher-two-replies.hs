@@ -15,9 +15,13 @@ researcher <- do
   case spawned of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready
-Right reportRequest <- requestWithReplyTool @Researcher.Report researcher
-  ("Which plants retain water? Search for moss and open a source; return a sourced report." :: Text)
-  defaultRequestOptions
+reportRequest <- do
+  requested <- requestWithReplyTool @Researcher.Report researcher
+    ("Which plants retain water? Search for moss and open a source; return a sourced report." :: Text)
+    defaultRequestOptions
+  case requested of
+    Left failure -> error (Text.pack (show failure))
+    Right ready -> pure ready
 Right report <- await (result reportRequest)
 display report
 Right followUpRequest <- requestWithReplyTool @Researcher.FollowUp researcher
