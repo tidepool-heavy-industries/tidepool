@@ -22,3 +22,15 @@ spec = defaultSpec { specTools = Tools standardReload }
 -- The ordinary notebook facade retains the compatible default wrapper.
 compatible :: Eff (SyncEffects '[]) (Either ReloadError ReloadOutcome)
 compatible = reloadSource []
+
+-- Broad Contract imports must not reserve ordinary authored record field names.
+data AuthoredTools mode = AuthoredTools
+  { notebook :: HaskellTools '[] mode
+  , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
+  } deriving (Generic)
+
+authoredSpec :: AgentSpec AuthoredTools '[]
+authoredSpec = defaultSpec { specTools = AuthoredTools
+  { notebook = haskellTools
+  , reload = standardReload
+  } }

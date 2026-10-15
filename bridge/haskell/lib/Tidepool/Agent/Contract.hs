@@ -67,7 +67,7 @@ module Tidepool.Agent.Contract
   , HaskellTools (..)
   , AsyncHaskellTools
   , haskellTools
-  , WorkbenchTools (..)
+  , WorkbenchTools (WorkbenchTools)
   , ReloadInput (..)
   , ReloadError (..)
   , ReloadOutcome (..)
