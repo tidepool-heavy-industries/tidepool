@@ -867,6 +867,7 @@ test-suite model-turn-test
     Tidepool.Effects.Core
     Tidepool.Effects.Row
     Tidepool.FilePath
+    Tidepool.File
     Tidepool.Inspection
     Tidepool.View.Wire
     Tidepool.Inspection.Display

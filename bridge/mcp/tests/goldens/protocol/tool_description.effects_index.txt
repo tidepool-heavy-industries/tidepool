@@ -3,7 +3,7 @@
   KV: Persistent key-value store.
       verbs: kvGet, kvSet, kvDel, kvClear, kvKeysP, kvInfo, kvCas
   FsRead: Read files and filesystem metadata (sandboxed to server working directory).
-      verbs: readFile, listDirectory, doesFileExist, doesDirectoryExist, getFileSize, fsMeta, glob, grepGlob, readGlob, planUpdate, fileHash
+      verbs: readFile, listDirectory, doesFileExist, doesDirectoryExist, getFileSize, fsMeta, glob, grepGlob, readGlob, planUpdate, fileHash, readSnapshotRaw
   FsWrite: Mutate files (sandboxed to server working directory).
       verbs: writeFile, appendFile, update, updateAll, updateJ, insertAfter, writeChecked, writeCheckedIf
   Http: JSON I/O.

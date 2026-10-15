@@ -1061,7 +1061,7 @@ macro_rules! fs_read_effect_def {
             // exported by `Tidepool.Records.Stable`; `stable_errors true`
             // below makes generated Core reuse them rather than declare a
             // second nominal copy. See `fs_stable.rs` for their source.
-            type_defs [],
+            type_defs ["data FsSnapshot = FsSnapshot { fsSnapshotPath :: Text, fsSnapshotContents :: Text, fsSnapshotHash :: Text } deriving (Show, Eq)"],
             // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
             // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
             // a message. `FsSandbox` covers sandbox escapes and the glob boundary
@@ -1121,6 +1121,9 @@ macro_rules! fs_read_effect_def {
                 { ctor FsHash, method fs_hash,
                   args { path: "Text" as String },
                   ret "(Maybe Text)", errors FsError },
+                { ctor FsReadSnapshot, method fs_read_snapshot,
+                  args { path: "Text" as String },
+                  ret "FsSnapshot", errors FsError },
             ],
             helpers [
                 { name readFile, raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)\nreadFile = send . FsRead"] },
@@ -1133,7 +1136,8 @@ macro_rules! fs_read_effect_def {
                 { name grepGlob, raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: forall effs. Member FsRead effs => Text -> FilePath -> Eff effs (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
                 { name readGlob, raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: forall effs. Member FsRead effs => Text -> Eff effs [FileRead]\nreadGlob = send . FsReadGlob"] },
                 { name planUpdate, raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else length (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
-                { name fileHash, raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
+                { name fileHash, raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- Storage and sandbox failures abort via liftEither. This separate hash read\n-- does not bind a later content read to the same bytes; use\n-- Tidepool.File.readSnapshot for a typed content/version observation.\nfileHash :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
+                { name readSnapshotRaw, raw ["-- | Read a resolved path, UTF-8 contents and Blake3 hash of exactly those\n-- bytes together. Serializes with FsWrite and FsWriteCas through the same\n-- parent-directory lock. Missing, invalid UTF-8, storage and sandbox failures\n-- remain Left FsError. External writers that bypass the lock are outside this\n-- guarantee. The hash identifies contents, not an intervening-write counter.\n-- Prefer Tidepool.File.readSnapshot and writeSnapshot to retain the path and\n-- version together in an abstract FileSnapshot.\nreadSnapshotRaw :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError FsSnapshot)\nreadSnapshotRaw = send . FsReadSnapshot"] },
             ],
         }
     };

@@ -153,6 +153,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("Right", 1),
         ("Left", 1),
         ("FileRead", 2),
+        ("FsSnapshot", 3),
         ("Match", 5),
         ("Rust", 0),
         ("Python", 0),

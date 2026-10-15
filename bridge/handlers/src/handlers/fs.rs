@@ -11,8 +11,9 @@ use tidepool_mcp::CapturedOutput;
 /// repository's files.
 /// Locking the parent directory (not a per-file sidecar) avoids littering the
 /// sandbox with lock files a glob could sweep up; it is coarse but CAS is never
-/// a hot path. The lock releases when the directory handle drops. `lock_dir`
-/// must already exist.
+/// a hot path. Snapshot reads, ordinary writes, and CAS writes take this same
+/// lock. External writers that bypass it are outside this contract. The lock
+/// releases when the directory handle drops. `lock_dir` must already exist.
 pub(crate) fn with_dir_flock<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
     let dir = std::fs::File::open(lock_dir)?;
     // `File::lock` blocks until the exclusive lock is acquired, retrying an
@@ -45,6 +46,14 @@ tidepool_mcp::fs_read_effect_def!(crate::effect_glue::effect_rust_projection);
 struct FileRead {
     path: String,
     contents: Result<String, FsError>,
+}
+
+/// The path and digest are issued from the same locked byte read as contents.
+#[derive(tidepool_bridge_derive::ToHaskell, tidepool_bridge_derive::FromHaskell, Debug, Clone)]
+struct FsSnapshot {
+    path: String,
+    contents: String,
+    hash: String,
 }
 
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
@@ -394,8 +403,11 @@ impl FsBackend {
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent).map_err(|e| FsError::FsIo(e.to_string()))?;
         }
-        std::fs::write(&resolved, &contents).map_err(|e| FsError::FsIo(e.to_string()))?;
-        Ok(())
+        let parent = resolved.parent().unwrap_or(&self.root);
+        with_dir_flock(parent, || {
+            std::fs::write(&resolved, &contents).map_err(|e| FsError::FsIo(e.to_string()))
+        })
+        .map_err(|e| FsError::FsIo(e.to_string()))?
     }
 
     fn fs_list_dir(&mut self, path: String) -> Result<Vec<String>, FsError> {
@@ -554,6 +566,33 @@ impl FsBackend {
             .map_err(|error| FsError::FsIo(format!("read '{path}' failed: {error}")))
     }
 
+    fn fs_read_snapshot(&mut self, path: String) -> Result<FsSnapshot, FsError> {
+        let resolved = self.resolve(&path)?;
+        let parent = resolved.parent().unwrap_or(&self.root);
+        with_dir_flock(parent, || {
+            let bytes = std::fs::read(&resolved).map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => FsError::FsNotFound(path.clone()),
+                _ => FsError::FsIo(format!("read '{path}' failed: {error}")),
+            })?;
+            let hash = blake3_hex(&bytes);
+            let contents =
+                String::from_utf8(bytes).map_err(|_| FsError::FsNotUtf8(path.clone()))?;
+            let path = resolved
+                .to_str()
+                .ok_or_else(|| FsError::FsNonUtf8Path(resolved.to_string_lossy().into_owned()))?
+                .to_owned();
+            Ok(FsSnapshot {
+                path,
+                contents,
+                hash,
+            })
+        })
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => FsError::FsNotFound(path),
+            _ => FsError::FsIo(error.to_string()),
+        })?
+    }
+
     fn fs_write_cas(
         &mut self,
         path: String,
@@ -681,6 +720,236 @@ mod tests {
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
+
+    #[test]
+    fn snapshot_binds_resolved_path_utf8_bytes_and_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handler = FsBackend::new(dir.path().to_owned());
+        let body = "memory: λ\n\0end";
+        handler.fs_write("memory".into(), body.into()).unwrap();
+        let snapshot = handler.fs_read_snapshot("memory".into()).unwrap();
+        assert_eq!(
+            snapshot.path,
+            dir.path()
+                .join("memory")
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(snapshot.contents, body);
+        assert_eq!(
+            snapshot.hash,
+            blake3::hash(body.as_bytes()).to_hex().as_str()
+        );
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let response = handler
+            .handle(FsReadReq::FsReadSnapshot("memory".into()), &cx)
+            .unwrap();
+        let decoded: Result<FsSnapshot, FsError> =
+            FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
+        let decoded = decoded.unwrap();
+        assert_eq!(
+            (&decoded.path, &decoded.contents, &decoded.hash),
+            (&snapshot.path, &snapshot.contents, &snapshot.hash)
+        );
+        assert_eq!(
+            handler
+                .fs_write_cas(
+                    snapshot.path.clone(),
+                    Some(snapshot.hash.clone()),
+                    "next".into()
+                )
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            handler
+                .fs_write_cas(
+                    snapshot.path.clone(),
+                    Some(snapshot.hash.clone()),
+                    "stale".into()
+                )
+                .unwrap(),
+            Err(Some(blake3_hex(b"next")))
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("memory")).unwrap(),
+            "next"
+        );
+        // Content versions deliberately allow A -> B -> A; they are not an
+        // edit counter and do not claim to detect intervening identical writes.
+        handler.fs_write("memory".into(), body.into()).unwrap();
+        assert_eq!(
+            handler
+                .fs_write_cas(snapshot.path, Some(snapshot.hash), "restored".into())
+                .unwrap(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn snapshot_preserves_missing_utf8_storage_and_sandbox_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handler = FsBackend::new(dir.path().to_owned());
+        std::fs::write(dir.path().join("binary"), [0xff]).unwrap();
+        std::fs::create_dir(dir.path().join("directory")).unwrap();
+        assert!(matches!(
+            handler.fs_read_snapshot("missing".into()),
+            Err(FsError::FsNotFound(_))
+        ));
+        assert!(matches!(
+            handler.fs_read_snapshot("missing/parent/file".into()),
+            Err(FsError::FsNotFound(_))
+        ));
+        assert!(matches!(
+            handler.fs_read_snapshot("binary".into()),
+            Err(FsError::FsNotUtf8(_))
+        ));
+        assert!(matches!(
+            handler.fs_read_snapshot("directory".into()),
+            Err(FsError::FsIo(_))
+        ));
+        assert!(matches!(
+            handler.fs_read_snapshot("../outside".into()),
+            Err(FsError::FsSandbox(_))
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let private = dir.path().join("unreadable");
+            std::fs::write(&private, "private").unwrap();
+            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let observed = handler.fs_read_snapshot("unreadable".into());
+            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(matches!(observed, Err(FsError::FsIo(_))));
+        }
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_commit_retains_resolved_destination_after_symlink_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handler = FsBackend::new(dir.path().to_owned());
+        handler.fs_write("original".into(), "same".into()).unwrap();
+        handler.fs_write("other".into(), "same".into()).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink("original", &alias).unwrap();
+        let snapshot = handler.fs_read_snapshot("alias".into()).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("other", &alias).unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let mut other_grant = FsBackend::new(unrelated.path().to_owned());
+        assert!(matches!(
+            other_grant.fs_write_cas(
+                snapshot.path.clone(),
+                Some(snapshot.hash.clone()),
+                "unauthorized".into()
+            ),
+            Err(FsError::FsSandbox(_))
+        ));
+        assert_eq!(
+            handler
+                .fs_write_cas(snapshot.path, Some(snapshot.hash), "changed".into())
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("original")).unwrap(),
+            "changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("other")).unwrap(),
+            "same"
+        );
+    }
+
+    #[test]
+    fn snapshot_and_ordinary_writes_share_cas_directory_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut handler = FsBackend::new(dir.path().to_owned());
+        handler.fs_write("memory".into(), "before".into()).unwrap();
+        for snapshot_read in [true, false] {
+            let mut worker = handler.clone();
+            let (started, waiting) = mpsc::channel();
+            let (settled, outcome) = mpsc::channel();
+            let job = with_dir_flock(dir.path(), || {
+                let job = std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    if snapshot_read {
+                        worker.fs_read_snapshot("memory".into()).unwrap();
+                    } else {
+                        worker.fs_write("memory".into(), "after".into()).unwrap();
+                    }
+                    settled.send(()).unwrap();
+                });
+                waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(
+                    matches!(
+                        outcome.recv_timeout(Duration::from_millis(100)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ),
+                    "filesystem operation bypassed the shared CAS lock"
+                );
+                // This external writer deliberately bypasses the advisory lock.
+                // It is a positive control for the documented writer boundary.
+                std::fs::write(dir.path().join("memory"), "outside lock").unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("memory")).unwrap(),
+                    "outside lock"
+                );
+                job
+            })
+            .unwrap();
+            outcome.recv_timeout(Duration::from_secs(5)).unwrap();
+            job.join().unwrap();
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+        #[test]
+        fn snapshot_histories_match_content_oracle(steps in proptest::collection::vec((0u8..4, "[a-zλ\\n]{0,24}"), 1..24)) {
+            use proptest::prelude::*;
+            let dir = tempfile::tempdir().unwrap();
+            let mut handler = FsBackend::new(dir.path().to_owned());
+            let mut current: Option<String> = None;
+            let mut saved: Option<FsSnapshot> = None;
+            for (operation, body) in steps {
+                match operation {
+                    0 => {
+                        handler.fs_write("memory".into(), body.clone()).unwrap();
+                        current = Some(body);
+                    }
+                    1 => match handler.fs_read_snapshot("memory".into()) {
+                        Ok(snapshot) => {
+                            prop_assert_eq!(Some(&snapshot.contents), current.as_ref());
+                            prop_assert_eq!(&snapshot.hash, &blake3::hash(snapshot.contents.as_bytes()).to_hex().to_string());
+                            saved = Some(snapshot);
+                        }
+                        Err(FsError::FsNotFound(_)) => prop_assert!(current.is_none()),
+                        Err(error) => prop_assert!(false, "unexpected snapshot failure: {error:?}"),
+                    },
+                    2 => if let Some(snapshot) = &saved {
+                        let expected_success = current.as_ref() == Some(&snapshot.contents);
+                        let result = handler.fs_write_cas(snapshot.path.clone(), Some(snapshot.hash.clone()), body.clone()).unwrap();
+                        prop_assert_eq!(result.is_ok(), expected_success);
+                        if expected_success { current = Some(body); }
+                    },
+                    _ => {
+                        if current.take().is_some() { std::fs::remove_file(dir.path().join("memory")).unwrap(); }
+                    }
+                }
+                prop_assert_eq!(std::fs::read_to_string(dir.path().join("memory")).ok(), current.clone());
+            }
+        }
+    }
 
     #[test]
     fn prepared_fs_read_runs_after_checkout_releases() {

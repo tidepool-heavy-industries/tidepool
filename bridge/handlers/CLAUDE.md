@@ -121,3 +121,9 @@ process-group termination on timeout — see `src/handlers/exec.rs`.
 created automatically (`std::fs::create_dir_all`) before writing. Parent
 creation is subject to the same sandbox check — the check validates the target
 path first, and any ancestor inside the sandbox root is safe by construction.
+
+Snapshot reads, ordinary `FsWrite` and `FsWriteCas` serialize through the same
+parent-directory advisory lock. A snapshot hashes the exact returned UTF-8 bytes
+and retains the canonical destination; it is a content observation, not an edit
+counter. External writers that bypass this lock are outside the coherence
+guarantee. A failed observation remains a typed `FsError`, never an empty file.
