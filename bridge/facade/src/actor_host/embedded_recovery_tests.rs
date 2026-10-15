@@ -1658,7 +1658,7 @@ async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_
         assert_eq!(std::fs::read(&retained).unwrap(), bytes);
     }
     assert!(
-        !run.join("recovery.sqlite").exists(),
+        !root.join("run/recovery.sqlite").exists(),
         "refusal must not recreate a known-issued recovery store"
     );
     finish_fixture(retained_root);
