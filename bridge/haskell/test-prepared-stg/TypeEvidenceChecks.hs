@@ -133,12 +133,13 @@ runTypeEvidenceChecks directory = do
   assert (rendering echo /= rendering alphaEcho) "alpha control did not change the actual diagnostic"
   assert (map (nodeAt (programTypes echo)) [rootBody (programTypes echo) (echoRoot echo)] == [TypeBound 0])
     "open reply lost its scoped bound variable"
-  assert (namedConstructors echo "Echo" == namedConstructors alphaEcho "Echo")
-    "alpha-renaming changed the physical constructor declaration"
+  _ <- assertPhysicalConstructor "Echo" echo alphaEcho
   originalTemplate <- program "templateReply"
   changedTemplate <- requireRight (project alphaContext alpha "templateReply" [])
-  assert (namedConstructors originalTemplate "SameLayout" == namedConstructors changedTemplate "SameLayout")
-    "formal declaration conflict control changed physical layout instead of only field type"
+  (beforeTemplate, afterTemplate) <- assertPhysicalConstructor "SameLayout" originalTemplate changedTemplate
+  assert (typeVersion (constructorFamily beforeTemplate) /= typeVersion (constructorFamily afterTemplate)
+      && constructorHostId beforeTemplate /= constructorHostId afterTemplate)
+    "changed SameLayout field lost its distinct compiler-issued nominal version and host identity"
   function <- program "functionRequest"
   assert (case nodeAt (programTypes function) (replyBody function "TypeEvidence" "FunctionReply") of
     TypeFunction{} -> True; _ -> False) "function reply lost exact syntax"
@@ -488,6 +489,30 @@ nominal graph expression = case nodeAt graph expression of
   other -> error ("expected nominal expression, got " ++ show other)
 headName :: TypeGraph -> TypeNodeId -> Text.Text
 headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence (typeSymbol identity)
+-- The two captures also change SameLayout Int to SameLayout Bool, which
+-- occurs in Console's TemplateReply. Equal physical layout does not establish
+-- equal nominal ABI or its derived host ID. Runtime admission checks those
+-- complete identities separately; this oracle compares every physical field.
+assertPhysicalConstructor :: Text.Text -> WireProgram -> WireProgram -> IO (ConstructorDecl, ConstructorDecl)
+assertPhysicalConstructor name first second = do
+  before <- one first
+  after <- one second
+  assert (constructorSymbol (constructorIdentity before) == constructorSymbol (constructorIdentity after)
+      && typeSymbol (constructorFamily before) == typeSymbol (constructorFamily after))
+    (Text.unpack name ++ ": fixture changed the nominal constructor or parent symbol")
+  assert (physical before == physical after)
+    (Text.unpack name ++ ": fixture changed physical constructor metadata: "
+      ++ show (physical before, physical after))
+  pure (before, after)
+ where
+  one wire = case namedConstructors wire name of
+    [constructor] -> pure constructor
+    constructors -> fail (Text.unpack name ++ ": expected one actual constructor, got " ++ show constructors)
+  physical constructor =
+    ( constructorResultRep constructor, constructorFieldReps constructor
+    , constructorStrictFields constructor, constructorLayout constructor
+    , constructorTag constructor, constructorFamilySize constructor )
+
 namedConstructors :: WireProgram -> Text.Text -> [ConstructorDecl]
 namedConstructors wire name = filter ((== name) . symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors wire)
 replyFor :: WireProgram -> Text.Text -> Text.Text -> [ConstructorReply]
