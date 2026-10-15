@@ -10,6 +10,8 @@ pub enum ActorExitKind {
     Completed,
     Failed,
     Cancelled,
+    /// The host stopped this incarnation; durable recovery may admit a successor.
+    Interrupted,
 }
 
 /// Immutable lifecycle result for one exact actor incarnation.
@@ -1223,6 +1225,7 @@ mod tests {
             ActorExitKind::Completed,
             ActorExitKind::Failed,
             ActorExitKind::Cancelled,
+            ActorExitKind::Interrupted,
         ] {
             for retain_first in [false, true] {
                 let retained = RetainedActorExit::new();
@@ -1670,6 +1673,56 @@ mod tests {
             ];
             assert!(!events.is_empty());
             assert!(expected.ends_with(&events), "{events:?}");
+        }
+    }
+
+    #[test]
+    fn concurrent_host_interruption_preserves_the_winning_terminal() {
+        for other in [
+            ActorExitKind::Completed,
+            ActorExitKind::Cancelled,
+            ActorExitKind::Failed,
+        ] {
+            let retained = RetainedActorExit::new();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let mut workers = Vec::new();
+            for kind in [other, ActorExitKind::Interrupted] {
+                let owner = retained.clone();
+                let barrier = Arc::clone(&barrier);
+                workers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    let terminal = ActorTerminal::new(kind, "same rendered reason");
+                    (terminal.clone(), owner.publish(terminal))
+                }));
+            }
+            barrier.wait();
+            let outcomes = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|(_, outcome)| outcome.is_ok())
+                    .count(),
+                1
+            );
+            let winner = outcomes
+                .iter()
+                .find(|(_, outcome)| outcome.is_ok())
+                .unwrap()
+                .0
+                .clone();
+            assert_eq!(retained.get(), Some(winner.clone()));
+            let loser = outcomes
+                .iter()
+                .find(|(_, outcome)| outcome.is_err())
+                .unwrap();
+            assert_eq!(loser.1.as_ref().unwrap_err().existing, winner);
+            assert!(retained
+                .publish(ActorTerminal::new(ActorExitKind::Interrupted, "late stop"))
+                .is_err());
+            assert_eq!(retained.get(), Some(winner));
         }
     }
 

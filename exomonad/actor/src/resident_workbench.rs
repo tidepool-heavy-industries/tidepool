@@ -10115,6 +10115,7 @@ where
             crate::ActorExitKind::Completed => 0,
             crate::ActorExitKind::Failed => 1,
             crate::ActorExitKind::Cancelled => 2,
+            crate::ActorExitKind::Interrupted => 3,
         };
         let mut outcome = self
             .access
@@ -11421,6 +11422,7 @@ where
                 let failure = match terminal.kind {
                     crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
                     crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Interrupted => ExitObservationFailure::Unavailable(terminal.summary),
                     crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
                 };
                 session.resume_classified(hole, failure, settlement).map_err(classify_resumption)
@@ -11480,6 +11482,7 @@ where
                 let failure = match terminal.kind {
                     crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
                     crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Interrupted => ExitObservationFailure::Unavailable(terminal.summary),
                     crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
                 };
                 session.resume_classified(hole, Some(failure), settlement).map_err(classify_resumption)

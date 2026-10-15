@@ -224,6 +224,13 @@ impl SourceLayer {
     /// Materialize the initial revision from the run's own frozen capture, unless a
     /// revision is already active. Idempotent, and the only way `active` comes
     /// into existence: every compile in the run needs it to resolve.
+    /// Reopen the source published before durable host launch admission.
+    /// Missing publication cannot authorize a new capture during host recovery.
+    pub(crate) fn reopen_active(&self) -> Result<SourceRevision> {
+        self.read_active()?
+            .ok_or_else(|| "admitted run has no accepted source publication".into())
+    }
+
     pub(crate) fn ensure_active(&self, frozen: &FrozenWorkspace) -> Result<SourceRevision> {
         if let Some(revision) = frozen.prepared_source_revision()? {
             if self.read_active()?.is_none() {
@@ -863,6 +870,9 @@ impl ExomonadSourceReload {
         owner: SourceRootOwner,
     ) -> Result<Self> {
         owner.validate(&run_root)?;
+        if matches!(&owner, SourceRootOwner::Host(_)) {
+            SourceLayer::new(&run_root).reopen_active()?;
+        }
         let run_root = std::fs::canonicalize(run_root)?;
         let workspace_directory =
             tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)?.child("workspace")?;
@@ -1128,7 +1138,14 @@ impl ExomonadSourceReload {
         &self,
         helper_branch: &str,
     ) -> Result<exomonad_actor::CheckpointSourceLayer> {
-        self.layer.ensure_active(&self.frozen)?;
+        match self.source_owner.as_ref() {
+            SourceRootOwner::Host(_) => {
+                self.layer.reopen_active()?;
+            }
+            _ => {
+                self.layer.ensure_active(&self.frozen)?;
+            }
+        }
         let helper = self
             .helper_layer(helper_branch)
             .checkpoint_revision(self.frozen.identity())?;
@@ -1725,6 +1742,24 @@ mod tests {
                 completed,
             );
         }
+    }
+
+    #[test]
+    fn reopening_accepted_source_never_recaptures_changed_draft_or_missing_publication() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = SourceLayer::new(run.path());
+        assert!(layer.reopen_active().is_err());
+        let accepted = layer.ensure_active(&frozen).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "invalid changed draft",
+        )
+        .unwrap();
+        assert_eq!(layer.reopen_active().unwrap().identity, accepted.identity);
+        std::fs::remove_file(layer.active_link()).unwrap();
+        assert!(layer.reopen_active().is_err());
+        assert!(!layer.active_link().exists());
     }
 
     #[test]

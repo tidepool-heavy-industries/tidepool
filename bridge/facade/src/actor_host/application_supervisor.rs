@@ -420,7 +420,9 @@ pub(super) async fn run_interactive_applications(
                     Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                         harness::server::HostActorLifecycle::Retired
                     }
-                    Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
+                    Some(ActorExitKind::Failed | ActorExitKind::Interrupted) | None => {
+                        harness::server::HostActorLifecycle::Lost
+                    }
                 };
                 embedded_lifecycle_tx.publish(actor, lifecycle);
                 if let Some(binding) = embedded_binding(&application_owners, actor) {
@@ -1150,10 +1152,13 @@ async fn retire_interactive_application(
     if let Some(binding) = binding {
         schedule_embedded_notification_drain(actor, binding, notifications);
     }
-    let lifecycle = if terminal.kind == ActorExitKind::Failed {
-        harness::server::HostActorLifecycle::Lost
-    } else {
-        harness::server::HostActorLifecycle::Retired
+    let lifecycle = match terminal.kind {
+        ActorExitKind::Failed | ActorExitKind::Interrupted => {
+            harness::server::HostActorLifecycle::Lost
+        }
+        ActorExitKind::Completed | ActorExitKind::Cancelled => {
+            harness::server::HostActorLifecycle::Retired
+        }
     };
     embedded_lifecycle_tx.publish(actor, lifecycle);
     if let Some(resources) = command_resources {

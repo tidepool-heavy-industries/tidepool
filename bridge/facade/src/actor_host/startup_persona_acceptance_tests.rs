@@ -169,6 +169,9 @@ pub(super) fn configure_persona(
         )
         .unwrap(),
     );
+    crate::exomonad::source::SourceLayer::new(config.run_directory.path())
+        .ensure_active(config.workspace_inputs.as_ref().unwrap())
+        .unwrap();
     let memory = authored.join("state/memory");
     std::fs::create_dir_all(&memory).unwrap();
     for (name, body) in PERSONA_MEMORIES {

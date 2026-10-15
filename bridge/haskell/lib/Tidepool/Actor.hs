@@ -208,6 +208,7 @@ replaceActorWithSite site (ActorRef previousId previousIncarnation) definition@A
 decodeShutdownReason :: Int -> ShutdownReason
 decodeShutdownReason 0 = ShutdownCompleted
 decodeShutdownReason 1 = ShutdownFailed
+decodeShutdownReason 3 = ShutdownInterrupted
 decodeShutdownReason _ = ShutdownCancelled
 
 raiseKernel :: Eff effs a -> Eff (ActorKernel ': effs) a

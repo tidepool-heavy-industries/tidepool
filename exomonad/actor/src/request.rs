@@ -2965,7 +2965,9 @@ impl RequestRegistry {
                     }
                     if record.owner_state == OwnerState::Observing {
                         record.owner_state = OwnerState::Unavailable(match terminal.kind {
-                            ActorExitKind::Completed => ResponseFailure::TargetUnavailable,
+                            ActorExitKind::Completed | ActorExitKind::Interrupted => {
+                                ResponseFailure::TargetUnavailable
+                            }
                             ActorExitKind::Failed => {
                                 ResponseFailure::TargetFailed(terminal.summary.clone())
                             }
@@ -5379,6 +5381,51 @@ mod tests {
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Unavailable(
                 ResponseFailure::TargetFailed("boom".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn target_interruption_settles_unavailable_without_replacing_prior_settlement() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        let (watch, initial) = registry.register_watch(owner, vec![request]).unwrap();
+        assert!(initial.is_empty());
+        let interrupted = ActorTerminal {
+            kind: ActorExitKind::Interrupted,
+            summary: "host stopped".into(),
+            diagnostic: None,
+        };
+        let notifications = registry.actor_stopped(target, &interrupted);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        let failed = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "later observation".into(),
+            diagnostic: None,
+        };
+        assert!(registry.actor_stopped(target, &failed).is_empty());
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::TargetUnavailable
+            ))
+        );
+
+        let failed_target = actor(3);
+        let failed_request = registry.reserve(owner, failed_target);
+        registry
+            .mark_queued(owner, failed_target, failed_request)
+            .unwrap();
+        registry.actor_stopped(failed_target, &failed);
+        registry.actor_stopped(failed_target, &interrupted);
+        assert_eq!(
+            registry.observe_response(owner, failed_request),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::TargetFailed("later observation".into())
             ))
         );
     }

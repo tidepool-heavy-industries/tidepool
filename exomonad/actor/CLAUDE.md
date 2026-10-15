@@ -76,7 +76,7 @@ while the supervisor continues. Qualifying other startup effects needs execution
 evidence through their actual services; effect membership alone is no support
 claim. Root has no caller seed; only fresh child admission issues one, so legacy
 absent-hook caller publication has no root successor to repeat it.
-These startup events use actor-journal version 9. Version 8 runs remain on their
+These startup events and host interruption exits use actor-journal version 10. Older runs remain on their
 existing binaries; the new reader refuses them without mutation. This change
 does not supply a migration or authorize restarting a live run.
 

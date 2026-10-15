@@ -13,9 +13,9 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{JsonlReadError, SyncPolicy, TailPolicy};
 
-// V9 retains authored initial-context preparation and publication facts.
+// V10 distinguishes resumable host interruption from actor cancellation.
 // Earlier runs require their matching binaries.
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -2397,7 +2397,7 @@ mod tests {
     async fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        for version in [1, 2, 3, 4, 5, 6, 7, 8] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
@@ -3865,7 +3865,7 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(32))]
         #[test]
-        fn journal_histories_match_independent_lifecycle_model(steps in proptest::collection::vec(0u8..7, 1..48)) {
+        fn journal_histories_match_independent_lifecycle_model(steps in proptest::collection::vec(0u8..7, 1..48), terminal_kind in 0u8..4) {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             runtime.block_on(async {
                 let directory = Arc::new(tempfile::tempdir().unwrap());
@@ -3873,7 +3873,13 @@ mod tests {
                 let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone()).await.unwrap();
                 let actor = ActorRef::first(ActorId(53));
                 let binding = directory.path().join("binding.json");
-                let terminal = crate::ActorTerminal::new(ActorExitKind::Completed, "done");
+                let kind = match terminal_kind {
+                    0 => ActorExitKind::Completed,
+                    1 => ActorExitKind::Failed,
+                    2 => ActorExitKind::Cancelled,
+                    _ => ActorExitKind::Interrupted,
+                };
+                let terminal = crate::ActorTerminal::new(kind, "same terminal text");
                 let (mut admitted, mut prepared, mut bound, mut retired) = (false, false, false, false);
                 let mut durable_events = 1;
                 let mut alternate_binding = false;

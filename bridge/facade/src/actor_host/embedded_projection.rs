@@ -201,7 +201,9 @@ impl EmbeddedProjection {
                 Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                     HostActorLifecycle::Retired
                 }
-                Some(ActorExitKind::Failed) => HostActorLifecycle::Lost,
+                Some(ActorExitKind::Failed | ActorExitKind::Interrupted) => {
+                    HostActorLifecycle::Lost
+                }
                 None => states.get(&node.actor).copied().unwrap_or_else(|| {
                     if matches!(
                         node.workbench,
@@ -670,7 +672,11 @@ mod tests {
 
     #[test]
     fn terminal_head_is_retained_and_observed_only_once() {
-        for kind in [ActorExitKind::Cancelled, ActorExitKind::Failed] {
+        for kind in [
+            ActorExitKind::Cancelled,
+            ActorExitKind::Failed,
+            ActorExitKind::Interrupted,
+        ] {
             let mut projection = EmbeddedProjection::default();
             let identity = HostIdentity {
                 run: "run".into(),
@@ -720,10 +726,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(actors[0].model_head_request.as_deref(), Some("final-head"));
-            assert!(matches!(
+            assert_eq!(
                 actors[0].lifecycle,
-                HostActorLifecycle::Retired | HostActorLifecycle::Lost
-            ));
+                match kind {
+                    ActorExitKind::Cancelled => HostActorLifecycle::Retired,
+                    ActorExitKind::Failed | ActorExitKind::Interrupted => HostActorLifecycle::Lost,
+                    ActorExitKind::Completed => unreachable!(),
+                }
+            );
             // Subsequent publications do no Store query for the immutable terminal head.
             for _ in 0..130 {
                 let (actors, _) = projection

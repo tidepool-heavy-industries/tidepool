@@ -55,10 +55,13 @@ impl HostRunLock {
             .open(run_root.join("host-incarnation.owner.lock"))?;
         match file.try_lock() {
             Ok(()) => Ok(Self(Some(file))),
-            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
-                "another Exomonad host or maintenance operation already owns {}",
-                run_root.display()
-            ))),
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "another Exomonad host or maintenance operation already owns {}",
+                    run_root.display()
+                ),
+            )),
             Err(std::fs::TryLockError::Error(error)) => Err(error),
         }
     }
@@ -117,6 +120,29 @@ impl tidepool_runtime::session::RecoveryRunAuthority for HostIncarnationLease {
 }
 
 impl HostIncarnationLease {
+    /// Read the epoch owner's durable issuance fact without consulting run status.
+    pub(crate) fn last_issued(run_root: &Path) -> io::Result<Option<Incarnation>> {
+        read_previous(&run_root.join("host-incarnation.json"))
+    }
+
+    /// Observe physical exclusion without allocating a new host epoch.
+    pub(crate) fn verify_released(run_root: &Path) -> io::Result<()> {
+        match HostRunLock::existing(run_root) {
+            Ok(lock) => {
+                drop(lock);
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(run_root.join("host-incarnation.json")) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(inaccessible) => Err(inaccessible),
+                    Ok(_) => Err(io::Error::other("issued host epoch lost its owner lock")),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn into_boot_registration(self) -> (Arc<Self>, HostBootRegistration) {
         let lease = Arc::new(self);
         let registration = HostBootRegistration(Arc::clone(&lease));
@@ -129,7 +155,7 @@ impl HostIncarnationLease {
         let owner_lock = HostRunLock::claim(run_root, true)?;
 
         let state_path = run_root.join("host-incarnation.json");
-        let previous = read_previous(&state_path)?;
+        let previous = read_previous(&state_path)?.map_or(0, |incarnation| incarnation.0);
         let next = previous.checked_add(1).ok_or_else(|| {
             io::Error::other(format!(
                 "Exomonad host incarnation exhausted at {}",
@@ -165,10 +191,10 @@ impl HostIncarnationLease {
     }
 }
 
-fn read_previous(path: &Path) -> io::Result<u64> {
+fn read_previous(path: &Path) -> io::Result<Option<Incarnation>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     let state: IncarnationState = serde_json::from_slice(&bytes)
@@ -182,7 +208,13 @@ fn read_previous(path: &Path) -> io::Result<u64> {
             ),
         ));
     }
-    Ok(state.last_incarnation)
+    if state.last_incarnation == 0 {
+        return Err(invalid_state(
+            path,
+            "issued host incarnation must be nonzero",
+        ));
+    }
+    Ok(Some(Incarnation(state.last_incarnation)))
 }
 
 fn invalid_state(path: &Path, detail: impl std::fmt::Display) -> io::Error {
@@ -250,6 +282,57 @@ mod tests {
         drop(lease);
         assert_eq!(*receipt.borrow(), HostLeaseRelease::Released);
         competing.try_lock().unwrap();
+    }
+
+    #[test]
+    fn last_issued_preserves_absence_and_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            HostIncarnationLease::last_issued(root.path()).unwrap(),
+            None
+        );
+        let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap();
+        drop(HostIncarnationLease::claim(&directory).unwrap());
+        assert_eq!(
+            HostIncarnationLease::last_issued(root.path()).unwrap(),
+            Some(Incarnation(1))
+        );
+        fs::write(root.path().join("host-incarnation.json"), b"not-json").unwrap();
+        assert!(HostIncarnationLease::last_issued(root.path()).is_err());
+    }
+
+    #[test]
+    fn release_probe_distinguishes_never_started_from_missing_issued_lock() {
+        let root = tempfile::tempdir().unwrap();
+        HostIncarnationLease::verify_released(root.path()).unwrap();
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap();
+        drop(HostIncarnationLease::claim(&directory).unwrap());
+        fs::remove_file(root.path().join("host-incarnation.owner.lock")).unwrap();
+        assert!(HostIncarnationLease::verify_released(root.path()).is_err());
+        assert!(!root.path().join("host-incarnation.owner.lock").exists());
+    }
+
+    #[test]
+    fn release_probe_does_not_allocate_an_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap();
+        let first = HostIncarnationLease::claim(&directory).unwrap();
+        assert_eq!(
+            HostIncarnationLease::verify_released(root.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(first);
+        HostIncarnationLease::verify_released(root.path()).unwrap();
+        HostIncarnationLease::verify_released(root.path()).unwrap();
+        assert_eq!(
+            HostIncarnationLease::claim(&directory)
+                .unwrap()
+                .incarnation(),
+            Incarnation(2)
+        );
     }
 
     #[test]

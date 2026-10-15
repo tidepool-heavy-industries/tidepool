@@ -486,78 +486,33 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
 }
 
 #[tokio::test]
-async fn later_host_before_root_admission_creates_missing_journals() {
-    let directory = Arc::new(tempfile::tempdir().unwrap());
-    let binding = directory.path().join("root-binding.json");
-    let actors = directory.path().join("actor-lifecycle.v2.jsonl");
-    let run = directory.path().join("run-journal.jsonl");
-    let incarnation = exomonad_actor::Incarnation(2);
-
-    assert_eq!(
-        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
-        JournalOpenMode::Create
+async fn launch_admission_issues_empty_journals_and_missing_history_stays_missing() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap();
+    admit_run_journals(&directory, workspace.path(), "issued-run")
+        .await
+        .unwrap();
+    let actor_path = root.path().join("actor-lifecycle.v2.jsonl");
+    let run_path = crate::exomonad::exomonad_journal_path(workspace.path(), "issued-run");
+    assert!(
+        exomonad_actor::ActorRecoveryJournal::read_observed(&actor_path)
+            .unwrap()
+            .is_empty()
     );
-    let actor_journal = exomonad_actor::ActorRecoveryJournal::open(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "actor-lifecycle.v2.jsonl",
-        directory.clone(),
-    )
-    .await
-    .unwrap();
-    assert!(actor_journal.records().await.unwrap().is_empty());
-    assert_eq!(
-        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
-        JournalOpenMode::Create
-    );
-    tidepool_handlers::SegmentPath::create_exclusive(run.clone()).unwrap();
-
-    assert_eq!(
-        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
-        JournalOpenMode::Resume
-    );
-    assert_eq!(
-        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
-        JournalOpenMode::Resume
-    );
-}
-
-#[tokio::test]
-async fn later_host_requires_missing_journals_when_prior_evidence_exists() {
-    let directory = Arc::new(tempfile::tempdir().unwrap());
-    let binding = directory.path().join("root-binding.json");
-    let actors = directory.path().join("actor-lifecycle.v2.jsonl");
-    let run = directory.path().join("run-journal.jsonl");
-    let incarnation = exomonad_actor::Incarnation(2);
-
-    std::fs::write(&binding, b"prior root was bound").unwrap();
-    assert_eq!(
-        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
-        JournalOpenMode::Resume
-    );
+    assert!(tidepool_handlers::SegmentPath::open_existing(run_path.clone()).is_ok());
+    std::fs::remove_file(&actor_path).unwrap();
     assert!(exomonad_actor::ActorRecoveryJournal::open_existing(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        &directory,
         "actor-lifecycle.v2.jsonl",
-        directory.clone(),
+        Arc::new(directory.clone())
     )
     .await
     .is_err());
-    assert_eq!(
-        run_journal_mode(incarnation, &binding, &run, true).unwrap(),
-        JournalOpenMode::Resume
-    );
-    assert!(tidepool_handlers::SegmentPath::open_existing(run.clone()).is_err());
-
-    std::fs::remove_file(&binding).unwrap();
-    std::fs::write(&run, b"prior run journal").unwrap();
-    assert_eq!(
-        actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
-        JournalOpenMode::Resume
-    );
-    std::fs::remove_file(&run).unwrap();
-    assert_eq!(
-        run_journal_mode(incarnation, &binding, &run, false).unwrap(),
-        JournalOpenMode::Resume
-    );
+    assert!(!actor_path.exists());
+    std::fs::remove_file(&run_path).unwrap();
+    assert!(tidepool_handlers::SegmentPath::open_existing(run_path.clone()).is_err());
+    assert!(!run_path.exists());
 }
 
 #[test]
@@ -1280,6 +1235,91 @@ fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
 }
 
 #[test]
+fn latest_root_resumability_preserves_terminal_distinctions() {
+    let first = ActorRef::first(exomonad_actor::ActorId(7));
+    let latest_actor = ActorRef {
+        id: first.id,
+        incarnation: exomonad_actor::Incarnation(2),
+    };
+    for bound in [false, true] {
+        for kind in [
+            ActorExitKind::Completed,
+            ActorExitKind::Cancelled,
+            ActorExitKind::Failed,
+            ActorExitKind::Interrupted,
+        ] {
+            let mut latest = durable_root(latest_actor);
+            if !bound {
+                let application = latest.application.as_mut().unwrap();
+                let conversation = application.conversation.take().unwrap();
+                application.intended_conversation = Some(conversation.clone());
+                latest.startup = Some(exomonad_actor::RootStartupIntent {
+                    bootstrap_identity: "bootstrap".into(),
+                    predecessor: Some(first),
+                    manifest_predecessor: None,
+                    manifest: None,
+                    store_predecessor: None,
+                    binding_path: application.binding_path.clone(),
+                    accepted_source: application.accepted_source.clone(),
+                    conversation,
+                });
+            }
+            latest.terminal = Some(exomonad_actor::DurableActorTerminal::new(
+                kind,
+                "same rendered reason",
+            ));
+            let observed =
+                durable_root_identity(&[durable_root(first), latest], Some("source-revision"))
+                    .unwrap();
+            assert_eq!(
+                observed,
+                (kind == ActorExitKind::Interrupted).then_some((
+                    latest_actor,
+                    ActorRef {
+                        id: first.id,
+                        incarnation: exomonad_actor::Incarnation(3)
+                    }
+                )),
+                "bound={bound} kind={kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn application_retirement_keeps_first_terminal_cleanup_policy() {
+    for first in [
+        ActorExitKind::Completed,
+        ActorExitKind::Cancelled,
+        ActorExitKind::Failed,
+        ActorExitKind::Interrupted,
+    ] {
+        for late in [
+            ActorExitKind::Completed,
+            ActorExitKind::Cancelled,
+            ActorExitKind::Failed,
+            ActorExitKind::Interrupted,
+        ] {
+            let mut owner = InteractiveApplicationOwner::embedded();
+            let terminal = ActorTerminal::new(first, "winning terminal");
+            owner.retired(terminal.clone());
+            owner.retired(ActorTerminal::new(late, "late host cleanup"));
+            assert_eq!(owner.terminal, Some(terminal));
+            assert!(matches!(
+                (first, owner.native_retirement),
+                (ActorExitKind::Failed, NativeRetirement::Preserve)
+                    | (
+                        ActorExitKind::Completed
+                            | ActorExitKind::Cancelled
+                            | ActorExitKind::Interrupted,
+                        NativeRetirement::Terminate
+                    )
+            ));
+        }
+    }
+}
+
+#[test]
 fn crash_before_root_admission_has_no_identity_to_adopt() {
     let records = Vec::new();
     assert!(!contains_durable_root_admission(&records));
@@ -1287,136 +1327,6 @@ fn crash_before_root_admission_has_no_identity_to_adopt() {
         durable_root_identity(&records, Some("source-revision")).unwrap(),
         None
     );
-}
-
-#[test]
-fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {
-    let run = tempfile::tempdir().unwrap();
-    let root = run.path().join("1-1");
-    let child = run.path().join("2-1");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&child).unwrap();
-    tidepool_atomic_write::write_durable(
-        &root.join(PROCESS_RECOVERY_RECORD),
-        &serde_json::to_vec(&ProcessRecoveryRecord {
-            version: 1,
-            launch_id: "root-launch".into(),
-            recovery_secret: "retired".into(),
-            supervisor_socket: root.join("supervisor.sock"),
-            socket_root: root.join("sockets"),
-            retired: true,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    std::fs::write(child.join(PROCESS_RECOVERY_RECORD), b"not-json").unwrap();
-
-    let report = stop_predecessor_processes(run.path()).unwrap();
-    assert!(report.root_available());
-    assert_eq!(report.unavailable_names(), vec!["2-1"]);
-}
-
-#[test]
-fn recovery_retries_socket_cleanup_after_a_durable_retirement_marker() {
-    let run = tempfile::tempdir().unwrap();
-    let actor = run.path().join("1-1");
-    let socket_root = actor.join("sockets");
-    std::fs::create_dir_all(&socket_root).unwrap();
-    std::fs::write(socket_root.join("stale.sock"), b"stale").unwrap();
-    tidepool_atomic_write::write_durable(
-        &actor.join(PROCESS_RECOVERY_RECORD),
-        &serde_json::to_vec(&ProcessRecoveryRecord {
-            version: 1,
-            launch_id: "root-launch".into(),
-            recovery_secret: "retired".into(),
-            supervisor_socket: socket_root.join("supervisor.sock"),
-            socket_root: socket_root.clone(),
-            retired: true,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    let report = stop_predecessor_processes(run.path()).unwrap();
-
-    assert_eq!(report.stopped, 0, "retired evidence must not stop twice");
-    assert!(report.root_available());
-    assert!(!socket_root.exists());
-}
-
-#[test]
-fn recovery_fails_closed_when_root_process_evidence_is_missing() {
-    let run = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(run.path().join("1-1")).unwrap();
-    let report = stop_predecessor_processes(run.path()).unwrap();
-    assert!(!report.root_available());
-    assert_eq!(report.unavailable_names(), vec!["1-1"]);
-}
-
-#[test]
-fn recovery_treats_a_numeric_root_directory_with_leading_zero_as_root() {
-    let run = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(run.path().join("01-2")).unwrap();
-    std::fs::create_dir_all(run.path().join("notes-2")).unwrap();
-
-    let report = stop_predecessor_processes(run.path()).unwrap();
-    assert!(!report.root_available());
-    assert_eq!(report.unavailable_names(), vec!["01-2"]);
-}
-
-#[test]
-fn recovery_reports_a_stopped_child_until_its_actor_state_can_be_rebuilt() {
-    let run = tempfile::tempdir().unwrap();
-    let root = run.path().join("1-1");
-    let child = run.path().join("2-1");
-    let socket_root = child.join("sockets");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&socket_root).unwrap();
-    tidepool_atomic_write::write_durable(
-        &root.join(PROCESS_RECOVERY_RECORD),
-        &serde_json::to_vec(&ProcessRecoveryRecord {
-            version: 1,
-            launch_id: "root-launch".into(),
-            recovery_secret: "retired".into(),
-            supervisor_socket: root.join("supervisor.sock"),
-            socket_root: root.join("sockets"),
-            retired: true,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let supervisor_socket = socket_root.join("supervisor.sock");
-    tidepool_atomic_write::write_durable(
-        &child.join(PROCESS_RECOVERY_RECORD),
-        &serde_json::to_vec(&ProcessRecoveryRecord {
-            version: 1,
-            launch_id: "child-launch".into(),
-            recovery_secret: "secret".into(),
-            supervisor_socket: supervisor_socket.clone(),
-            socket_root: socket_root.clone(),
-            retired: false,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    tidepool_atomic_write::write_durable(
-        &socket_root.join(exomonad_node::PROCESS_SUPERVISOR_CHECKPOINT),
-        &serde_json::to_vec(&ProcessRecoveryCheckpoint {
-            version: exomonad_node::PROCESS_SUPERVISOR_VERSION,
-            launch_id: "child-launch".into(),
-            observation: exomonad_node::ProcessSupervisorObservation::ProcessStopped,
-            operation_pending: false,
-            error: None,
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    let report = stop_predecessor_processes(run.path()).unwrap();
-    assert!(report.root_available());
-    assert_eq!(report.stopped, 1);
-    assert_eq!(report.unavailable_names(), vec!["2-1"]);
-    assert!(!socket_root.exists());
 }
 
 #[test]

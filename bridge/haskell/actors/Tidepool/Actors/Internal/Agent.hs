@@ -92,6 +92,7 @@ data AgentState
   | AgentStopped
   | AgentFailed Text
   | AgentCancelled Text
+  | AgentInterrupted Text
   | AgentUnavailable
   deriving (Show, Eq)
 
@@ -131,6 +132,7 @@ rosterAgentState entry = case rosterState entry of
   RosterStopped -> AgentStopped
   RosterFailed summary -> AgentFailed summary
   RosterCancelled summary -> AgentCancelled summary
+  RosterInterrupted summary -> AgentInterrupted summary
 
 -- | What a supervisor reads when it asks who is out there: identity, what
 -- model it asked for and what answered, whether the actor is running, what it

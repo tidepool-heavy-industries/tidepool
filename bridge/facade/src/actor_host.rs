@@ -620,6 +620,7 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
+    pub run_id: String,
     pub systemd_slice: Option<exomonad_node::systemd_slice::SystemdSlice>,
     pub source_exclude: Vec<String>,
     pub source_import: crate::exomonad::SourceImportPolicy,
@@ -640,206 +641,6 @@ pub struct ActorHostConfig {
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
     pub jev: Option<exomonad_actor::JevBackendHandle>,
-}
-
-const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
-// The local forest admits its root first, before any child actor identities.
-const ROOT_ACTOR_ID: exomonad_actor::ActorId = exomonad_actor::ActorId(1);
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessRecoveryRecord {
-    version: u32,
-    launch_id: String,
-    recovery_secret: String,
-    supervisor_socket: PathBuf,
-    socket_root: PathBuf,
-    retired: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessRecoveryCheckpoint {
-    version: u32,
-    launch_id: String,
-    observation: exomonad_node::ProcessSupervisorObservation,
-    operation_pending: bool,
-    error: Option<String>,
-}
-
-pub(crate) struct PredecessorRecovery {
-    pub(crate) stopped: usize,
-    unavailable: Vec<UnavailablePredecessor>,
-}
-
-struct UnavailablePredecessor {
-    actor: ActorRef,
-    directory: String,
-}
-
-impl PredecessorRecovery {
-    pub(crate) fn root_available(&self) -> bool {
-        !self
-            .unavailable
-            .iter()
-            .any(|entry| entry.actor.id == ROOT_ACTOR_ID)
-    }
-
-    pub(crate) fn unavailable_names(&self) -> Vec<String> {
-        self.unavailable
-            .iter()
-            .map(|entry| entry.directory.clone())
-            .collect()
-    }
-
-    fn mark_unavailable(&mut self, actor: ActorRef, directory: &str) {
-        self.unavailable.push(UnavailablePredecessor {
-            actor,
-            directory: directory.to_owned(),
-        });
-    }
-}
-
-fn actor_ref_from_directory(name: &str) -> Option<ActorRef> {
-    let (id, incarnation) = name.split_once('-')?;
-    Some(ActorRef {
-        id: exomonad_actor::ActorId(id.parse().ok()?),
-        incarnation: exomonad_actor::Incarnation(incarnation.parse().ok()?),
-    })
-}
-
-/// Stop each predecessor whose exact supervisor identity remains provable.
-/// Unverifiable children remain unavailable without preventing independent
-/// actors from recovering. Composition separately rejects an unverifiable root.
-pub(crate) fn stop_predecessor_processes(
-    run_root: &Path,
-) -> Result<PredecessorRecovery, std::io::Error> {
-    let mut report = PredecessorRecovery {
-        stopped: 0,
-        unavailable: Vec::new(),
-    };
-    for actor in std::fs::read_dir(run_root)? {
-        let actor = actor?;
-        if !actor.file_type()?.is_dir() {
-            continue;
-        }
-        let actor_name = actor.file_name().to_string_lossy().into_owned();
-        let Some(actor_ref) = actor_ref_from_directory(&actor_name) else {
-            continue;
-        };
-        let record_path = actor.path().join(PROCESS_RECOVERY_RECORD);
-        let bytes = match std::fs::read(&record_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                report.mark_unavailable(actor_ref, &actor_name);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let mut record: ProcessRecoveryRecord = match serde_json::from_slice(&bytes) {
-            Ok(record) => record,
-            Err(error) => {
-                tracing::warn!(actor = %actor_name, %error, "corrupt predecessor evidence");
-                report.mark_unavailable(actor_ref, &actor_name);
-                continue;
-            }
-        };
-        if record.version != 1 {
-            report.mark_unavailable(actor_ref, &actor_name);
-            continue;
-        }
-        if record.retired {
-            // The durable marker is written before deleting this directory.
-            // A previous host can die between those two operations, so a
-            // retired record also authorizes retrying only the idempotent
-            // socket cleanup. It does not authorize another process stop.
-            remove_predecessor_socket_root(&record.socket_root)?;
-            continue;
-        }
-        let terminal = (|| -> Result<_, std::io::Error> {
-            if record.supervisor_socket.exists() {
-                let (mut recovery, _) = exomonad_node::ProcessSupervisorRecovery::recover(
-                    record.supervisor_socket.clone(),
-                    record.launch_id.clone(),
-                    record.recovery_secret.clone(),
-                    PROCESS_OPERATION_TIMEOUT,
-                )
-                .map_err(std::io::Error::other)?;
-                let observation = recovery
-                    .stop(PROCESS_OPERATION_TIMEOUT)
-                    .map_err(std::io::Error::other)?;
-                recovery
-                    .finalize(PROCESS_OPERATION_TIMEOUT)
-                    .map_err(std::io::Error::other)?;
-                Ok(observation)
-            } else {
-                let checkpoint_path = record
-                    .supervisor_socket
-                    .parent()
-                    .ok_or_else(|| std::io::Error::other("supervisor socket has no parent"))?
-                    .join(exomonad_node::PROCESS_SUPERVISOR_CHECKPOINT);
-                let checkpoint: ProcessRecoveryCheckpoint =
-                    serde_json::from_slice(&std::fs::read(&checkpoint_path).map_err(|error| {
-                        std::io::Error::other(format!(
-                            "predecessor process evidence unavailable at {}: {error}",
-                            checkpoint_path.display()
-                        ))
-                    })?)
-                    .map_err(std::io::Error::other)?;
-                if checkpoint.version != exomonad_node::PROCESS_SUPERVISOR_VERSION
-                    || checkpoint.launch_id != record.launch_id
-                    || checkpoint.operation_pending
-                    || checkpoint.error.is_some()
-                {
-                    return Err(std::io::Error::other(format!(
-                        "predecessor process evidence is unresolved at {}",
-                        checkpoint_path.display()
-                    )));
-                }
-                Ok(checkpoint.observation)
-            }
-        })();
-        let terminal = match terminal {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                tracing::warn!(actor = %actor_name, %error, "predecessor actor remains unavailable");
-                report.mark_unavailable(actor_ref, &actor_name);
-                continue;
-            }
-        };
-        if !matches!(
-            terminal,
-            exomonad_node::ProcessSupervisorObservation::ProcessStopped
-                | exomonad_node::ProcessSupervisorObservation::NotSpawned
-        ) {
-            report.mark_unavailable(actor_ref, &actor_name);
-            continue;
-        }
-        record.retired = true;
-        tidepool_atomic_write::write_durable(
-            &record_path,
-            &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
-        )
-        .map_err(std::io::Error::from)?;
-        remove_predecessor_socket_root(&record.socket_root)?;
-        report.stopped += 1;
-        // Process evidence is enough to prove that replacing the root is safe,
-        // but it does not reconstruct a child actor's lost Haskell state,
-        // lineage, or mailbox. Keep that child visible as unavailable until an
-        // actor-owned durable record can restore those identities.
-        if actor_ref.id != ROOT_ACTOR_ID {
-            report.mark_unavailable(actor_ref, &actor_name);
-        }
-    }
-    Ok(report)
-}
-
-fn remove_predecessor_socket_root(path: &Path) -> Result<(), std::io::Error> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 fn operator_capabilities() -> exomonad_actor::ActorCapabilities {
@@ -954,8 +755,12 @@ fn durable_root_identity(
         .filter(|record| {
             record.application.as_ref().is_some_and(|application| {
                 application.accepted_source.as_deref() == accepted_source
+                    && record
+                        .terminal
+                        .as_ref()
+                        .is_none_or(|terminal| terminal.kind == ActorExitKind::Interrupted)
                     && ((record.startup.is_some() && application.conversation.is_none())
-                        || (record.terminal.is_none() && application.conversation.is_some()))
+                        || application.conversation.is_some())
             })
         })
         .map(|record| {
@@ -1657,9 +1462,14 @@ impl InteractiveApplicationOwner {
     }
 
     fn retired(&mut self, terminal: ActorTerminal) {
+        if self.terminal.is_some() {
+            return;
+        }
         self.native_retirement = match terminal.kind {
             ActorExitKind::Failed => NativeRetirement::Preserve,
-            ActorExitKind::Completed | ActorExitKind::Cancelled => NativeRetirement::Terminate,
+            ActorExitKind::Completed | ActorExitKind::Cancelled | ActorExitKind::Interrupted => {
+                NativeRetirement::Terminate
+            }
         };
         if let Some(custody) = &self.custody {
             custody.actor_stopped(&terminal);
@@ -1997,43 +1807,59 @@ enum StartupRecoveryRefusal {
         "root application lacks its required atomic startup intent; retained state is unavailable"
     )]
     MissingRootStartupIntent,
+    #[error("root startup lost its retained public recovery domain at {path}")]
+    MissingIssuedRecoveryStore { path: PathBuf },
+    #[error("initial context for {actor:?} requires reconciliation after host interruption")]
+    InterruptedInitialContext { actor: ActorRef },
 }
 
-// The host incarnation fences identities even when a predecessor failed before
-// reaching the actor host. Its number alone cannot prove that a journal exists.
-fn actor_journal_mode(
-    incarnation: exomonad_actor::Incarnation,
-    root_binding: &Path,
-    actor_journal: &Path,
-    run_journal: &Path,
-) -> std::io::Result<JournalOpenMode> {
-    if incarnation == exomonad_actor::Incarnation::FIRST {
-        return Ok(JournalOpenMode::Create);
+/// Issue the initially empty journals before publishing durable launch admission.
+/// A host only reopens these owners; it never recreates missing history.
+pub(crate) async fn admit_run_journals(
+    directory: &tidepool_atomic_write::DirectoryAnchor,
+    workspace: &Path,
+    run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let journal = exomonad_actor::ActorRecoveryJournal::open(
+        directory,
+        "actor-lifecycle.v2.jsonl",
+        Arc::new(directory.clone()),
+    )
+    .await?;
+    let mut status = journal.owner_status();
+    drop(journal);
+    tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        loop {
+            match status.borrow_and_update().clone() {
+                exomonad_actor::JournalOwnerStatus::Stopped {
+                    clean: true,
+                    fenced: false,
+                } => return Ok(()),
+                exomonad_actor::JournalOwnerStatus::Stopped { .. } => {
+                    return Err(runtime_error("initial actor journal did not close cleanly"))
+                }
+                _ => {}
+            }
+            status.changed().await.map_err(|_| {
+                runtime_error("initial actor journal owner closed without settlement")
+            })?;
+        }
+    })
+    .await
+    .map_err(|_| runtime_error("initial actor journal close timed out"))??;
+    let actor_path = directory.path().join("actor-lifecycle.v2.jsonl");
+    std::fs::File::open(&actor_path)?.sync_all()?;
+    tidepool_atomic_write::sync_parent_directory(&actor_path)?;
+    let path = crate::exomonad::exomonad_journal_path(workspace, run_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    if actor_journal.try_exists()? || root_binding.try_exists()? || run_journal.try_exists()? {
-        Ok(JournalOpenMode::Resume)
-    } else {
-        Ok(JournalOpenMode::Create)
-    }
-}
-
-// The actor journal is written before root compilation opens the run journal.
-// A restart between those steps may create the latter only if no actor was
-// admitted and no root conversation was bound.
-fn run_journal_mode(
-    incarnation: exomonad_actor::Incarnation,
-    root_binding: &Path,
-    run_journal: &Path,
-    no_prior_actors: bool,
-) -> std::io::Result<JournalOpenMode> {
-    if incarnation == exomonad_actor::Incarnation::FIRST {
-        return Ok(JournalOpenMode::Create);
-    }
-    if run_journal.try_exists()? || root_binding.try_exists()? || !no_prior_actors {
-        Ok(JournalOpenMode::Resume)
-    } else {
-        Ok(JournalOpenMode::Create)
-    }
+    drop(tidepool_handlers::JournalHandler::new(
+        tidepool_handlers::SegmentPath::create_exclusive(path.clone())?,
+    )?);
+    std::fs::File::open(&path)?.sync_all()?;
+    tidepool_atomic_write::sync_parent_directory(&path)?;
+    Ok(())
 }
 
 async fn await_host_lease_release(
@@ -2084,6 +1910,21 @@ pub(crate) async fn run(
         None,
     )
     .await;
+    acknowledge_completed_run_release(outcome, released).await
+}
+
+#[cfg(test)]
+pub(crate) use hosted_test_context::HostTestHooks;
+
+#[cfg(test)]
+pub(crate) async fn run_with_test_hooks(
+    config: ActorHostConfig,
+    readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    host_incarnation: HostIncarnationLease,
+    hooks: HostTestHooks,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let released = host_incarnation.release_observation();
+    let outcome = run_owned(config, readiness, host_incarnation, None, Some(hooks)).await;
     acknowledge_completed_run_release(outcome, released).await
 }
 
@@ -2148,34 +1989,20 @@ async fn run_owned(
         &run_root,
         worktrees.clone(),
         crate::exomonad::source::SourceRootOwner::Host(Arc::clone(&host_incarnation)),
-    )?;
-    let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
-    let run_id = run_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| runtime_error("run root has no UTF-8 run identifier"))?;
-    let run_journal_path = crate::exomonad::exomonad_journal_path(&config.workspace, run_id);
-    let actor_journal_mode = actor_journal_mode(
-        host_incarnation.incarnation(),
-        &config.root_binding_path,
-        &actor_recovery_path,
-        &run_journal_path,
-    )?;
+    )
+    .map_err(|error| crate::exomonad::boot_stage_refusal("accepted source", error))?;
     let (actor_recovery, recovery_boot) = exomonad_actor::ActorRecoveryJournal::open_for_boot(
         &config.run_directory,
         "actor-lifecycle.v2.jsonl",
-        actor_journal_mode != JournalOpenMode::Create,
+        true,
         Box::new(boot_registration),
     )
-    .await?;
-    let prior_actor_records = actor_recovery.records().await?;
-
-    let run_journal_mode = run_journal_mode(
-        host_incarnation.incarnation(),
-        &config.root_binding_path,
-        &run_journal_path,
-        prior_actor_records.is_empty(),
-    )?;
+    .await
+    .map_err(|error| crate::exomonad::boot_stage_refusal("actor journal", error))?;
+    let startup_records = embedded_recovery::observe_boot(&actor_recovery, &run_root)
+        .await
+        .map_err(|error| crate::exomonad::boot_stage_refusal("startup prerequisites", error))?;
+    let run_journal_mode = JournalOpenMode::Resume;
     let embedded_service = embedded_service::EmbeddedService::prepare_owned(
         &run_root,
         settings,
@@ -2205,7 +2032,7 @@ async fn run_owned(
         root_binding_path: config.root_binding_path.clone(),
         manifest: None,
     };
-    let startup_observation = embedded_startup.observe_manifest().await?;
+    let startup_observation = embedded_startup.observe_manifest(startup_records);
     let CompiledRoot {
         source,
         root,
@@ -2268,7 +2095,7 @@ async fn run_owned(
         host_incarnation.incarnation(),
     )
     .await?;
-    let mut forest = forest
+    let forest = forest
         .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
             &config.workspace,
         )?)
@@ -2283,11 +2110,13 @@ async fn run_owned(
     // Production hosts retain the launching machine. Dedicated acceptance
     // campaigns select the existing capability with the owner-produced root.
     #[cfg(test)]
-    if test_hooks.as_ref().is_some_and(|hooks| {
+    let forest = if test_hooks.as_ref().is_some_and(|hooks| {
         hooks.child_machines == hosted_test_context::HostedChildMachines::Dedicated
     }) {
-        forest = forest.with_child_bootstrap_program(Arc::clone(&program));
-    }
+        forest.with_child_bootstrap_program(Arc::clone(&program))
+    } else {
+        forest
+    };
     let _ = &program;
     let forest = with_host_interpreters(
         forest,
@@ -2313,11 +2142,12 @@ async fn run_owned(
     }
     forest.track_resource_release();
     let forest = Arc::new(forest);
-    let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
+    let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())
+        .map_err(|error| crate::exomonad::boot_stage_refusal("root identity", error))?;
     if contains_durable_root_admission(&prior_actor_records) && recovered_root.is_none() {
-        return Err(runtime_error(
+        return Err(crate::exomonad::boot_stage_refusal("root identity", runtime_error(
             "host recovery cannot adopt a root without complete durable actor, source, and conversation evidence",
-        ));
+        )));
     }
 
     forest
@@ -2338,7 +2168,8 @@ async fn run_owned(
             accepted_source.clone(),
             bootstrap_identity.clone(),
         )
-        .await?;
+        .await
+        .map_err(|error| crate::exomonad::boot_stage_refusal("startup ownership", error))?;
     let (root_actor, mut root_task, startup_release) = async {
         Ok::<_, Box<dyn std::error::Error>>(match recovered_root {
             Some((_, identity)) => {
@@ -2748,6 +2579,7 @@ async fn run_owned(
         std::future::pending::<()>().await;
     };
     tokio::pin!(test_stop);
+    let mut host_stopped = false;
     let result: Result<(), Box<dyn std::error::Error>> = async {
         loop {
             tokio::select! {
@@ -2761,8 +2593,8 @@ async fn run_owned(
                 failure = &mut coordination_failure => {
                     break Err(runtime_error(failure.unwrap_or_else(|_| "interactive application coordination owner stopped".into())));
                 }
-                signal = operator_shutdown() => { signal?; break Ok(()); }
-                _ = &mut test_stop => break Ok(()),
+                signal = operator_shutdown() => { signal?; host_stopped = true; break Ok(()); }
+                _ = &mut test_stop => { host_stopped = true; break Ok(()); },
                 result = &mut applications_task => {
                     applications_finished = true;
                     break result.map_err(join_error)?.map_err(runtime_error);
@@ -2783,7 +2615,11 @@ async fn run_owned(
     };
     shutdown.send_replace(ApplicationShutdown::Draining(retirement));
     operator.shutdown().await;
-    let forest_shutdown = forest.shutdown().await;
+    let forest_shutdown = if host_stopped {
+        forest.interrupt_for_host_stop().await
+    } else {
+        forest.shutdown().await
+    };
     #[cfg(test)]
     if let Some(observer) = &shutdown_observer {
         observer.forest_shutdown(&forest_shutdown);
@@ -3722,11 +3558,13 @@ fn compile_root(
         settlement,
     )?;
     if let Some(startup) = embedded_startup {
-        startup.validate_manifest(
-            &library,
-            run_root,
-            active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
-        )?;
+        startup
+            .validate_manifest(
+                &library,
+                run_root,
+                active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
+            )
+            .map_err(|error| crate::exomonad::boot_stage_refusal("startup manifest", error))?;
     }
     let event_registry = WorktreeRegistry::open(worktree_directory, "registry")?;
     let event_journal = EventJournal::open(run_directory, "repo-events.jsonl")?;
@@ -3738,11 +3576,7 @@ fn compile_root(
     );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
-    let run_id = run_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| runtime_error("run root has no UTF-8 run identifier"))?;
-    let journal_path = crate::exomonad::exomonad_journal_path(&config.workspace, run_id);
+    let journal_path = crate::exomonad::exomonad_journal_path(&config.workspace, &config.run_id);
     if let Some(parent) = journal_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3752,9 +3586,11 @@ fn compile_root(
         )?)?
     } else {
         tidepool_handlers::JournalHandler::resuming(
-            tidepool_handlers::SegmentPath::open_existing(journal_path)?,
+            tidepool_handlers::SegmentPath::open_existing(journal_path)
+                .map_err(|error| crate::exomonad::boot_stage_refusal("run journal", error))?,
             host_incarnation.incarnation().0,
-        )?
+        )
+        .map_err(|error| crate::exomonad::boot_stage_refusal("run journal header", error))?
     };
     // The composition root's `ChildSessionFactory`: builds a fresh, idle
     // `ResidentSession` with the root's workspace handlers for a
@@ -3994,6 +3830,7 @@ pub(crate) async fn prepare_workspace_toolsets(
     let runtime_directory =
         tidepool_atomic_write::DirectoryAnchor::open_existing(temporary.path())?;
     let config = ActorHostConfig {
+        run_id: "preparation".into(),
         systemd_slice: Some(authored.launch.systemd_slice),
         source_exclude: authored.launch.source_exclude,
         source_import: authored.launch.source,

@@ -111,6 +111,11 @@ pub fn actor() -> Effect {
                             fields: positional_fields![HsType::Text],
                             doc: &[],
                         },
+                        SumVariant {
+                            ctor: "ActorInterruptedStatus",
+                            fields: positional_fields![HsType::Text],
+                            doc: &[],
+                        },
                     ],
                 },
                 json: JsonInstance::None,

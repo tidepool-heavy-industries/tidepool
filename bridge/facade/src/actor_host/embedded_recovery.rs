@@ -10,16 +10,91 @@ pub(super) struct EmbeddedStartupRecovery {
     pub(super) root_binding_path: PathBuf,
     pub(super) manifest: Option<(ActorRef, exomonad_actor::RootStartupManifestPin)>,
 }
+/// Observe retained prerequisites before opening either mutable recovery store.
+pub(super) async fn observe_boot(
+    journal: &ActorRecoveryJournal,
+    run_root: &Path,
+) -> Result<Vec<exomonad_actor::DurableActorRecord>, Box<dyn std::error::Error>> {
+    let records = journal.validated_records().await?;
+    if let Some(head) = super::latest_durable_root_application(&records)? {
+        if journal
+            .initial_context(head.admission.actor)
+            .await?
+            .is_some_and(|initial| {
+                matches!(
+                    initial.state,
+                    exomonad_actor::InitialContextState::Preparing
+                        | exomonad_actor::InitialContextState::RecoveryRequired { .. }
+                )
+            })
+        {
+            return Err(super::StartupRecoveryRefusal::InterruptedInitialContext {
+                actor: head.admission.actor,
+            }
+            .into());
+        }
+    }
+    let chain = super::root_startup_chain(&records)?;
+    let native_issued = chain.iter().any(|record| {
+        record
+            .startup
+            .as_ref()
+            .is_some_and(|intent| intent.manifest.is_some())
+            || record
+                .application
+                .as_ref()
+                .is_some_and(|application| application.conversation.is_some())
+    });
+    let conversation_issued = chain.iter().any(|record| {
+        record
+            .startup
+            .as_ref()
+            .is_some_and(|intent| intent.store_predecessor.is_some())
+            || record
+                .application
+                .as_ref()
+                .is_some_and(|application| application.conversation.is_some())
+    });
+    for (issued, path) in [
+        (
+            native_issued,
+            super::root_declaration_recovery::store_path(run_root),
+        ),
+        (conversation_issued, run_root.join("harness/store.sqlite")),
+    ] {
+        if !issued {
+            continue;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "issued recovery store is not a regular file",
+                )
+                .into())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(
+                    super::StartupRecoveryRefusal::MissingIssuedRecoveryStore { path }.into(),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(records)
+}
+
 impl EmbeddedStartupRecovery {
-    /// Capture journal evidence before entering the synchronous compiler owner.
-    pub(super) async fn observe_manifest(
+    /// Pair the boot owner's captured journal prefix with its compiler adapter.
+    pub(super) fn observe_manifest(
         &mut self,
-    ) -> Result<ObservedStartupRecovery<'_>, Box<dyn std::error::Error>> {
-        let records = self.journal.validated_records().await?;
-        Ok(ObservedStartupRecovery {
+        records: Vec<exomonad_actor::DurableActorRecord>,
+    ) -> ObservedStartupRecovery<'_> {
+        ObservedStartupRecovery {
             startup: self,
             records,
-        })
+        }
     }
 
     pub(super) async fn intent(

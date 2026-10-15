@@ -63,6 +63,11 @@ pub(crate) fn visit_agent_roster_state(
             crate::ActorExitKind::Cancelled => visit_core(table, visitor, "RosterCancelled", |v| {
                 t.summary.visit(table, v)
             }),
+            crate::ActorExitKind::Interrupted => {
+                visit_core(table, visitor, "RosterInterrupted", |v| {
+                    t.summary.visit(table, v)
+                })
+            }
         },
     }
 }
@@ -203,6 +208,7 @@ impl ToHaskell for LifecycleAnswer {
                     crate::ActorExitKind::Completed => "ActorFinished",
                     crate::ActorExitKind::Failed => "ActorFailed",
                     crate::ActorExitKind::Cancelled => "ActorCancelled",
+                    crate::ActorExitKind::Interrupted => "ActorInterrupted",
                 },
                 |visitor| terminal.summary.visit(table, visitor),
             ),

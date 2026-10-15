@@ -314,6 +314,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
 fn configuration(root: &Path) -> ActorHostConfig {
     let startup_driver = root.join("startup-driver");
     ActorHostConfig {
+        run_id: "run".into(),
         systemd_slice: None,
         source_exclude: vec![],
         source_import: Default::default(),
@@ -754,7 +755,7 @@ async fn refused(root: &Path, phase: &str, process: &mut Process, expected: &str
     .expect("invalid recovery did not refuse before provider readiness");
 }
 
-fn fixture() -> PathBuf {
+async fn fixture() -> PathBuf {
     let artifacts = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -786,6 +787,13 @@ fn fixture() -> PathBuf {
         .unwrap();
     std::fs::write(root.join("secret"), SECRET).unwrap();
     std::fs::write(root.join("auth.json"), "{}").unwrap();
+    let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root)
+        .unwrap()
+        .child("run")
+        .unwrap();
+    admit_run_journals(&directory, &root.join("project"), "run")
+        .await
+        .unwrap();
     retained_root
 }
 
@@ -802,7 +810,7 @@ fn finish_fixture(root: PathBuf) {
 #[tokio::test]
 async fn production_startup_and_cold_successor_preserve_bound_conversation_without_replay() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let mut first = start(root, "first");
     let first_pid = first.0.id();
@@ -902,7 +910,7 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
 async fn production_persona_crash_preserves_edited_context_without_reinitialization() {
     use std::os::unix::process::ExitStatusExt;
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let run = root.join("run");
     let mut original = start(root, "persona-original");
@@ -1130,7 +1138,7 @@ enum InstallerFault {
 async fn coherent_recovery_history(fault: InstallerFault) {
     use std::os::unix::process::ExitStatusExt;
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let run = root.join("run");
     let mut original = start(root, "coherent-original");
@@ -1374,7 +1382,7 @@ pub(super) fn startup_checkpoint(checkpoint: &str) {
 #[tokio::test]
 async fn production_authored_root_failure_is_not_evaluated_before_durable_binding() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     fn copy_actors(source: &Path, target: &Path) {
         std::fs::create_dir_all(target).unwrap();
@@ -1545,7 +1553,7 @@ pub(super) fn uncertain_store_reader() -> Option<rusqlite::Connection> {
 #[tokio::test]
 async fn production_uncertain_store_write_never_activates_visible_binding() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let mut first = start_crashing(root, "before-uncertainty", "store");
     crashed(root, "before-uncertainty", &mut first).await;
@@ -1591,7 +1599,7 @@ async fn production_uncertain_store_write_never_activates_visible_binding() {
 #[tokio::test]
 async fn production_old_startup_journal_is_refused_without_rewriting_evidence() {
     for version in [3, 4] {
-        let retained_root = fixture();
+        let retained_root = fixture().await;
         let root = retained_root.as_path();
         std::fs::create_dir_all(root.join("run")).unwrap();
         let journal = root.join("run/actor-lifecycle.v2.jsonl");
@@ -1614,7 +1622,7 @@ async fn production_old_startup_journal_is_refused_without_rewriting_evidence() 
 #[tokio::test]
 async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_journal() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let mut first = start_crashing(root, "retained-bound-root", "bound");
     crashed(root, "retained-bound-root", &mut first).await;
@@ -1649,13 +1657,17 @@ async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_
     for (retained, bytes) in retained_files {
         assert_eq!(std::fs::read(&retained).unwrap(), bytes);
     }
+    assert!(
+        !run.join("recovery.sqlite").exists(),
+        "refusal must not recreate a known-issued recovery store"
+    );
     finish_fixture(retained_root);
 }
 
 #[tokio::test]
 async fn production_repeated_startup_crashes_roll_split_owners_forward_without_replay() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     for (index, checkpoint) in [
         "admitted", "manifest", "manifest", "store", "manifest", "manifest", "store", "bound",
@@ -1738,7 +1750,7 @@ async fn cell_settled(root: &Path, phase: &str, process: &mut Process) {
 #[tokio::test]
 async fn production_cold_successor_executes_retained_original_declaration_in_fresh_heap() {
     tidepool_testing::eval_harness::require_extract();
-    let retained_root = fixture();
+    let retained_root = fixture().await;
     let root = retained_root.as_path();
     let mut original = start(root, "publish-original");
     let original_pid = original.0.id();

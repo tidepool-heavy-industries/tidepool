@@ -13188,7 +13188,10 @@ where
         let child = notice.child.identity();
         self.publish_retired(child, notice.terminal.clone());
         if self.child_exit_observations.process(child)
-            || notice.terminal.kind == ActorExitKind::Completed
+            || matches!(
+                notice.terminal.kind,
+                ActorExitKind::Completed | ActorExitKind::Interrupted
+            )
         {
             return;
         }
@@ -14300,16 +14303,29 @@ where
     /// Fence every admitted member before draining run and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
+        self.shutdown_with_terminal(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "forest shutdown",
+        ))
+        .await
+    }
+
+    /// Stop host-owned work while preserving durable successor eligibility.
+    pub async fn interrupt_for_host_stop(&self) -> Vec<crate::ForestRootShutdown> {
+        self.shutdown_with_terminal(ActorTerminal::new(
+            ActorExitKind::Interrupted,
+            "host stopped",
+        ))
+        .await
+    }
+
+    async fn shutdown_with_terminal(
+        &self,
+        terminal: ActorTerminal,
+    ) -> Vec<crate::ForestRootShutdown> {
         let budget = std::time::Duration::from_secs(30);
         let retirement = match self.directory.seal().await {
-            Ok(membership) => {
-                membership
-                    .cancel_all(ActorTerminal::new(
-                        ActorExitKind::Cancelled,
-                        "forest host shutdown",
-                    ))
-                    .await
-            }
+            Ok(membership) => membership.cancel_all(terminal.clone()).await,
             Err(error) => {
                 return vec![crate::ForestRootShutdown::RunResources(
                     crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
@@ -14330,7 +14346,8 @@ where
         };
         let mut outcomes = Vec::with_capacity(roots.len() + 1);
         for root in roots {
-            outcomes.push(shutdown_forest_root(&root, budget).await);
+            outcomes
+                .push(shutdown_forest_root_with_terminal(&root, budget, terminal.clone()).await);
         }
         let resources = self.directory.shutdown_run_resources().await;
         outcomes.push(crate::ForestRootShutdown::RunResources(
@@ -15245,15 +15262,20 @@ pub(crate) async fn shutdown_forest_root(
     root: &LocalActorRef,
     grace: std::time::Duration,
 ) -> crate::ForestRootShutdown {
-    let result = tokio::time::timeout(
+    shutdown_forest_root_with_terminal(
+        root,
         grace,
-        root.shutdown_with_cleanup(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "forest host shutdown".into(),
-            diagnostic: None,
-        }),
+        ActorTerminal::new(ActorExitKind::Cancelled, "forest shutdown"),
     )
-    .await;
+    .await
+}
+
+async fn shutdown_forest_root_with_terminal(
+    root: &LocalActorRef,
+    grace: std::time::Duration,
+    terminal: ActorTerminal,
+) -> crate::ForestRootShutdown {
+    let result = tokio::time::timeout(grace, root.shutdown_with_cleanup(terminal)).await;
     match result {
         Ok(Ok(shutdown)) => crate::ForestRootShutdown::Settled(shutdown),
         result => {

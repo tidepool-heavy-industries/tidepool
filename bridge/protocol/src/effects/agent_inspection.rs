@@ -79,6 +79,7 @@ pub fn agent_inspection() -> Effect {
                         variant("RosterStopped", vec![]),
                         variant("RosterFailed", vec![HsType::Text]),
                         variant("RosterCancelled", vec![HsType::Text]),
+                        variant("RosterInterrupted", vec![HsType::Text]),
                     ],
                 },
                 json: JsonInstance::None,

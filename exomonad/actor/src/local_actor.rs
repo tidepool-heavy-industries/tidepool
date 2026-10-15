@@ -3710,6 +3710,7 @@ async fn shutdown_children(
     let requested = ActorTerminal {
         kind: match owner_exit {
             ActorExitKind::Failed => ActorExitKind::Failed,
+            ActorExitKind::Interrupted => ActorExitKind::Interrupted,
             ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
         },
         summary: "owner actor stopped".into(),

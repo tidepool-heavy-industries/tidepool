@@ -36,6 +36,7 @@ fn actor_lifecycle() -> TypeDef {
                 text("ActorFinished"),
                 text("ActorFailed"),
                 text("ActorCancelled"),
+                text("ActorInterrupted"),
             ],
         },
         json: JsonInstance::None,

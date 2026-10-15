@@ -246,6 +246,15 @@ impl KernelBehavior for ObservedBehavior {
 
 #[tokio::test]
 async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
+    forest_shutdown_membership_history(false).await;
+}
+
+#[tokio::test]
+async fn host_stop_interrupts_run_owned_and_supervised_members_before_cleanup() {
+    forest_shutdown_membership_history(true).await;
+}
+
+async fn forest_shutdown_membership_history(host_stop: bool) {
     let fixture = Fixture::new().await;
     let forest = &fixture.forest;
     let placement = forest
@@ -343,7 +352,13 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
 
     let shutting_down = {
         let forest = forest.clone();
-        tokio::spawn(async move { forest.shutdown().await })
+        tokio::spawn(async move {
+            if host_stop {
+                forest.interrupt_for_host_stop().await
+            } else {
+                forest.shutdown().await
+            }
+        })
     };
     let admitted = peers.lock().clone();
     for actor in &admitted {
@@ -392,6 +407,14 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     assert_eq!(roots, [parent.identity(), run_owned.identity()].into());
     assert!(child.terminal().cleanup().unwrap().is_confirmed());
     assert_eq!(cleanups.load(Ordering::Relaxed), 3);
+    let expected = if host_stop {
+        ActorExitKind::Interrupted
+    } else {
+        ActorExitKind::Cancelled
+    };
+    for actor in &admitted {
+        assert_eq!(actor.terminal().get().unwrap().kind, expected);
+    }
     let refused_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
         .await
         .unwrap()
@@ -1169,6 +1192,52 @@ impl tidepool_effect::dispatch::DispatchEffect<tidepool_mcp::CapturedOutput>
             Some(response) => tidepool_effect::dispatch::EffectDispatch::Immediate(response),
             None => tidepool_effect::dispatch::EffectDispatch::Unhandled,
         })
+    }
+}
+
+#[tokio::test]
+async fn host_stop_interrupts_live_incarnation_without_replacing_explicit_retirement() {
+    for winner in [
+        ActorExitKind::Completed,
+        ActorExitKind::Cancelled,
+        ActorExitKind::Failed,
+    ] {
+        let fixture = Fixture::new().await;
+        let forest = &fixture.forest;
+        let mut actors = Vec::new();
+        for label in ["already-retired", "host-interrupted"] {
+            let placement = forest
+                .environment
+                .runner
+                .provision_root_scope(forest.session)
+                .await
+                .unwrap();
+            actors.push(
+                crate::local_actor::spawn_local_actor_in_directory(
+                    None,
+                    fixture.behavior(ActorDescriptor::new(label, placement)),
+                    forest.incarnation,
+                    forest.directory.clone(),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let terminal = ActorTerminal::new(winner, "explicit terminal");
+        actors[0].0.shutdown(terminal.clone()).await.unwrap();
+        let outcomes = forest.interrupt_for_host_stop().await;
+        assert!(
+            outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+            "{outcomes:?}"
+        );
+        assert_eq!(actors[0].0.terminal().get(), Some(terminal));
+        assert_eq!(
+            actors[1].0.terminal().get().unwrap().kind,
+            ActorExitKind::Interrupted
+        );
+        for (_, task) in actors {
+            task.await.unwrap();
+        }
     }
 }
 

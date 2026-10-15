@@ -70,6 +70,7 @@ impl ToHaskell for ActorTerminal {
             ActorExitKind::Completed => ("ActorCompletedStatus", 0),
             ActorExitKind::Failed => ("ActorFailedStatus", 1),
             ActorExitKind::Cancelled => ("ActorCancelledStatus", 1),
+            ActorExitKind::Interrupted => ("ActorInterruptedStatus", 1),
         };
         let qualified = format!("Tidepool.Effects.Core.{name}");
         let constructor = get_qualified(table, &qualified, arity)
@@ -157,6 +158,7 @@ mod tests {
             (100, "ActorCompletedStatus", 0),
             (101, "ActorFailedStatus", 1),
             (102, "ActorCancelledStatus", 1),
+            (103, "ActorInterruptedStatus", 1),
         ] {
             table
                 .insert_checked(DataCon {
@@ -190,6 +192,7 @@ mod tests {
             (ActorExitKind::Completed, 100),
             (ActorExitKind::Failed, 101),
             (ActorExitKind::Cancelled, 102),
+            (ActorExitKind::Interrupted, 103),
         ] {
             let terminal = ActorTerminal {
                 kind,

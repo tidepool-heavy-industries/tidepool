@@ -965,6 +965,7 @@ impl TestCampaign {
             .unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let mut config = ActorHostConfig {
+            run_id: "run".into(),
             systemd_slice: None,
             source_exclude: Vec::new(),
             source_import: Default::default(),

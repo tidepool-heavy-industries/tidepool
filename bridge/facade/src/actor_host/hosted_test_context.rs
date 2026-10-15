@@ -1516,7 +1516,7 @@ impl HostedTestRuntime {
         let run_id = uuid::Uuid::new_v4().to_string();
         let run_directory =
             tidepool_atomic_write::DirectoryAnchor::open_existing(runtime_directory.path())
-                .and_then(|root| root.child(std::path::Path::new("exomonad/runs").join(run_id)))
+                .and_then(|root| root.child(std::path::Path::new("exomonad/runs").join(&run_id)))
                 .map_err(|error| error.to_string())?;
         let run_root = run_directory.path().to_path_buf();
         let mut diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
@@ -1529,6 +1529,7 @@ impl HostedTestRuntime {
             diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
         }
         let mut config = ActorHostConfig {
+            run_id,
             systemd_slice: None,
             source_exclude: Vec::new(),
             source_import: Default::default(),

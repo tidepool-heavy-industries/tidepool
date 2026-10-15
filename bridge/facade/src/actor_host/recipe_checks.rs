@@ -308,6 +308,7 @@ impl Driver {
         let resource_policy = defaults.resources.clone();
         let haskell_root = selected.runtime_actors().to_path_buf();
         let config = ActorHostConfig {
+            run_id: "selection-0".into(),
             systemd_slice: None,
             source_exclude: defaults.launch.source_exclude,
             source_import: defaults.launch.source,

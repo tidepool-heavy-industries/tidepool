@@ -60,6 +60,7 @@ data ShutdownReason
   = ShutdownCompleted
   | ShutdownFailed
   | ShutdownCancelled
+  | ShutdownInterrupted
   deriving (Show, Eq)
 
 data ActorDefinition startup (protocol :: Type -> Type) exit where

@@ -447,6 +447,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     }))
     .unwrap();
     let config = ActorHostConfig {
+        run_id: "model-policy-test".into(),
         systemd_slice: None,
         source_exclude: vec![],
         source_import: Default::default(),
