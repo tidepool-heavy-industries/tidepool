@@ -339,6 +339,7 @@
     "exomonad/actor/src/fixtures/request-alias-borrow.hs",
     "exomonad/actor/src/fixtures/scope-live-result.hs",
     "exomonad/actor/src/local_actor/failure_origin.hs",
+    "exomonad/actor/src/request/fixtures/reply-tool-request.hs",
     "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
     "exomonad/actor/src/request/fixtures/result-receiver.hs",
     "exomonad/actor/src/request/fixtures/result-request.hs",

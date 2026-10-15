@@ -236,6 +236,7 @@ data ReplyError
   | ReplySettlementCancelled
   | ReplyResultTypeMismatch
   | ReplyResultUnavailable
+  | ReplyToolRequired
   deriving (Show, Eq)
 
 data ResponseFailure

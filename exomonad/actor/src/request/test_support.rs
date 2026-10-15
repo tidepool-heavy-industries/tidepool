@@ -410,6 +410,92 @@ pub(crate) fn admit_destination(registry: &RequestRegistry, owner: ActorRef, req
         .unwrap();
 }
 
+/// Capture the real compiled installer at the public request preparation
+/// boundary, before submission can publish any request input.
+pub(crate) fn admit_reply_tool_request(
+    registry: &RequestRegistry,
+    owner: ActorRef,
+    request: RequestId,
+) {
+    let mut fixture = Fixture::with_source(include_str!("fixtures/reply-tool-request.hs"));
+    let (reservation, _) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.run_with_sites(
+                "reply-tool-request",
+                fixture.producer.code(),
+                settlement,
+            )
+        })
+        .unwrap(),
+    );
+    let (registration, payload) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.resume(
+                reservation,
+                Ok::<i64, ()>(request.0.try_into().unwrap()),
+                settlement,
+            )
+        })
+        .unwrap(),
+    );
+    let RepliesReq::RegisterReplyToolWith(metadata, _, issued_request) =
+        RepliesReq::from_value(&payload, fixture.resident.data_con_table()).unwrap()
+    else {
+        panic!("public JSON request must prepare its compiled reply before submission")
+    };
+    assert_eq!(u64::try_from(issued_request).unwrap(), request.0);
+    let metadata = tidepool_runtime::value_to_json(&metadata, fixture.resident.data_con_table(), 0);
+    let installer = fixture
+        .resident
+        .live_payload_handle_owned_by(registration.cont_id(), RealmId::ROOT)
+        .unwrap()
+        .expect("registration retains the compiled installer");
+    // Hosted invocation context is a source interpreter, composed alongside
+    // the environment-owned actor primitives by the production facade.
+    let mut support = crate::resident_workbench::intrinsic_effect_families();
+    support.push(exomonad_tool::ToolEffectKey::ContextReadWrite);
+    let definition = crate::request_reply_tool::ReplyToolDefinition::prepare(
+        metadata,
+        FIXTURE_SESSION,
+        Arc::new(installer),
+        &support,
+    )
+    .unwrap();
+    registry
+        .register_reply_tool(owner, request, Arc::new(definition))
+        .unwrap();
+    let (submission, payload) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture
+                .resident
+                .resume(registration, Ok::<(), ()>(()), settlement)
+        })
+        .unwrap(),
+    );
+    let RepliesReq::SubmitRequestWith(_, site, _, _, _) =
+        RepliesReq::from_value(&payload, fixture.resident.data_con_table()).unwrap()
+    else {
+        panic!("prepared reply tool must precede its typed submission")
+    };
+    let witness = fixture
+        .resident
+        .request_result_type_witness(u64::try_from(site).unwrap(), &submission)
+        .unwrap();
+    let destination = RequestResultDestination::new(
+        owner,
+        FIXTURE_SESSION,
+        witness,
+        fixture.resident.lease_bindings(&[]),
+    );
+    registry
+        .admit_result_destination(owner, request, destination)
+        .unwrap();
+    fixture.abort_submission(
+        &submission,
+        "typed request prepared without mailbox publication",
+    );
+}
+
 pub(crate) fn complete_reply(
     registry: &RequestRegistry,
     claim: RequestReplyClaim,

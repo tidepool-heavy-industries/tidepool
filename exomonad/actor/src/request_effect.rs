@@ -389,6 +389,7 @@ fn reply_error_name(error: ReplyError) -> &'static str {
         ReplyError::ReplyResultTypeMismatch => "ReplyResultTypeMismatch",
         ReplyError::ReplyResultUnavailable => "ReplyResultUnavailable",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
+        ReplyError::ReplyToolRequired => "ReplyToolRequired",
     }
 }
 

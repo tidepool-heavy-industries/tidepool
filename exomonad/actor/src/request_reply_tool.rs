@@ -61,6 +61,7 @@ pub struct RequestReplyActivation {
     actor: crate::ActorRef,
     request: crate::RequestId,
     pub(crate) lease: crate::InstalledToolLease,
+    definition: Arc<ReplyToolDefinition>,
     schema: Arc<harness_schema::FunctionToolSchema>,
     declarations: Arc<[exomonad_tool::HostedTool]>,
     settled: std::sync::atomic::AtomicBool,
@@ -72,8 +73,9 @@ impl RequestReplyActivation {
         actor: crate::ActorRef,
         request: crate::RequestId,
         lease: crate::InstalledToolLease,
-        schema: Arc<harness_schema::FunctionToolSchema>,
+        definition: Arc<ReplyToolDefinition>,
     ) -> Result<Self, crate::ResidentActorWorkbenchError> {
+        let schema = definition.schema();
         let mut declarations = lease
             .tools()
             .expect("reply lease retains compiled tools")
@@ -89,6 +91,7 @@ impl RequestReplyActivation {
             actor,
             request,
             lease,
+            definition,
             schema,
             declarations: declarations.into(),
             settled: false.into(),
@@ -142,7 +145,7 @@ impl RequestReplyActivation {
                 return Err(RequestReplyAdmissionError::Pending(pending));
             }
             let claim = registry
-                .begin_reply(self.actor, self.request)
+                .begin_reply_tool(ReplyToolPermit { activation: self })
                 .map_err(RequestReplyAdmissionError::Refused)?;
             self.mark_settled();
             accepted = Some(claim);
@@ -174,6 +177,23 @@ impl RequestReplyActivation {
         wire: serde_json::Value,
     ) -> Result<ReplyHostArguments, crate::ResidentToolError> {
         ReplyHostArguments::admit(&self.schema, wire)
+    }
+}
+
+/// Earned only inside the exact hosted admission callback after pending work
+/// has been checked. The claim owner consumes it; callers cannot construct one.
+pub(crate) struct ReplyToolPermit<'activation> {
+    activation: &'activation RequestReplyActivation,
+}
+impl ReplyToolPermit<'_> {
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.activation.actor
+    }
+    pub(crate) fn request(&self) -> crate::RequestId {
+        self.activation.request
+    }
+    pub(crate) fn matches_definition(&self, definition: &Arc<ReplyToolDefinition>) -> bool {
+        Arc::ptr_eq(&self.activation.definition, definition)
     }
 }
 

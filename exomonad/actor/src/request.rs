@@ -248,6 +248,7 @@ pub enum ReplyError {
     ReplyResultTypeMismatch,
     ReplyResultUnavailable,
     CancellationRequested,
+    ReplyToolRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +419,11 @@ impl PartialEq for RequestReplyClaim {
     }
 }
 impl Eq for RequestReplyClaim {}
+
+enum ReplyClaimEntry<'activation> {
+    Ordinary,
+    Tool(crate::request_reply_tool::ReplyToolPermit<'activation>),
+}
 
 enum ProgressTypeAdmission {
     Unadmitted,
@@ -2091,6 +2097,22 @@ impl RequestRegistry {
         target: ActorRef,
         request: RequestId,
     ) -> Result<RequestReplyClaim, ReplyError> {
+        self.begin_reply_entry(target, request, ReplyClaimEntry::Ordinary)
+    }
+
+    pub(crate) fn begin_reply_tool(
+        &self,
+        permit: crate::request_reply_tool::ReplyToolPermit<'_>,
+    ) -> Result<RequestReplyClaim, ReplyError> {
+        self.begin_reply_entry(permit.actor(), permit.request(), ReplyClaimEntry::Tool(permit))
+    }
+
+    fn begin_reply_entry(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+        entry: ReplyClaimEntry<'_>,
+    ) -> Result<RequestReplyClaim, ReplyError> {
         let mut state = self.state.lock();
         let generation = state
             .next_reply_claim
@@ -2113,6 +2135,13 @@ impl RequestRegistry {
                         .any(updates::UpdateRecord::fences_settlement)
                 {
                     return Err(ReplyError::UpdatePending);
+                }
+                match (record.reply_tool.as_ref(), entry) {
+                    (None, ReplyClaimEntry::Ordinary) => {}
+                    (Some(definition), ReplyClaimEntry::Tool(permit))
+                        if permit.matches_definition(definition) => {}
+                    (Some(_), ReplyClaimEntry::Ordinary) => return Err(ReplyError::ReplyToolRequired),
+                    _ => return Err(ReplyError::Unauthorized),
                 }
                 let destination = record
                     .operation()?
@@ -5329,6 +5358,23 @@ mod tests {
         registry.forget_terminal_actor_metadata(owner).unwrap();
         assert!(!registry.retains_watch(owner, watch));
         assert_eq!(waiting.wait().await, Err(ReplyError::Stale));
+    }
+
+    #[test]
+    fn json_request_mode_refuses_ordinary_claim_without_consuming_request() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve_for_operation(owner, target, "JSON reply".into(), true, None);
+        test_support::admit_reply_tool_request(&registry, owner, request);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        // Both direct helpers and route callbacks use this same claim owner.
+        for _ in 0..2 {
+            assert_eq!(registry.begin_reply(target, request), Err(ReplyError::ReplyToolRequired),
+                "ordinary reply must not bypass JSON request admission");
+            assert_eq!(registry.observe_reply(target, request), Ok(ReplyObservation::Open));
+        }
     }
 
     #[test]

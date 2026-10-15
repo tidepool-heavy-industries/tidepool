@@ -2010,6 +2010,7 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
         ReplyError::InvalidReadiness => "this watch's readiness expression is invalid",
         ReplyError::ReplyResultTypeMismatch => "a request has an incompatible result type",
         ReplyError::ReplyResultUnavailable => "a request has no admitted result destination",
+        ReplyError::ReplyToolRequired => "a request requires its active request-bound reply tool",
     };
     format!("watch registration was rejected: {detail}")
 }
@@ -2055,6 +2056,9 @@ fn settlement_refusal(
         ReplyError::ReplyResultUnavailable => {
             format!("request {request} has no admitted result destination")
         }
+        ReplyError::ReplyToolRequired => format!(
+            "request {request} requires its active request-bound reply tool; ordinary respond and route replies cannot settle this request"
+        ),
         ReplyError::AlreadySettled => format!("request {request} is already settled"),
         ReplyError::Stale => format!("request {request} is not active for this actor"),
         ReplyError::Unauthorized | ReplyError::WrongIncarnation => {
@@ -8077,7 +8081,7 @@ where
                     context.actor,
                     request.request,
                     lease,
-                    definition.schema(),
+                    definition.clone(),
                 )?))
             } else {
                 None

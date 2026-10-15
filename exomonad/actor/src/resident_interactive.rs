@@ -3,8 +3,6 @@
 use std::sync::Arc;
 
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
-#[cfg(test)]
-use tidepool_runtime::session::WorkbenchRequest;
 
 use crate::prompt_catalog::PromptId;
 use crate::resident_tools::{
