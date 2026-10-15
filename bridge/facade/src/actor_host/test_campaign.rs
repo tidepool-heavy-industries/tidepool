@@ -1534,6 +1534,15 @@ pub(super) fn declared_workspace_package() -> std::path::PathBuf {
 /// tests select the package this repository ships, so what they compile is
 /// what a project gets — including the pin.
 pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
+    pinned_jev_workspace_with(config, |_| {});
+}
+
+/// Customize the authored configuration before its one immutable capture.
+/// Write any additional source files before calling this function.
+pub(super) fn pinned_jev_workspace_with(
+    config: &mut ActorHostConfig,
+    configure: impl FnOnce(&mut crate::exomonad::ExomonadConfig),
+) {
     let package = declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
@@ -1543,6 +1552,7 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
             .haskell
             .flake_sources
             .insert("jev-dsl".into(), vec!["core".into()]);
+        configure(project);
     });
     for name in ["flake.nix", "flake.lock"] {
         std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();

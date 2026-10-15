@@ -71,27 +71,14 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
         |admission| admission,
         |config| {
             config.jev = Some(owned_backend as exomonad_actor::JevBackendHandle);
-            test_campaign::pinned_jev_workspace(config);
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
             std::fs::create_dir_all(authored.join("state")).unwrap();
             std::fs::write(authored.join("Project/RecordingReloadProbe.hs"), &probe).unwrap();
-            let installed = test_campaign::declared_workspace_package().join(".exomonad");
-            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-                project.haskell.source_roots = vec![".".into(), installed];
+            test_campaign::pinned_jev_workspace_with(config, |project| {
+                project.haskell.source_roots.insert(0, ".".into());
                 project.haskell.modules = vec!["Project.RecordingReloadProbe".into()];
-                project
-                    .haskell
-                    .flake_sources
-                    .insert("jev-dsl".into(), vec!["core".into()]);
             });
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .expect("capture authored probe and exact installed Jev sources"),
-            );
         },
         Some(Arc::new(|_, _| {
             Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
