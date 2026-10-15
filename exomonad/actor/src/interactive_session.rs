@@ -10,8 +10,8 @@ use tidepool_runtime::session::{
     OutputSink, ResidentHole, ResidentSession, RuntimeActivationInput,
 };
 
-use crate::typed_request::decode_typed_request_site;
 use crate::ResponseExpectation;
+use crate::typed_request::decode_typed_request_site;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivationId {
@@ -78,6 +78,7 @@ impl ResidentActivation {
 }
 
 pub(crate) struct ActivationContract {
+    pub reply_tool: bool,
     pub input_type: String,
     pub response: ResponseExpectation,
     pub input_preview: String,
@@ -87,6 +88,15 @@ pub(crate) struct ActivationContract {
 
 impl ActivationContract {
     pub(crate) fn message(&self, request: crate::RequestId, guidance: Option<&str>) -> String {
+        if self.reply_tool {
+            return format!(
+                "Request {}{}\n\nAssignment:\n\n{}{}\n\nReturn the result using the request-bound reply tool with {{\"result\": ...}} matching its schema. Invalid fields or decoder refusal leave this request active. Finish pending request-owned operations first; status lists retained work and yield waits for running calls. A successful reply ends inference for this request; inherited reply tools never apply to another request.",
+                request.0,
+                guidance.map(|text| format!(": {text}")).unwrap_or_default(),
+                self.input_preview,
+                self.siblings_block()
+            );
+        }
         let progress = self
             .response
             .progress_type
@@ -244,6 +254,7 @@ mod tests {
             3,
             crate::RequestId(11),
             ActivationContract {
+                reply_tool: false,
                 input_type: "Candidate".into(),
                 response: ResponseExpectation::new("Review"),
                 input_preview: "candidate".into(),

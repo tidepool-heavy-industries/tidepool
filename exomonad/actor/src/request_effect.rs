@@ -284,6 +284,7 @@ pub(crate) enum RequestError {
     RequestReservationRejected(ReplyError),
     RequestSubmissionRejected(ReplyError),
     RequestInvalidDeadline(String),
+    RequestReplyToolInvalid(String),
 }
 
 pub(crate) struct RequestReservation {
@@ -755,9 +756,11 @@ mod tests {
             .expect("explicit immediate deadline");
         assert_eq!(immediate.duration().as_millis(), 0);
         assert!(RequestDuration::DurationMinutes(-1).checked().is_err());
-        assert!(RequestDuration::DurationMinutes(i64::MAX)
-            .checked()
-            .is_err());
+        assert!(
+            RequestDuration::DurationMinutes(i64::MAX)
+                .checked()
+                .is_err()
+        );
         assert_eq!(
             RequestDuration::DurationMilliseconds(0)
                 .checked_milliseconds()

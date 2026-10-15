@@ -101,7 +101,12 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         self.reply_activation.clone()
     }
     fn invocation_role(&self, name: &str) -> crate::HostedInvocationRole {
-        if self.reply_activation.as_ref().and_then(|reply| reply.select(name)).is_some() {
+        if self
+            .reply_activation
+            .as_ref()
+            .and_then(|reply| reply.select(name))
+            .is_some()
+        {
             crate::HostedInvocationRole::Settlement
         } else if is_builtin(name) {
             crate::HostedInvocationRole::Observation
@@ -131,15 +136,23 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         let tools = if let Some(installed) = issued_tools.installation().tools() {
             let installed = installed.declaration_snapshot();
             let mut cached = self.declarations.lock();
-            if let Some(cached) = cached
-                .as_ref()
-                .filter(|cached| Arc::ptr_eq(&cached.installed, &installed) && match (&cached.reply, &reply_activation) { (None, None) => true, (Some(a), Some(b)) => Arc::ptr_eq(a,b), _ => false })
-            {
+            if let Some(cached) = cached.as_ref().filter(|cached| {
+                Arc::ptr_eq(&cached.installed, &installed)
+                    && match (&cached.reply, &reply_activation) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    }
+            }) {
                 cached.exposed.clone()
             } else {
                 let exposed: Arc<[HostedTool]> = std::iter::once(crate::status_tool::declaration())
                     .chain(installed.iter().cloned())
-                    .chain(reply_activation.iter().flat_map(|reply| reply.declarations().to_vec()))
+                    .chain(
+                        reply_activation
+                            .iter()
+                            .flat_map(|reply| reply.declarations().to_vec()),
+                    )
                     .collect::<Vec<_>>()
                     .into();
                 *cached = Some(RequestDeclarations {
@@ -272,7 +285,11 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         context: Option<Arc<dyn crate::HostedContextBinding>>,
     ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
-        let reply_activation = if self.issued_tools.is_some() { self.reply_activation.clone() } else { self.installed_tools.active_reply() };
+        let reply_activation = if self.issued_tools.is_some() {
+            self.reply_activation.clone()
+        } else {
+            self.installed_tools.active_reply()
+        };
         let installed_tools = self
             .issued_tools
             .clone()
@@ -291,13 +308,16 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ));
                 }
                 let lease = installed_tools?;
-                let selected = reply_activation.as_ref().and_then(|reply| reply.select(&invocation.name))
-                    .or_else(|| lease.select(&invocation.name)).ok_or_else(|| {
-                    ResidentToolError::InvalidInvocation(format!(
-                        "unknown actor tool {:?}",
-                        invocation.name
-                    ))
-                })?;
+                let selected = reply_activation
+                    .as_ref()
+                    .and_then(|reply| reply.select(&invocation.name))
+                    .or_else(|| lease.select(&invocation.name))
+                    .ok_or_else(|| {
+                        ResidentToolError::InvalidInvocation(format!(
+                            "unknown actor tool {:?}",
+                            invocation.name
+                        ))
+                    })?;
                 let admitted = selected.admit(arguments)?;
                 Ok(crate::ActorWorkbenchInvocation::installed(
                     admitted,

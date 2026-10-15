@@ -93,8 +93,12 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
-    pub(super) fn invocation_is_terminal(&self, invocation: &exomonad_tool::ToolInvocationContext) -> bool {
-        self.0.get(&WorkbenchReplayKey::Hosted(invocation.clone().into()))
+    pub(super) fn invocation_is_terminal(
+        &self,
+        invocation: &exomonad_tool::ToolInvocationContext,
+    ) -> bool {
+        self.0
+            .get(&WorkbenchReplayKey::Hosted(invocation.clone().into()))
             .is_some_and(|record| matches!(record.state, WorkbenchExecutionState::Terminal { .. }))
     }
 
@@ -902,26 +906,32 @@ mod tests {
                         .pending_provider_boundaries(),
                     vec![boundary.clone()]
                 );
-                assert!(fixture
-                    .native
-                    .kernel
-                    .forget_terminal_actor(children[1].identity())
-                    .await
-                    .expect("terminal forget acknowledgement"));
-                assert!(fixture
-                    .native
-                    .kernel
-                    .resolve(children[1].identity())
-                    .await
-                    .expect("directory actor observation")
-                    .is_none());
+                assert!(
+                    fixture
+                        .native
+                        .kernel
+                        .forget_terminal_actor(children[1].identity())
+                        .await
+                        .expect("terminal forget acknowledgement")
+                );
+                assert!(
+                    fixture
+                        .native
+                        .kernel
+                        .resolve(children[1].identity())
+                        .await
+                        .expect("directory actor observation")
+                        .is_none()
+                );
                 // The scope's retained LocalActorRef, not a fresh directory
                 // lookup, carries the same failed cleanup across retries.
-                assert!(fixture
-                    .behavior
-                    .tool_aborted(&fixture.native.kernel, boundary.clone())
-                    .await
-                    .is_err());
+                assert!(
+                    fixture
+                        .behavior
+                        .tool_aborted(&fixture.native.kernel, boundary.clone())
+                        .await
+                        .is_err()
+                );
                 assert!(owner.acknowledge().await.is_err());
                 assert!(scope.owns_worker(children[1].identity()));
                 // An erroneous success caller also cannot overwrite the
@@ -949,23 +959,27 @@ mod tests {
                     crate::ProviderFinalizationKind::Completed
                 );
                 assert!(owner.control().is_none());
-                assert!(fixture
-                    .behavior
-                    .workbench_executions
-                    .lock()
-                    .pending_provider_boundaries()
-                    .is_empty());
+                assert!(
+                    fixture
+                        .behavior
+                        .workbench_executions
+                        .lock()
+                        .pending_provider_boundaries()
+                        .is_empty()
+                );
             }
             let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "turn".into(),
                 "other".into(),
             );
-            assert!(fixture
-                .behavior
-                .settle_provider_resources(&fixture.native.kernel, &other)
-                .await
-                .is_err());
+            assert!(
+                fixture
+                    .behavior
+                    .settle_provider_resources(&fixture.native.kernel, &other)
+                    .await
+                    .is_err()
+            );
             fixture.native.finish().await;
         }
     }
@@ -1162,11 +1176,12 @@ mod tests {
         let retry = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
         slot.publish_provider_transport(actor, retry.clone());
         slot.accept(&retry);
-        assert!(slot
-            .retained_operation(key)
-            .unwrap()
-            .unwrap()
-            .same_owner(&original));
+        assert!(
+            slot.retained_operation(key)
+                .unwrap()
+                .unwrap()
+                .same_owner(&original)
+        );
         let wrong = WorkbenchRequest::from_cell_input("different effects")
             .with_execution_id(execution.clone())
             .with_checkpoint_boundary(boundary.clone());
@@ -1234,10 +1249,11 @@ mod tests {
         );
         late.settle(reply);
         slot.complete(&late);
-        assert!(slot
-            .retained_boundary(&boundary)
-            .unwrap()
-            .same_owner(&original));
+        assert!(
+            slot.retained_boundary(&boundary)
+                .unwrap()
+                .same_owner(&original)
+        );
         assert_eq!(
             slot.retained_boundary(&boundary)
                 .unwrap()
@@ -1716,24 +1732,28 @@ mod tests {
             journal.at_boundary(&tidepool_runtime::session::ContextCheckpointBoundary::external("thread".into(), "turn".into(), "outer".into())),
             Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
         ));
-        assert!(journal
-            .at_boundary(
-                &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "thread".into(),
-                    "turn".into(),
-                    "other".into()
+        assert!(
+            journal
+                .at_boundary(
+                    &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                        "thread".into(),
+                        "turn".into(),
+                        "other".into()
+                    )
                 )
-            )
-            .is_none());
-        assert!(journal
-            .at_boundary(
-                &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "thread".into(),
-                    "later-turn".into(),
-                    "outer".into()
+                .is_none()
+        );
+        assert!(
+            journal
+                .at_boundary(
+                    &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                        "thread".into(),
+                        "later-turn".into(),
+                        "outer".into()
+                    )
                 )
-            )
-            .is_none());
+                .is_none()
+        );
     }
 
     #[test]

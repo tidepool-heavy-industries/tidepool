@@ -1111,6 +1111,7 @@ enum ToolInstallationPurpose {
     RecoveredTools,
     CandidateTools,
     SpawnApplication,
+    RequestReplyTools,
 }
 
 struct PreparedToolInstallation {
@@ -6030,6 +6031,25 @@ where
         })
     }
 
+    pub(crate) async fn prepare_reply_tools(
+        &self,
+        context: crate::ActorSessionContext,
+        request: crate::RequestId,
+        installer: Arc<RootCustody>,
+        metadata: serde_json::Value,
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
+        let expected = crate::tool_contract::decode_installation(metadata)?;
+        let support = self.access.source.installed_effect_support().to_vec();
+        let expected = crate::tool_contract::admit_reply_spec_metadata(expected, &support)
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let tools = self.prepare_explicit_tools_for(context, request.0, vec![crate::ActorEffectKey::Replies], installer, ToolInstallationPurpose::RequestReplyTools).await?;
+        let expected = expected.plans.iter().map(|plan| plan.surface()).collect::<Vec<_>>();
+        if !exomonad_tool::surface::compare_surfaces(&expected, &tools.declaration_snapshot()).is_empty() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol("reply installer differs from its issuer's prepared metadata".into()));
+        }
+        Ok(tools)
+    }
+
     pub(crate) async fn prepare_explicit_application(
         &self,
         context: crate::ActorSessionContext,
@@ -6281,9 +6301,12 @@ where
                                 "tool interpreter support changed during source preparation".into(),
                             ));
                         }
-                        let admitted = crate::tool_contract::admit_installation(
-                            installation, &admitted_base, &installed_effect_support, &dispatcher_effects,
-                        )?;
+                        let admitted = match purpose {
+                            ToolInstallationPurpose::RequestReplyTools => crate::tool_contract::admit_reply_installation(
+                                installation, &installed_effect_support, &dispatcher_effects),
+                            _ => crate::tool_contract::admit_installation(
+                                installation, &admitted_base, &installed_effect_support, &dispatcher_effects),
+                        }?;
                         let declarations: Arc<[exomonad_tool::HostedTool]> = admitted.endpoints.iter().map(|endpoint| endpoint.plan().surface()).collect::<Vec<_>>().into();
                         if let Some(validate) = &tool_surface_validator {
                             validate(&declarations).map_err(|detail| ResidentActorWorkbenchError::UnsupportedToolSurface { detail, surface: Arc::clone(&declarations) })?;
@@ -6320,7 +6343,7 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     let (settled, receiver) = match purpose {
-                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::RecoveredTools | ToolInstallationPurpose::CandidateTools => (settled, None),
+                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::RecoveredTools | ToolInstallationPurpose::CandidateTools | ToolInstallationPurpose::RequestReplyTools => (settled, None),
                         ToolInstallationPurpose::SpawnApplication => {
                             let ResidentOutcome::Suspended { hole, request, .. } = settled else {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9878,7 +9901,7 @@ where
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
                             definition: Arc::new(crate::request_reply_tool::ReplyToolDefinition {
-                                installation, installer: Arc::new(installer),
+                                installation, session: context.placement.session, installer: Arc::new(installer),
                             }),
                         })
                     }

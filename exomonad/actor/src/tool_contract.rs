@@ -212,6 +212,43 @@ pub(crate) fn admit_spec_metadata(
     admitted_base: &[ActorEffectKey],
     installed_support: &[ToolEffectKey],
 ) -> Result<ValidatedSpecMetadata, SpecValidationError> {
+    admit_spec_metadata_for(installation, admitted_base, installed_support, false)
+}
+
+pub(crate) fn admit_reply_spec_metadata(
+    installation: SpecInstallation,
+    installed_support: &[ToolEffectKey],
+) -> Result<ValidatedSpecMetadata, SpecValidationError> {
+    admit_spec_metadata_for(
+        installation,
+        &[ActorEffectKey::Replies],
+        installed_support,
+        true,
+    )
+}
+
+fn admit_spec_metadata_for(
+    installation: SpecInstallation,
+    admitted_base: &[ActorEffectKey],
+    installed_support: &[ToolEffectKey],
+    reply: bool,
+) -> Result<ValidatedSpecMetadata, SpecValidationError> {
+    if reply
+        && (installation.tools.len() != 1
+            || !installation.slots.is_empty()
+            || !installation.slot_effect_keys.is_empty()
+            || installation.tools.iter().any(|tool| {
+                tool.name != crate::request_reply_tool::REPLY_TOOL
+                    || tool.schedule != ToolScheduling::BeforeNextInference
+                    || tool.kind != ToolKind::Call
+                    || tool.implementation != ToolImplementation::ResidentHandler
+            }))
+    {
+        return Err(SpecValidationError::SpecMetadataInvalid(
+            "request reply installation must contain only its synchronous compiled reply endpoint"
+                .into(),
+        ));
+    }
     let SpecInstallation {
         mut tools,
         slots,
@@ -255,6 +292,9 @@ pub(crate) fn admit_spec_metadata(
         }
     }
     let mut names = HashSet::from([crate::status_tool::STATUS_TOOL.to_string()]);
+    if !reply {
+        names.insert(crate::request_reply_tool::REPLY_TOOL.into());
+    }
     let plans = tools
         .into_iter()
         .map(|tool| {
@@ -288,10 +328,40 @@ pub(crate) fn admit_installation(
     installed_support: &[ToolEffectKey],
     dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
 ) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
+    admit_installation_for(
+        installation,
+        admitted_base,
+        installed_support,
+        dispatcher_effects,
+        false,
+    )
+}
+
+pub(crate) fn admit_reply_installation(
+    installation: SpecInstallation,
+    installed_support: &[ToolEffectKey],
+    dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
+) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
+    admit_installation_for(
+        installation,
+        &[ActorEffectKey::Replies],
+        installed_support,
+        dispatcher_effects,
+        true,
+    )
+}
+
+fn admit_installation_for(
+    installation: SpecInstallation,
+    admitted_base: &[ActorEffectKey],
+    installed_support: &[ToolEffectKey],
+    dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
+    reply: bool,
+) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
     let ValidatedSpecMetadata { plans, slots } =
-        admit_spec_metadata(installation, admitted_base, installed_support).map_err(|failure| {
-            crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string())
-        })?;
+        admit_spec_metadata_for(installation, admitted_base, installed_support, reply).map_err(
+            |failure| crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string()),
+        )?;
     let endpoints = plans
         .into_iter()
         .map(|plan| {
@@ -462,7 +532,7 @@ fn validate_row(
         }
         match key {
             key if key.is_invocation_only() && scheduling == ToolScheduling::Async => {
-                return Err(ToolContractError::AsyncContext(name.into()))
+                return Err(ToolContractError::AsyncContext(name.into()));
             }
             ToolEffectKey::Actor(effect) if !granted.contains(&effect) => {
                 return Err(ToolContractError::Ungranted {
@@ -504,6 +574,56 @@ mod tests {
     ) -> Result<(), ToolContractError> {
         validate_installation(&[tool], &[], &BTreeMap::new(), granted, support)
     }
+    #[test]
+    fn reply_endpoint_is_reserved_and_overlay_admission_is_narrow() {
+        let keys = ToolEffectKey::ALL
+            .iter()
+            .copied()
+            .filter(|key| key.is_invocation_only())
+            .chain([ToolEffectKey::Actor(ActorEffectKey::Replies)])
+            .collect::<Vec<_>>();
+        let declaration = ToolDeclaration {
+            name: crate::request_reply_tool::REPLY_TOOL.into(),
+            description: "Return report".into(),
+            input_schema: serde_json::json!({"type":"object","properties":{"result":{"type":"string"}},"required":["result"],"additionalProperties":false}),
+            output_schema: None,
+            kind: ToolKind::Call,
+            schedule: ToolScheduling::BeforeNextInference,
+            implementation: ToolImplementation::ResidentHandler,
+            effect_keys: keys.clone(),
+        };
+        let make = |tool| SpecInstallation {
+            tools: vec![tool],
+            slots: vec![],
+            slot_effect_keys: BTreeMap::new(),
+        };
+        assert!(
+            admit_spec_metadata(make(declaration.clone()), &[ActorEffectKey::Replies], &keys)
+                .is_err()
+        );
+        let admitted = admit_reply_spec_metadata(make(declaration.clone()), &keys).unwrap();
+        assert_eq!(admitted.plans.len(), 1);
+        for mutation in 0..8 {
+            let mut changed = make(declaration.clone());
+            match mutation {
+                0 => changed.tools[0].name = "other".into(),
+                1 => changed.tools[0].schedule = ToolScheduling::Async,
+                2 => changed.tools[0].kind = ToolKind::Raw,
+                3 => changed.tools[0].implementation = ToolImplementation::HaskellCell,
+                4 => changed.tools[0]
+                    .effect_keys
+                    .push(ActorEffectKey::Source.into()),
+                5 => changed.slots.push("initialContext".into()),
+                6 => changed.tools.push(declaration.clone()),
+                _ => changed.tools[0].input_schema = serde_json::json!({"type":"string"}),
+            }
+            assert!(
+                admit_reply_spec_metadata(changed, &keys).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
     #[test]
     fn installation_issues_only_supported_plans_and_an_optional_typed_slot() {
         let jev = ActorEffectKey::Jev;
@@ -593,25 +713,29 @@ mod tests {
                 ..valid.clone()
             },
         ] {
-            assert!(admit_installation(
-                make(invalid, vec![], BTreeMap::new()),
+            assert!(
+                admit_installation(
+                    make(invalid, vec![], BTreeMap::new()),
+                    &[jev],
+                    &support,
+                    &dispatcher
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            admit_installation(
+                make(
+                    valid,
+                    vec![],
+                    BTreeMap::from([("afterTool".into(), vec![jev.into()])])
+                ),
                 &[jev],
                 &support,
                 &dispatcher
             )
-            .is_err());
-        }
-        assert!(admit_installation(
-            make(
-                valid,
-                vec![],
-                BTreeMap::from([("afterTool".into(), vec![jev.into()])])
-            ),
-            &[jev],
-            &support,
-            &dispatcher
-        )
-        .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -622,14 +746,16 @@ mod tests {
         )
         .is_err());
         let installation=decode_installation(serde_json::json!({"tools":[],"slots":["afterTool"],"slotEffectKeys":{"afterTool":["Jev"]}})).unwrap();
-        assert!(validate_installation(
-            &installation.tools,
-            &installation.slots,
-            &installation.slot_effect_keys,
-            &[ActorEffectKey::Jev],
-            &[ActorEffectKey::Jev.into()]
-        )
-        .is_ok());
+        assert!(
+            validate_installation(
+                &installation.tools,
+                &installation.slots,
+                &installation.slot_effect_keys,
+                &[ActorEffectKey::Jev],
+                &[ActorEffectKey::Jev.into()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -674,12 +800,14 @@ mod tests {
                 effect: ActorEffectKey::Jev
             })
         );
-        assert!(validate(
-            native(ToolScheduling::BeforeNextInference, vec![context, jev]),
-            &[ActorEffectKey::Jev],
-            &[context, jev]
-        )
-        .is_ok());
+        assert!(
+            validate(
+                native(ToolScheduling::BeforeNextInference, vec![context, jev]),
+                &[ActorEffectKey::Jev],
+                &[context, jev]
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn compiled_metadata_must_match_the_same_installer_row() {
@@ -752,30 +880,36 @@ mod tests {
                 .chain([actor.into()])
                 .collect::<Vec<_>>();
             assert_eq!(selected.endpoints[0].plan().effect_keys(), expected);
-            assert!(selected.endpoints[0]
-                .execution_effects()
-                .expression()
-                .contains("Tidepool.Effects.Core.Reload"));
+            assert!(
+                selected.endpoints[0]
+                    .execution_effects()
+                    .expression()
+                    .contains("Tidepool.Effects.Core.Reload")
+            );
         }
         let missing_reload = support
             .iter()
             .copied()
             .filter(|effect| *effect != ToolEffectKey::Reload)
             .collect::<Vec<_>>();
-        assert!(admit_installation(
-            installation(vec![actor.into()]),
-            &[actor],
-            &missing_reload,
-            &"UnusedDispatcher".into()
-        )
-        .is_err());
-        assert!(admit_installation(
-            installation(vec![ActorEffectKey::Web.into()]),
-            &[actor],
-            &support,
-            &"UnusedDispatcher".into()
-        )
-        .is_err());
+        assert!(
+            admit_installation(
+                installation(vec![actor.into()]),
+                &[actor],
+                &missing_reload,
+                &"UnusedDispatcher".into()
+            )
+            .is_err()
+        );
+        assert!(
+            admit_installation(
+                installation(vec![ActorEffectKey::Web.into()]),
+                &[actor],
+                &support,
+                &"UnusedDispatcher".into()
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -7259,7 +7259,13 @@ where
                     .await
             }),
             ResidentActorBoundary::RegisterReplyTool { continuation, request, definition } => Box::pin(async move {
-                let outcome = self.environment.requests.register_reply_tool(context.actor, request, definition);
+                let support = self.environment.intrinsic_effect_support();
+                let outcome = crate::tool_contract::decode_installation(definition.installation.clone())
+                    .and_then(|installation| crate::tool_contract::admit_reply_spec_metadata(installation, &support)
+                        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string())))
+                    .map_err(|error| crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string()))
+                    .and_then(|_| self.environment.requests.register_reply_tool(context.actor, request, definition)
+                        .map_err(crate::request_effect::RequestError::RequestSubmissionRejected));
                 self.environment.runner.resume_value(context.clone(), continuation, outcome).await
             }),
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
@@ -7993,8 +7999,23 @@ where
         let input_preview = std::mem::take(&mut input.input_preview);
         let reply_preview = std::mem::take(&mut input.reply_preview);
         let result = async {
+            let reply_definition = self.environment.requests.reply_tool(context.actor, request.request)
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("reply tool request authority rejected: {error:?}")))?;
+            let reply_activation = if let Some(definition) = reply_definition {
+                let installer = if definition.session == private_context.placement.session {
+                    definition.installer.clone()
+                } else {
+                    Arc::new(self.environment.runner.import_shared_custody(definition.installer.clone(), definition.session,
+                        private_context.placement.session, private_context.placement.resource_scope).await?)
+                };
+                let tools = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit())
+                    .scope(workbench.prepare_reply_tools(private_context.clone(), request.request, installer, definition.installation.clone())).await?;
+                let lease = crate::InstalledToolLease::new(context.actor, activation_source.clone(), Some(Arc::new(tools)));
+                Some(Arc::new(crate::RequestReplyActivation::new(context.actor, request.request, lease)))
+            } else { None };
             let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
             let contract = crate::interactive_session::ActivationContract {
+                reply_tool: reply_activation.is_some(),
                 input_type: request.input_type.clone(),
                 response: request.response.clone(),
                 input_preview,
@@ -8017,7 +8038,7 @@ where
                         kernel,
                         &private_context,
                         Some(request_message.clone()),
-                        activation_source,
+                        activation_source.clone(),
                     )
                     .await?,
                 ),
@@ -8062,6 +8083,7 @@ where
                     if let Some(installation) = installation {
                         self.publish_interactive_installation(installation);
                     }
+                    self.installed_tools.publish_reply(reply_activation);
                     self.assignment_base = assignment_base;
                     self.outstanding_interactive = Some(OutstandingInteractive::new(
                         &request,

@@ -248,8 +248,7 @@ requestWithReplyToolSited site agent input options =
       case replyToolInstaller replyHandle of
         Left problem -> pure (Left (RequestReplyToolInvalid problem))
         Right (metadata, installer) -> do
-          registered <- registerReplyTool (requestIdNumber (replyRequestId replyHandle)) metadata installer
-          pure (either (Left . RequestSubmissionRejected) Right registered)
+          registerReplyTool (requestIdNumber (replyRequestId replyHandle)) metadata installer
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress

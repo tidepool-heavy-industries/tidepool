@@ -6,6 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | The request issuer compiles this decoder with the exact result dictionary
@@ -16,8 +17,9 @@ import Control.Monad.Freer (Eff)
 import Data.Void (absurd)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Tidepool.Aeson.FromJSON (FromJSON)
-import Tidepool.Aeson.Schema (JsonSchema)
+import Data.Proxy (Proxy (..))
+import Tidepool.Aeson.FromJSON (FromJSON (..), withObject, (.:))
+import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Agent.Reply.Internal as Replies
@@ -26,8 +28,10 @@ import Tidepool.Inspection.Display (WorkbenchDisplay)
 
 newtype ReplyInput result = ReplyInput { result :: result }
   deriving (Generic)
-instance FromJSON result => FromJSON (ReplyInput result)
-instance JsonSchema result => JsonSchema (ReplyInput result)
+instance FromJSON result => FromJSON (ReplyInput result) where
+  parseJSON = withObject "request reply" (\fields -> ReplyInput <$> fields .: "result")
+instance JsonSchema result => JsonSchema (ReplyInput result) where
+  jsonSchema _ = objectSchema Nothing [("result", jsonSchema (Proxy :: Proxy result), True)]
 
 data ReplyTools result mode = ReplyTools
   { reply :: mode :- Sync (Call (ReplyInput result) ())

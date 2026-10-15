@@ -1,7 +1,7 @@
 //! Invocation-local authority for synchronous context transformations.
 
 use exomonad_tool::ToolInvocationContext;
-use tidepool_effect::{error::EffectError, DeferredEffect};
+use tidepool_effect::{DeferredEffect, error::EffectError};
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
@@ -90,9 +90,13 @@ pub trait HostedContextBinding: Send + Sync {
     fn admit_request_reply(
         &self,
         _activation: &crate::RequestReplyActivation,
-        _claim: &mut dyn FnMut(&[crate::HostedPendingInvocation]) -> Result<(), crate::RequestReplyAdmissionError>,
+        _claim: &mut dyn FnMut(
+            &[crate::HostedPendingInvocation],
+        ) -> Result<(), crate::RequestReplyAdmissionError>,
     ) -> Result<(), crate::RequestReplyAdmissionError> {
-        Err(crate::RequestReplyAdmissionError::Unavailable("host has no request-operation admission authority".into()))
+        Err(crate::RequestReplyAdmissionError::Unavailable(
+            "host has no request-operation admission authority".into(),
+        ))
     }
 
     fn admit(
