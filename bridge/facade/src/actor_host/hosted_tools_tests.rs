@@ -10,6 +10,8 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         |config| {
             let directory = config.workspace.join(".exomonad");
             std::fs::create_dir_all(directory.join("Project")).unwrap();
+            std::fs::create_dir_all(directory.join("state")).unwrap();
+            std::fs::write(directory.join("state/handler-calls"), b"").unwrap();
             std::fs::write(
                 directory.join("Project/Tools.hs"),
                 tidepool_testing::fixture_source(
@@ -42,6 +44,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
+    let handler_calls = campaign._repository.path().join(".exomonad/state/handler-calls");
     let typed =
         dispatch_haskell_script(policy.as_ref(), "checks <- ToolDispatchFixture.dispatchChecks\nif checks then pure () else error \"dispatch contract failed\"").await;
     assert_eq!(typed["status"], "committed", "{typed}");
@@ -79,6 +82,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     .await
     .unwrap();
     assert_eq!(response["items"][0]["output"], "λλλ");
+    assert_eq!(std::fs::read(&handler_calls).unwrap(), b"x");
     assert!(
         call("raw_echo", ToolArguments::Structured(serde_json::json!({})))
             .await
@@ -97,15 +101,14 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         let error = call("repeat_text", ToolArguments::Structured(arguments))
             .await
             .expect_err("malformed declared input is a tool refusal");
-        assert!(
-            matches!(
-                error,
-                exomonad_actor::ResidentToolError::Invocation(
-                    exomonad_actor::KernelInvocationFailure::Rejected { .. }
-                )
-            ),
-            "{error}"
-        );
+        let exomonad_actor::ResidentToolError::Invocation(
+            exomonad_actor::KernelInvocationFailure::Workbench(failure),
+        ) = error else { panic!("expected authored dispatch input-unit refusal: {error}") };
+        assert_eq!(failure.point, tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 });
+        assert_eq!(failure.total, 1);
+        assert!(failure.receipts.is_empty(), "{failure:?}");
+        assert!(failure.publication.is_none(), "{failure:?}");
+        assert_eq!(std::fs::read(&handler_calls).unwrap(), b"x", "malformed input must not enter the effectful handler");
     }
     let scalar = call(
         "repeat_text",
@@ -127,6 +130,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     .await
     .expect("valid call remains usable after malformed input");
     assert_eq!(repaired["items"][0]["output"], "fixed");
+    assert_eq!(std::fs::read(&handler_calls).unwrap(), b"xx");
     let failed = call("raw_echo", ToolArguments::Raw("fail".into()))
         .await
         .unwrap();

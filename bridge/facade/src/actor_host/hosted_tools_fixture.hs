@@ -14,6 +14,8 @@ import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Command as Cmd
 import qualified Tidepool.Command.Tools as Shell
+import Tidepool.Effects.Core (FsRead, FsWrite)
+import qualified Tidepool.Effects.Authored as Files
 
 data EchoInput = EchoInput {text :: Text, copies :: Int}
   deriving (Generic, FromJSON, JsonSchema)
@@ -28,7 +30,7 @@ data TestTools effects mode = TestTools
   }
   deriving (Generic)
 
-tools :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects)
+tools :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects, Member FsRead effects, Member FsWrite effects)
   => TestTools effects (AsServerT (Eff effects))
 tools =
   TestTools
@@ -37,13 +39,14 @@ tools =
         if input == "fail"
           then error "expected raw handler failure"
           else pure ("frozen:" <> input),
-      repeatText = presentWith id $ tool "Repeat supplied text." $ \EchoInput {text = value, copies = count} ->
+      repeatText = presentWith id $ tool "Repeat supplied text." $ \EchoInput {text = value, copies = count} -> do
+        Files.appendFile ".exomonad/state/handler-calls" "x" >>= either (error . show) pure
         pure (T.replicate count value),
       launch = presentWith id $ tool "Launch with project postprocessing." $ \input -> Shell.execute input >> pure "handler continued",
       followProcess = presentWith presentDisplay $ tool "Continue the retained command." Shell.writeInput,
       readLog = presentWith presentDisplay $ tool "Read retained diagnostics." Shell.readRetained
     }
 
-agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects)
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects, Member FsRead effects, Member FsWrite effects)
   => AgentSpec (TestTools effects) effects
 agentSpec = defaultSpec {specTools = tools}
