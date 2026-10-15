@@ -101,7 +101,7 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
     campaign.run_scenario(|campaign| Box::pin(async move {
         let endpoint = Arc::clone(&campaign.root_installation.policy);
         let first = displayed(campaign, endpoint.as_ref(),
-            "observed <- observeAndSave \".exomonad/state/jev-observation.json\"\ndisplay (show observed)").await;
+            "import qualified Project.RecordingReloadProbe as Probe\nobserved <- Probe.observeAndSave \".exomonad/state/jev-observation.json\"\ndisplay (show observed)").await;
         assert_eq!(first, "Right 12");
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
         let path = campaign._repository.path().join(ARCHIVE);
@@ -117,10 +117,10 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
             "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished before after changed _ -> revisionIdentity before /= revisionIdentity after && \"Project.RecordingReloadProbe\" `elem` changed; _ -> False })").await;
         assert_eq!(published, "True");
         let replayed = displayed(campaign, endpoint.as_ref(),
-            "replayed <- replaySaved \".exomonad/state/jev-observation.json\"\ndisplay (show replayed)").await;
+            "import qualified Project.RecordingReloadProbe as Probe\nreplayed <- Probe.replaySaved \".exomonad/state/jev-observation.json\"\ndisplay (show replayed)").await;
         assert_eq!(replayed, "Right 36", "new source supplies the payload; archive supplies only the observation");
         let refused = displayed(campaign, endpoint.as_ref(),
-            "refused <- refusesChangedEvidence \".exomonad/state/jev-observation.json\"\ndisplay (show refused)").await;
+            "import qualified Project.RecordingReloadProbe as Probe\nrefused <- Probe.refusesChangedEvidence \".exomonad/state/jev-observation.json\"\ndisplay (show refused)").await;
         assert_eq!(refused, "Right True");
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "replay and refusal never fall back to the provider");
         assert_eq!(std::fs::read(path).unwrap(), original_archive, "reload and replay do not overwrite retained evidence");
