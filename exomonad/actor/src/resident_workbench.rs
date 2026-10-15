@@ -16156,7 +16156,10 @@ pub(crate) mod request_tests {
             .await
             .unwrap();
         workbench
-            .execute_cell_for_test(context.clone(), "writeCheckedIf = 17 :: Int")
+            .execute_cell_for_test(
+                context.clone(),
+                "writeCheckedIf = 17 :: Int\nlookupRaw = 19 :: Int",
+            )
             .await
             .unwrap();
         let (view, inputs, prepared) = workbench
@@ -16177,6 +16180,12 @@ pub(crate) mod request_tests {
         let before = compiler_trace_started_ids(&trace);
         let calls = Cell::new(0);
         let inspected = RefCell::new(None);
+        let checks = modules.path().join(".exomonad/checks");
+        std::fs::create_dir_all(&checks).unwrap();
+        std::fs::write(checks.join("captured.hs"), "owner-authored example\n").unwrap();
+        std::fs::write(checks.join("usage-examples.json"),
+            r#"{"examples":[{"module":"Tidepool.Effects.Core","name":"lookupRaw","namespace":"value","source":"checks/captured.hs","prerequisites":[],"requirements":"Lookup effect required"}]}"#).unwrap();
+        let examples = crate::UsagePointerTable::discover(modules.path()).unwrap();
         let answer = crate::lookup::execute(
             real_lookup_request(vec![
                 "LookupPlanParent.ModuleOnly".into(),
@@ -16187,12 +16196,13 @@ pub(crate) mod request_tests {
                 "Fs.writeCheckedIf".into(),
                 "Fs.fileHash".into(),
                 "writeCheckedIf".into(),
+                "lookupRaw".into(),
             ]),
             "view".into(),
             &prepared.imports,
             &prepared.injected,
             &[],
-            crate::UsagePointerTable::default(),
+            examples,
             |queries| {
                 calls.set(calls.get() + 1);
                 let result = tidepool_testing::with_settlement(|settlement| {
@@ -16276,6 +16286,18 @@ pub(crate) mod request_tests {
         };
         assert_eq!(shadows.len(), 1);
         assert_eq!(shadows[0].contract, None);
+        assert!(shadows[0].example.is_none());
+        let LookupOutcome::Found(exported, false) = &answer.results[3].outcome else {
+            panic!("qualified reexport must resolve");
+        };
+        assert_eq!(
+            exported[0].example.as_ref().unwrap().source,
+            "owner-authored example\n"
+        );
+        let LookupOutcome::Found(local, false) = &answer.results[8].outcome else {
+            panic!("resident lookupRaw shadow must resolve");
+        };
+        assert!(local[0].example.is_none());
         let before_docs = compiler_trace_started_ids(&trace);
         let docs = crate::lookup::execute(
             real_lookup_request(vec!["doc workbench".into()]),

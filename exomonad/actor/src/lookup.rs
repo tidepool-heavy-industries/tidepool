@@ -168,7 +168,7 @@ pub(crate) struct LookupEntry {
     quality: LookupQuality,
     usage: Option<String>,
     pub(crate) contract: Option<String>,
-    example: Option<crate::usage_pointer::LookupExample>,
+    pub(crate) example: Option<crate::usage_pointer::LookupExample>,
 }
 #[derive(ToHaskell)]
 enum LookupKind {
@@ -922,9 +922,9 @@ pub(crate) fn execute(
         }
     }
     batch.results = response.results.into_iter().map(Into::into).collect();
-    // Only original direct queries can carry examples. Related references are
-    // resolved separately and remain declaration-only, even on a raw batch.
-    for result in batch.results.iter_mut().take(prepared.len()) {
+    // Direct queries and exact references share the resolved defining identity.
+    // Never attach owner examples to a shadow, ambiguous hit or truncated set.
+    for result in &mut batch.results {
         let LookupOutcome::Found(entries, false) = &mut result.outcome else {
             continue;
         };
@@ -1415,8 +1415,15 @@ mod tests {
             references: vec![],
         };
         let available = InspectionAvailability::Available;
+        let mut direct_and_exact = request(&["Cmd.start", "Alias.start"], false);
+        direct_and_exact.expected_view = Some("view".into());
+        direct_and_exact.references = vec![LookupReference {
+            module: "Reexport.Command".into(),
+            name: "start".into(),
+            namespace: LookupNamespace::Value,
+        }];
         let found = execute(
-            request(&["Cmd.start", "Alias.start"], false),
+            direct_and_exact,
             "view".into(),
             "qualified Tidepool.Command as Cmd\nqualified Tidepool.Command as Alias",
             &[],
@@ -1433,13 +1440,14 @@ mod tests {
                         InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
                             module: module.clone(),
                             expanded: *expanded,
-                            entries: vec![],
+                            entries: vec![make_entry("Tidepool.Command", available)],
                         },
                         _ => panic!("unexpected query"),
                     })
                     .collect())
             },
         );
+        assert_eq!(found.results.len(), 3);
         for result in &found.results {
             let LookupOutcome::Found(entries, false) = &result.outcome else {
                 panic!("expected one hit")
@@ -1524,7 +1532,7 @@ mod tests {
             "",
             &[],
             &[],
-            usage,
+            usage.clone(),
             |_| {
                 Ok(vec![InspectionResult::Ambiguous {
                     query: "start".into(),
@@ -1539,6 +1547,81 @@ mod tests {
             ambiguous.results[0].outcome,
             LookupOutcome::Ambiguous(_, _)
         ));
+        for (live_modules, namespace, entries) in [
+            (
+                vec!["Tidepool.Command".into()],
+                LookupNamespace::Value,
+                vec![make_entry("Tidepool.Command", available)],
+            ),
+            (
+                vec![],
+                LookupNamespace::Type,
+                vec![make_entry("Tidepool.Command", available)],
+            ),
+            (
+                vec![],
+                LookupNamespace::Value,
+                vec![make_entry(
+                    "Tidepool.Command",
+                    InspectionAvailability::Unavailable,
+                )],
+            ),
+            (
+                vec![],
+                LookupNamespace::Value,
+                vec![
+                    make_entry("Tidepool.Command", available),
+                    make_entry("Other.Command", available),
+                ],
+            ),
+        ] {
+            let expected_missing = namespace == LookupNamespace::Type;
+            let expected_ambiguous = entries.len() > 1;
+            let mut exact = request(&[], false);
+            exact.expected_view = Some("view".into());
+            exact.references = vec![LookupReference {
+                module: "Reexport.Command".into(),
+                name: "start".into(),
+                namespace,
+            }];
+            let captured = execute(
+                exact,
+                "view".into(),
+                "",
+                &live_modules,
+                &[],
+                usage.clone(),
+                |queries| {
+                    Ok(queries
+                        .iter()
+                        .map(|query| {
+                            let InspectionQuery::Browse { module, expanded } = query else {
+                                panic!()
+                            };
+                            InspectionResult::Browse {
+                                module: module.clone(),
+                                expanded: *expanded,
+                                entries: entries.clone(),
+                            }
+                        })
+                        .collect())
+                },
+            );
+            match &captured.results[0].outcome {
+                LookupOutcome::Found(entries, false)
+                    if !expected_missing && !expected_ambiguous =>
+                {
+                    assert_eq!(entries.len(), 1);
+                    assert!(entries[0].example.is_none());
+                }
+                LookupOutcome::Ambiguous(entries, false) if expected_ambiguous => {
+                    assert_eq!(entries.len(), 2);
+                    assert!(entries.iter().all(|entry| entry.example.is_none()));
+                }
+                LookupOutcome::Missing(_, _) if expected_missing => {}
+                _ => panic!("unexpected exact-reference outcome"),
+            }
+        }
     }
     #[test]
     fn references_are_one_degree_deduplicated_and_fair() {
