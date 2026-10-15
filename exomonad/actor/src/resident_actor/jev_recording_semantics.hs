@@ -65,5 +65,4 @@ _ <- do
         Left (J.CallFailed (J.Transport (J.JevCircuitOpen 503 987))) -> True; _ -> False)
       "typed host failure was reclassified during replay"
     Left _ -> error "typed failure archive did not decode"
-  pure ()
-pure True
+  say "True"
