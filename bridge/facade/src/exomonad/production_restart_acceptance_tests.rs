@@ -997,38 +997,14 @@ async fn outer_host_stop_and_crash_restore_accepted_source_and_selected_account_
         .command_receipt(&successor, queued, &mut recovered)
         .await;
     assert!(
-        matches!(admitted.outcome, harness::server::CommandReceiptOutcome::Admitted { target: Some(target), .. } if target == successor)
-    );
-    assert_eq!(
-        fixture
-            .store()
-            .embedded_inference_state(&successor)
-            .unwrap(),
-        harness::embedding::HostInferenceState::Blocked {
-            block: block.clone()
-        }
-    );
-    assert!(
-        !evidence(fixture.root(), "recovered", "request-0.json").exists(),
-        "ordinary input must not authorize recovery or issue a provider request"
-    );
-    let recovery = fixture
-        .command(
-            &third,
-            harness::server::HostCommand::Recover {
-                target: successor.clone(),
-                expected_block: block.clone(),
-                mode: harness::embedding::RecoveryMode::Exact,
-            },
-        )
-        .await;
-    let receipt = fixture
-        .command_receipt(&successor, recovery, &mut recovered)
-        .await;
-    assert!(
-        matches!(&receipt.outcome, harness::server::CommandReceiptOutcome::RecoveryAuthorized { target, block: authorized, mode: harness::embedding::RecoveryMode::Exact, .. } if target == &successor && authorized == &block),
-        "exact recovery was not authorized: {:?}",
-        receipt.outcome
+        matches!(&admitted.outcome, harness::server::CommandReceiptOutcome::Admitted {
+            target: Some(target),
+            continuation: Some(harness::embedding::InputContinuation::Granted { block: granted }),
+            wake_error: None,
+            ..
+        } if target == &successor && granted == &block),
+        "ordinary Send must authorize exact continuation of the retained block: {:?}",
+        admitted.outcome
     );
     observed(
         fixture.root(),
