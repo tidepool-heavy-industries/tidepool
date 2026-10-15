@@ -686,12 +686,54 @@ async fn forged_spec_metadata_cannot_bypass_actual_installation_and_retains_clea
         include_str!("capture_workspace_forged_spec.hs").replace("CHECKPOINT_TOKEN", &token);
     let reply = run_host_cell(parent.clone(), source).await;
     assert_committed(&reply);
-    // The authored case matches the actual typed SpawnPartialFailure and
-    // SpawnCleanupConfirmed constructors before returning this diagnostic.
-    assert!(
-        reply.to_string().contains("SpawnCleanupConfirmed"),
-        "{reply}"
-    );
+    // The authored continuation matches the actual typed failure and cleanup
+    // constructors. Observe physical cleanup from the native lifecycle owner;
+    // expression feedback may retain the diagnostic behind a binding handle.
+    let (failed, terminal) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match fixture
+                .deployments
+                .recv()
+                .await
+                .expect("deployment owner remains live")
+            {
+                LocalResidentDeployment::Retired { actor, terminal }
+                    if actor != parent.identity() =>
+                {
+                    break (actor, terminal)
+                }
+                LocalResidentDeployment::PolicyInstalled(child) => panic!(
+                    "invalid installer published a tool policy for {}",
+                    child.actor.identity()
+                ),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("failed child retires");
+    assert_eq!(terminal.kind, ActorExitKind::Failed);
+    let lifecycle = fixture
+        .forest
+        .environment
+        .actors
+        .lock()
+        .get(&failed)
+        .expect("failed child retains its native lifecycle record")
+        .lifecycle
+        .clone();
+    let cleanup = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(cleanup) = lifecycle.retained_terminal().cleanup() {
+                break cleanup;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed child retains its cleanup receipt");
+    assert!(cleanup.is_confirmed(), "{cleanup:?}");
+    eprintln!("failed installer actor={failed} terminal={terminal:?} cleanup={cleanup:?}");
     fixture.workspace_wait().await;
     assert!(
         fixture.entered.try_recv().is_err(),
