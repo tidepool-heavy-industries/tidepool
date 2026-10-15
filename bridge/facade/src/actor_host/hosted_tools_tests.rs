@@ -107,7 +107,13 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         assert_eq!(failure.point, tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 });
         assert_eq!(failure.total, 1);
         assert!(failure.receipts.is_empty(), "{failure:?}");
-        assert!(failure.publication.is_none(), "{failure:?}");
+        assert_eq!(
+            failure.publication,
+            Some(tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+            }),
+            "{failure:?}"
+        );
         assert_eq!(std::fs::read(&handler_calls).unwrap(), b"x", "malformed input must not enter the effectful handler");
     }
     let scalar = call(
