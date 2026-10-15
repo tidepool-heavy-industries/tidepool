@@ -1205,7 +1205,12 @@ pub(super) fn explicit_display_operation(response: &serde_json::Value) -> &serde
     let items = response["items"].as_array().expect("cell item receipts");
     let operations = items
         .iter()
-        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .flat_map(|item| {
+            item.get("operations")
+                .map(|operations| operations.as_array().expect("structured operations array"))
+                .into_iter()
+                .flatten()
+        })
         .filter(|operation| operation.get("display").is_some())
         .collect::<Vec<_>>();
     let [operation] = operations.as_slice() else {
@@ -1264,6 +1269,49 @@ pub(super) fn retained_committed_display_text(
     retained_display_text(store, origin, response)
 }
 
+/// Read a page produced by the explicit expansion endpoint. Its Store emission
+/// is actor-program output; the response's synthetic operation ID is not the
+/// publication identity and must not be used as Notebook evidence.
+pub(super) fn retained_committed_expansion_display_text(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &serde_json::Value,
+) -> String {
+    assert_eq!(response["status"], "committed", "{response}");
+    let items = response["items"]
+        .as_array()
+        .expect("expansion item receipt");
+    let [item] = items.as_slice() else {
+        panic!("one expansion item: {response}")
+    };
+    assert_eq!(item["index"], 0);
+    assert_eq!(item["status"], "committed");
+    let operations = item["operations"].as_array().expect("expansion operation");
+    let [operation] = operations.as_slice() else {
+        panic!("one expansion operation: {response}")
+    };
+    assert_eq!(operation["effect"], "expand");
+    assert_eq!(operation["disposition"], "committed");
+    assert_eq!(operation["displayPublication"], serde_json::Value::Null);
+    assert_eq!(operation["id"]["inputUnitIndex"], 0);
+    assert_eq!(operation["id"]["effectOrdinal"], 0);
+    assert!(
+        operation["id"]["execution"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    let row = retained_display_operation_output(store, origin, operation);
+    let emission = row.emission();
+    assert!(
+        matches!(
+            &emission.execution,
+            harness::store::actor_output::ActorOutputExecution::ActorProgram
+        ),
+        "expansion response must refer to actor-program output"
+    );
+    emission.page.text.clone()
+}
+
 /// Read every explicit page in receipt order through the same Store checks as
 /// the single-display observer. Examples may intentionally emit several values.
 pub(super) fn retained_committed_display_texts(
@@ -1278,7 +1326,12 @@ pub(super) fn retained_committed_display_texts(
     }
     items
         .iter()
-        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .flat_map(|item| {
+            item.get("operations")
+                .map(|operations| operations.as_array().expect("structured operations array"))
+                .into_iter()
+                .flatten()
+        })
         .filter(|operation| operation.get("display").is_some())
         .map(|operation| retained_display_operation_text(store, origin, operation))
         .collect()
@@ -1317,32 +1370,12 @@ fn retained_display_operation_text(
     origin: &harness::store::actor_output::ActorOutputOrigin,
     operation: &serde_json::Value,
 ) -> String {
-    let display = &operation["display"];
-    let sequence = display["output"]["sequence"]
-        .as_i64()
-        .expect("issued output sequence");
-    assert!(sequence > 0, "issued output sequence must be positive");
-    assert_eq!(display["output"]["run"], origin.run);
-    let history = store
-        .actor_output_page(origin, sequence - 1, 1)
-        .expect("retained actor output remains readable");
-    assert_eq!(&history.origin, origin);
-    let [row] = history.outputs.as_slice() else {
-        panic!("issued output {sequence} is absent from retained actor history");
-    };
-    assert_eq!(&row.reference().origin, origin);
-    assert_eq!(row.reference().sequence, sequence);
+    let row = retained_display_operation_output(store, origin, operation);
     let emission = row.emission();
-    assert_eq!(&emission.origin, origin);
-    let identity = serde_json::json!([
-        origin.native_actor,
-        origin.incarnation,
-        emission.id.display_slot
-    ]);
-    assert_eq!(display["identity"], identity);
+    let display = &operation["display"];
     let publication = &operation["displayPublication"];
     assert_eq!(publication["status"], "published");
-    assert_eq!(publication["publication"]["display"], identity);
+    assert_eq!(publication["publication"]["display"], display["identity"]);
     assert_eq!(
         publication["publication"]["pageOrdinal"],
         emission.id.page_ordinal
@@ -1359,6 +1392,39 @@ fn retained_display_operation_text(
     assert_eq!(operation["id"]["execution"], *execution);
     assert_eq!(operation["id"]["inputUnitIndex"], *input_unit_index);
     assert_eq!(operation["id"]["effectOrdinal"], *effect_ordinal);
+    emission.page.text.clone()
+}
+
+fn retained_display_operation_output(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    operation: &serde_json::Value,
+) -> harness::store::actor_output::StoredActorOutput {
+    let display = &operation["display"];
+    let sequence = display["output"]["sequence"]
+        .as_i64()
+        .expect("issued output sequence");
+    assert!(sequence > 0, "issued output sequence must be positive");
+    assert_eq!(display["output"]["run"], origin.run);
+    let history = store
+        .actor_output_page(origin, sequence - 1, 1)
+        .expect("retained actor output remains readable");
+    assert_eq!(&history.origin, origin);
+    let mut rows = history.outputs.into_iter();
+    let row = rows.next().unwrap_or_else(|| {
+        panic!("issued output {sequence} is absent from retained actor history")
+    });
+    assert!(rows.next().is_none(), "one exact retained output");
+    assert_eq!(&row.reference().origin, origin);
+    assert_eq!(row.reference().sequence, sequence);
+    let emission = row.emission();
+    assert_eq!(&emission.origin, origin);
+    let identity = serde_json::json!([
+        origin.native_actor,
+        origin.incarnation,
+        emission.id.display_slot
+    ]);
+    assert_eq!(display["identity"], identity);
     assert_eq!(
         display["expansions"],
         serde_json::to_value(&emission.page.expansions).unwrap()
@@ -1370,7 +1436,7 @@ fn retained_display_operation_text(
             emission.page.text
         );
     }
-    emission.page.text.clone()
+    row
 }
 
 fn native_activation_event(
@@ -2218,6 +2284,15 @@ mod tests {
         display.remove("textSource");
         display.insert("text".into(), serde_json::json!("Exact inline ■\r\n"));
         assert_eq!(committed_display_text(&inline), "Exact inline ■\r\n");
+
+        for malformed in [serde_json::Value::Null, serde_json::json!({})] {
+            let mut invalid = projected.clone();
+            invalid["items"][0]["operations"] = malformed;
+            assert!(
+                std::panic::catch_unwind(|| committed_display_text(&invalid)).is_err(),
+                "present malformed operations must not be skipped"
+            );
+        }
 
         for pointer in ["/items/1/missing", "/items/1/operations"] {
             let mut invalid = inline.clone();

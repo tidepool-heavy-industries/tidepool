@@ -3840,7 +3840,12 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
+        .flat_map(|item| {
+            item.get("operations")
+                .map(|operations| operations.as_array().expect("structured operations array"))
+                .into_iter()
+                .flatten()
+        })
         .filter_map(|operation| operation.get("display"))
         .collect();
     assert_eq!(
@@ -3864,8 +3869,20 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
         .drive_actor_output(&store, policy.expand_display_boxed(identity, key))
         .await
         .unwrap();
-    let suffix = explicit_display_output(&expanded)["text"].as_str().unwrap();
-    assert_eq!(format!("{prefix}{suffix}"), "v".repeat(5000));
+    let expanded_display = explicit_display_output(&expanded);
+    let suffix = expanded_display["text"].as_str().unwrap();
+    let origin = super::test_campaign::actor_output_origin(
+        &super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity());
+    assert_eq!(super::test_campaign::retained_committed_expansion_display_text(
+        &store, &origin, &expanded), suffix);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        super::test_campaign::retained_committed_display_text(&store, &origin, &expanded))).is_err(),
+        "an expansion response must not be accepted as a Notebook publication");
+    let authored_prefix_bytes = prefix.bytes().take_while(|byte| *byte == b'v').count();
+    assert!(authored_prefix_bytes > 0 && authored_prefix_bytes < 5000);
+    assert_eq!(suffix, "v".repeat(5000 - authored_prefix_bytes));
+    assert!(expanded_display["expansions"].as_array().unwrap().is_empty());
+    assert_eq!(expanded_display["unavailable"], false);
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
 })).await;
 }

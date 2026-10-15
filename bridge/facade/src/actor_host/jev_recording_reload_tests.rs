@@ -69,7 +69,11 @@ async fn displayed(
     let mut identity = None;
     let mut consumed = std::collections::HashSet::new();
     for page_number in 1..=MAX_PAGES {
-        let page = test_campaign::retained_committed_display_text(&store, &origin, &receipt);
+        let page = if page_number == 1 {
+            test_campaign::retained_committed_display_text(&store, &origin, &receipt)
+        } else {
+            test_campaign::retained_committed_expansion_display_text(&store, &origin, &receipt)
+        };
         let display = &test_campaign::explicit_display_operation(&receipt)["display"];
         let current: (i64, i64, i64) = serde_json::from_value(display["identity"].clone()).unwrap();
         if let Some(expected) = identity {
