@@ -2,8 +2,8 @@
 //! installed Sync handlers, Web normalization and typed request settlement.
 use super::hosted_test_context::{HostedChildMachines, HostedTestRuntime};
 use super::test_campaign::{
-    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
-    select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
+    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_child_round,
+    next_hosted_script_round, select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
 };
 use super::ResidentToolEndpointTestExt;
 use serde_json::{json, Value};
@@ -178,12 +178,12 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
         assert!(!names.contains(&"haskell") && !names.contains(&"haskell_sync"));
         first.function("search-moss", "search", json!({"query":"moss", "limit":3}));
         let opened = host.while_operation_succeeds(&tutorial,
-            next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child.actor, &root, "researcher-tutorial")).await.unwrap();
         let search = opened.settled_output("search-moss");
         assert_eq!(search["items"][0]["value"]["Right"][0]["url"], PAGE, "{search}");
         opened.function("open-moss", "open", json!({"url":PAGE}));
         let first_reply = host.while_operation_succeeds(&tutorial,
-            next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child.actor, &root, "researcher-tutorial")).await.unwrap();
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), installed_requests,
             "installed search/open handlers submit no extractor requests");
         let open = first_reply.settled_output("open-moss");
@@ -204,7 +204,7 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
                 let operation = first_reply.operation(id);
                 first_reply.function(id, "reply", payload);
                 first_reply = host.while_operation_succeeds(&tutorial,
-                    next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+                    next_hosted_child_round(&mut requests, &mut pending, &child.actor, &root, "researcher-tutorial")).await.unwrap();
                 let _failure = recorded_failure(&host, &operation).await;
                 assert!(!activation_a.is_settled(), "invalid input cannot claim A");
                 assert_eq!(reply_properties(&first_reply), ["question", "sources", "summary"]);
@@ -216,7 +216,7 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
                 ("queued-domain", "search", json!({"query":"moss pending control","limit":1})),
             ]);
             first_reply = host.while_operation_succeeds(&tutorial,
-                next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+                next_hosted_child_round(&mut requests, &mut pending, &child.actor, &root, "researcher-tutorial")).await.unwrap();
             let failure = recorded_failure(&host, &before_domain).await;
             let metadata = failure.metadata().unwrap();
             assert_eq!(metadata["requestReplyRefusal"]["request"], serde_json::to_value(activation_a.request()).unwrap());
@@ -277,7 +277,7 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
         } else {
             first_reply.function("report-a", "reply", json!({"result":report}));
             let second = host.while_operation_succeeds(&tutorial,
-                next_hosted_script_round(&mut requests, &mut pending, &child.actor)).await.unwrap();
+                next_hosted_child_round(&mut requests, &mut pending, &child.actor, &root, "researcher-tutorial")).await.unwrap();
             (second, tutorial, "researcher-tutorial")
         };
         let (second, terminal_operation, terminal_call) = second;

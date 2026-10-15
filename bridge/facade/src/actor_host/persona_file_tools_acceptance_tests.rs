@@ -1,8 +1,9 @@
 //! Native file operations remain callable after a notebook typecheck refusal.
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    actor_output_origin, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
-    retained_committed_display_text, select_hosted_script_round, HostedScriptSelection,
+    actor_output_origin, hosted_script_provider, hosted_test_settings, next_hosted_child_round,
+    next_hosted_script_round, retained_committed_display_text, select_hosted_script_round,
+    HostedScriptSelection,
 };
 use super::ResidentToolEndpointTestExt;
 use exomonad_tool::{ToolArguments, ToolInvocation};
@@ -85,14 +86,14 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
         child.sync_call_named("reply-bypass-refused", "haskell", &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/persona_file_tools_reply_bypass.hs"));
         let child = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let refusal = child.settled_output("reply-bypass-refused");
         assert_eq!(retained_committed_display_text(&host.runtime.store(), &child_origin, &refusal), "True",
             "ordinary Replies cannot settle an explicitly JSON-tool-mode request");
         assert!(child.request.tools.iter().any(|tool| tool["name"] == "reply"), "same activation remains available");
         child.sync_call_named("notebook-refused", "haskell", "display (1 + True)");
         let created = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let refused = created.settled_output("notebook-refused");
         assert_eq!(refused["status"], "rejected", "{refused}");
         let baseline = tidepool_extract_cmd::extract_spawn_count();
@@ -115,38 +116,38 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
         assert!(!path.try_exists().unwrap(), "refused Create publishes no file");
         created.function("create-draft", "write_file", json!({"operation":{"tag":"Create","path":DRAFT,"contents":FIRST}}));
         let replaced = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let initial_ref = published(&replaced.settled_output("create-draft"), &path, FIRST);
         replaced.function("replace-draft", "write_file", json!({"operation":{"tag":"Replace","file":initial_ref,"contents":SECOND}}));
         let read = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let stale_ref = published(&read.settled_output("replace-draft"), &path, SECOND);
         read.function("read-draft", "read_file", json!({"path":DRAFT,"expectedVersion":stale_ref["version"],"range":null}));
         let preview = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let read = preview.settled_output("read-draft");
         assert_eq!(read["items"][0]["value"]["Right"]["content"], SECOND, "{read}");
         assert_eq!(read["items"][0]["value"]["Right"]["file"], stale_ref);
         let edit = json!({"file":stale_ref,"edits":[{"oldText":"False + 1","newText":"True"}]});
         preview.function("preview-draft", "preview_edit", edit.clone());
         let edit_round = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let preview = edit_round.settled_output("preview-draft");
         assert_eq!(preview["items"][0]["value"]["Right"]["preview"], "Edit 1\n- False + 1\n+ True\n", "{preview}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SECOND, "preview does not publish");
         edit_round.function("edit-draft", "edit_file", edit);
         let reread = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let final_ref = published(&reread.settled_output("edit-draft"), &path, FIXED);
         reread.function("read-repaired", "read_file", json!({"path":DRAFT,"expectedVersion":final_ref["version"],"range":null}));
         let conflict = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let read = conflict.settled_output("read-repaired");
         assert_eq!(read["items"][0]["value"]["Right"]["content"], FIXED, "{read}");
         assert_eq!(read["items"][0]["value"]["Right"]["file"], final_ref);
         conflict.function("stale-replace", "write_file", json!({"operation":{"tag":"Replace","file":stale_ref,"contents":"must not publish"}}));
         let done = host.while_operation_succeeds(&repair,
-            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+            next_hosted_child_round(&mut requests, &mut pending, &child_identity.actor, &root, "file-repair-request")).await.unwrap();
         let conflict = done.settled_output("stale-replace");
         let conflict = &conflict["items"][0]["value"]["Right"];
         assert_eq!(conflict["tag"], "Conflict");

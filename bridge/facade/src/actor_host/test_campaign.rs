@@ -1752,18 +1752,27 @@ impl HostedScriptRound {
     pub fn functions(self, calls: &[(&str, &str, serde_json::Value)]) {
         assert!(!calls.is_empty());
         let mut ids = std::collections::HashSet::new();
-        let items = calls.iter().map(|(call_id, name, arguments)| {
-            assert!(ids.insert(*call_id), "distinct submitted calls need distinct identities");
-            self.assert_advertised(call_id, name, "function");
-            harness::item::Item(serde_json::json!({
-                "type":"function_call", "call_id":call_id, "name":name,
-                "arguments":serde_json::to_string(arguments).unwrap(),
-            }))
-        }).collect();
-        self.reply.send(harness::transport::ResponsesTurn {
-            response_id: format!("script-batch-{}", calls[0].0),
-            items, usage: Default::default(),
-        }).expect("production provider request remains live");
+        let items = calls
+            .iter()
+            .map(|(call_id, name, arguments)| {
+                assert!(
+                    ids.insert(*call_id),
+                    "distinct submitted calls need distinct identities"
+                );
+                self.assert_advertised(call_id, name, "function");
+                harness::item::Item(serde_json::json!({
+                    "type":"function_call", "call_id":call_id, "name":name,
+                    "arguments":serde_json::to_string(arguments).unwrap(),
+                }))
+            })
+            .collect();
+        self.reply
+            .send(harness::transport::ResponsesTurn {
+                response_id: format!("script-batch-{}", calls[0].0),
+                items,
+                usage: Default::default(),
+            })
+            .expect("production provider request remains live");
     }
 
     pub fn settled_output(&self, call_id: &str) -> serde_json::Value {
@@ -2113,6 +2122,31 @@ pub(super) async fn next_hosted_script_round(
     actor: &harness::model::AgentPath,
 ) -> HostedScriptRound {
     select_hosted_script_round(requests, pending, HostedScriptSelection::Actor(actor)).await
+}
+
+/// In a two-actor scenario, requiring another child turn must also observe an
+/// early parent terminal result. Retaining that parent while waiting for a child
+/// would hide the actual failure until the provider-selection deadline.
+pub(super) async fn next_hosted_child_round(
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+    pending: &mut std::collections::VecDeque<HostedScriptRound>,
+    child: &harness::model::AgentPath,
+    parent: &harness::model::AgentPath,
+    parent_call: &str,
+) -> HostedScriptRound {
+    let round = select_hosted_script_round(requests, pending, HostedScriptSelection::Any).await;
+    let actual = round.host_identity();
+    if &actual.actor == parent {
+        panic!(
+            "parent advanced before the required child turn; {parent_call}: {}",
+            round.settled_text(parent_call)
+        );
+    }
+    assert_eq!(
+        &actual.actor, child,
+        "one exact child owns this scenario's next request"
+    );
+    round
 }
 
 /// Use the bundle supplied by the native runner, including its verified manifest.
