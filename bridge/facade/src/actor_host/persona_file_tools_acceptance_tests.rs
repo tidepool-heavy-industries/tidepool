@@ -4,6 +4,8 @@ use super::test_campaign::{
     actor_output_origin, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     retained_committed_display_text, select_hosted_script_round, HostedScriptSelection,
 };
+use super::ResidentToolEndpointTestExt;
+use exomonad_tool::{ToolArguments, ToolInvocation};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 
@@ -75,11 +77,6 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
             panic!("file request settled before child inference: {}", child.settled_output("file-repair-request"));
         }
         let child_identity = child.host_identity();
-        let write_schema = child.request.tools.iter().find(|tool| tool["name"] == "write_file").unwrap()["parameters"].clone();
-        let write_schema = harness::finalize::FunctionToolSchema::new(write_schema).unwrap();
-        let invalid = json!({"operation":{"tag":"Create","contents":FIRST,"file":{"path":DRAFT,"version":"0".repeat(64)}}});
-        assert!(matches!(write_schema.decode_arguments(invalid),
-            Err(harness::finalize::SchemaError::ValueSchemaMismatch(_))));
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let actor = graph.iter().find(|node| host.context.binding(node.actor)
             .and_then(|binding| binding.conversation())
@@ -100,6 +97,22 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
         assert_eq!(refused["status"], "rejected", "{refused}");
         let baseline = tidepool_extract_cmd::extract_spawn_count();
         let path = host.context.config.workspace.join(DRAFT);
+        let installation = host.context.observer.installation(actor).await;
+        let invalid = json!({"operation":{"tag":"Create","contents":FIRST,"file":{"path":DRAFT,"version":"0".repeat(64)}}});
+        let refusal = installation.policy.dispatch_json_boxed(ToolInvocation {
+            context: None, name: "write_file".into(), arguments: ToolArguments::Structured(invalid),
+        }).await.expect_err("the actual installed Create decoder requires its path field");
+        let exomonad_actor::ResidentToolError::Invocation(
+            exomonad_actor::KernelInvocationFailure::Workbench(failure)) = refusal else {
+                panic!("expected exact installed input-unit refusal: {refusal}")
+            };
+        assert_eq!(failure.point, tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 });
+        assert_eq!(failure.total, 1);
+        assert!(failure.receipts.is_empty());
+        assert_eq!(failure.publication, Some(tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+        }));
+        assert!(!path.try_exists().unwrap(), "refused Create publishes no file");
         created.function("create-draft", "write_file", json!({"operation":{"tag":"Create","path":DRAFT,"contents":FIRST}}));
         let replaced = host.while_operation_succeeds(&repair,
             next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
@@ -119,7 +132,7 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
         let edit_round = host.while_operation_succeeds(&repair,
             next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
         let preview = edit_round.settled_output("preview-draft");
-        assert_eq!(preview["items"][0]["value"]["Right"]["preview"], FIXED, "{preview}");
+        assert_eq!(preview["items"][0]["value"]["Right"]["preview"], "Edit 1\n- False + 1\n+ True\n", "{preview}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SECOND, "preview does not publish");
         edit_round.function("edit-draft", "edit_file", edit);
         let reread = host.while_operation_succeeds(&repair,
