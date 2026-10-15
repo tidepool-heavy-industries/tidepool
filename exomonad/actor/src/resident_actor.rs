@@ -7304,22 +7304,22 @@ where
                 session,
                 installer,
             } => Box::pin(async move {
-                let support = self.environment.intrinsic_effect_support();
-                let outcome = crate::request_reply_tool::ReplyToolDefinition::prepare(
-                    installation,
-                    session,
-                    installer,
-                    &support,
-                )
-                .map_err(|error| {
-                    crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string())
-                })
-                .and_then(|definition| {
-                    self.environment
-                        .requests
-                        .register_reply_tool(context.actor, request, Arc::new(definition))
-                        .map_err(crate::request_effect::RequestError::RequestSubmissionRejected)
-                });
+                let outcome = self
+                    .environment
+                    .application_workbench()
+                    .prepare_reply_tool(context.clone(), installation, session, installer)
+                    .await
+                    .map_err(|error| {
+                        crate::request_effect::RequestError::RequestReplyToolInvalid(
+                            error.to_string(),
+                        )
+                    })
+                    .and_then(|definition| {
+                        self.environment
+                            .requests
+                            .register_reply_tool(context.actor, request, Arc::new(definition))
+                            .map_err(crate::request_effect::RequestError::RequestSubmissionRejected)
+                    });
                 self.environment
                     .runner
                     .resume_value(context.clone(), continuation, outcome)

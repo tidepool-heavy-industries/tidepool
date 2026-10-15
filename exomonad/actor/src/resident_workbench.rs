@@ -8522,6 +8522,32 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Prepare the captured decoder against the same composed interpreter
+    /// support used by installation on this exact machine.
+    pub(crate) async fn prepare_reply_tool(
+        &self,
+        context: crate::ActorSessionContext,
+        metadata: serde_json::Value,
+        session: tidepool_repr::SessionId,
+        installer: Arc<RootCustody>,
+    ) -> Result<crate::request_reply_tool::ReplyToolDefinition, ResidentActorWorkbenchError> {
+        if context.placement.session != session {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "reply decoder preparation requires its captured machine session".into(),
+            ));
+        }
+        let mut support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        self.access
+            .with_machine(context, move |machine, _, _| {
+                support.extend(observer(machine.handlers()));
+                crate::request_reply_tool::ReplyToolDefinition::prepare(
+                    metadata, session, installer, &support,
+                )
+            })
+            .await
+    }
+
     /// Validate only the already evaluated installation metadata on this exact
     /// machine. This does not run an installer, tool handler or startup slot.
     pub(crate) async fn validate_agent_spec(
