@@ -263,7 +263,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     }
     // These authored record members distinguish the shipped workspace from
     // the built-in notebook fallback; descriptions and schema layout may evolve.
-    for name in ["bash", "lookup", "submit_review"] {
+    for name in ["bash", "lookup", "submit_review", "reload"] {
         let matching: Vec<_> = tools.iter().filter(|tool| tool.name() == name).collect();
         assert_eq!(matching.len(), 1, "expected one {name}: {tools:?}");
         assert_eq!(
@@ -271,6 +271,8 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
             ToolImplementation::ResidentHandler
         );
     }
+    let reload = tools.iter().find(|tool| tool.name() == "reload").unwrap();
+    assert_eq!(reload.scheduling(), ToolScheduling::BeforeNextInference);
 }
 
 /// A command-owner fault fixture checks a truncated retained slice. It does not

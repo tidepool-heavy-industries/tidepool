@@ -1113,6 +1113,14 @@ rust_filegroup(
         "src/actor_host/fixtures/supplied_live_spawn.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs",
         "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
         "src/actor_host/fixtures/supplied_live_tools.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs",
+        "src/actor_host/fixtures/sync_reload_after_noop.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_after_noop.hs",
+        "src/actor_host/fixtures/sync_reload_child_progress.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_child_progress.hs",
+        "src/actor_host/fixtures/sync_reload_invalid_b_draft.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_invalid_b_draft.hs",
+        "src/actor_host/fixtures/sync_reload_invalid_draft.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_invalid_draft.hs",
+        "src/actor_host/fixtures/sync_reload_noop_draft.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_noop_draft.hs",
+        "src/actor_host/fixtures/sync_reload_publish_b_draft.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_publish_b_draft.hs",
+        "src/actor_host/fixtures/sync_reload_spec_a.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_spec_a.hs",
+        "src/actor_host/fixtures/sync_reload_spec_b.hs": "bridge/facade/src/actor_host/fixtures/sync_reload_spec_b.hs",
         "src/actor_host/fixtures/terminal_transfer_request.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs",
         "src/actor_host/fixtures/terminal_transfer_setup.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs",
         "src/actor_host/fixtures/three_actor_workload_roster.json": "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json",
@@ -2910,6 +2918,14 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs": "src/actor_host/fixtures/supplied_live_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs": "src/actor_host/fixtures/supplied_live_tools.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_after_noop.hs": "src/actor_host/fixtures/sync_reload_after_noop.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_child_progress.hs": "src/actor_host/fixtures/sync_reload_child_progress.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_invalid_b_draft.hs": "src/actor_host/fixtures/sync_reload_invalid_b_draft.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_invalid_draft.hs": "src/actor_host/fixtures/sync_reload_invalid_draft.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_noop_draft.hs": "src/actor_host/fixtures/sync_reload_noop_draft.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_publish_b_draft.hs": "src/actor_host/fixtures/sync_reload_publish_b_draft.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_spec_a.hs": "src/actor_host/fixtures/sync_reload_spec_a.hs",
+        "bridge/facade/src/actor_host/fixtures/sync_reload_spec_b.hs": "src/actor_host/fixtures/sync_reload_spec_b.hs",
         "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs": "src/actor_host/fixtures/terminal_transfer_request.hs",
         "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs": "src/actor_host/fixtures/terminal_transfer_setup.hs",
         "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json": "src/actor_host/fixtures/three_actor_workload_roster.json",
@@ -4263,6 +4279,62 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f746f6f6c732e6873",
     src = "src/actor_host/fixtures/supplied_live_tools.hs",
     out = "supplied_live_tools.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f61667465725f6e6f6f702e6873",
+    src = "src/actor_host/fixtures/sync_reload_after_noop.hs",
+    out = "sync_reload_after_noop.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f6368696c645f70726f67726573732e6873",
+    src = "src/actor_host/fixtures/sync_reload_child_progress.hs",
+    out = "sync_reload_child_progress.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f696e76616c69645f625f64726166742e6873",
+    src = "src/actor_host/fixtures/sync_reload_invalid_b_draft.hs",
+    out = "sync_reload_invalid_b_draft.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f696e76616c69645f64726166742e6873",
+    src = "src/actor_host/fixtures/sync_reload_invalid_draft.hs",
+    out = "sync_reload_invalid_draft.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f6e6f6f705f64726166742e6873",
+    src = "src/actor_host/fixtures/sync_reload_noop_draft.hs",
+    out = "sync_reload_noop_draft.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f7075626c6973685f625f64726166742e6873",
+    src = "src/actor_host/fixtures/sync_reload_publish_b_draft.hs",
+    out = "sync_reload_publish_b_draft.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f737065635f612e6873",
+    src = "src/actor_host/fixtures/sync_reload_spec_a.hs",
+    out = "sync_reload_spec_a.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73796e635f72656c6f61645f737065635f622e6873",
+    src = "src/actor_host/fixtures/sync_reload_spec_b.hs",
+    out = "sync_reload_spec_b.hs",
     visibility = ["PUBLIC"],
 )
 

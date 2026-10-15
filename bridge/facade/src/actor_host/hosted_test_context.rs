@@ -1504,9 +1504,17 @@ impl HostedTestRuntime {
         source_layers: HostSourceLayersTransform,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
-            settings, configure, Some(Arc::clone(transport)), None, false, None,
-            HostedChildMachines::Shared, None, Some(source_layers),
-        ).await
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            HostedChildMachines::Shared,
+            None,
+            Some(source_layers),
+        )
+        .await
     }
 
     async fn start_owned(
@@ -1630,7 +1638,12 @@ impl HostedTestRuntime {
                     .map_err(|error| error.to_string())?,
             );
             crate::exomonad::source::SourceLayer::new(config.run_directory.path())
-                .ensure_active(config.workspace_inputs.as_ref().expect("selected preparation"))
+                .ensure_active(
+                    config
+                        .workspace_inputs
+                        .as_ref()
+                        .expect("selected preparation"),
+                )
                 .map_err(|error| error.to_string())?;
         }
         if let Some(diagnostics) = &mut diagnostics {

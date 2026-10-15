@@ -111,18 +111,17 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     .join("helpers");
                 let draft = helper_root.join("drafts/run/SessionHelpers.hs");
                 let root = campaign.root_installation.policy.clone();
-                assert!(
-                    std::fs::read_to_string(&draft)
-                        .unwrap()
-                        .contains("helperAnswer = 41")
-                );
+                assert!(std::fs::read_to_string(&draft)
+                    .unwrap()
+                    .contains("helperAnswer = 41"));
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
-                    published["items"][0]["value"]["outcome"], "published",
+                    published["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
                     "{published}"
                 );
-                let first = published["items"][0]["value"]["revision"]["identity"]
+                let first = published["items"][0]["value"]["Right"]["contents"][1]
+                    ["revisionIdentity"]
                     .as_str()
                     .unwrap();
                 assert!(issued_source_identity_matches(campaign, root.as_ref(), first).await);
@@ -139,11 +138,11 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 let rejected =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
-                    rejected["items"][0]["value"]["outcome"], "rejected",
+                    rejected["items"][0]["value"]["Right"]["tag"], "ReloadRejected",
                     "{rejected}"
                 );
                 assert_eq!(
-                    rejected["items"][0]["value"]["issuedRevision"]["identity"],
+                    rejected["items"][0]["value"]["Right"]["contents"][0]["revisionIdentity"],
                     first
                 );
                 assert!(issued_source_identity_matches(campaign, root.as_ref(), first).await);
@@ -163,10 +162,11 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
-                    published["items"][0]["value"]["outcome"], "published",
+                    published["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
                     "{published}"
                 );
-                let second = published["items"][0]["value"]["revision"]["identity"]
+                let second = published["items"][0]["value"]["Right"]["contents"][1]
+                    ["revisionIdentity"]
                     .as_str()
                     .unwrap();
                 assert_ne!(second, first);
@@ -214,7 +214,7 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
-                    published["items"][0]["value"]["outcome"], "published",
+                    published["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
                     "{published}"
                 );
                 committed(root.as_ref(), "import SessionHelpers").await;
@@ -360,7 +360,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     let refused = displayed(
         campaign,
         child.policy.as_ref(),
-        "outcome <- reloadSource []\ndisplay (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ndisplay (case outcome of { Left (ReloadUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
@@ -449,7 +449,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     let refused = displayed(
         campaign,
         child.policy.as_ref(),
-        "outcome <- reloadSource []\ndisplay (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ndisplay (case outcome of { Left (ReloadUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
@@ -513,7 +513,7 @@ async fn a_reloaded_module_starts_a_fresh_notebook_and_preserves_issued_bindings
     assert_eq!(super::test_campaign::committed_display_text(&edited), "1", "draft edits preserve active code: {edited}");
     let reloaded = displayed(
         campaign, policy,
-        "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished _ _ changed -> changed == [\"Project.Work\"]; _ -> False })",
+        "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished _ _ changed _ -> changed == [\"Project.Work\"]; _ -> False })",
     )
     .await;
     assert_eq!(
@@ -541,7 +541,7 @@ async fn a_reloaded_module_starts_a_fresh_notebook_and_preserves_issued_bindings
     // module's digest moved with it.
     let after = displayed(
         campaign, policy,
-        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now) == 2 && revisionIdentity (statusActive now) == revisionIdentity (statusDisk now))",
+        "Right now <- sourceStatus\ndisplay (revisionIdentity (statusActive now) == revisionIdentity (statusDisk now))",
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&after), "True", "{after}");
@@ -577,7 +577,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     let result = displayed(
         campaign,
         policy.as_ref(),
-        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ndisplay ((case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False }) && (revisionIdentity (statusActive before) == revisionIdentity (statusActive after)) && (case outcome of { ReloadPublished previous current _ -> revisionIdentity previous == revisionIdentity (statusActive before) && revisionIdentity current /= revisionIdentity (statusActive before); _ -> False }))",
+        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ndisplay ((case outcome of { ReloadPublished _ _ changed _ -> \"Project.Vibe\" `elem` changed; _ -> False }) && (revisionIdentity (statusActive before) == revisionIdentity (statusActive after)) && (case outcome of { ReloadPublished previous current _ _ -> revisionIdentity previous == revisionIdentity (statusActive before) && revisionIdentity current /= revisionIdentity (statusActive before); _ -> False }))",
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&result), "True", "{result}");

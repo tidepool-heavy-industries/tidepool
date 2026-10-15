@@ -38,12 +38,16 @@ struct ReloadGate {
     release: std::sync::Condvar,
 }
 impl ReloadGate {
-    fn arm(&self) { self.armed.store(true, Ordering::SeqCst); }
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
     fn wait_if_armed(&self) {
         if self.armed.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             let mut released = self.released.lock().unwrap();
-            while !*released { released = self.release.wait(released).unwrap(); }
+            while !*released {
+                released = self.release.wait(released).unwrap();
+            }
         }
     }
     fn release(&self) {
@@ -52,50 +56,118 @@ impl ReloadGate {
     }
 }
 struct ReleaseReloadGate(Arc<ReloadGate>);
-impl Drop for ReleaseReloadGate { fn drop(&mut self) { self.0.release(); } }
+impl Drop for ReleaseReloadGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 
 struct GatedSourceLayers {
     owner: exomonad_actor::ActorSourceLayerResolver,
     gate: Arc<ReloadGate>,
 }
 impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
-    fn freeze_toolset_layer(&self, actor: tidepool_repr::PrincipalId) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+    fn freeze_toolset_layer(
+        &self,
+        actor: tidepool_repr::PrincipalId,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.owner.freeze_toolset_layer(actor)
     }
-    fn toolset_layer_from(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+    fn toolset_layer_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.owner.toolset_layer_from(source)
     }
-    fn fresh_toolset_layer_from(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+    fn fresh_toolset_layer_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.owner.fresh_toolset_layer_from(source)
     }
-    fn validate_source_authority(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<(), String> {
+    fn validate_source_authority(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<(), String> {
         self.owner.validate_source_authority(source)
     }
-    fn freeze_checkpoint_layer(&self, actor: tidepool_repr::PrincipalId) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+    fn freeze_checkpoint_layer(
+        &self,
+        actor: tidepool_repr::PrincipalId,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.owner.freeze_checkpoint_layer(actor)
     }
-    fn admit_checkpoint_layer(&self, source: &exomonad_actor::CheckpointSourceLayer, actor: tidepool_repr::PrincipalId, branch: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    fn admit_checkpoint_layer(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        actor: tidepool_repr::PrincipalId,
+        branch: &str,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
         self.owner.admit_checkpoint_layer(source, actor, branch)
     }
-    fn admit_retained_layer(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<Vec<std::path::PathBuf>, String> {
+    fn admit_retained_layer(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
         self.owner.admit_retained_layer(source)
     }
-    fn bind_checkpoint_for(&self, actor: tidepool_repr::PrincipalId, branch: &str, source: &exomonad_actor::CheckpointSourceLayer) -> Result<(), String> {
+    fn bind_checkpoint_for(
+        &self,
+        actor: tidepool_repr::PrincipalId,
+        branch: &str,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<(), String> {
         self.owner.bind_checkpoint_for(actor, branch, source)
     }
-    fn retain_helpers(&self, actor: tidepool_repr::PrincipalId) -> Result<String, String> { self.owner.retain_helpers(actor) }
-    fn layer_include_for(&self, branch: &str) -> Result<Vec<std::path::PathBuf>, String> { self.owner.layer_include_for(branch) }
-    fn bind_for(&self, actor: tidepool_repr::PrincipalId, branch: &str) { self.owner.bind_for(actor, branch) }
-    fn restore_source(&self, reference: &tidepool_runtime::session::GenerationArtifactReference) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+    fn retain_helpers(&self, actor: tidepool_repr::PrincipalId) -> Result<String, String> {
+        self.owner.retain_helpers(actor)
+    }
+    fn layer_include_for(&self, branch: &str) -> Result<Vec<std::path::PathBuf>, String> {
+        self.owner.layer_include_for(branch)
+    }
+    fn bind_for(&self, actor: tidepool_repr::PrincipalId, branch: &str) {
+        self.owner.bind_for(actor, branch)
+    }
+    fn restore_source(
+        &self,
+        reference: &tidepool_runtime::session::GenerationArtifactReference,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.owner.restore_source(reference)
     }
-    fn restore_source_with_acquisition(&self, reference: &tidepool_runtime::session::GenerationArtifactReference, acquisition: &exomonad_actor::ToolsetAcquisition) -> Result<exomonad_actor::CheckpointSourceLayer, exomonad_actor::SourceInspectionError> {
-        self.owner.restore_source_with_acquisition(reference, acquisition)
+    fn restore_source_with_acquisition(
+        &self,
+        reference: &tidepool_runtime::session::GenerationArtifactReference,
+        acquisition: &exomonad_actor::ToolsetAcquisition,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, exomonad_actor::SourceInspectionError> {
+        self.owner
+            .restore_source_with_acquisition(reference, acquisition)
     }
-    fn read_from(&self, source: &exomonad_actor::CheckpointSourceLayer, module: &str) -> Result<(String, String), exomonad_actor::SourceInspectionError> { self.owner.read_from(source, module) }
-    fn revision(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrRevision, exomonad_actor::SourceInspectionError> { self.owner.revision(source) }
-    fn observe(&self, source: &exomonad_actor::CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError> { self.owner.observe(source) }
-    fn stage_reload(self: Arc<Self>, actor: tidepool_repr::PrincipalId, source: &exomonad_actor::CheckpointSourceLayer, checks: &[String]) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload> {
+    fn read_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        module: &str,
+    ) -> Result<(String, String), exomonad_actor::SourceInspectionError> {
+        self.owner.read_from(source, module)
+    }
+    fn revision(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrRevision, exomonad_actor::SourceInspectionError> {
+        self.owner.revision(source)
+    }
+    fn observe(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError> {
+        self.owner.observe(source)
+    }
+    fn stage_reload(
+        self: Arc<Self>,
+        actor: tidepool_repr::PrincipalId,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        checks: &[String],
+    ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
+    {
         self.gate.wait_if_armed();
         self.owner.clone().stage_reload(actor, source, checks)
     }
@@ -172,62 +244,62 @@ fn configure_workshop(
     judgments: Arc<UnexpectedJudgment>,
     spec: Option<&str>,
 ) {
-        config.jev = Some(judgments.clone());
-        super::startup_persona_acceptance_tests::configure_persona(
-            config,
-            "AgentSpec.agentSpec",
-            |workspace, project| {
-                let authored = workspace.join(".exomonad");
-                std::fs::create_dir_all(authored.join("Project")).unwrap();
-                std::fs::write(
-                    authored.join("Project/Work.hs"),
+    config.jev = Some(judgments.clone());
+    super::startup_persona_acceptance_tests::configure_persona(
+        config,
+        "AgentSpec.agentSpec",
+        |workspace, project| {
+            let authored = workspace.join(".exomonad");
+            std::fs::create_dir_all(authored.join("Project")).unwrap();
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_a.hs"),
+            )
+            .unwrap();
+            project.haskell.modules.push("Project.Work".into());
+            let inputs = workspace.join("reload-inputs");
+            std::fs::create_dir_all(&inputs).unwrap();
+            if let Some(spec) = spec {
+                std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+            }
+            for (name, body) in [
+                ("spec-b.txt", include_str!("fixtures/sync_reload_spec_b.hs")),
+                (
+                    "work-a.txt",
                     include_str!("fixtures/coherent_reload_work_a.hs"),
-                )
-                .unwrap();
-                project.haskell.modules.push("Project.Work".into());
-                let inputs = workspace.join("reload-inputs");
-                std::fs::create_dir_all(&inputs).unwrap();
-                if let Some(spec) = spec {
-                    std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
-                }
-                for (name, body) in [
-                    ("spec-b.txt", include_str!("fixtures/sync_reload_spec_b.hs")),
-                    (
-                        "work-a.txt",
-                        include_str!("fixtures/coherent_reload_work_a.hs"),
-                    ),
-                    (
-                        "work-b.txt",
-                        include_str!("fixtures/coherent_reload_work_b.hs"),
-                    ),
-                    (
-                        "work-invalid.txt",
-                        include_str!("fixtures/coherent_reload_work_invalid.hs"),
-                    ),
-                    (
-                        "prompt-b.txt",
-                        include_str!("fixtures/coherent_reload_prompt_b.md"),
-                    ),
-                ] {
-                    std::fs::write(inputs.join(name), body).unwrap();
-                }
-            },
-        );
-        let selected = config.workspace_inputs.as_ref().unwrap();
-        assert!(selected
-            .modules
-            .iter()
-            .any(|module| module == "Project.Work"));
-        let work = selected
-            .captured_source_roots()
-            .iter()
-            .map(|root| root.join("Project/Work.hs"))
-            .find(|path| path.is_file())
-            .expect("the selected immutable graph contains Work");
-        assert_eq!(
-            std::fs::read_to_string(work).unwrap(),
-            include_str!("fixtures/coherent_reload_work_a.hs")
-        );
+                ),
+                (
+                    "work-b.txt",
+                    include_str!("fixtures/coherent_reload_work_b.hs"),
+                ),
+                (
+                    "work-invalid.txt",
+                    include_str!("fixtures/coherent_reload_work_invalid.hs"),
+                ),
+                (
+                    "prompt-b.txt",
+                    include_str!("fixtures/coherent_reload_prompt_b.md"),
+                ),
+            ] {
+                std::fs::write(inputs.join(name), body).unwrap();
+            }
+        },
+    );
+    let selected = config.workspace_inputs.as_ref().unwrap();
+    assert!(selected
+        .modules
+        .iter()
+        .any(|module| module == "Project.Work"));
+    let work = selected
+        .captured_source_roots()
+        .iter()
+        .map(|root| root.join("Project/Work.hs"))
+        .find(|path| path.is_file())
+        .expect("the selected immutable graph contains Work");
+    assert_eq!(
+        std::fs::read_to_string(work).unwrap(),
+        include_str!("fixtures/coherent_reload_work_a.hs")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -397,7 +469,11 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                     .await;
                     assert_reload_tool(
                         &authored,
-                        if id == "noop" { "ReloadUnchanged" } else { "ReloadRejected" },
+                        if id == "noop" {
+                            "ReloadUnchanged"
+                        } else {
+                            "ReloadRejected"
+                        },
                     );
                 }
             }
@@ -423,8 +499,13 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
 }
 
 fn authored_tool_names(request: &harness::transport::ResponsesRequest) -> Vec<String> {
-    request.tools.iter().filter_map(|tool| tool["name"].as_str())
-        .filter(|name| *name != "status").map(str::to_owned).collect()
+    request
+        .tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .filter(|name| *name != "status")
+        .map(str::to_owned)
+        .collect()
 }
 
 async fn authored_cell(
@@ -438,8 +519,13 @@ async fn authored_cell(
 ) -> HostedScriptRound {
     let operation = round.operation(id);
     round.sync_call_named(id, "haskell", source);
-    let next = host.while_operation_succeeds(&operation,
-        next_hosted_script_round(requests, pending, root)).await.unwrap();
+    let next = host
+        .while_operation_succeeds(
+            &operation,
+            next_hosted_script_round(requests, pending, root),
+        )
+        .await
+        .unwrap();
     assert_true_page(host, &next.settled_output(id));
     next
 }
@@ -456,8 +542,12 @@ async fn authored_reload(
 ) -> HostedScriptRound {
     let operation = round.operation(id);
     round.function(id, name, arguments);
-    host.while_operation_succeeds(&operation,
-        next_hosted_script_round(requests, pending, root)).await.unwrap()
+    host.while_operation_succeeds(
+        &operation,
+        next_hosted_script_round(requests, pending, root),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -467,17 +557,31 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
     let (provider, mut requests) = hosted_script_provider();
     let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
     let gate = Arc::new(ReloadGate::default());
-    let _release_on_failure = ReleaseReloadGate(gate.clone());
     let transform: super::hosted_test_context::HostSourceLayersTransform = {
         let gate = gate.clone();
-        Arc::new(move |owner| Arc::new(GatedSourceLayers { owner, gate: gate.clone() }))
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: gate.clone(),
+            })
+        })
     };
     let host = HostedTestRuntime::start_configured_with_source_layers(
-        &settings, &provider,
-        |config| configure_workshop(config, judgments.clone(), Some(include_str!("fixtures/sync_reload_spec_a.hs"))),
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            )
+        },
         transform,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     host.run_scenario(|host| Box::pin(async move {
+        let _release_on_failure = ReleaseReloadGate(gate.clone());
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
         host.input("Keep working while our tool interface evolves.").await.unwrap();
@@ -518,13 +622,13 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
         round = authored_cell(host, &mut requests, &mut pending, &root, round, "progress-child",
             include_str!("fixtures/sync_reload_child_progress.hs")).await;
         let child = host.while_host_running(select_hosted_script_round(
-            &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await;
+            &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
         let child_path = child.host_identity().actor;
         let reload_operation = round.operation("accept-surface");
         let mut settlements = host.runtime.scheduler().operation_settlements();
         gate.arm();
         round.function("accept-surface", "apply_draft", serde_json::json!({"accept_cache_invalidation":true}));
-        host.while_host_running(gate.entered.notified()).await;
+        host.while_host_running(gate.entered.notified()).await.unwrap();
         let input = host.input("This input arrived while synchronous reload was preparing.").await.unwrap();
         let before = host.runtime.store().embedded_round_frontier(&root_identity).unwrap();
         assert_eq!(before.pending_head.as_ref(), Some(&reload_operation.request));
@@ -547,7 +651,7 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
             loop {
                 if settlements.recv().await.unwrap() == reload_operation { break; }
             }
-        }).await;
+        }).await.unwrap();
         round = host.while_operation_succeeds(&reload_operation,
             next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
         assert_reload_tool(&round.settled_output("accept-surface"), "ReloadPublished");

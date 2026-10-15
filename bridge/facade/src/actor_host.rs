@@ -2127,7 +2127,9 @@ async fn run_owned(
         .map(|layers| layers as exomonad_actor::ActorSourceLayerResolver);
     #[cfg(test)]
     let interpreted_source_layers = interpreted_source_layers.map(|layers| {
-        test_hooks.as_ref().and_then(|hooks| hooks.source_layers.as_ref())
+        test_hooks
+            .as_ref()
+            .and_then(|hooks| hooks.source_layers.as_ref())
             .map_or_else(|| layers.clone(), |transform| transform(layers.clone()))
     });
     let forest = with_host_interpreters(
