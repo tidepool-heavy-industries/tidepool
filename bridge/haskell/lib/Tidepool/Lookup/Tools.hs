@@ -228,12 +228,15 @@ sameCandidate :: LookupCandidate -> LookupCandidate -> Bool
 sameCandidate a b = candidateQuery a == candidateQuery b && candidateReference a == candidateReference b
 
 -- | Preserve fair/local-first ordering, counting Unicode scalars. Every original
--- candidate gets an assignment, including duplicates and both omission budgets.
+-- candidate gets an assignment. After the unique-candidate cap, remaining rows
+-- are cap omissions without maintaining an unbounded duplicate inventory.
 packCandidates :: Text -> [LookupCandidate] -> CandidatePacking
 packCandidates view = go (8192 * 4) [] 0 . zip [1..]
   where
     go :: Int -> [(Int, LookupCandidate)] -> Int -> [(Int, LookupCandidate)] -> CandidatePacking
     go remaining _ _ [] = CandidatePacking [] [] remaining
+    go remaining _ unique remainingCandidates | unique >= 128 = CandidatePacking
+      [CandidateAssignment ordinal CandidateCapOmitted | (ordinal, _) <- remainingCandidates] [] remaining
     go remaining seen unique ((ordinal, candidate) : rest) =
       let duplicate = [previous | (previous, original) <- seen, sameCandidate candidate original]
           bounded = candidate {candidateSummary = T.pack (take 2048 (T.unpack (candidateSummary candidate)))}
@@ -241,10 +244,9 @@ packCandidates view = go (8192 * 4) [] 0 . zip [1..]
           packed = PackedCandidate (CandidateId view ordinal (candidateQuery candidate) (candidateReference candidate)) candidate bounded
           (decision, nextRemaining, nextSeen, nextUnique, admitted) = case duplicate of
             previous : _ -> (CandidateDuplicate previous, remaining, seen, unique, [])
-            [] | unique >= 128 -> (CandidateCapOmitted, remaining, seen ++ [(ordinal, candidate)], unique + 1, [])
-               | cost > remaining -> (CandidateBudgetOmitted cost, remaining, seen ++ [(ordinal, candidate)], unique + 1, [])
+            [] | cost > remaining -> (CandidateBudgetOmitted cost, remaining, (ordinal, candidate) : seen, unique + 1, [])
                | otherwise -> (CandidatePacked packed cost (candidateSummary bounded /= candidateSummary candidate),
-                   remaining - cost, seen ++ [(ordinal, candidate)], unique + 1, [packed])
+                   remaining - cost, (ordinal, candidate) : seen, unique + 1, [packed])
           following = go nextRemaining nextSeen nextUnique rest
       in following {packingAssignments = CandidateAssignment ordinal decision : packingAssignments following,
                     packingCandidates = admitted ++ packingCandidates following}

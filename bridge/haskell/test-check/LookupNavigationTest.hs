@@ -191,6 +191,15 @@ lookupPackingTests = testGroup "lookup evidence"
       assert "full original metadata remains available" (Tools.packedOriginal (head (Tools.packingCandidates packed)) == unicode)
       let capped = Tools.packCandidates "immutable-view" [candidate n (T.replicate 40000 "x") | n <- [1..129]]
       assert "cap precedes aggregate budget" (Tools.assignmentDecision (last (Tools.packingAssignments capped)) == Tools.CandidateCapOmitted)
+  , testCase "large capped pools retain one assignment per source with a bounded prefix inventory" $ do
+      let values = [candidate n "brief" | n <- [1..10000]]
+          prefix = Tools.packCandidates "immutable-view" (take 128 values)
+          allRows = Tools.packCandidates "immutable-view" values
+      assert "admitted pool and scoring budget unchanged after cap" (Tools.packingCandidates allRows == Tools.packingCandidates prefix
+        && Tools.packingRemainingScalars allRows == Tools.packingRemainingScalars prefix)
+      assert "all originals have a trace row" (map Tools.assignmentOrdinal (Tools.packingAssignments allRows) == [1..10000])
+      assert "suffix is cap omitted without further deduplication" (all ((== Tools.CandidateCapOmitted) . Tools.assignmentDecision)
+        (drop 128 (Tools.packingAssignments allRows)))
   , testCase "aggregate Unicode scalar threshold is inclusive with exact budget accounting" $ do
       let base = candidate 1 ""
           overhead = length (T.unpack (Tools.candidateText base)) + 1024 - 4
