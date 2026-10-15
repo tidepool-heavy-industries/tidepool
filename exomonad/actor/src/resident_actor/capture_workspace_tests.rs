@@ -939,10 +939,19 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
         .await;
     let gate = InstallationGateGuard::new(fixture.session, false);
-    let call = tokio::spawn(run_host_cell(
-        parent,
-        reader_source(&token, "publication-cancel", "Core.ActorOwned"),
-    ));
+    let source = reader_source(&token, "publication-cancel", "Core.ActorOwned");
+    let call = tokio::spawn(async move {
+        let client = crate::resident_tools::ResidentToolClient::local(parent);
+        client
+            .dispatch_prepared_workbench(
+                crate::ActorWorkbenchInvocation::unbound(WorkbenchRequest::from_cell_input(
+                    &source,
+                )),
+                client.issue_workbench_call(None),
+            )
+            .await
+            .expect("actual parent notebook receipt")
+    });
     let kernel = gate.reached().await;
     let retained = kernel.retained_exit();
     let first = ActorTerminal::new(ActorExitKind::Cancelled, "cancel before child publication");
@@ -956,9 +965,7 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .await
         .expect("cancelled bootstrap retires");
     assert_eq!(terminal, first);
-    let reply: tidepool_runtime::session::WorkbenchResponse =
-        serde_json::from_value(call.await.expect("failed spawn caller task"))
-            .expect("actual parent notebook receipt");
+    let reply = call.await.expect("failed spawn caller task");
     assert_eq!(reply.items.len(), 1, "{reply:?}");
     assert_eq!(
         reply.items[0].status,
