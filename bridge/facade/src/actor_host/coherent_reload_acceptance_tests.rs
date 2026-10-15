@@ -503,7 +503,7 @@ fn authored_tool_names(request: &harness::transport::ResponsesRequest) -> Vec<St
         .tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
-        .filter(|name| *name != "status")
+        .filter(|name| !matches!(*name, "status" | "yield"))
         .map(str::to_owned)
         .collect()
 }
