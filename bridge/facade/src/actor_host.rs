@@ -747,6 +747,13 @@ fn root_startup_chain(
     Ok(chain)
 }
 
+fn needs_host_recovery(record: &exomonad_actor::DurableActorRecord) -> bool {
+    match record.terminal.as_ref().map(|terminal| terminal.kind) {
+        None | Some(ActorExitKind::Interrupted) => true,
+        Some(ActorExitKind::Completed | ActorExitKind::Cancelled | ActorExitKind::Failed) => false,
+    }
+}
+
 fn durable_root_identity(
     records: &[exomonad_actor::DurableActorRecord],
     accepted_source: Option<&str>,
@@ -755,10 +762,7 @@ fn durable_root_identity(
         .filter(|record| {
             record.application.as_ref().is_some_and(|application| {
                 application.accepted_source.as_deref() == accepted_source
-                    && record
-                        .terminal
-                        .as_ref()
-                        .is_none_or(|terminal| terminal.kind == ActorExitKind::Interrupted)
+                    && needs_host_recovery(record)
                     && ((record.startup.is_some() && application.conversation.is_none())
                         || application.conversation.is_some())
             })
@@ -2154,7 +2158,7 @@ async fn run_owned(
         .fence_recovery_identities(
             prior_actor_records
                 .iter()
-                .filter(|record| record.terminal.is_none())
+                .filter(|record| needs_host_recovery(record))
                 .map(|record| record.admission.actor.id)
                 .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
@@ -2361,7 +2365,7 @@ async fn run_owned(
     let unavailable_records = prior_actor_records
         .iter()
         .filter(|record| {
-            record.terminal.is_none() && record.admission.actor.id != root_actor.identity().id
+            needs_host_recovery(record) && record.admission.actor.id != root_actor.identity().id
         })
         .map(|record| record.admission.actor)
         .collect::<Vec<_>>();
