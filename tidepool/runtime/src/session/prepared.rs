@@ -12016,6 +12016,8 @@ pub(super) mod tests {
 
     #[test]
     fn site_conflict_diagnostics_identify_the_refused_comparison() {
+        let mut family = testing::identity("Fixture", "Result");
+        family.namespace = "type".into();
         let types = response_result_types(
             &[
                 DeclarationForm::Text,
@@ -12023,7 +12025,7 @@ pub(super) mod tests {
                 DeclarationForm::Natural,
             ],
             0,
-            &testing::identity("Fixture", "Result"),
+            &family,
         );
         let program = |delivery, wire, inputs: &[u32], origin: &str, ordinal| {
             let prepared = typed_site_program(7, types.clone(), wire, inputs);
