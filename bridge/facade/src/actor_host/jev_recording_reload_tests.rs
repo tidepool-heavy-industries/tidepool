@@ -48,7 +48,11 @@ async fn displayed(
     source: &str,
 ) -> String {
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let receipt = campaign
+    let origin = test_campaign::actor_output_origin(
+        &super::runtime_namespace(campaign.session_root.path()),
+        campaign.actor.identity(),
+    );
+    let mut receipt = campaign
         .drive_actor_output(&store, async {
             let result =
                 test_campaign::dispatch_haskell_script_named(endpoint, "haskell_sync", source)
@@ -57,7 +61,84 @@ async fn displayed(
             result
         })
         .await;
-    test_campaign::committed_display_text(&receipt).to_owned()
+    // Runaway safeguards for this one diagnostic scalar: at most 64 default
+    // 8-KiB ASCII pages; the byte bound also limits encoded Unicode text.
+    const MAX_PAGES: usize = 64;
+    const MAX_BYTES: usize = 512 * 1024;
+    let mut text = String::new();
+    let mut identity = None;
+    let mut consumed = std::collections::HashSet::new();
+    for page_number in 1..=MAX_PAGES {
+        let page = test_campaign::retained_committed_display_text(&store, &origin, &receipt);
+        let displays: Vec<_> = receipt["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["operations"].as_array().unwrap())
+            .filter_map(|operation| operation.get("display"))
+            .collect();
+        let [display] = displays.as_slice() else {
+            panic!("one diagnostic scalar display: {receipt}")
+        };
+        let current: (i64, i64, i64) = serde_json::from_value(display["identity"].clone()).unwrap();
+        if let Some(expected) = identity {
+            assert_eq!(
+                current, expected,
+                "diagnostic continuation changed display identity"
+            );
+        } else {
+            identity = Some(current);
+        }
+        let keys = display["expansions"].as_array().unwrap();
+        assert_eq!(
+            display["unavailable"],
+            false,
+            "diagnostic observation incomplete: retained detail unavailable after {page_number} pages/{} bytes; partial: {text}; page: {page}",
+            text.len()
+        );
+        assert!(
+            keys.len() <= 1,
+            "diagnostic observation incomplete: expected a scalar suffix, got {} branches after {page_number} pages/{} bytes; partial: {text}; page: {page}",
+            keys.len(),
+            text.len()
+        );
+        // The notice describes this page and is not part of the retained suffix.
+        // Only a page with a continuation can have this owner-added notice.
+        // A lone ellipsis could also be actual content at a one-character
+        // allowance; report that ambiguity instead of silently deleting it.
+        let content = if keys.is_empty() {
+            page.as_str()
+        } else {
+            ["[truncated; expand handle key for retained detail]", "[…]", "…"]
+                .iter().find_map(|notice| page.strip_suffix(*notice)
+                    .filter(|prefix| *notice != "…" || !prefix.is_empty()))
+                .or_else(|| page.is_empty().then_some(""))
+                .unwrap_or_else(|| panic!("diagnostic observation incomplete: unrecognized continuation notice after {page_number} pages/{} bytes; partial: {text}; page: {page}", text.len()))
+        };
+        let observed_bytes = text.len().saturating_add(content.len());
+        assert!(
+            observed_bytes <= MAX_BYTES,
+            "diagnostic observation incomplete: {observed_bytes} bytes exceeds {MAX_BYTES}-byte bound after {page_number} pages; partial: {text}"
+        );
+        text.push_str(content);
+        let Some(key) = keys.first() else {
+            return text;
+        };
+        let key = key[0].as_i64().unwrap();
+        assert!(
+            consumed.insert(key),
+            "diagnostic observation incomplete: consumed key {key} reappeared after {page_number} pages/{} bytes; partial: {text}",
+            text.len()
+        );
+        assert!(
+            page_number < MAX_PAGES,
+            "diagnostic observation incomplete: {page_number} pages reached {MAX_PAGES}-page bound at {} bytes; partial: {text}",
+            text.len()
+        );
+        receipt = campaign.drive_actor_output(&store, endpoint.expand_display_boxed(current, key)).await
+            .unwrap_or_else(|error| panic!("diagnostic observation incomplete: retained expansion failed after {page_number} pages/{} bytes: {error}; partial: {text}", text.len()));
+    }
+    unreachable!("bounded scalar observation returns or reports its limit")
 }
 
 #[tokio::test]
