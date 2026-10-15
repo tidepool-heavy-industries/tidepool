@@ -412,9 +412,15 @@ async fn forest_shutdown_membership_history(host_stop: bool) {
     } else {
         ActorExitKind::Cancelled
     };
-    for actor in &admitted {
+    for actor in [&parent, &child] {
         assert_eq!(actor.terminal().get().unwrap().kind, expected);
     }
+    // This member loses startup admission to the sealed directory; its actual
+    // failure must not be replaced by the host's earlier interruption intent.
+    assert_eq!(
+        run_owned.terminal().get().unwrap().kind,
+        ActorExitKind::Failed
+    );
     let refused_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
         .await
         .unwrap()
