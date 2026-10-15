@@ -1208,8 +1208,6 @@ fn prepare_embedded_browser_command(
         };
         return Ok(EmbeddedBrowserCommandDispatch::SelectAccount {
             operation,
-            run: run.to_owned(),
-            store: store.clone(),
             auth: auth.clone(),
             control: control.clone(),
             owner: owner.clone(),
@@ -1232,8 +1230,6 @@ fn prepare_embedded_browser_command(
 enum EmbeddedBrowserCommandDispatch {
     SelectAccount {
         operation: harness::embedding::ClientOperationId,
-        run: String,
-        store: Arc<harness::store::Store>,
         auth: harness::transport::auth::chatgpt::RunAccountAuth,
         control: harness::server::ServerControl,
         owner: Arc<HostIncarnationLease>,
@@ -1257,59 +1253,25 @@ impl EmbeddedBrowserCommandDispatch {
             Self::Settled(receipt) => return Ok(receipt),
             Self::SelectAccount {
                 operation,
-                run,
-                store,
                 auth,
                 control,
                 owner,
             } => {
-                let (receipt, selection) = tokio::task::spawn_blocking(move || {
+                let receipt = tokio::task::spawn_blocking(move || {
                     // Blocking work survives async cancellation; retain the exact
                     // host lease until its atomic Store transition has settled.
                     let _owner = owner;
-                    let accounts = match auth.accounts() {
-                        Ok(accounts) => accounts,
-                        Err(_) => {
-                            let target = store
-                                .embedded_command(&run, operation)
-                                .map_err(|e| e.to_string())?
-                                .ok_or("account command is missing")?
-                                .command
-                                .target()
-                                .clone();
-                            let receipt = store
-                                .settle_embedded_command(
-                                    &run,
-                                    operation,
-                                    CommandReceiptOutcome::Refused {
-                                        target: Some(target),
-                                        reason: "Saved accounts are unavailable.".into(),
-                                    },
-                                )
-                                .map_err(|e| e.to_string())?;
-                            return Ok::<_, String>((receipt, None));
-                        }
-                    };
-                    let receipt = store
-                        .select_run_account(&run, operation, &accounts)
-                        .map_err(|e| e.to_string())?;
-                    let selection = match &receipt.outcome {
-                        CommandReceiptOutcome::AccountSelected { account_id, .. } => {
-                            Some(accounts.projection(account_id.clone()))
-                        }
-                        _ => None,
-                    };
-                    Ok((receipt, selection))
+                    auth.select_account(operation, |selection| {
+                        control.publish(
+                            harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
+                                selection,
+                            ),
+                        );
+                    })
+                    .map_err(|error| error.to_string())
                 })
                 .await
-                .map_err(|e| e.to_string())??;
-                if let Some(selection) = selection {
-                    control.publish(
-                        harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
-                            selection,
-                        ),
-                    );
-                }
+                .map_err(|error| error.to_string())??;
                 return Ok(Some(receipt));
             }
             Self::Admitted {
