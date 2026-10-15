@@ -1196,6 +1196,10 @@ test-suite tool-profiles-contract
   hs-source-dirs:   test-check generated/effects generated/protocol lib actors
   other-modules:
     QuantitiesContract
+    Tidepool.Actor
+    Tidepool.Actors.Spawn
+    Tidepool.Actors.Internal.Agent
+    Tidepool.Agent.Session
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson

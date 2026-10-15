@@ -2,6 +2,8 @@
 module Main (main, tests) where
 
 import Control.Monad (unless)
+import qualified Tidepool.Actors.Spawn as Spawn
+import qualified Tidepool.Effects.Core as Core
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
 import Control.Monad.Freer.State (State, get, modify, runState)
 import Data.List (isInfixOf)
@@ -195,6 +197,28 @@ installedToolContracts = do
     field name (Object values) = KM.lookup (KM.fromText name) values
     field _ _ = Nothing
 
+preparedSpecContracts :: IO ()
+preparedSpecContracts = do
+  let spec = defaultSpec
+        { specTools = tools
+        , afterTool = Just (error "preparation executed after-tool")
+        , initialContext = Just (error "preparation executed startup")
+        }
+  prepared <- either (error . show) pure (prepareAgentSpec spec)
+  let metadata = preparedAgentSpecMetadata prepared
+      (_, installed) = run $ interpret noReload $ interpret (\(_ :: ContextReadWrite a) -> error "unexpected context request") $
+        runState Null $ reinterpret installation $ installPreparedSpec prepared
+  require "preparation and installation share exactly one declaration set" (metadata == installed)
+  let refused = run $ interpret refuse $ Spawn.spawnSubagent (Spawn.FreshCtx "fixture") Spawn.SameDir (Spawn.defaultSpawnOptions spec)
+  require "public scalar preflight refusal does not emit a child allocation" (case refused of
+    Left (Spawn.SpawnInvalidSpec (Core.SpecInputSchemaInvalid _)) -> True
+    _ -> False)
+  where
+    refuse :: Core.AgentLaunch a -> Eff '[] a
+    refuse (Core.AgentLaunchValidateSpecWith _ _) = pure (Left (Core.SpecInputSchemaInvalid "function input must be an object"))
+    refuse _ = error "refused preflight reached a launch or another authored effect"
+
+
 presentedCompositionContracts :: IO ()
 presentedCompositionContracts = do
   bounded <- either (error . show) pure (compileTools semanticTools)
@@ -302,7 +326,9 @@ endpointIndexTests =
 
 tests :: TestTree
 tests = testGroup "tool profile contract" $
-  [ testCase "receipt projections distinguish terminal failure from observation rejection" receiptFailureProjection
+  [ testCase "prepared spec metadata does not execute handlers or slots and refusal cannot launch" preparedSpecContracts
+  , testCase "concrete spec preparation requires an input schema dictionary" $ compileProfile "PreparedSpecMissingSchema" (Rejected ["JsonSchema Input"])
+  , testCase "receipt projections distinguish terminal failure from observation rejection" receiptFailureProjection
   , testCase "compiled installation dispatch scheduling presentation and actor profiles" installedToolContracts
   , testCase "nested bounded and installed handlers preserve semantic presentation" presentedCompositionContracts
   , testCase "ordinary compiled model program can be raised into sync context" $
