@@ -265,7 +265,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin, normalizeInterfaceEvidence )
 import Tidepool.ExactScope
-  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
+  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(ModuleInterfaceAdmission), scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, revalidateCanonicalProofInputs
   , canonicalCertificateSha256, canonicalCoreArtifact
@@ -326,6 +326,7 @@ data PreparedModuleCompletionInputs = PreparedModuleCompletionInputs
   , completionExternalOriginals :: Set.Set SymbolIdentity
   , completionExternalOriginalBindings :: Map.Map Name SymbolIdentity
   , completionReuseContext :: ReuseContext
+  , completionCanonicalInterfaces :: Map.Map (String,String) CanonicalInterfaceAdmission
   }
 
 data PreparedModuleObserver = PreparedModuleObserver
@@ -2629,6 +2630,19 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw targetName
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
+        exactCanonicalInterfaces = maybe Map.empty scopeCanonicalInterfaces selectedExact
+        candidateCanonicalInterfaces = Map.fromList
+          [((candidateUnit original,candidateModule original),
+              ModuleInterfaceAdmission (admittedCandidateProof admitted))
+            | admitted <- Map.elems acceptedCandidates
+            , let original = admittedCandidateOriginal admitted]
+        -- Genuine candidate admission declines an owner already present in the
+        -- exact interface closure. Enforce that contract before combining proof
+        -- owners; map precedence cannot choose between competing admissions.
+        duplicateCanonicalOwners = Map.keys (Map.intersection exactCanonicalInterfaces candidateCanonicalInterfaces)
+        selectedCanonicalInterfaces = Map.union exactCanonicalInterfaces candidateCanonicalInterfaces
+    unless (null duplicateCanonicalOwners) $ liftIO $ fail
+      ("admitted candidate duplicates an exact canonical owner: " ++ show duplicateCanonicalOwners)
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
     -- substitute for this cycle's accepted candidate proof.
@@ -3524,7 +3538,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                          ++ [binder | admitted <- Map.elems acceptedCandidates
                             , group <- candidateGroups (admittedCandidateOriginal admitted)
                             , binder <- candidateGroupBinders group])
-                      inputs = PreparedModuleCompletionInputs recovery sourceOwners siblings externalOriginals externalBindings reuseContext
+                      inputs = PreparedModuleCompletionInputs recovery sourceOwners siblings externalOriginals externalBindings reuseContext selectedCanonicalInterfaces
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
@@ -3915,8 +3929,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 , ownedPrHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
                 , ownedPrInjectedSessionInterfaces = injectedBaseline
                 , ownedPrProducedSessionInterfaces = injectedTyped
-                , ownedPrCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
-                    (pvExactScope variant)
+                , ownedPrCanonicalInterfaceAdmissions = selectedCanonicalInterfaces
                 , ownedPrCapturedType = capturedType
                 , ownedPrCheckedBinderPins = checkedBinderPins
                 , ownedPrResultType   = resultTy

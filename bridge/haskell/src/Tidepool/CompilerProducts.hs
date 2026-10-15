@@ -63,9 +63,9 @@ import Tidepool.ExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
-  , scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes
+  , scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
-  , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
+  , CanonicalInterfaceProof, CanonicalInterfaceAdmission, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
@@ -98,7 +98,7 @@ import Tidepool.FinalizedModuleArtifacts
   )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
-  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
   , PreparedModuleCompletionInputs(..), preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
@@ -131,14 +131,14 @@ prepareCompilerProjectionContext
 prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
   context <- prepareCompilerProjectionContextForEnvironment
     (prHscEnv (pprPipelineResult prepared))
-    (compilationScope <$> preparedExactCompilation prepared)
+    (prCanonicalInterfaceAdmissions (pprPipelineResult prepared))
     retainedGenerations owner target auxiliaryRoots hostJsonAuthority
   pure context {projectionCurrentOriginals = pprOriginalBindings prepared}
 
 prepareCompilerProjectionContextForEnvironment
-  :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
+  :: HscEnv -> Map.Map (String,String) CanonicalInterfaceAdmission -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
   -> Maybe JsonAuthority -> IO ProjectionContext
-prepareCompilerProjectionContextForEnvironment environment exactScope retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
+prepareCompilerProjectionContextForEnvironment environment canonicalInterfaces retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
   timing <- readTimingEnabled
   let symbol occurrence = SymbolIdentity (T.pack (unitString (moduleUnit owner)))
         (T.pack (moduleNameString (moduleName owner))) "value" (T.pack occurrence) Nothing
@@ -147,7 +147,7 @@ prepareCompilerProjectionContextForEnvironment environment exactScope retainedGe
   jsonAuthority <- timePhase timing "json_authority" $ case hostJsonAuthority of
     Just authority -> pure (Just authority)
     Nothing -> resolveJsonAuthorityWithCanonicalInterfaces environment
-      (maybe Map.empty scopeCanonicalInterfaces exactScope)
+      canonicalInterfaces
   textAuthority <- timePhase timing "text_authority" $ resolveTextPackageUnit environment
   (architecture, abi) <- case SystemInfo.arch of
     "x86_64" -> pure (X86_64, "sysv64")
@@ -183,8 +183,8 @@ observeOriginalProjection :: OriginalProjectionCollector
   -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
   -> PreparedModuleCompletionInputs -> IO PreparedModuleObserver
 observeOriginalProjection completed retained auxiliaryRoots json
-    environment interfaces owner exact inputs = do
-  baseContext <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
+    environment interfaces owner _exact inputs = do
+  baseContext <- prepareCompilerProjectionContextForEnvironment environment (completionCanonicalInterfaces inputs) retained owner
     "__original_projection" auxiliaryRoots json
   let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
       observe prepared = do
@@ -389,7 +389,7 @@ observeOriginalProjectionWithRecovery :: OriginalProjectionCollector -> Prepared
   -> PreparedModuleCompletionInputs -> IO (PreparedModuleObserver,OriginalProductWorklist)
 observeOriginalProjectionWithRecovery collector cache executor retained auxiliaryRoots json
     env interfaces owner exact inputs = do
-  baseContext <- prepareCompilerProjectionContextForEnvironment env exact retained owner
+  baseContext <- prepareCompilerProjectionContextForEnvironment env (completionCanonicalInterfaces inputs) retained owner
     "__original_projection" auxiliaryRoots json
   let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
   worklist <- newOriginalProductWorklist collector cache executor (Just (completionReuseContext inputs)) env exact interfaces context

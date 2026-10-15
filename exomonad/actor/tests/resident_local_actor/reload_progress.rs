@@ -120,8 +120,17 @@ async fn invalid_authored_reload_arguments_release_the_invocation() {
         .await,
     )
     .await
-    .unwrap();
-    assert_eq!(rejected["status"], "rejected");
+    .unwrap_err();
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = rejected
+    else {
+        panic!("malformed authored arguments must refuse the workbench invocation: {rejected:?}");
+    };
+    assert!(failure.receipts.is_empty());
+    assert!(failure
+        .detail
+        .contains("invalid input for tool reload: expected array, got bool"));
     fixture
         .check_value("retained-after-refusal", "kept == 42")
         .await;

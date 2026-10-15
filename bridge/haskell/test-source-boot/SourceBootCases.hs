@@ -191,7 +191,7 @@ import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProo
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
   , pprFinalizedModules, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates
-  , preparedCandidateOriginal, preparedCandidateProof, prBinds, prHscEnv, prResultType, prWarnings
+  , preparedCandidateOriginal, preparedCandidateProof, prBinds, prHscEnv, prCanonicalInterfaceAdmissions, prResultType, prWarnings
   , prTargetTcGblEnv, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , retainProgramSourceImports, withProgramSourceImports
@@ -221,7 +221,7 @@ import Tidepool.ExactScope
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
-  , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
+  , scopeModuleInterfaceProofs, scopeCanonicalInterfaces, admittedInterfaceSourceSha256, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
@@ -426,7 +426,7 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
           workers <- newMVar Set.empty
           releaseFirst <- newEmptyMVar
           let inputs = PreparedModuleCompletionInputs Nothing
-                (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture")
+                (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture") Map.empty
               firstOwner = pmModule (head queue)
               secondOwner = pmModule (queue !! 1)
           (observer,worklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
@@ -531,6 +531,14 @@ candidateGraphDescriptorsAt work = do
   unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == owners
       && Set.null (owners `Set.intersection` Set.fromList (preparedNames accepted))) $
     fail "genuine graph above four MiB lost actual candidate reuse"
+  let admissions = prCanonicalInterfaceAdmissions (pprPipelineResult accepted)
+  unless (Map.keysSet admissions == Set.fromList [("main",name) | name <- Set.toList owners]) $
+    fail "candidate hydration did not retain exactly its issuing canonical admissions"
+  forM_ (Set.toList owners) $ \name -> do
+    sourceBytes <- BS.readFile (work </> name <.> "hs")
+    unless (fmap admittedInterfaceSourceSha256 (Map.lookup ("main",name) admissions)
+        == Just (digest sourceBytes)) $
+      fail "recovered candidate authority lost its independently hashed original source"
   putStrLn "candidate graph descriptors: genuine bounded offer and actual dependency reuse passed"
 
 -- Load provenance is local to a request; retained owners and source changes
@@ -3656,7 +3664,7 @@ originalProjectionProducts = withScratch $ \work -> do
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
     let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules paired)))
-          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture")
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture") (prCanonicalInterfaceAdmissions (pprPipelineResult paired))
         completionOrder = [consumer,ownerModule,provider,independent]
     (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
       pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
@@ -3723,7 +3731,7 @@ originalProjectionProducts = withScratch $ \work -> do
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
     let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules captured)))
-          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture")
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture") (scopeCanonicalInterfaces capturedScope)
     (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
       Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
       (Just capturedScope) inputs

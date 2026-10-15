@@ -868,6 +868,8 @@ tests = testGroup "prepared-stg-pipeline"
       withCaseScratch "prepared-cache-lifetime" verifyTypedPreparationCacheLifetime
   , testCase "site dependency histories refuse changed and newly available authority" $
       withCaseScratch "prepared-site-dependencies" verifySiteDependencyHistories
+  , testCase "JSON authority refuses dependency shadows" $
+      withCaseScratch "json-authority" verifyJsonDependencyAuthority
   , testCase "original prepared pipeline and compiler authority" fullMain
   , testCase "projection interning and constructor conflicts" $
       withCaseScratch "projection-interning" verifyProjectionInterning
@@ -1270,7 +1272,6 @@ fullMain = do
         ])
       verifyPreparedPrivateImports
       withCaseScratch "constructor-representations" verifyConstructorRepresentations
-      verifyJsonDependencyAuthority dir
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"

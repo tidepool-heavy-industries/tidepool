@@ -344,6 +344,17 @@ candidateCanonicalChecks manifest candidateManifest = do
           Right _ -> fail "candidate promotion admitted changed source or interface evidence"
   forM_ candidates $ \candidate -> do
     proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope) selected candidate >>= either fail pure
+    let exactOwnerRows = [(iface,path,seal) | (iface,path,seal) <- scopeInterfaces scope
+          , (exactUnit iface,exactModule iface) == (candidateUnit candidate,candidateModule candidate)]
+    when (null exactOwnerRows) (fail "candidate conflict fixture lacks its genuine exact owner")
+    -- Both identical and competing offers remain advisory: neither may issue a
+    -- second admission beside the already selected exact owner.
+    forM_ [candidate, candidate {candidateSourceSha256 = alterSeal (candidateSourceSha256 candidate)}] $ \offered -> do
+      duplicate <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope)
+        (selected ++ exactOwnerRows) offered
+      case duplicate of
+        Left _ -> pure ()
+        Right _ -> fail "candidate promotion admitted a duplicate exact canonical owner"
     let descriptor = candidateModuleInterface candidate
     unless (Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate
         && canonicalCertificatePath proof == candidateCertificatePath descriptor
