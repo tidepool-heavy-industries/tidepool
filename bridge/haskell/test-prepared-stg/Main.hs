@@ -930,6 +930,8 @@ verifyRecoveredTypedPreparation dir = do
       && length (pmYieldSites recovered) == 1 && null (pmSiteRejections recovered)
       && not (null (pmPreparedSites recovered)))
     "recovered typed Core bypassed site/carrier elaboration"
+  assert (map ysSite (pmYieldSites owner) == map ysSite (pmYieldSites recovered))
+    "same original source and recovered Core issued different typed site identities"
   let replaced = recovered : filter
         ((/= pmModule recovered) . pmModule) (pprModules result)
   assertProjects "recovered unrelated entry" (projectModulesWithAux replaced "TypedPreparationOwner" "unrelated" [] mempty)
