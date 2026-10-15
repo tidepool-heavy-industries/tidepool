@@ -3517,6 +3517,16 @@ fn admits_reload_plan(selected: Option<&exomonad_tool::EndpointPlan>) -> bool {
     })
 }
 
+fn serializes_reload_plan(
+    selected: Option<&exomonad_tool::EndpointPlan>,
+    unresolved_tool_call: bool,
+) -> bool {
+    // Programmatic named calls resolve their installation during preflight.
+    // Until then they cannot safely overlap publication; this scheduling
+    // fence grants no effect authority. Raw cells cannot acquire Reload.
+    selected.map_or(unresolved_tool_call, |plan| admits_reload_plan(Some(plan)))
+}
+
 fn admit_context_authority(
     actor: ActorRef,
     selected: Option<&exomonad_tool::EndpointPlan>,
@@ -12210,7 +12220,10 @@ where
         &self,
         invocation: &crate::ActorWorkbenchInvocation,
     ) -> bool {
-        admits_reload_plan(invocation.selected_endpoint())
+        serializes_reload_plan(
+            invocation.selected_endpoint(),
+            invocation.request().tool_call().is_some(),
+        )
     }
 
     fn dispatch_workbench(
@@ -15407,10 +15420,15 @@ mod tests {
             };
             let plan = EndpointPlan::admit(declaration);
             match plan {
-                Ok(plan) => proptest::prop_assert_eq!(super::admits_reload_plan(Some(&plan)), sync && reload),
+                Ok(plan) => {
+                    proptest::prop_assert_eq!(super::admits_reload_plan(Some(&plan)), sync && reload);
+                    proptest::prop_assert_eq!(super::serializes_reload_plan(Some(&plan), true), sync && reload);
+                },
                 Err(_) => proptest::prop_assert!(!sync && reload),
             }
             proptest::prop_assert!(!super::admits_reload_plan(None));
+            proptest::prop_assert!(super::serializes_reload_plan(None, true));
+            proptest::prop_assert!(!super::serializes_reload_plan(None, false));
         }
     }
 
