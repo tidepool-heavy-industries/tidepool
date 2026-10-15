@@ -1,12 +1,13 @@
 //! Execute the exact published tutorial through real source capture, Harness,
 //! installed Sync handlers, Web normalization and typed request settlement.
+use super::ResidentToolEndpointTestExt;
 use super::hosted_test_context::{HostedChildMachines, HostedTestRuntime};
 use super::test_campaign::{
-    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_child_round,
-    next_hosted_script_round, select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
+    HostedScriptRound, HostedScriptSelection, commit_workspace, hosted_script_provider,
+    hosted_test_settings, next_hosted_child_round, next_hosted_script_round,
+    select_hosted_script_round,
 };
-use super::ResidentToolEndpointTestExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

@@ -1,13 +1,13 @@
 //! Native file operations remain callable after a notebook typecheck refusal.
+use super::ResidentToolEndpointTestExt;
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    actor_output_origin, hosted_script_provider, hosted_test_settings, next_hosted_child_round,
-    next_hosted_script_round, retained_committed_display_text, select_hosted_script_round,
-    HostedScriptSelection,
+    HostedScriptSelection, actor_output_origin, hosted_script_provider, hosted_test_settings,
+    next_hosted_child_round, next_hosted_script_round, retained_committed_display_text,
+    select_hosted_script_round,
 };
-use super::ResidentToolEndpointTestExt;
 use exomonad_tool::{ToolArguments, ToolInvocation};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 const DRAFT: &str = ".exomonad/RepairDraft.hs";
