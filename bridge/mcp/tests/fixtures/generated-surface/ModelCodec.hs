@@ -3,7 +3,7 @@ module Main where
 import Prelude
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
-import Tidepool.Effects.Core (SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..))
+import Tidepool.Effects.Core (SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..), JevCallError (..))
 
 assert :: Bool -> String -> IO ()
 assert True _ = pure ()
@@ -20,6 +20,19 @@ main = do
   mapM_ roundtrip [ModelNoAnnotation,ModelAbstained "reason",ModelAnnotated "text",ModelPruned "handle" "short"]
   roundtrip (ModelRequestEnvelope "instructions" "input" Nothing (Just ModelLowEffort)
     (ModelRequestLimits Nothing Nothing Nothing Nothing) (toJSON ([] :: [Value])) Nothing True)
+  mapM_ roundtrip
+    [JevUnconfigured, JevCallCap, JevTransport "断線", JevTimeout,
+     JevHttp 429 "後で", JevCircuitOpen 503 987, JevClientSetup "setup",
+     JevBodyLimit, JevMalformed "malformed"]
+  assert (fromJSON (object ["tag" .= ("JevHttp" :: String), "contents" .= [Number (scientific 429 0), String "後で"]]) == Success (JevHttp 429 "後で"))
+    "independent generated payload shape did not decode"
+  mapM_ (\malformed -> case (fromJSON malformed :: Result JevCallError) of
+      Error _ -> pure ()
+      Success _ -> fail "malformed typed Jev failure was accepted")
+    [object ["tag" .= ("UnknownCause" :: String)],
+     object ["tag" .= ("JevHttp" :: String)],
+     object ["tag" .= ("JevHttp" :: String), "contents" .= [String "429", Null]],
+     object ["tag" .= ("JevCircuitOpen" :: String), "contents" .= [Number (scientific 503 0)]]]
   case fromJSON (toJSON hook) of
     Success (ModelHook _ _ _ _ _ _ value _) -> assert (value == semantic) "callback value changed"
     _ -> fail "valid hook control failed"

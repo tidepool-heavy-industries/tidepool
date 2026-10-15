@@ -10,6 +10,8 @@ use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormTransit
 use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
+mod recording;
+
 struct MountedForm {
     actor: ActorRef,
     descriptor: serde_json::Value,
@@ -278,6 +280,7 @@ impl Fixture {
         let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "qualified Jev.Operators as J",
+            "qualified Jev.Recording as Recording",
             "qualified Tidepool.Form as F",
             "qualified Tidepool.View as V",
             "Data.List.NonEmpty (NonEmpty(..))",

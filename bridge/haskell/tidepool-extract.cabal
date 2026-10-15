@@ -830,6 +830,8 @@ test-suite model-turn-test
     Persona.Orientation
     Tidepool.Agent.Context
     JevPreparedTest
+    JevRecordingTest
+    Jev.Recording
     Examples.JevPreparedWorkflow
     Examples.JevComposedWorkflow
     Examples.JevFormWorkflow
