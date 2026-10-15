@@ -18,8 +18,9 @@ import qualified Tidepool.Command.Tools as Shell
 data EchoInput = EchoInput {text :: Text, copies :: Int}
   deriving (Generic, FromJSON, JsonSchema)
 
-data TestTools mode = TestTools
-  { rawEcho :: mode :- RawCall Text,
+data TestTools effects mode = TestTools
+  { notebook :: HaskellTools effects mode,
+    rawEcho :: mode :- RawCall Text,
     repeatText :: mode :- Call EchoInput Text,
     launch :: mode :- Call Shell.Execute Text,
     followProcess :: mode :- Call Shell.WriteInput Shell.CommandToolResult,
@@ -27,10 +28,12 @@ data TestTools mode = TestTools
   }
   deriving (Generic)
 
-tools :: (Member Cmd.Commands effects) => TestTools (AsServerT (Eff effects))
+tools :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects)
+  => TestTools effects (AsServerT (Eff effects))
 tools =
   TestTools
-    { rawEcho = presentWith id $ rawTool "Echo literal input." $ \input ->
+    { notebook = haskellTools,
+      rawEcho = presentWith id $ rawTool "Echo literal input." $ \input ->
         if input == "fail"
           then error "expected raw handler failure"
           else pure ("frozen:" <> input),
@@ -41,5 +44,6 @@ tools =
       readLog = presentWith presentDisplay $ tool "Read retained diagnostics." Shell.readRetained
     }
 
-agentSpec :: Member Cmd.Commands effects => AgentSpec TestTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects)
+  => AgentSpec (TestTools effects) effects
 agentSpec = defaultSpec {specTools = tools}

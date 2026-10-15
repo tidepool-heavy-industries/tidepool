@@ -43,8 +43,8 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let typed =
-        dispatch_haskell_script(policy.as_ref(), "ToolDispatchFixture.dispatchChecks").await;
-    assert_eq!(typed["items"][0]["output"], "True", "{typed}");
+        dispatch_haskell_script(policy.as_ref(), "checks <- ToolDispatchFixture.dispatchChecks\nif checks then pure () else error \"dispatch contract failed\"").await;
+    assert_eq!(typed["status"], "committed", "{typed}");
     // The running dispatcher uses captured source, even if authored files change.
     std::fs::write(
         campaign
@@ -54,12 +54,10 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         "invalid replacement",
     )
     .unwrap();
-    assert!(matches!(&policy.tools()[0], HostedTool::Custom(tool) if tool.name == "haskell"));
-    // Only the declared notebook and project tools plus native status are installed.
-    assert!(matches!(&policy.tools()[1], HostedTool::Function(tool) if tool.name == "status"));
-    assert!(matches!(&policy.tools()[2], HostedTool::Custom(tool) if tool.name == "raw_echo"));
-    assert!(matches!(&policy.tools()[3], HostedTool::Function(tool) if tool.name == "repeat_text"));
-    assert_eq!(policy.tools().len(), 7);
+    assert_eq!(policy.tools().iter().map(HostedTool::name).collect::<Vec<_>>(),
+        ["status", "haskell", "haskell_sync", "raw_echo", "repeat_text", "launch", "follow_process", "read_log"]);
+    assert!(matches!(&policy.tools()[1], HostedTool::Custom(_)));
+    assert!(matches!(&policy.tools()[2], HostedTool::Custom(_)));
     let call = |name: &str, arguments| {
         policy.dispatch_json_boxed(ToolInvocation {
             context: None,
@@ -184,7 +182,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             .contains("custom-handler-output"),
         "{page}"
     );
-    let haskell = dispatch_haskell_script(policy.as_ref(), "40 + 2 :: Int").await;
-    assert_eq!(haskell["items"][0]["output"], "42");
+    let haskell = dispatch_haskell_script(policy.as_ref(), "answer <- pure (40 + 2 :: Int)\nif answer == 42 then pure () else error \"notebook contract failed\"").await;
+    assert_eq!(haskell["status"], "committed", "{haskell}");
 })).await;
 }

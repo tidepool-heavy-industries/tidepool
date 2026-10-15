@@ -174,6 +174,10 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     let host = HostedTestRuntime::start_configured(&settings, &provider, scaffold)
         .await
         .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+    let store = host.runtime.store();
+    let origin = super::test_campaign::actor_output_origin(
+        host.runtime.run_identity(), host.context.actor.identity());
     host.input("Exercise the scaffolded tool and retained shell contracts.")
         .await
         .unwrap();
@@ -182,7 +186,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     round.call("scaffold-reflect", "import qualified Tidepool.Effects.Core as Core\nreflected <- Core.reflect 1\ndisplay (case reflected of { Right _ -> True; _ -> False })");
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-    round.assert_value("scaffold-reflect", "True");
+    round.assert_authored_value(&store, &origin, "scaffold-reflect", "True");
     round.call(
         "scaffold-facts",
         &tidepool_testing::fixture_source(
@@ -190,7 +194,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
         ),
     );
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-    round.assert_value("scaffold-facts", "(True,True,True,True,True)");
+    round.assert_authored_value(&store, &origin, "scaffold-facts", "(True,True,True,True,True)");
     let stdout = format!("{}stdout-tail\n", "λ".repeat(800));
     let stderr = format!("{}stderr-tail\n", "μ".repeat(800));
     // The marker independently checks that recovering the exact emitted pointer
@@ -212,7 +216,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
         round.call(&call_id, &source);
         round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         let response = round.settled_output(&call_id);
-        let recovered = committed_display_text(&response);
+        let recovered = super::test_campaign::retained_committed_display_text(&store, &origin, &response);
         assert!(
             recovered.starts_with("Right ") && recovered.contains(tail),
             "{response}"
@@ -235,7 +239,6 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
         .await
         .tools;
     round.finish();
-    host.stop().await.unwrap();
 
     for (name, schedule) in [
         ("haskell", ToolScheduling::Async),
@@ -273,6 +276,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     }
     let reload = tools.iter().find(|tool| tool.name() == "reload").unwrap();
     assert_eq!(reload.scheduling(), ToolScheduling::BeforeNextInference);
+    })).await;
 }
 
 /// A command-owner fault fixture checks a truncated retained slice. It does not
