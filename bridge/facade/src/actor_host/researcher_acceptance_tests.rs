@@ -295,7 +295,11 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
                 incarnation: host.context.actor.identity().incarnation.0,
             }, &output);
         assert_eq!(pages.len(), 2);
-        assert_eq!(serde_json::from_str::<Value>(&pages[0]).unwrap(), if script == ResearchScript::Tutorial { report.clone() } else { json!(true) });
+        if script == ResearchScript::Tutorial {
+            assert_eq!(serde_json::from_str::<Value>(&pages[0]).unwrap(), report);
+        } else {
+            assert_eq!(pages[0], "True");
+        }
         assert_eq!(serde_json::from_str::<Value>(&pages[1]).unwrap(), follow_up);
         assert!(pending.is_empty(), "no extra inference after either terminal reply");
         assert!(requests.try_recv().is_err(), "no successor child request after settlement");
