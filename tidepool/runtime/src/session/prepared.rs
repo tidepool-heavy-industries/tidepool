@@ -41,7 +41,9 @@ use tidepool_repr::execution_schema::{
     SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
 };
 use tidepool_repr::type_graph::{
-    DataView, GraphLimits, TypeCursor, TypeGraph, TypeGraphError, TypeView, TypeWorkBudget,
+    DataView, DeclarationForm as GraphDeclarationForm, GraphLimits, TypeCursor, TypeEdge,
+    TypeGraph, TypeGraphError, TypeLiteral as GraphTypeLiteral, TypeNode as GraphTypeNode,
+    TypeNodeId as GraphTypeNodeId, TypeView, TypeWorkBudget,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -119,6 +121,30 @@ pub struct SiteConflictEvidence {
     pub boundary: SiteConflictBoundary,
     pub existing: SiteRowObservation,
     pub incoming: SiteRowObservation,
+    pub graph: Option<SiteGraphComparison>,
+}
+
+/// Finite syntax observations supplement root summaries; even no observed
+/// difference does not establish normalized compatibility.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SiteGraphComparison {
+    Refused(TypeGraphError),
+    NoDifferenceObserved,
+    Difference {
+        path: Vec<TypeEdge>,
+        path_truncated: bool,
+        edges: Option<(Option<TypeEdge>, Option<TypeEdge>)>,
+        existing: SiteGraphNodeObservation,
+        incoming: SiteGraphNodeObservation,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteGraphNodeObservation {
+    pub node: usize,
+    pub metadata: GraphTypeNode,
+    /// Original binder/parameter count when its diagnostic prefix is capped.
+    pub sequence_length: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2866,12 +2892,13 @@ fn site_conflict_evidence(
     incoming: &ProgramFacts,
     incoming_row: &SiteRow,
 ) -> Box<SiteConflictEvidence> {
+    let compared_node = |row: &SiteRow| match boundary {
+        SiteConflictBoundary::Wire => Some(row.wire),
+        SiteConflictBoundary::Input { ordinal } => Some(row.inputs[ordinal]),
+        SiteConflictBoundary::Delivery | SiteConflictBoundary::InputArity => None,
+    };
     let observe = |facts: &ProgramFacts, row: &SiteRow| {
-        let node = match boundary {
-            SiteConflictBoundary::Wire => Some(row.wire),
-            SiteConflictBoundary::Input { ordinal } => Some(row.inputs[ordinal]),
-            SiteConflictBoundary::Delivery | SiteConflictBoundary::InputArity => None,
-        };
+        let node = compared_node(row);
         SiteRowObservation {
             origin: conflict_text(&row.origin),
             ordinal: row.ordinal,
@@ -2887,7 +2914,99 @@ fn site_conflict_evidence(
         boundary,
         existing: observe(existing, existing_row),
         incoming: observe(incoming, incoming_row),
+        graph: compared_node(existing_row)
+            .zip(compared_node(incoming_row))
+            .map(|(first, second)| {
+                // A separate observational budget: cap failure diagnostics at one
+                // million units of metadata, edge/path work, independent of admission.
+                let mut budget = TypeWorkBudget::new(1_048_576);
+                match existing.types.first_evidence_difference(
+                    GraphTypeNodeId::new(first.0 as usize),
+                    &incoming.types,
+                    GraphTypeNodeId::new(second.0 as usize),
+                    &mut budget,
+                ) {
+                    Err(error) => SiteGraphComparison::Refused(error),
+                    Ok(None) => SiteGraphComparison::NoDifferenceObserved,
+                    Ok(Some(difference)) => SiteGraphComparison::Difference {
+                        path: difference.path,
+                        path_truncated: difference.path_truncated,
+                        edges: difference.edges,
+                        existing: conflict_graph_node(&existing.types, difference.existing),
+                        incoming: conflict_graph_node(&incoming.types, difference.incoming),
+                    },
+                }
+            }),
     })
+}
+
+fn conflict_graph_node(graph: &TypeGraph, node: GraphTypeNodeId) -> SiteGraphNodeObservation {
+    let mut sequence_length = None;
+    let metadata = match &graph.graph()[node] {
+        GraphTypeNode::Root {
+            domain,
+            binders,
+            rendered,
+        } => {
+            sequence_length = Some(binders.len());
+            GraphTypeNode::Root {
+                domain: *domain,
+                binders: binders.iter().copied().take(16).collect(),
+                rendered: conflict_text(rendered),
+            }
+        }
+        GraphTypeNode::Declaration {
+            identity,
+            parameters,
+            form,
+            restriction,
+        } => {
+            sequence_length = Some(parameters.len());
+            let form = match form {
+                GraphDeclarationForm::Opaque { head_kind, reason } => {
+                    GraphDeclarationForm::Opaque {
+                        head_kind: *head_kind,
+                        reason: conflict_text(reason),
+                    }
+                }
+                other => other.clone(),
+            };
+            GraphTypeNode::Declaration {
+                identity: TypeIdentity {
+                    symbol: conflict_identity(&identity.symbol),
+                    version: identity.version.clone(),
+                },
+                parameters: parameters.iter().copied().take(16).collect(),
+                form,
+                restriction: *restriction,
+            }
+        }
+        GraphTypeNode::ConstructorTemplate {
+            constructor,
+            identity,
+        } => GraphTypeNode::ConstructorTemplate {
+            constructor: *constructor,
+            identity: ConstructorIdentity {
+                symbol: conflict_identity(&identity.symbol),
+                family: TypeIdentity {
+                    symbol: conflict_identity(&identity.family.symbol),
+                    version: identity.family.version.clone(),
+                },
+            },
+        },
+        GraphTypeNode::Literal(GraphTypeLiteral::Natural(value)) => {
+            GraphTypeNode::Literal(GraphTypeLiteral::Natural(conflict_text(value)))
+        }
+        GraphTypeNode::Literal(GraphTypeLiteral::Symbol(value)) => {
+            GraphTypeNode::Literal(GraphTypeLiteral::Symbol(conflict_text(value)))
+        }
+        other => other.clone(),
+    };
+    SiteGraphNodeObservation {
+        node: node.index(),
+        metadata,
+        sequence_length,
+    }
 }
 
 /// A boxed or unboxed non-negative `Int` field: the leading site argument of

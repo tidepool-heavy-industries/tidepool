@@ -159,6 +159,72 @@ pub struct TypeGraph {
 }
 
 impl TypeGraph {
+    /// First finite graph evidence difference, for diagnostics only. This is
+    /// neither normalized compatibility nor an authority witness. Paths retain
+    /// at most 32 roles; traversal still visits beyond a truncated path.
+    pub fn first_evidence_difference(
+        &self,
+        first: TypeNodeId,
+        other: &Self,
+        second: TypeNodeId,
+        budget: &mut TypeWorkBudget,
+    ) -> Result<Option<TypeGraphDifference>, TypeGraphError> {
+        let mut pending = vec![(first, second, Vec::new(), false)];
+        let mut visited = BTreeSet::new();
+        while let Some((first, second, path, path_truncated)) = pending.pop() {
+            budget.charge(1)?;
+            if !visited.insert((first.index(), second.index())) {
+                continue;
+            }
+            let first_node = self
+                .graph
+                .node_weight(first)
+                .ok_or(TypeGraphError::InvalidReference(first.index()))?;
+            let second_node = other
+                .graph
+                .node_weight(second)
+                .ok_or(TypeGraphError::InvalidReference(second.index()))?;
+            budget.charge(
+                evidence_metadata_work(first_node).max(evidence_metadata_work(second_node)),
+            )?;
+            let mut difference = TypeGraphDifference {
+                existing: first,
+                incoming: second,
+                path,
+                path_truncated,
+                edges: None,
+            };
+            if !node_evidence_equal(first_node, second_node, true) {
+                return Ok(Some(difference));
+            }
+            let mut first_edges = self.ordered_edges(first);
+            let mut second_edges = other.ordered_edges(second);
+            loop {
+                budget.charge(1)?;
+                match (first_edges.next(), second_edges.next()) {
+                    (None, None) => break,
+                    (Some(first), Some(second)) if first.weight() == second.weight() => {
+                        budget.charge(difference.path.len() + 1)?;
+                        let mut path = difference.path.clone();
+                        let truncated = difference.path_truncated || path.len() == 32;
+                        if path.len() < 32 {
+                            path.push(*first.weight());
+                        }
+                        pending.push((first.target(), second.target(), path, truncated));
+                    }
+                    (first, second) => {
+                        difference.edges = Some((
+                            first.map(|edge| *edge.weight()),
+                            second.map(|edge| *edge.weight()),
+                        ));
+                        return Ok(Some(difference));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Publish a complete graph once, using the enclosing decoder's remaining
     /// budgets. The physical inventory is authenticated by its existing owner.
     pub fn validate(
@@ -397,6 +463,17 @@ impl TypeGraph {
             }
         }
     }
+}
+
+/// Indices refer to the two compared frozen graphs, never a reconstructed type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeGraphDifference {
+    pub existing: TypeNodeId,
+    pub incoming: TypeNodeId,
+    pub path: Vec<TypeEdge>,
+    pub path_truncated: bool,
+    /// Present when ordered edge roles, rather than node metadata, differ.
+    pub edges: Option<(Option<TypeEdge>, Option<TypeEdge>)>,
 }
 
 impl Default for TypeGraph {
