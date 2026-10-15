@@ -7689,9 +7689,7 @@ where
                     || !source_revision_unchanged
                     || !effect_alias_unchanged
                 {
-                    answer.results.clear();
-                    answer.candidates.clear();
-                    answer.issue = Some("lookup compile view changed".into());
+                    answer.invalidate_changed_view();
                 }
                 session
                     .resume_classified(hole, answer, settlement)
@@ -16713,13 +16711,19 @@ pub(crate) mod request_tests {
             let validation = if sibling_write {
                 concat!(
                     "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
-                    "if lookupIssue result == Nothing && not (null (lookupResults result)) ",
+                    "if lookupIssue result == Nothing && not (null (lookupResults result)) && ",
+                    "LookupApi.searchView (LookupApi.lookupSearchReceipt result) == lookupView result && ",
+                    "LookupApi.searchDisposition (LookupApi.lookupSearchReceipt result) == LookupApi.LookupSearchCaptured && ",
+                    "not (null (LookupApi.searchMatches (LookupApi.lookupSearchReceipt result))) ",
                     "then pure True else error \"unrelated sibling write invalidated lookup\""
                 )
             } else {
                 concat!(
                     "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
-                    "if lookupIssue result == Just \"lookup compile view changed\" && null (lookupResults result) ",
+                    "if lookupIssue result == Just \"lookup compile view changed\" && null (lookupResults result) && ",
+                    "(case LookupApi.searchDisposition (LookupApi.lookupSearchReceipt result) of ",
+                    "LookupApi.LookupSearchInvalidated prior _ -> not (null prior); _ -> False) && ",
+                    "null (LookupApi.searchMatches (LookupApi.lookupSearchReceipt result)) ",
                     "then pure True else error \"stale lookup metadata escaped\""
                 )
             };

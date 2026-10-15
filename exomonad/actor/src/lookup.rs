@@ -86,6 +86,163 @@ pub(crate) struct LookupBatch {
     pub view: String,
     pub issue: Option<String>,
     pub identity: String,
+    pub search_receipt: LookupSearchReceipt,
+}
+#[derive(ToHaskell)]
+#[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchReceipt")]
+pub(crate) struct LookupSearchReceipt {
+    view: String,
+    disposition: LookupSearchDisposition,
+    attempted_scopes: Vec<LookupSearchScope>,
+    matches: Vec<LookupMatchReceipt>,
+    discovery: LookupDiscovery,
+}
+impl LookupSearchReceipt {
+    fn new(view: String, discover: bool) -> Self {
+        Self {
+            view,
+            disposition: LookupSearchDisposition::NotExecuted,
+            attempted_scopes: vec![],
+            matches: vec![],
+            discovery: if discover {
+                LookupDiscovery::NotRun(LookupSearchNotRun::Unavailable)
+            } else {
+                LookupDiscovery::NotRequested
+            },
+        }
+    }
+}
+#[derive(ToHaskell)]
+pub(crate) enum LookupSearchDisposition {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchNotExecuted")]
+    NotExecuted,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchCaptured")]
+    Captured,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchInvalidated")]
+    Invalidated(Vec<LookupMatchReceipt>, LookupDiscovery),
+}
+impl LookupBatch {
+    /// Refuse stale facts while preserving whether work actually executed.
+    pub(crate) fn invalidate_changed_view(&mut self) {
+        if matches!(
+            self.search_receipt.disposition,
+            LookupSearchDisposition::Invalidated(..)
+        ) {
+            return;
+        }
+        self.results.clear();
+        self.candidates.clear();
+        self.issue = Some("lookup compile view changed".into());
+        if matches!(
+            self.search_receipt.disposition,
+            LookupSearchDisposition::NotExecuted
+        ) {
+            if !matches!(self.search_receipt.discovery, LookupDiscovery::NotRequested) {
+                self.search_receipt.discovery =
+                    LookupDiscovery::NotRun(LookupSearchNotRun::StaleView);
+            }
+            return;
+        }
+        let observations = std::mem::take(&mut self.search_receipt.matches);
+        let discovery = std::mem::replace(
+            &mut self.search_receipt.discovery,
+            LookupDiscovery::Invalidated,
+        );
+        self.search_receipt.disposition =
+            LookupSearchDisposition::Invalidated(observations, discovery);
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, ToHaskell)]
+pub(crate) enum LookupSearchScope {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupCurrentScope")]
+    Current,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupPublicModule")]
+    Module(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq, ToHaskell)]
+pub(crate) enum LookupCount {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupKnownCount")]
+    Known(i64),
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupUnknownCount")]
+    Unknown,
+}
+impl LookupCount {
+    fn known(count: usize) -> Self {
+        i64::try_from(count)
+            .map(Self::Known)
+            .unwrap_or(Self::Unknown)
+    }
+}
+#[derive(ToHaskell)]
+#[haskell(module = "Tidepool.Effects.Core", name = "LookupMatchReceipt")]
+pub(crate) struct LookupMatchReceipt {
+    query: String,
+    observed: LookupCount,
+    retained: LookupCount,
+    limit: Option<i64>,
+}
+#[derive(ToHaskell)]
+pub(crate) enum LookupDiscovery {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupDiscoveryNotRequested")]
+    NotRequested,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupDiscoveryNotRun")]
+    NotRun(LookupSearchNotRun),
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupDiscoveryObserved")]
+    Observed(LookupDiscoveryReceipt),
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupDiscoveryInvalidated")]
+    Invalidated,
+}
+#[derive(ToHaskell)]
+pub(crate) enum LookupSearchNotRun {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchStaleView")]
+    StaleView,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchInvalidRequest")]
+    InvalidRequest,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchUnavailable")]
+    Unavailable,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchZeroBudget")]
+    ZeroBudget,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupSearchNoEligibleQuery")]
+    NoEligibleQuery,
+}
+#[derive(ToHaskell)]
+#[haskell(module = "Tidepool.Effects.Core", name = "LookupDiscoveryReceipt")]
+pub(crate) struct LookupDiscoveryReceipt {
+    module_search: LookupModuleSearch,
+    attempted_scopes: Vec<LookupSearchScope>,
+    eligible_modules: LookupCount,
+    submitted_modules: LookupCount,
+    module_limit: i64,
+    enumerated_occurrences: LookupCount,
+    retained_candidates: LookupCount,
+    discarded_occurrences: LookupCount,
+    distinct_discarded: LookupCount,
+    unenumerated_candidates: LookupCount,
+    candidate_limit: i64,
+    broader_module_count: LookupCount,
+    issue: Option<String>,
+}
+#[derive(ToHaskell)]
+pub(crate) enum LookupModuleSearch {
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupModulesNotNeeded")]
+    NotNeeded,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupModulesUnavailable")]
+    Unavailable,
+    #[haskell(module = "Tidepool.Effects.Core", name = "LookupModulesAttempted")]
+    Attempted,
+}
+fn attempted_scopes(queries: &[InspectionQuery]) -> Vec<LookupSearchScope> {
+    let mut scopes = Vec::new();
+    for query in queries {
+        let scope = match query {
+            InspectionQuery::Browse { module, .. } => LookupSearchScope::Module(module.clone()),
+            _ => LookupSearchScope::Current,
+        };
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    scopes
 }
 #[derive(ToHaskell)]
 #[haskell(module = "Tidepool.Effects.Core", name = "LookupResult")]
@@ -263,15 +420,15 @@ impl From<lookup_tool::LookupResult> for LookupResult {
         Self {
             query: r.query,
             outcome: match r.outcome {
-                lookup_tool::LookupOutcome::Found { matches, truncated } => {
-                    LookupOutcome::Found(matches.into_iter().map(Into::into).collect(), truncated)
-                }
-                lookup_tool::LookupOutcome::Ambiguous { matches, truncated } => {
-                    LookupOutcome::Ambiguous(
-                        matches.into_iter().map(Into::into).collect(),
-                        truncated,
-                    )
-                }
+                lookup_tool::LookupOutcome::Found {
+                    matches, truncated, ..
+                } => LookupOutcome::Found(matches.into_iter().map(Into::into).collect(), truncated),
+                lookup_tool::LookupOutcome::Ambiguous {
+                    matches, truncated, ..
+                } => LookupOutcome::Ambiguous(
+                    matches.into_iter().map(Into::into).collect(),
+                    truncated,
+                ),
                 lookup_tool::LookupOutcome::NotFound {
                     attempted,
                     suggestions,
@@ -452,6 +609,7 @@ pub(crate) fn execute(
     mut inspect: impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> LookupBatch {
     let mut batch = LookupBatch {
+        search_receipt: LookupSearchReceipt::new(view.clone(), request.discover),
         identity: uuid::Uuid::new_v4().to_string(),
         results: vec![],
         candidates: vec![],
@@ -463,6 +621,9 @@ pub(crate) fn execute(
         .as_ref()
         .is_some_and(|expected| expected != &batch.view)
     {
+        if request.discover {
+            batch.search_receipt.discovery = LookupDiscovery::NotRun(LookupSearchNotRun::StaleView);
+        }
         batch.issue = Some("lookup compile view changed".into());
         return batch;
     }
@@ -472,6 +633,10 @@ pub(crate) fn execute(
         match lookup_tool::prepare(serde_json::json!({"queries":request.queries})) {
             Ok(prepared) => prepared,
             Err(error) => {
+                if request.discover {
+                    batch.search_receipt.discovery =
+                        LookupDiscovery::NotRun(LookupSearchNotRun::InvalidRequest);
+                }
                 batch.issue = Some(error.to_string());
                 return batch;
             }
@@ -481,6 +646,8 @@ pub(crate) fn execute(
     // Request their facts with the primary queries so ordinary browsing shares
     // one PreserveSource environment; type searches keep their own transform.
     let plan = LookupInspectionPlan::new(&prepared, imports, &request.references);
+    batch.search_receipt.disposition = LookupSearchDisposition::Captured;
+    batch.search_receipt.attempted_scopes = attempted_scopes(&plan.queries);
     let InspectionAnswers {
         results: mut inspected,
         unavailable,
@@ -645,6 +812,18 @@ pub(crate) fn execute(
             .push(lookup_tool::LookupResult { query, outcome });
     }
     let cap = request.candidate_limit.clamp(0, 128) as usize;
+    let eligible_query = prepared.iter().any(|query| {
+        !matches!(
+            query.kind,
+            lookup_tool::PreparedLookupKind::Doc(_) | lookup_tool::PreparedLookupKind::Rejected(_)
+        )
+    });
+    if request.discover && cap == 0 {
+        batch.search_receipt.discovery = LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget);
+    } else if request.discover && !eligible_query {
+        batch.search_receipt.discovery =
+            LookupDiscovery::NotRun(LookupSearchNotRun::NoEligibleQuery);
+    }
     if request.discover && cap > 0 {
         let mut groups: Vec<Vec<LookupCandidate>> = vec![];
         let mut cursor = 0;
@@ -696,6 +875,7 @@ pub(crate) fn execute(
             }
         }
         // Module metadata is compiler-owned. Discovery is bounded independently of display.
+        let eligible_modules = discovery_modules.len();
         discovery_modules.truncate(128);
         let misses = response.results.iter().zip(&prepared).any(|(r, q)| {
             matches!(r.outcome, lookup_tool::LookupOutcome::NotFound { .. })
@@ -705,6 +885,14 @@ pub(crate) fn execute(
                         | lookup_tool::PreparedLookupKind::Qualified(_)
                 )
         });
+        let mut discovery_scopes = vec![];
+        let module_search = if !misses {
+            LookupModuleSearch::NotNeeded
+        } else if batch.issue.is_some() {
+            LookupModuleSearch::Unavailable
+        } else {
+            LookupModuleSearch::Attempted
+        };
         let exports = if misses && batch.issue.is_none() {
             let mut discovery_queries = discovery_modules
                 .iter()
@@ -717,6 +905,7 @@ pub(crate) fn execute(
                 named_count.min(discovery_queries.len()),
                 InspectionQuery::ScopeBrowse,
             );
+            discovery_scopes = attempted_scopes(&discovery_queries);
             match inspect_checked(&discovery_queries, &mut inspect) {
                 Ok(results) => results,
                 Err(error) => {
@@ -880,6 +1069,7 @@ pub(crate) fn execute(
             groups.push(candidates);
         }
         // Round-robin admission prevents the first query monopolizing the shared budget.
+        let enumerated_occurrences = groups.iter().map(Vec::len).sum();
         let mut groups: Vec<_> = groups.into_iter().map(Vec::into_iter).collect();
         while batch.candidates.len() < cap {
             let mut progressed = false;
@@ -909,6 +1099,7 @@ pub(crate) fn execute(
             }
         }
         // A full budget limits declarations, not the original queries linked to them.
+        let mut discarded_occurrences = 0;
         for candidate in groups.into_iter().flatten() {
             if let Some(existing) = batch.candidates.iter_mut().find(|existing| {
                 existing.query == candidate.query && existing.reference == candidate.reference
@@ -918,9 +1109,73 @@ pub(crate) fn execute(
                         existing.origins.push(origin);
                     }
                 }
+            } else {
+                discarded_occurrences += 1;
             }
         }
+        if eligible_query {
+            batch.search_receipt.discovery = LookupDiscovery::Observed(LookupDiscoveryReceipt {
+                module_search,
+                submitted_modules: LookupCount::known(
+                    discovery_scopes
+                        .iter()
+                        .filter(|scope| matches!(scope, LookupSearchScope::Module(_)))
+                        .count(),
+                ),
+                attempted_scopes: discovery_scopes,
+                eligible_modules: LookupCount::known(eligible_modules),
+                module_limit: 128,
+                enumerated_occurrences: LookupCount::known(enumerated_occurrences),
+                retained_candidates: LookupCount::known(batch.candidates.len()),
+                discarded_occurrences: LookupCount::known(discarded_occurrences),
+                distinct_discarded: if discarded_occurrences == 0 {
+                    LookupCount::Known(0)
+                } else {
+                    LookupCount::Unknown
+                },
+                unenumerated_candidates: LookupCount::Unknown,
+                candidate_limit: cap as i64,
+                broader_module_count: LookupCount::Unknown,
+                issue: batch.issue.clone(),
+            });
+        }
     }
+    batch.search_receipt.matches = response
+        .results
+        .iter()
+        .map(|result| {
+            let (observed, retained, limit) = match &result.outcome {
+                lookup_tool::LookupOutcome::Found {
+                    matches,
+                    total_matches,
+                    match_limit,
+                    ..
+                }
+                | lookup_tool::LookupOutcome::Ambiguous {
+                    matches,
+                    total_matches,
+                    match_limit,
+                    ..
+                } => (
+                    LookupCount::known(*total_matches),
+                    LookupCount::known(matches.len()),
+                    i64::try_from(*match_limit).ok(),
+                ),
+                lookup_tool::LookupOutcome::NotFound { .. } => {
+                    (LookupCount::Known(0), LookupCount::Known(0), None)
+                }
+                lookup_tool::LookupOutcome::Rejected { .. } => {
+                    (LookupCount::Unknown, LookupCount::Known(0), None)
+                }
+            };
+            LookupMatchReceipt {
+                query: result.query.clone(),
+                observed,
+                retained,
+                limit,
+            }
+        })
+        .collect();
     batch.results = response.results.into_iter().map(Into::into).collect();
     // Direct queries and exact references share the resolved defining identity.
     // Never attach owner examples to a shadow, ambiguous hit or truncated set.
@@ -1707,6 +1962,257 @@ mod tests {
         assert_eq!(result.candidates[0].origins, vec!["a", "b"]);
     }
     #[test]
+    fn search_receipt_records_match_cap_before_discard() {
+        for count in [0, 19, 20, 21, 40] {
+            let captured = execute(
+                request(&["value"], false),
+                "view".into(),
+                "",
+                &[],
+                &[],
+                crate::UsagePointerTable::default(),
+                |_| {
+                    Ok(vec![InspectionResult::Info {
+                        query: "value".into(),
+                        entries: (0..count).map(|_| entry("value")).collect(),
+                    }])
+                },
+            );
+            let receipt = &captured.search_receipt.matches[0];
+            assert_eq!(receipt.observed, LookupCount::known(count));
+            assert_eq!(receipt.retained, LookupCount::known(count.min(20)));
+            assert_eq!(receipt.limit, Some(20));
+            assert!(matches!(
+                captured.search_receipt.discovery,
+                LookupDiscovery::NotRequested
+            ));
+        }
+    }
+    #[test]
+    fn search_receipt_records_effective_candidate_cap_boundaries() {
+        for requested in [-1, 0, 1, 127, 128, 129] {
+            let mut req = request(&["root"], true);
+            req.candidate_limit = requested;
+            let captured = execute(
+                req,
+                "view".into(),
+                "",
+                &[],
+                &[],
+                crate::UsagePointerTable::default(),
+                |_| {
+                    let mut hit = entry("root");
+                    hit.references = (0..129)
+                        .map(|n| IdentifierRef {
+                            module: "Project.Other".into(),
+                            name: format!("Ref{n}"),
+                            namespace: IdentifierNamespace::Type,
+                        })
+                        .collect();
+                    Ok(vec![InspectionResult::Info {
+                        query: "root".into(),
+                        entries: vec![hit],
+                    }])
+                },
+            );
+            let cap = requested.clamp(0, 128);
+            if cap == 0 {
+                assert!(matches!(
+                    captured.search_receipt.discovery,
+                    LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
+                ));
+            } else {
+                let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
+                    panic!()
+                };
+                assert_eq!(receipt.candidate_limit, cap);
+                assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(129));
+                assert_eq!(receipt.retained_candidates, LookupCount::Known(cap));
+                assert_eq!(receipt.discarded_occurrences, LookupCount::Known(129 - cap));
+                assert_eq!(receipt.distinct_discarded, LookupCount::Unknown);
+                assert_eq!(receipt.unenumerated_candidates, LookupCount::Unknown);
+            }
+        }
+    }
+    #[test]
+    fn search_receipt_distinguishes_module_cap_from_unsearched_universe() {
+        let modules: Vec<_> = (0..130).map(|n| format!("Project.Module{n}")).collect();
+        let captured = execute(
+            request(&["absent"], true),
+            "view".into(),
+            "",
+            &[],
+            &modules,
+            crate::UsagePointerTable::default(),
+            |queries| {
+                Ok(queries
+                    .iter()
+                    .map(|query| match query {
+                        InspectionQuery::Info(name) => InspectionResult::NotFound {
+                            query: name.clone(),
+                        },
+                        InspectionQuery::ScopeBrowse => InspectionResult::Browse {
+                            module: "".into(),
+                            expanded: true,
+                            entries: vec![],
+                        },
+                        InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
+                            module: module.clone(),
+                            expanded: *expanded,
+                            entries: vec![],
+                        },
+                        _ => panic!(),
+                    })
+                    .collect())
+            },
+        );
+        let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
+            panic!()
+        };
+        assert_eq!(receipt.eligible_modules, LookupCount::Known(130));
+        assert_eq!(receipt.submitted_modules, LookupCount::Known(128));
+        assert_eq!(receipt.attempted_scopes.len(), 129);
+        assert!(matches!(
+            receipt.module_search,
+            LookupModuleSearch::Attempted
+        ));
+        assert_eq!(receipt.broader_module_count, LookupCount::Unknown);
+        assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(0));
+    }
+    #[test]
+    fn search_receipt_does_not_turn_not_run_into_zero_coverage() {
+        let mut stale = request(&["value"], true);
+        stale.expected_view = Some("old-view".into());
+        let captured = execute(
+            stale,
+            "new-view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| panic!("stale view must not inspect"),
+        );
+        assert_eq!(captured.search_receipt.view, "new-view");
+        assert!(captured.search_receipt.matches.is_empty());
+        assert!(captured.search_receipt.attempted_scopes.is_empty());
+        assert!(matches!(
+            captured.search_receipt.disposition,
+            LookupSearchDisposition::NotExecuted
+        ));
+        assert!(matches!(
+            captured.search_receipt.discovery,
+            LookupDiscovery::NotRun(LookupSearchNotRun::StaleView)
+        ));
+        let docs = execute(
+            request(&["doc workbench"], true),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| panic!("docs do not inspect"),
+        );
+        assert!(matches!(
+            docs.search_receipt.discovery,
+            LookupDiscovery::NotRun(LookupSearchNotRun::NoEligibleQuery)
+        ));
+        assert!(docs.search_receipt.attempted_scopes.is_empty());
+        let mut zero = request(&["value"], true);
+        zero.candidate_limit = 0;
+        let captured = execute(
+            zero,
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| {
+                Ok(vec![InspectionResult::Info {
+                    query: "value".into(),
+                    entries: vec![entry("value")],
+                }])
+            },
+        );
+        assert!(matches!(
+            captured.search_receipt.discovery,
+            LookupDiscovery::NotRun(LookupSearchNotRun::ZeroBudget)
+        ));
+        assert!(captured.candidates.is_empty());
+    }
+    #[test]
+    fn search_receipt_invalidates_executed_facts_without_fabricating_zero_counts() {
+        let mut captured = execute(
+            request(&["value"], true),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| {
+                Ok(vec![InspectionResult::Info {
+                    query: "value".into(),
+                    entries: vec![entry("value")],
+                }])
+            },
+        );
+        assert_eq!(
+            captured.search_receipt.matches[0].observed,
+            LookupCount::Known(1)
+        );
+        assert!(matches!(
+            captured.search_receipt.discovery,
+            LookupDiscovery::Observed(_)
+        ));
+        captured.invalidate_changed_view();
+        captured.invalidate_changed_view();
+        assert!(captured.results.is_empty());
+        assert!(captured.candidates.is_empty());
+        assert!(captured.search_receipt.matches.is_empty());
+        assert_eq!(
+            captured.search_receipt.attempted_scopes,
+            [LookupSearchScope::Current]
+        );
+        let LookupSearchDisposition::Invalidated(work, discovery) =
+            captured.search_receipt.disposition
+        else {
+            panic!()
+        };
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].observed, LookupCount::Known(1));
+        assert!(matches!(discovery, LookupDiscovery::Observed(_)));
+        assert!(matches!(
+            captured.search_receipt.discovery,
+            LookupDiscovery::Invalidated
+        ));
+    }
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn search_receipt_duplicate_histories_count_only_discarded_occurrences(width in 1usize..9, cap in 1usize..12) {
+            let mut req = request(&["a", "b"], true);
+            req.candidate_limit = cap as i64;
+            let captured = execute(req, "view".into(), "", &[], &[], crate::UsagePointerTable::default(), |queries| {
+                Ok(queries.iter().map(|query| {
+                    let InspectionQuery::Info(name) = query else { panic!() };
+                    let mut hit = entry(name);
+                    hit.references = (0..width).chain(std::iter::once(0)).map(|n| IdentifierRef {
+                        module: "Project.Other".into(), name: format!("Ref{n}"), namespace: IdentifierNamespace::Type,
+                    }).collect();
+                    InspectionResult::Info { query: name.clone(), entries: vec![hit] }
+                }).collect())
+            });
+            let LookupDiscovery::Observed(receipt) = &captured.search_receipt.discovery else { panic!() };
+            let retained = width.min(cap);
+            proptest::prop_assert_eq!(&receipt.enumerated_occurrences, &LookupCount::known(2 * (width + 1)));
+            proptest::prop_assert_eq!(&receipt.retained_candidates, &LookupCount::known(retained));
+            proptest::prop_assert_eq!(&receipt.discarded_occurrences, &LookupCount::known(2 * (width - retained)));
+            proptest::prop_assert_eq!(&receipt.distinct_discarded, &if width == retained { LookupCount::Known(0) } else { LookupCount::Unknown });
+            proptest::prop_assert!(matches!(receipt.module_search, LookupModuleSearch::NotNeeded));
+            proptest::prop_assert!(receipt.attempted_scopes.is_empty());
+            proptest::prop_assert!(captured.candidates.iter().all(|candidate| candidate.origins == ["a", "b"]));
+        }
+    }
+    #[test]
     fn missed_name_searches_imports_and_keeps_failure() {
         let result = execute(
             request(&["targte"], true),
@@ -1825,6 +2331,7 @@ mod tests {
     #[test]
     fn note_request_only_bindings_hints_a_miss_on_a_request_only_name() {
         let mut batch = LookupBatch {
+            search_receipt: LookupSearchReceipt::new("view".into(), false),
             identity: uuid::Uuid::new_v4().to_string(),
             results: vec![missing("respond"), missing("otherName")],
             candidates: vec![],
@@ -1850,6 +2357,7 @@ mod tests {
     #[test]
     fn note_request_only_bindings_leaves_a_found_request_only_name_alone() {
         let mut batch = LookupBatch {
+            search_receipt: LookupSearchReceipt::new("view".into(), false),
             identity: uuid::Uuid::new_v4().to_string(),
             results: vec![LookupResult {
                 query: "respond".into(),

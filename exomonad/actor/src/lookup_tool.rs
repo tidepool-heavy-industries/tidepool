@@ -378,6 +378,8 @@ pub(crate) enum LookupOutcome {
     Found {
         matches: Vec<LookupEntry>,
         truncated: bool,
+        total_matches: usize,
+        match_limit: usize,
     },
     NotFound {
         attempted: Vec<LookupInterpretation>,
@@ -389,6 +391,8 @@ pub(crate) enum LookupOutcome {
     Ambiguous {
         matches: Vec<LookupEntry>,
         truncated: bool,
+        total_matches: usize,
+        match_limit: usize,
     },
     /// GHC's diagnostic here is already a bare rendered string by the time it
     /// reaches Rust (span and severity are dropped in Haskell before any wire
@@ -411,20 +415,29 @@ pub(crate) struct LookupResponse {
 
 impl LookupResult {
     pub(crate) fn found(query: String, matches: Vec<LookupEntry>, limit: usize) -> Self {
+        let total_matches = matches.len();
         Self {
             query,
             outcome: bounded_matches(matches, limit, |matches, truncated| LookupOutcome::Found {
                 matches,
                 truncated,
+                total_matches,
+                match_limit: limit,
             }),
         }
     }
 
     pub(crate) fn ambiguous(query: String, matches: Vec<LookupEntry>, limit: usize) -> Self {
+        let total_matches = matches.len();
         Self {
             query,
             outcome: bounded_matches(matches, limit, |matches, truncated| {
-                LookupOutcome::Ambiguous { matches, truncated }
+                LookupOutcome::Ambiguous {
+                    matches,
+                    truncated,
+                    total_matches,
+                    match_limit: limit,
+                }
             }),
         }
     }
@@ -465,8 +478,12 @@ impl LookupResponse {
             .iter()
             .map(|result| {
                 let body = match &result.outcome {
-                    LookupOutcome::Found { matches, truncated }
-                    | LookupOutcome::Ambiguous { matches, truncated } => {
+                    LookupOutcome::Found {
+                        matches, truncated, ..
+                    }
+                    | LookupOutcome::Ambiguous {
+                        matches, truncated, ..
+                    } => {
                         let mut lines = matches
                             .iter()
                             .map(|entry| {
@@ -1011,7 +1028,10 @@ mod tests {
             ],
             2,
         );
-        let LookupOutcome::Found { matches, truncated } = result.outcome else {
+        let LookupOutcome::Found {
+            matches, truncated, ..
+        } = result.outcome
+        else {
             panic!("expected found");
         };
         assert!(truncated);
@@ -1040,7 +1060,10 @@ mod tests {
             vec![unavailable, unknown, polymorphic, available],
             2,
         );
-        let LookupOutcome::Found { matches, truncated } = &result.outcome else {
+        let LookupOutcome::Found {
+            matches, truncated, ..
+        } = &result.outcome
+        else {
             panic!("expected found");
         };
         assert!(*truncated);

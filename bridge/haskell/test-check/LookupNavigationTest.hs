@@ -25,7 +25,7 @@ batch source = LookupBatch
    LookupResult "same" (LookupFound [entry "second-result"] False),
    LookupResult "missing" (LookupMissing ["missing"] []),
    LookupResult "error" (LookupRejected "compiler refused")]
-  [] "immutable-view" Nothing "fixture-capture"
+  [] "immutable-view" Nothing "fixture-capture" (LookupSearchReceipt "immutable-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
 
 assert :: String -> Bool -> IO ()
 assert label value = unless value (fail label)
@@ -33,6 +33,61 @@ lookupNavigationTests :: TestTree
 lookupNavigationTests = testGroup "retained lookup navigation"
   [testCase "hosted query and retained read compile through ordinary tool owner" $
      assert "compiled retained tool surface" (case compileTools (Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup, Console]))) of Right _ -> True; Left _ -> False)
+  ,testCase "two-stage capture preserves issuing batches receipts and continuation addresses" $ do
+     let primary = batch "primary\nremaining-primary\n"
+         related = (batch "related\nremaining-related\n") {lookupIdentity = "related-capture"}
+         captured = retainLookupCapture primary (Just related)
+         selection = LookupCaptureSelection RelatedLookup (LookupSelection (LookupAddress 1 1 Example) (Just (LookupLines 1 1)))
+     assert "native receipts stay separate" (lookupCaptureReceipts captured ==
+       [(PrimaryLookup, lookupSearchReceipt primary), (RelatedLookup, lookupSearchReceipt related)])
+     case selectLookupCapture captured selection of
+       Left issue -> fail (show issue)
+       Right excerpt -> do
+         assert "issuing batch provenance" (excerptBatchIdentity (captureExcerpt excerpt) == "related-capture"
+           && excerptView (captureExcerpt excerpt) == lookupView related
+           && excerptText (captureExcerpt excerpt) == "related\n")
+         assert "continuations target related batch" (captureContinuations excerpt ==
+           [LookupCaptureSelection RelatedLookup (LookupSelection (LookupAddress 1 1 Example) (Just (LookupLines 2 2)))])
+         assert "continuation returns exact remaining source" (case selectLookupCaptureMany captured (captureContinuations excerpt) of
+           [Right suffix] -> excerptText (captureExcerpt suffix) == "remaining-related\n"
+           _ -> False)
+  ,testCase "related refusal never invalidates primary or conceals its own stage" $ do
+     let primary = batch "retained-primary\n"
+         receipt = lookupSearchReceipt primary
+         stale = primary {lookupView = "changed-view", lookupResults = [], lookupIssue = Just "lookup compile view changed",
+           lookupSearchReceipt = receipt {searchView = "changed-view", searchDisposition = LookupSearchNotExecuted,
+             searchDiscovery = LookupDiscoveryNotRun LookupSearchStaleView}}
+         invalidated = primary {lookupResults = [], lookupIssue = Just "lookup compile view changed",
+           lookupSearchReceipt = receipt {searchDisposition = LookupSearchInvalidated (searchMatches receipt) (searchDiscovery receipt),
+             searchMatches = [], searchDiscovery = LookupDiscoveryInvalidated}}
+         unavailable = primary {lookupIssue = Just "compiler unavailable",
+           lookupResults = [LookupResult "failed" (LookupRejected "compiler unavailable")]}
+         selection part = LookupCaptureSelection part (LookupSelection (LookupAddress 1 1 Example) Nothing)
+     mapM_ (\related -> do
+       let captured = retainLookupCapture primary (Just related)
+       assert "receipt stage and view unchanged" (lookupCaptureReceipts captured ==
+         [(PrimaryLookup, receipt), (RelatedLookup, lookupSearchReceipt related)])
+       assert "primary remains readable" (case selectLookupCapture captured (selection PrimaryLookup) of
+         Right excerpt -> excerptText (captureExcerpt excerpt) == "retained-primary\n"
+         _ -> False)
+       assert "refused related not exposed as found entries" (all (\(part, hit) -> part == PrimaryLookup || hitEntry hit == Nothing) (lookupCaptureIndex captured))
+       assert "related selection refuses" (case selectLookupCapture captured (selection RelatedLookup) of
+         Left (CaptureRefused RelatedLookup _ _) -> True
+         Left (CaptureViewMismatch _ _) -> True
+         Left (CaptureSelectionIssue (ResultRejected _)) -> True
+         _ -> False)) [stale, invalidated, unavailable]
+  ,testProperty "generated two-stage selections keep distinct issuing captures and replay order" $ \(NonNegative pick :: NonNegative Int) ->
+     let primary = batch "primary-source"
+         related = (batch "related-source") {lookupIdentity = "related-capture"}
+         captured = retainLookupCapture primary (Just related)
+         part = if even pick then PrimaryLookup else RelatedLookup
+         other = if even pick then RelatedLookup else PrimaryLookup
+         selection which = LookupCaptureSelection which (LookupSelection (LookupAddress 1 1 Example) Nothing)
+         expected which = if which == PrimaryLookup then ("fixture-capture", "primary-source") else ("related-capture", "related-source")
+     in case selectLookupCaptureMany captured (map selection [part,other,part]) of
+       [Right first,Right second,Right repeated] ->
+         first == repeated && map (\excerpt -> (excerptBatchIdentity (captureExcerpt excerpt), excerptText (captureExcerpt excerpt))) [first,second] == map expected [part,other]
+       _ -> False
   ,testCase "revisit multiselect duplicate hits complete large example and setup" $ do
      let source = T.replicate 3000 "α\r\n" <> "last🙂"
          captured = batch source

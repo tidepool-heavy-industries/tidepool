@@ -6,6 +6,10 @@ module Tidepool.Lookup.Navigation
   ( LookupSection(..), LookupAddress(..), LookupLines(..), LookupSelection(..)
   , LookupHit(..), LookupExcerpt(..), LookupExtent(..), LookupSelectionIssue(..)
   , lookupIndex, renderLookupIndex, selectLookup, selectLookupMany, lookupSectionText
+  , RetainedLookupCapture, LookupCapturePart(..), LookupCaptureSelection(..)
+  , LookupCaptureExcerpt(..), LookupCaptureIssue(..), retainLookupCapture
+  , lookupCaptureIndex, renderLookupCaptureIndex, lookupCaptureReceipts
+  , selectLookupCapture, selectLookupCaptureMany
   ) where
 
 import Prelude
@@ -45,6 +49,65 @@ data LookupExcerpt = LookupExcerpt
   , excerptLines :: Maybe LookupLines, excerptText :: Text, excerptExtent :: LookupExtent
   , excerptUnavailable :: [Text]
   } deriving (Eq, Show)
+
+-- | The existing two-stage authored lookup policy. Each native batch and its
+-- receipt remain unchanged; no combined native search outcome is invented.
+data RetainedLookupCapture = RetainedLookupCapture LookupBatch (Maybe LookupBatch)
+data LookupCapturePart = PrimaryLookup | RelatedLookup
+  deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
+data LookupCaptureSelection = LookupCaptureSelection
+  { selectedCapture :: LookupCapturePart, capturedSelection :: LookupSelection }
+  deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
+data LookupCaptureExcerpt = LookupCaptureExcerpt
+  { captureExcerptPart :: LookupCapturePart, captureExcerpt :: LookupExcerpt
+  , captureContinuations :: [LookupCaptureSelection] }
+  deriving (Eq, Show)
+data LookupCaptureIssue = CaptureNotRetained LookupCapturePart
+  | CaptureRefused LookupCapturePart LookupSearchReceipt (Maybe Text)
+  | CaptureViewMismatch Text Text | CaptureSelectionIssue LookupSelectionIssue
+  deriving (Eq, Show)
+
+retainLookupCapture :: LookupBatch -> Maybe LookupBatch -> RetainedLookupCapture
+retainLookupCapture = RetainedLookupCapture
+
+lookupCaptureReceipts :: RetainedLookupCapture -> [(LookupCapturePart, LookupSearchReceipt)]
+lookupCaptureReceipts (RetainedLookupCapture primary related) =
+  (PrimaryLookup, lookupSearchReceipt primary) : maybe [] (\batch -> [(RelatedLookup, lookupSearchReceipt batch)]) related
+
+captureBatch :: RetainedLookupCapture -> LookupCapturePart -> Either LookupCaptureIssue LookupBatch
+captureBatch (RetainedLookupCapture primary related) part = do
+  batch <- case part of
+    PrimaryLookup -> Right primary
+    RelatedLookup -> maybe (Left (CaptureNotRetained RelatedLookup)) Right related
+  if lookupView batch /= lookupView primary
+    then Left (CaptureViewMismatch (lookupView primary) (lookupView batch))
+    else case searchDisposition (lookupSearchReceipt batch) of
+      LookupSearchCaptured -> Right batch
+      _ -> Left (CaptureRefused part (lookupSearchReceipt batch) (lookupIssue batch))
+
+lookupCaptureIndex :: RetainedLookupCapture -> [(LookupCapturePart, LookupHit)]
+lookupCaptureIndex captured = concat
+  [either (const []) (map ((,) part) . lookupIndex) (captureBatch captured part)
+  | part <- [PrimaryLookup, RelatedLookup]]
+
+renderLookupCaptureIndex :: RetainedLookupCapture -> Text
+renderLookupCaptureIndex captured@(RetainedLookupCapture _ related) = T.intercalate "\n"
+  [T.pack (show part) <> "\n" <> either issueText renderLookupIndex (captureBatch captured part)
+  | part <- PrimaryLookup : maybe [] (const [RelatedLookup]) related]
+  where issueText (CaptureRefused _ _ issue) = "Unavailable; inspect LookupReceipt." <> maybe "" (" " <>) issue
+        issueText issue = T.pack (show issue)
+
+selectLookupCapture :: RetainedLookupCapture -> LookupCaptureSelection -> Either LookupCaptureIssue LookupCaptureExcerpt
+selectLookupCapture captured (LookupCaptureSelection part selection) = do
+  batch <- captureBatch captured part
+  excerpt <- either (Left . CaptureSelectionIssue) Right (selectLookup batch selection)
+  let continuations = case excerptExtent excerpt of
+        Complete -> []
+        Partial selections -> map (LookupCaptureSelection part) selections
+  pure (LookupCaptureExcerpt part excerpt continuations)
+
+selectLookupCaptureMany :: RetainedLookupCapture -> [LookupCaptureSelection] -> [Either LookupCaptureIssue LookupCaptureExcerpt]
+selectLookupCaptureMany captured = map (selectLookupCapture captured)
 
 lookupIndex :: LookupBatch -> [LookupHit]
 lookupIndex batch = concatMap index (zip [1..] (lookupResults batch))
@@ -165,3 +228,9 @@ instance Display LookupExcerpt where
      ("lines", TextLeaf (T.pack (show (excerptLines excerpt)))), ("extent", TextLeaf (T.pack (show (excerptExtent excerpt)))),
      ("unavailable", displayTree (excerptUnavailable excerpt)), ("text", TextLeaf (excerptText excerpt))]
 instance Display LookupSelectionIssue where displayTree = TextLeaf . T.pack . show
+instance Display LookupCaptureExcerpt where
+  displayTree excerpt = Constructor "LookupCaptureExcerpt"
+    [("part", TextLeaf (T.pack (show (captureExcerptPart excerpt)))),
+     ("excerpt", displayTree (captureExcerpt excerpt)),
+     ("continuations", TextLeaf (T.pack (show (captureContinuations excerpt))))]
+instance Display LookupCaptureIssue where displayTree = TextLeaf . T.pack . show

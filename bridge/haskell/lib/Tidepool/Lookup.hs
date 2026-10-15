@@ -5,6 +5,8 @@ module Tidepool.Lookup
     LookupOutcome (..), LookupEntry (..), LookupExample (..), LookupSource (..), LookupKind (..),
     LookupAvailability (..), LookupOrigin (..), LookupQuality (..),
     LookupCandidate (..), LookupReference (..), LookupNamespace (..),
+    LookupSearchReceipt (..), LookupSearchDisposition (..), LookupSearchScope (..), LookupCount (..), LookupMatchReceipt (..),
+    LookupDiscovery (..), LookupSearchNotRun (..), LookupModuleSearch (..), LookupDiscoveryReceipt (..),
     lookupRaw, lookupRequest,
   ) where
 

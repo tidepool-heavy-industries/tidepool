@@ -81,10 +81,15 @@ renderedExampleCheck :: Member Lookup effects => Eff effects Bool
 renderedExampleCheck = do
   rendered <- Tools.executeWith (\_ _ -> pure [])
     (Tools.LookupArguments ["Cmd.start", "Cmd.start"])
-  pure (T.count "```haskell" rendered == 1
-    && "import qualified Tidepool.Command as Cmd" `T.isInfixOf` rendered
-    && "finishCommandWatcher watcher" `T.isInfixOf` rendered
-    && "Project/BackgroundCommandExample.hs" `T.isInfixOf` rendered)
+  captured <- lookupRaw (LookupRequest ["Cmd.start"] False Nothing 0 [])
+  pure (case lookupResults captured of
+    [LookupResult _ (LookupFound [entry] False)] -> case lookupExample entry of
+      Just example -> exampleSourceIssue example == Nothing
+        && not (T.null (exampleSource example))
+        && T.count (exampleSource example) rendered == 1
+        && T.count "```haskell" rendered == 1
+      Nothing -> False
+    _ -> False)
 
 emptySelectionCheck :: (Member Jev effects, Member Reflect effects) => Eff effects Bool
 emptySelectionCheck = null <$> Project.select [] []

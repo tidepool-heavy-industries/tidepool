@@ -344,12 +344,15 @@ async fn lookup_campaign() -> (TestCampaign, Arc<LookupScoreJev>) {
         fail: Mutex::new(false),
         score: Mutex::new(3),
     });
-    let campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
             lookup_enrichment_workspace(config);
         },
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await;
     (campaign, backend)
@@ -390,104 +393,284 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
 })).await;
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostedLookupCaptureReceipt {
+    lookup_capture_actor: i64,
+    lookup_capture_incarnation: i64,
+    lookup_capture_slot: i64,
+    lookup_capture_view: String,
+}
+
+fn lookup_presented_output(reply: &serde_json::Value) -> String {
+    assert_eq!(reply["status"], "committed", "lookup operation: {reply}");
+    reply["items"]
+        .as_array()
+        .expect("workbench items")
+        .iter()
+        .map(|item| {
+            assert_eq!(item["status"], "committed", "lookup item: {item}");
+            item["output"].as_str().expect("presented tool output")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn lookup_capture_receipt(reply: &serde_json::Value) -> HostedLookupCaptureReceipt {
+    lookup_presented_output(reply);
+    let values = reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("value"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values.len(),
+        1,
+        "one installed tool semantic result: {reply}"
+    );
+    let receipt: HostedLookupCaptureReceipt =
+        serde_json::from_value(values[0].clone()).expect("typed lookup capture receipt");
+    assert!(
+        receipt.lookup_capture_actor > 0
+            && receipt.lookup_capture_incarnation > 0
+            && receipt.lookup_capture_slot > 0
+            && !receipt.lookup_capture_view.is_empty()
+    );
+    receipt
+}
+
+fn lookup_signature_selection(part: &str, result: i64) -> serde_json::Value {
+    serde_json::json!({"tag":"LookupSections","contents":[{
+        "selectedCapture":part,
+        "capturedSelection":{"address":{"resultOrdinal":result,"entryOrdinal":1,"section":{"tag":"Signature"}},"lineWindow":null}
+    }]})
+}
+
+async fn read_lookup_capture(
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    receipt: &HostedLookupCaptureReceipt,
+    requested: serde_json::Value,
+) -> String {
+    let mut reply = dispatch_structured_tool(
+        policy,
+        "read_lookup",
+        serde_json::json!({
+            "retainedActor":receipt.lookup_capture_actor,
+            "retainedIncarnation":receipt.lookup_capture_incarnation,
+            "retainedSlot":receipt.lookup_capture_slot,
+            "requested":requested,
+        }),
+    )
+    .await;
+    let mut pages = Vec::new();
+    let mut consumed = std::collections::HashSet::new();
+    // Bound this fixture's finite excerpts while reading ordinary retained
+    // display suffixes through the same owner as the named selection.
+    for _ in 0..128 {
+        pages.push(lookup_presented_output(&reply));
+        let display = reply["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["operations"].as_array())
+            .flatten()
+            .find_map(|operation| operation.get("display"))
+            .unwrap_or_else(|| panic!("selected display metadata missing: {reply}"));
+        assert_eq!(
+            display["identity"],
+            serde_json::json!([
+                receipt.lookup_capture_actor,
+                receipt.lookup_capture_incarnation,
+                receipt.lookup_capture_slot
+            ])
+        );
+        let Some(key) = display["expansions"].as_array().unwrap().first() else {
+            return pages.join("\n");
+        };
+        let key = key[0].as_i64().unwrap();
+        assert!(
+            consumed.insert(key),
+            "consumed expansion key reappeared: {reply}"
+        );
+        reply = policy
+            .expand_display_boxed(
+                (
+                    receipt.lookup_capture_actor,
+                    receipt.lookup_capture_incarnation,
+                    receipt.lookup_capture_slot,
+                ),
+                key,
+            )
+            .await
+            .expect("retained selected display expansion");
+    }
+    panic!("finite lookup fixture exceeded 128 retained display pages");
+}
+
 #[tokio::test]
 async fn template_lookup_batches_related_declarations_and_recovers_from_jev_failure() {
     let (campaign, backend) = lookup_campaign().await;
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let policy = campaign.root_installation.policy.as_ref();
-                let output = dispatch_structured_tool(
+                let policy = campaign.root_installation.policy.clone();
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                campaign
+                    .drive_actor_output(&store, async move {
+                        let policy = policy.as_ref();
+                        let output = dispatch_structured_tool(
                     policy,
                     "lookup",
                     serde_json::json!({
                         "queries": ["LookupFixture.relatedRoot", "LookupFixture.alternativeRoot"]
                     }),
                 )
-                .await
-                .to_string();
-                assert!(output.contains("relatedRoot"), "{output}");
-                assert!(output.contains("Related declarations"), "{output}");
-                assert_eq!(
-                    output.matches("related to:").count(),
-                    4,
-                    "four-declaration cap: {output}"
-                );
-                let scoring = backend.scoring_requests();
-                assert_eq!(
-                    scoring.len(),
-                    1,
-                    "one scoring batch; no recursive expansion"
-                );
-                let request = scoring[0].clone();
-                assert!(
-                    request["questions"]
-                        .as_object()
-                        .unwrap()
-                        .values()
-                        .all(|question| !question["instructions"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
-                    "second-degree reference was scored as a candidate: {request}"
-                );
+                .await;
+                        let retained = lookup_capture_receipt(&output);
+                        let index = read_lookup_capture(
+                            policy,
+                            &retained,
+                            serde_json::json!({"tag":"LookupIndex"}),
+                        )
+                        .await;
+                        assert!(index.contains("relatedRoot"), "{index}");
+                        for ordinal in 1..=4 {
+                            let selected = read_lookup_capture(
+                                policy,
+                                &retained,
+                                lookup_signature_selection("RelatedLookup", ordinal),
+                            )
+                            .await;
+                            assert!(
+                                selected.contains("[Right LookupCaptureExcerpt")
+                                    && selected.contains("part = RelatedLookup")
+                                    && selected.contains("section = Signature")
+                                    && selected.contains("extent = Complete"),
+                                "retained related declaration {ordinal}: {selected}"
+                            );
+                        }
+                        let outside = read_lookup_capture(
+                            policy,
+                            &retained,
+                            lookup_signature_selection("RelatedLookup", 5),
+                        )
+                        .await;
+                        assert!(
+                            outside.contains("InvalidResult"),
+                            "four-declaration cap: {outside}"
+                        );
+                        let primary = read_lookup_capture(
+                            policy,
+                            &retained,
+                            lookup_signature_selection("PrimaryLookup", 1),
+                        )
+                        .await;
+                        assert!(primary.contains("relatedRoot ::"), "{primary}");
+                        let receipts = read_lookup_capture(
+                            policy,
+                            &retained,
+                            serde_json::json!({"tag":"LookupReceipt"}),
+                        )
+                        .await;
+                        assert!(
+                            receipts.contains(&retained.lookup_capture_view),
+                            "{receipts}"
+                        );
+                        let scoring = backend.scoring_requests();
+                        assert_eq!(
+                            scoring.len(),
+                            1,
+                            "one scoring batch; no recursive expansion"
+                        );
+                        let request = scoring[0].clone();
+                        assert!(
+                            request["questions"]
+                                .as_object()
+                                .unwrap()
+                                .values()
+                                .all(|question| !question["instructions"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
+                            "second-degree reference was scored as a candidate: {request}"
+                        );
 
-                backend.requests.lock().clear();
-                let missing = dispatch_structured_tool(
-                    policy,
-                    "lookup",
-                    serde_json::json!({
-                        "queries": ["LookupFixture.alternativeRoo"]
-                    }),
-                )
-                .await
-                .to_string();
-                assert!(
-                    missing.contains("alternativeRoo") && missing.contains("no match:"),
-                    "original miss must remain: {missing}"
-                );
-                assert!(missing.contains("Related declarations"), "{missing}");
-                assert!(
-                    missing.contains("alternativeRoot"),
-                    "qualified-module alternative missing: {missing}"
-                );
-                assert_eq!(backend.scoring_requests().len(), 1);
+                        backend.requests.lock().clear();
+                        let missing = dispatch_structured_tool(
+                            policy,
+                            "lookup",
+                            serde_json::json!({
+                                "queries": ["LookupFixture.alternativeRoo"]
+                            }),
+                        )
+                        .await;
+                        let missing = lookup_capture_receipt(&missing);
+                        let original_miss = read_lookup_capture(
+                            policy,
+                            &missing,
+                            lookup_signature_selection("PrimaryLookup", 1),
+                        )
+                        .await;
+                        assert!(original_miss.contains("ResultMissing"), "{original_miss}");
+                        let alternative = read_lookup_capture(
+                            policy,
+                            &missing,
+                            lookup_signature_selection("RelatedLookup", 1),
+                        )
+                        .await;
+                        assert!(alternative.contains("alternativeRoot ::"), "{alternative}");
+                        assert_eq!(backend.scoring_requests().len(), 1);
 
-                *backend.score.lock() = 0;
-                backend.requests.lock().clear();
-                let irrelevant = dispatch_structured_tool(
-                    policy,
-                    "lookup",
-                    serde_json::json!({
-                        "queries": ["LookupFixture.relatedRoot"]
-                    }),
-                )
-                .await
-                .to_string();
-                assert!(irrelevant.contains("relatedRoot"), "{irrelevant}");
-                assert!(
-                    !irrelevant.contains("Related declarations"),
-                    "irrelevant additions: {irrelevant}"
-                );
-                assert_eq!(backend.scoring_requests().len(), 1);
+                        *backend.score.lock() = 0;
+                        backend.requests.lock().clear();
+                        let irrelevant = dispatch_structured_tool(
+                            policy,
+                            "lookup",
+                            serde_json::json!({
+                                "queries": ["LookupFixture.relatedRoot"]
+                            }),
+                        )
+                        .await;
+                        let irrelevant = lookup_capture_receipt(&irrelevant);
+                        let unavailable = read_lookup_capture(
+                            policy,
+                            &irrelevant,
+                            lookup_signature_selection("RelatedLookup", 1),
+                        )
+                        .await;
+                        assert!(unavailable.contains("CaptureNotRetained"), "{unavailable}");
+                        assert_eq!(backend.scoring_requests().len(), 1);
 
-                *backend.fail.lock() = true;
-                backend.requests.lock().clear();
-                let fallback = dispatch_structured_tool(
-                    policy,
-                    "lookup",
-                    serde_json::json!({
-                        "queries": ["LookupFixture.relatedRoot"]
-                    }),
-                )
-                .await
-                .to_string();
-                assert!(
-                    fallback.contains("relatedRoot"),
-                    "ordinary result lost on Jev failure: {fallback}"
-                );
-                assert!(!fallback.contains("Related declarations"), "{fallback}");
-                assert_eq!(backend.scoring_requests().len(), 1);
+                        *backend.fail.lock() = true;
+                        backend.requests.lock().clear();
+                        let fallback = dispatch_structured_tool(
+                            policy,
+                            "lookup",
+                            serde_json::json!({
+                                "queries": ["LookupFixture.relatedRoot"]
+                            }),
+                        )
+                        .await;
+                        let fallback = lookup_capture_receipt(&fallback);
+                        let original = read_lookup_capture(
+                            policy,
+                            &fallback,
+                            lookup_signature_selection("PrimaryLookup", 1),
+                        )
+                        .await;
+                        assert!(original.contains("relatedRoot ::"), "{original}");
+                        let absent = read_lookup_capture(
+                            policy,
+                            &fallback,
+                            lookup_signature_selection("RelatedLookup", 1),
+                        )
+                        .await;
+                        assert!(absent.contains("CaptureNotRetained"), "{absent}");
+                        assert_eq!(backend.scoring_requests().len(), 1);
+                    })
+                    .await;
             })
         })
         .await;

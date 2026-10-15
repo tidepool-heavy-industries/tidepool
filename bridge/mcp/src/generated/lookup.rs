@@ -5,14 +5,23 @@
 pub fn lookup_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Lookup",
-        description: "Type-directed discovery of the executing resident scope or an explicitly named public module, checked by GHC. Use names when known, `::` queries with `_` holes when the needed type is known, and module exports or documentation for unfamiliar abstractions. `Tidepool.Lookup.lookupRaw` returns structured results without automatic enrichment; preserve each query's missing, ambiguous, rejected or found result, and inspect found entries' availability separately. Lookup inspects an immutable scope view; a declaration's availability under an effect row is separate from runtime resource authority. Use the hosted lookup tool for direct questions, and the structured API to filter candidates or build repeated discovery programs.",
+        description: "Type-directed discovery of the executing resident scope or an explicitly named public module, checked by GHC. Use names when known, `::` queries with `_` holes when the needed type is known, and module exports or documentation for unfamiliar abstractions. `Tidepool.Lookup.lookupRaw` returns captured structured results without automatic related queries; preserve each query's missing, ambiguous, rejected or found result, and inspect found entries' availability separately. Lookup inspects an immutable scope view; a declaration's availability under an effect row is separate from runtime resource authority. Use the hosted lookup tool for direct questions, and the structured API to filter candidates or build repeated discovery programs.",
         prompt_card: Some("`Tidepool.Lookup.lookupRaw` returns structured, GHC-checked lookup from the current scope. Search names, `::` types with `_` holes, or docs; keep ambiguity and availability explicit. Use hosted lookup for direct discovery, structured results for programmatic filtering. Finding a signature does not grant its effects or resource authority."),
         constructors: &[
             "LookupRaw :: LookupRequest -> Lookup LookupBatch",
         ],
         type_defs: &[
             "data LookupRequest = LookupRequest { lookupQueries :: [Text], lookupDiscover :: Bool, lookupExpectedView :: Maybe Text, lookupCandidateLimit :: Int, lookupReferences :: [LookupReference] } deriving (Show, Eq)",
-            "data LookupBatch = LookupBatch { lookupResults :: [LookupResult], lookupCandidates :: [LookupCandidate], lookupView :: Text, lookupIssue :: Maybe Text, lookupIdentity :: Text } deriving (Show, Eq)",
+            "data LookupBatch = LookupBatch { lookupResults :: [LookupResult], lookupCandidates :: [LookupCandidate], lookupView :: Text, lookupIssue :: Maybe Text, lookupIdentity :: Text, lookupSearchReceipt :: LookupSearchReceipt } deriving (Show, Eq)",
+            "data LookupSearchReceipt = LookupSearchReceipt { searchView :: Text, searchDisposition :: LookupSearchDisposition, searchAttemptedScopes :: [LookupSearchScope], searchMatches :: [LookupMatchReceipt], searchDiscovery :: LookupDiscovery } deriving (Show, Eq)",
+            "data LookupSearchDisposition = LookupSearchNotExecuted | LookupSearchCaptured | LookupSearchInvalidated [LookupMatchReceipt] LookupDiscovery deriving (Show, Eq)",
+            "data LookupSearchScope = LookupCurrentScope | LookupPublicModule Text deriving (Show, Eq)",
+            "data LookupCount = LookupKnownCount Int | LookupUnknownCount deriving (Show, Eq)",
+            "data LookupMatchReceipt = LookupMatchReceipt { matchQuery :: Text, matchObservedOccurrences :: LookupCount, matchRetainedOccurrences :: LookupCount, matchLimit :: Maybe Int } deriving (Show, Eq)",
+            "data LookupDiscovery = LookupDiscoveryNotRequested | LookupDiscoveryNotRun LookupSearchNotRun | LookupDiscoveryObserved LookupDiscoveryReceipt | LookupDiscoveryInvalidated deriving (Show, Eq)",
+            "data LookupSearchNotRun = LookupSearchStaleView | LookupSearchInvalidRequest | LookupSearchUnavailable | LookupSearchZeroBudget | LookupSearchNoEligibleQuery deriving (Show, Eq)",
+            "data LookupModuleSearch = LookupModulesNotNeeded | LookupModulesUnavailable | LookupModulesAttempted deriving (Show, Eq)",
+            "data LookupDiscoveryReceipt = LookupDiscoveryReceipt { discoveryModuleSearch :: LookupModuleSearch, discoveryAttemptedScopes :: [LookupSearchScope], discoveryEligibleModules :: LookupCount, discoverySubmittedModules :: LookupCount, discoveryModuleLimit :: Int, discoveryEnumeratedOccurrences :: LookupCount, discoveryRetainedCandidates :: LookupCount, discoveryDiscardedOccurrences :: LookupCount, discoveryDistinctDiscarded :: LookupCount, discoveryUnenumeratedCandidates :: LookupCount, discoveryCandidateLimit :: Int, discoveryBroaderModuleCount :: LookupCount, discoveryIssue :: Maybe Text } deriving (Show, Eq)",
             "data LookupResult = LookupResult { lookupQuery :: Text, lookupOutcome :: LookupOutcome } deriving (Show, Eq)",
             "data LookupOutcome = LookupFound [LookupEntry] Bool | LookupMissing [Text] [Text] | LookupAmbiguous [LookupEntry] Bool | LookupRejected Text deriving (Show, Eq)",
             "data LookupEntry = LookupEntry { lookupName :: Text, lookupModule :: Maybe Text, lookupDeclaration :: Text, lookupKind :: LookupKind, lookupAvailability :: LookupAvailability, lookupOrigin :: LookupOrigin, lookupQuality :: LookupQuality, lookupUsage :: Maybe Text, lookupContract :: Maybe Text, lookupExample :: Maybe LookupExample } deriving (Show, Eq)",
@@ -28,7 +37,7 @@ pub fn lookup_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            crate::effect_defs::helper_decl!(@ Some("lookupRaw"), Public, { raw ["-- | Execute structured lookups without presentation or enrichment.\nlookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch\nlookupRaw = send . LookupRaw"] }),
+            crate::effect_defs::helper_decl!(@ Some("lookupRaw"), Public, { raw ["-- | Capture structured lookups without presentation or automatic related queries.\nlookupRaw :: forall effs. Member Lookup effs => LookupRequest -> Eff effs LookupBatch\nlookupRaw = send . LookupRaw"] }),
         ],
         type_params: &[],
         default_row_args: &[],

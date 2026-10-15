@@ -7,7 +7,7 @@
 -- | The lookup tool's presentation policy. The Lookup effect owns resolution;
 -- selection can only add bounded, explicitly requested related declarations.
 module Tidepool.Lookup.Tools
-  ( LookupTools (..), LookupArguments (..), LookupReadArguments (..), LookupNavigation (..), Selection,
+  ( LookupTools (..), LookupArguments (..), LookupReadArguments (..), LookupNavigation (..), LookupCaptureReceipt(..), Selection,
     tools, toolsWith, executeWith, packCandidates, rankCandidates,
     renderBatch, renderResult, candidateText,
   ) where
@@ -20,7 +20,7 @@ import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
 import Tidepool.Aeson.Value (ToJSON, toJSON, encodeValue)
-import Tidepool.Inspection (displaySelectable, selectDisplay, displayIdentity, displayTree, DisplayTree(..))
+import Tidepool.Inspection (displaySelectable, selectDisplay, displayIdentity, Display(..), DisplayTree(..))
 import Tidepool.Lookup.Navigation
 import Tidepool.Effects.Core (Console)
 import Tidepool.Agent.Contract
@@ -30,15 +30,25 @@ import Tidepool.Lookup.Render (renderBatch, renderResult)
 newtype LookupArguments = LookupArguments { queries :: [Text] }
   deriving (Generic, FromJSON, JsonSchema)
 
-data LookupNavigation = LookupIndex | LookupSections [LookupSelection]
+data LookupNavigation = LookupIndex | LookupSections [LookupCaptureSelection] | LookupReceipt
   deriving (Generic, FromJSON, ToJSON, JsonSchema)
 data LookupReadArguments = LookupReadArguments
   { retainedActor :: Int, retainedIncarnation :: Int, retainedSlot :: Int
   , requested :: LookupNavigation
   } deriving (Generic, FromJSON, JsonSchema)
+data LookupCaptureReceipt = LookupCaptureReceipt
+  { lookupCaptureActor :: Int, lookupCaptureIncarnation :: Int, lookupCaptureSlot :: Int
+  , lookupCaptureView :: Text
+  } deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
+
+instance Display LookupCaptureReceipt where
+  displayTree receipt = Constructor "LookupCaptureReceipt"
+    [("actor", displayTree (lookupCaptureActor receipt)), ("incarnation", displayTree (lookupCaptureIncarnation receipt)),
+     ("slot", displayTree (lookupCaptureSlot receipt)), ("view", displayTree (lookupCaptureView receipt)),
+     ("read_lookup", TextLeaf "Use this exact identity with LookupIndex, LookupReceipt, or LookupSections. Sections carry PrimaryLookup or RelatedLookup, a result/entry address, and optional line ranges.")]
 
 data LookupTools mode = LookupTools
-  { lookup :: mode :- Call LookupArguments Text
+  { lookup :: mode :- Call LookupArguments LookupCaptureReceipt
   , readLookup :: mode :- Call LookupReadArguments Text
   }
   deriving (Generic)
@@ -52,13 +62,13 @@ tools = toolFor (executeRetained False (\_ _ -> pure []))
 toolsWith :: (Member Lookup effects, Member Console effects) => Selection effects -> LookupTools (AsServerT (Eff effects))
 toolsWith select = toolFor (executeRetained True select)
 
-toolFor :: Member Console effects => (LookupArguments -> Eff effects Text) -> LookupTools (AsServerT (Eff effects))
+toolFor :: Member Console effects => (LookupArguments -> Eff effects LookupCaptureReceipt) -> LookupTools (AsServerT (Eff effects))
 toolFor action = LookupTools
-  { lookup = presentWith id $ tool
+  { lookup = presentWith presentDisplay $ tool
       "Resolve missing API details before composing a cell: names, module exports, Haskell types or Exomonad documentation in this actor's scope. Pass {\"queries\":[\"Cmd.run\",\":: Int -> Int\",\"doc workbench\"]}; batch related questions. Search by input/output type when the name is unknown. Prefix type searches with :: and use _ for unknown parts. Qualified names are tried before module exports. During a pending request, queries \"respond\" and \"sessionInput\" reveal its exact reply and assignment types. Each query reports independently; narrow ambiguous or truncated matches. Availability labels describe the current effect row: a found signature alone does not establish that it is callable with your effects or runtime authority. When configured, related declarations and alternatives may be attached; explicitly look up a candidate for fuller detail. doc queries are text for this tool, not notebook Haskell."
       action
   , readLookup = presentWith id $ tool
-      "Read the retained lookup by actor/incarnation/slot from its query result. Use LookupIndex to revisit the index, or LookupSections with stable result/entry ordinals, named sections and optional 1-based inclusive line ranges. Selection preserves order and never refetches."
+      "Read the retained lookup by the exact actor/incarnation/slot in LookupCaptureReceipt. Use LookupIndex, LookupReceipt, or LookupSections with PrimaryLookup/RelatedLookup and stable result/entry ordinals, named sections and optional 1-based inclusive line ranges. Selection preserves order and never refetches."
       (\request -> do
         _ <- selectDisplay (retainedActor request, retainedIncarnation request, retainedSlot request)
           (encodeValue (toJSON (requested request)))
@@ -92,30 +102,20 @@ captureLookup discover select names = do
           (Just (lookupView original)) 0 [reference | c <- selected, Just reference <- [candidateReference c]])
         pure (original, Just (selected, extra))
 
-executeRetained :: (Member Lookup effects, Member Console effects) => Bool -> Selection effects -> LookupArguments -> Eff effects Text
-executeRetained discover select (LookupArguments names)
-  | null names = pure "lookup requires at least one query"
-  | otherwise = do
+executeRetained :: (Member Lookup effects, Member Console effects) => Bool -> Selection effects -> LookupArguments -> Eff effects LookupCaptureReceipt
+executeRetained discover select (LookupArguments names) = do
       (original, related) <- captureLookup discover select names
-      let captured = case related of
-            Nothing -> original
-            Just (_, extra) -> original
-              { lookupIdentity = lookupIdentity original <> "+" <> lookupIdentity extra
-              , lookupResults = lookupResults original ++ lookupResults extra
-              , lookupIssue = case lookupIssue extra of Nothing -> lookupIssue original; issue -> issue }
-          index = TextLeaf (renderLookupIndex captured)
+      let captured = retainLookupCapture original (snd <$> related)
+          index = TextLeaf (renderLookupCaptureIndex captured)
           navigate payload = case eitherDecode payload of
             Left issue -> TextLeaf ("Invalid lookup selection: " <> issue)
             Right LookupIndex -> index
-            Right (LookupSections selections) -> displayTree (selectLookupMany captured selections)
+            Right LookupReceipt -> Constructor "LookupSearchReceipts"
+              [(T.pack (show part), TextLeaf (T.pack (show receipt))) | (part, receipt) <- lookupCaptureReceipts captured]
+            Right (LookupSections selections) -> displayTree (selectLookupCaptureMany captured selections)
       handle <- displaySelectable index navigate
       let (actor, incarnation, slot) = displayIdentity handle
-      pure ("Lookup retained in view " <> lookupView captured
-        <> "; read_lookup with retainedActor=" <> T.pack (show actor)
-        <> ", retainedIncarnation=" <> T.pack (show incarnation)
-        <> ", retainedSlot=" <> T.pack (show slot)
-        <> ". Named sections and line ranges read this exact capture; LookupIndex returns to the index."
-        <> maybe "" ("\nLookup unavailable: " <>) (lookupIssue captured))
+      pure (LookupCaptureReceipt actor incarnation slot (lookupView original))
 
 sameCandidate :: LookupCandidate -> LookupCandidate -> Bool
 sameCandidate a b = candidateQuery a == candidateQuery b && candidateReference a == candidateReference b

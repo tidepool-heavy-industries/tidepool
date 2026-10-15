@@ -27,14 +27,14 @@ entry name = LookupEntry name (Just "Fixture") ("data " <> name)
 
 original :: LookupBatch
 original = LookupBatch [LookupResult "root" (LookupMissing ["root"] [])]
-  candidates "frozen-view" Nothing "fixture-capture"
+  candidates "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
 
 answer :: LookupRequest -> LookupBatch
 answer request
   | lookupDiscover request = original
   | otherwise = LookupBatch
       [LookupResult query (LookupFound [entry query] False) | query <- lookupQueries request]
-      [] "frozen-view" Nothing "fixture-capture"
+      [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
 
 observe :: Eff '[Lookup] a -> ([LookupRequest], a)
 observe = observeWith answer
@@ -71,7 +71,7 @@ main = do
       && lookupRequest ["Cmd.quiet"] == expectedDefaults)
   check "hosted lookup returns retained selection identity"
     (case hostedResult of
-      Right (ToolDispatchSuccess value presentation) -> value == toJSON presentation && "retainedSlot=1" `T.isInfixOf` presentation
+      Right (ToolDispatchSuccess value _) -> value == toJSON (Tools.LookupCaptureReceipt 1 1 1 "frozen-view")
       _ -> False)
   let select _ values = pure (Tools.rankCandidates (zip values [2,3,1,3,2,3]))
       (requests, output) = observe (Tools.executeWith select (Tools.LookupArguments ["root"]))
@@ -110,7 +110,7 @@ main = do
       exampleAnswer source request = LookupBatch
         [LookupResult query (LookupFound
           [(entry query) {lookupExample = Just (example source)}] False)
-        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture"
+        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, twoExamples) = observeWith (exampleAnswer "Cmd.start command\n")
         (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first", "second"]))
   check "only first direct hit carries one complete example"
@@ -122,7 +122,7 @@ main = do
         | otherwise = LookupBatch
             [LookupResult query (LookupFound
               [(entry query) {lookupExample = Just (example "Cmd.start command\n")}] False)
-            | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture"
+            | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, relatedOutput) = observeWith relatedExample
         (Tools.executeWith select (Tools.LookupArguments ["root"]))
   check "related declarations do not display examples"
@@ -141,7 +141,7 @@ main = do
       withLongMetadata request = LookupBatch
         [LookupResult query (LookupFound
           [(entry query) {lookupExample = Just longExample}] False)
-        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture"
+        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, boundedMetadata) = observeWith withLongMetadata
         (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
   check "multibyte requirements and complete source survive rendering"
@@ -155,7 +155,7 @@ main = do
       maximalAnswer request = LookupBatch
         [LookupResult query (LookupFound
           [(entry query) {lookupExample = Just maximal}] False)
-        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture"
+        | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, maximalOutput) = observeWith maximalAnswer
         (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
       (_, maximalBlock) = T.breakOn "\n  Example: " maximalOutput
