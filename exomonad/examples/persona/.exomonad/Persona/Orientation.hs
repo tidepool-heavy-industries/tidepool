@@ -11,6 +11,10 @@ import Tidepool.Effects.Core (FsRead, FsWrite)
 import Tidepool.Records (FsError)
 import qualified Persona.Memory as Memory
 
+-- This is your editable arrival context. Try adding a short current-project
+-- note or choosing which material matters for the conversation you are having.
+-- Context.refresh reuses renderMemory; change it when you want the same policy
+-- at arrival and refresh. Reload installs code without rerunning startup.
 -- Full authored bodies are carried unchanged. Reading or refreshing never
 -- creates a missing memory; only startup initialises the seed files.
 renderMemory :: Member FsRead effects => Eff effects (Either FsError Text)

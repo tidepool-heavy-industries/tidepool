@@ -31,6 +31,13 @@ type HelperEffects =
 data PersonaTools mode = PersonaTools
   { haskell :: mode :- Sync (HaskellCell PersonaEffects) }
   deriving (Generic)
+-- Try adding an afterTool hook here to notice something useful after a call.
+-- A hook receives ToolCall and ToolResult and returns Annotation: Annotated
+-- adds a note beside the result; NoAnnotation leaves it alone. With this spec,
+-- the call is a whole notebook cell, not each helper invoked inside it.
+-- A Jev/Reflect-using hook needs those effects in this signature's constraints.
+-- Save the implementation in a module, connect it here, then reload. You can
+-- add or replace the hook without adding a new registered tool.
 agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools

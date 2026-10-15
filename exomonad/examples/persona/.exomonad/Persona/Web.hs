@@ -39,6 +39,10 @@ data Selection = Selection
   , uncertain :: [(Passage, Text)], judgment :: Value, contextUsed :: Text
   } deriving (Eq, Show)
 
+-- Try composing a search-and-read helper: search, ask Jev which hit advances
+-- your question, then open that hit in the same Haskell computation. Carry the
+-- actual SearchHit or prepared action as the choice payload so its continuation
+-- already has what it needs. Keep the raw search available for direct use.
 search :: Member Web effects => Text -> Int -> [Text] -> [Text] -> Eff effects (Either WebError [SearchHit])
 search query limit includeDomains excludeDomains = decodeResult <$> webSearchRaw query limit includeDomains excludeDomains
 open :: Member Web effects => Text -> Eff effects (Either WebError Page)
