@@ -2728,6 +2728,28 @@ impl ArtifactInventory {
                 }
                 .copied()
                 .ok_or_else(|| {
+                    if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG) {
+                        let wanted = entry.native_owners.get(owner);
+                        let matching = fixed.owners.native.iter()
+                            .filter(|(key, _)| key.owner == *owner);
+                        let candidate_count = matching.clone().count();
+                        let candidates = matching.take(16).collect::<Vec<_>>();
+                        let retained = cursor_projection.entries.iter()
+                            .filter_map(|entry| match &entry.payload {
+                                ArtifactPayload::Original(product) if product.owner().unit == owner.unit
+                                    && product.owner().module == owner.module =>
+                                    Some((NativeOwnerKey::from_owner(product.owner()), entry.descriptor.id)),
+                                _ => None,
+                            }).take(16).collect::<Vec<_>>();
+                        let consumer_owner = match &entry.payload {
+                            ArtifactPayload::Original(product) => Some(product.owner()),
+                            _ => None,
+                        };
+                        tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                            consumer = ?group, ?consumer_owner, required = ?owner, ?dependency,
+                            ?wanted, ?candidates, candidate_count, ?retained,
+                            "bound native dependency owner index refused");
+                    }
                     admission_failure(ArtifactInventoryFailure::MissingDependency {
                         artifact: group.artifact,
                         dependent: entry.descriptor.owner.clone(),
