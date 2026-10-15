@@ -513,6 +513,16 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
+The `persona-specialists` cohort runs four real Harness scenarios with scripted
+model and Web responses: shared and dedicated Web-only researchers completing
+two schema-bound requests, invalid/duplicate/pending-work reply refusals, and
+installed Persona file editing after notebook compilation refusal. The file
+scenario requires zero additional logical compiler requests during installed
+tool calls. Each case requires confirmed process, host and compiler cleanup;
+the cohort runs one case at a time with a 900-second per-case limit. Run it from
+the same frozen descriptor with `--cohort persona-specialists --jobs 1`.
+These checks do not establish live provider availability or prompt-cache behavior.
+
 The `response-continuation` cohort runs three real host histories from the
 frozen bundle: settled-history reopening, interrupted inference and exact
 continuation, and blocked retirement. The interruption history observes the
