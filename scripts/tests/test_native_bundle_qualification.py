@@ -49,6 +49,20 @@ def browser_driver_fixture(source, driver):
     return inputs
 
 
+def recipe_workspace_fixture(source, resource):
+    inputs = {}
+    for relative in ('flake.nix', 'flake.lock', '.exomonad/AgentSpec.hs',
+                     '.exomonad/Project/Tools.hs'):
+        path = source / qualification.RECIPE_WORKSPACE_SOURCE / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('declared recipe input: ' + relative + '\n')
+        copied = resource / relative
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        copied.write_bytes(path.read_bytes())
+        inputs[path.relative_to(source).as_posix()] = qualification.sha256(path)
+    return inputs
+
+
 def root_entry_source_fixture(root, modules):
     """Generated source declaration fixture, without compilation authority."""
     path = root / qualification.ROOT_ENTRY_SOURCE
@@ -151,6 +165,58 @@ class RegisteredGcRootTests(unittest.TestCase):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_declared_recipe_package_matches_the_source_snapshot(self):
+        source = SCRIPT.parents[2] / qualification.RECIPE_WORKSPACE_SOURCE
+        inputs = {qualification.RECIPE_WORKSPACE_SOURCE + '/' + path.relative_to(source).as_posix():
+                  qualification.sha256(path) for path in source.rglob('*') if path.is_file()}
+        resource = Path(os.environ['TIDEPOOL_SCRIPT_RECIPE_PACKAGE'])
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            record = qualification.copy_recipe_workspace(inputs, resource, bundle)
+            contract = {'source_inputs': inputs, 'recipe_workspace': record}
+            qualification.verify_recipe_workspace(bundle, contract, qualification.inventory(bundle))
+            self.assertTrue((bundle / qualification.RECIPE_WORKSPACE_ROOT / 'flake.lock').is_file())
+            self.assertTrue((bundle / qualification.RECIPE_WORKSPACE_ROOT / '.exomonad/Project/Tools.hs').is_file())
+
+    def test_recipe_package_refuses_incoherent_missing_extra_and_aliased_bytes(self):
+        for mutation in ('changed-pin', 'missing-module', 'extra-module', 'frozen-alias', 'source-hash', 'owner'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                resource = root / 'resource'
+                inputs = recipe_workspace_fixture(root / 'source', resource)
+                if mutation == 'changed-pin':
+                    (resource / 'flake.lock').write_text('different revision')
+                elif mutation == 'missing-module':
+                    (resource / '.exomonad/Project/Tools.hs').unlink()
+                elif mutation == 'extra-module':
+                    (resource / '.exomonad/Extra.hs').write_text('undeclared')
+                bundle = root / 'bundle'
+                if mutation in ('changed-pin', 'missing-module', 'extra-module'):
+                    with self.assertRaisesRegex(ValueError, 'recipe workspace'):
+                        qualification.copy_recipe_workspace(inputs, resource, bundle)
+                    continue
+                record = qualification.copy_recipe_workspace(inputs, resource, bundle)
+                if mutation == 'frozen-alias':
+                    path = bundle / qualification.RECIPE_WORKSPACE_ROOT / 'flake.lock'
+                    path.unlink()
+                    path.symlink_to(resource / 'flake.lock')
+                elif mutation == 'source-hash':
+                    inputs[qualification.RECIPE_WORKSPACE_SOURCE + '/flake.lock'] = '0' * 64
+                else:
+                    record['target'] = '//unrelated:workspace'
+                with self.assertRaisesRegex(ValueError, 'recipe workspace|runtime input escapes'):
+                    qualification.verify_recipe_workspace(bundle, {'source_inputs': inputs, 'recipe_workspace': record})
+
+    def test_recipe_package_requires_modules_and_both_flake_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = recipe_workspace_fixture(root / 'source', root / 'resource')
+            for name in ('flake.nix', 'flake.lock', '.exomonad/AgentSpec.hs'):
+                incomplete = dict(inputs)
+                incomplete.pop(qualification.RECIPE_WORKSPACE_SOURCE + '/' + name)
+                with self.assertRaisesRegex(ValueError, 'complete recipe workspace'):
+                    qualification.copy_recipe_workspace(incomplete, root / 'resource', root / 'bundle')
+
     def setUp(self):
         # Legacy run_cohort fixtures mock subprocess.run to synthesize runner
         # records. Keep that seam behind the new owner boundary by adapting
@@ -376,6 +442,8 @@ class NativeQualificationTests(unittest.TestCase):
             output = root / 'assembled'
             browser_driver = root / 'browser-driver'
             browser_driver_fixture(source, browser_driver)
+            recipe_resource = root / 'recipe-package'
+            recipe_workspace_fixture(source, recipe_resource)
             roster = source / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE
             roster.parent.mkdir(parents=True, exist_ok=True)
             roster.write_bytes((Path(__file__).resolve().parents[2] / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE).read_bytes())
@@ -384,6 +452,7 @@ class NativeQualificationTests(unittest.TestCase):
                 frontend=inputs['frontend'], worker=inputs['worker'], libtest=inputs['libtest'],
                 build_sources=source, test_fixtures=resource_root,
                 fixture_manifest=source / qualification.TEST_FIXTURE_MANIFEST,
+                recipe_workspace=recipe_resource,
                 workspace_gitlink=workspace_gitlink, workspace_git_bundle=workspace_bundle,
                 sources=sources, assets=root / 'assets', libraries=libraries,
                 harness_revision=harness_revision, runtime_tools=tools, ghc_libdir=ghc,
@@ -393,6 +462,7 @@ class NativeQualificationTests(unittest.TestCase):
                  patch.object(qualification, 'verify_workspace_bundle'):
                 qualification.assemble(args)
             contract = json.loads((output / 'share/exomonad/native-build-contract.json').read_text())
+            qualification.verify_recipe_workspace(output, contract)
             self.assertEqual(contract['test_fixtures']['files'], {
                 fixture.relative_to(source).as_posix(): qualification.sha256(fixture)})
             self.assertEqual((output / qualification.TEST_FIXTURE_ROOT / fixture.relative_to(source)).read_bytes(),
@@ -515,9 +585,11 @@ class NativeQualificationTests(unittest.TestCase):
             root = Path(directory)
             bundle = root / 'bundle'
             inputs = browser_driver_fixture(root / 'source', bundle / qualification.BROWSER_DRIVER_ROOT)
+            inputs.update(recipe_workspace_fixture(root / 'source', root / 'recipe-resource'))
             contract = {'source_inputs': inputs, 'artifacts': {},
                         'browser_driver': qualification.browser_driver_record(
                             bundle / qualification.BROWSER_DRIVER_ROOT, inputs)}
+            contract['recipe_workspace'] = qualification.copy_recipe_workspace(inputs, root / 'recipe-resource', bundle)
             for relative, target in qualification.ARTIFACT_TARGETS.items():
                 path = bundle / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1873,6 +1945,8 @@ class NativeQualificationTests(unittest.TestCase):
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             (source / 'native.rs').write_text('fn shipped() {}\n')
             inputs = browser_driver_fixture(source, bundle / qualification.BROWSER_DRIVER_ROOT)
+            inputs.update(recipe_workspace_fixture(source, root / 'recipe-resource'))
+            recipe_record = qualification.copy_recipe_workspace(inputs, root / 'recipe-resource', bundle)
             roster = source / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE
             roster.parent.mkdir(parents=True, exist_ok=True)
             roster.write_bytes((Path(__file__).resolve().parents[2] / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE).read_bytes())
@@ -1884,6 +1958,7 @@ class NativeQualificationTests(unittest.TestCase):
             subprocess.run([*commit, 'first revision'], check=True)
             inputs['native.rs'] = qualification.sha256(source / 'native.rs')
             contract = {'profile': 'fast-dev', 'startup_mode': 'unprepared', 'source_inputs': inputs,
+                        'recipe_workspace': recipe_record,
                         'source_inputs_sha256': qualification.digest_inventory(inputs), 'artifacts': {},
                         'browser_driver': qualification.browser_driver_record(
                             bundle / qualification.BROWSER_DRIVER_ROOT, inputs)}
@@ -2002,6 +2077,7 @@ class NativeQualificationTests(unittest.TestCase):
             'TIDEPOOL_TEST_SYSTEMD_RUN': '/tmp/hostile-systemd-run',
             'TIDEPOOL_TEST_SYSTEMCTL': '/tmp/hostile-systemctl',
             'TIDEPOOL_TEST_FIXTURE_ROOT': '/tmp/source-fixtures',
+            'TIDEPOOL_RECIPE_WORKSPACE': '/tmp/ambient-workspace/.exomonad',
             'EXOMONAD_WORKSPACE_GITLINK': '/tmp/older-workspace-gitlink.json',
             'EXOMONAD_NIX_BIN': '/tmp/hostile-nix',
             'EXOMONAD_NIX_OFFLINE': '1',
@@ -2012,7 +2088,7 @@ class NativeQualificationTests(unittest.TestCase):
             }})
         self.assertEqual(environment['TIDEPOOL_EXTRACT'], '/frozen/bin/tidepool-extract')
         self.assertEqual(environment['EXOMONAD_NIX_BIN'], '/frozen/runtime-tools/bin/nix')
-        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE', 'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL', 'TIDEPOOL_TEST_FIXTURE_ROOT'):
+        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE', 'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL', 'TIDEPOOL_TEST_FIXTURE_ROOT', 'TIDEPOOL_RECIPE_WORKSPACE'):
             self.assertNotIn(key, environment)
 
     def test_frozen_bytes_may_not_change_and_descriptor_may_not_move(self):
@@ -2383,6 +2459,8 @@ class CatalogSourceTests(unittest.TestCase):
             environment = qualification.native_environment(bundle)
             self.assertEqual(environment['TIDEPOOL_PRELUDE_DIR'], str(original / 'lib'))
             self.assertEqual(environment['TIDEPOOL_COMPILER_MODULES'], str(catalog))
+            self.assertEqual(environment['TIDEPOOL_RECIPE_WORKSPACE'],
+                             str(bundle / qualification.RECIPE_WORKSPACE_ROOT / '.exomonad'))
             self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
             before = catalog.read_bytes()
             altered = json.loads(before)
@@ -2849,7 +2927,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
         runner = importlib.util.module_from_spec(runner_spec)
         runner_spec.loader.exec_module(runner)
         optional = ('TIDEPOOL_PREPARED_ROOT_ENTRY', 'TIDEPOOL_PREPARED_BUILTIN_ENTRIES',
-                    'TIDEPOOL_TEST_FIXTURE_ROOT')
+                    'TIDEPOOL_TEST_FIXTURE_ROOT', 'TIDEPOOL_RECIPE_WORKSPACE')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # A candidate namespace consumes its own packaged policy. An old
@@ -2864,7 +2942,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                 path = root / name
                 path.write_text('immutable resource fixture')
                 paths[name] = str(path)
-            for subset in range(8):
+            for subset in range(1 << len(optional)):
                 for reverse in (False, True):
                     with self.subTest(subset=subset, reverse=reverse):
                         selected = {'TIDEPOOL_COMPILER_MODULES': paths['TIDEPOOL_COMPILER_MODULES']}
@@ -2892,6 +2970,8 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                             # Actual receiving owner clears ambient selection and binds only
                             # the paths carried by the production namespace command.
                             supplied['TIDEPOOL_EXTRACT_DAEMON_SOCKET'] = '/ambient/injected.sock'
+                            if 'TIDEPOOL_RECIPE_WORKSPACE' not in selected:
+                                supplied['TIDEPOOL_RECIPE_WORKSPACE'] = str(paths['TIDEPOOL_RECIPE_WORKSPACE'])
                             with patch.dict(os.environ, supplied, clear=True):
                                 runner.resolve_resource_environment(declared)
                                 for name, value in selected.items():

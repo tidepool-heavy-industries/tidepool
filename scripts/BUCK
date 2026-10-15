@@ -133,9 +133,11 @@ sh_test(
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "TIDEPOOL_SCRIPT_RECIPE_PACKAGE": "$(location //exomonad/examples/workspace:facade_test_sources)",
+        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "TIDEPOOL_SCRIPT_RECIPE_PACKAGE",
         "PATH": read_root_config("nix", "action_path"),
     },
-    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    resources = [":script_test_resources", "//exomonad/examples/workspace:facade_test_sources", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
 

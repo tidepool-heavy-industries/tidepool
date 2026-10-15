@@ -162,6 +162,7 @@ def native_runtime_bundle(name, catalog_backed):
         "workspace-git-bundle": "//build/rust:workspace_git_bundle",
         "haskell-test-fixtures": "//bridge/testing:haskell_test_fixtures",
         "fixture-manifest": "//:test_fixture_manifest",
+        "recipe-workspace": "//exomonad/examples/workspace:facade_test_sources",
     }
     if catalog_backed:
         bundle_sources.update({"catalog": ":native_catalog", "root-entry": ":native_root_entry", "workbench-entry": ":native_workbench_entry", "async-workbench-entry": ":native_async_workbench_entry"})
@@ -183,6 +184,7 @@ def native_runtime_bundle(name, catalog_backed):
       --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
       --test-fixtures "$PWD/$(location //bridge/testing:haskell_test_fixtures)" \
       --fixture-manifest "$PWD/$(location //:test_fixture_manifest)" \
+      --recipe-workspace "$PWD/$(location //exomonad/examples/workspace:facade_test_sources)" \
       --workspace-gitlink "$PWD/$(location //build/rust:workspace_gitlink)" \
       --workspace-git-bundle "$PWD/$(location //build/rust:workspace_git_bundle)" \
       --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \

@@ -156,7 +156,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
-    "TIDEPOOL_TEST_FIXTURE_ROOT",
+    "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
@@ -167,7 +167,7 @@ ARTIFACT_TARGETS = {
     "bin/tidepool-tests": "//bridge/facade:tidepool_unit_tests",
 }
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
-BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver")
+BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver", "recipe_workspace")
 CATALOG_SOURCE_METADATA = "catalog-sources.json"
 CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors", "jev": "jev/core"}
 RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
@@ -1253,6 +1253,7 @@ def verify_artifact_contract(bundle: Path, contract: dict, observed_inventory: d
                             if path.startswith(prefix)}
     verify_browser_driver(bundle / BROWSER_DRIVER_ROOT, contract, driver_inventory)
     verify_harness_performance_roster(bundle, contract, observed_inventory)
+    verify_recipe_workspace(bundle, contract, observed_inventory)
 
 
 HARNESS_PERFORMANCE_ROSTER_SOURCE = "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
@@ -1305,6 +1306,48 @@ def verify_browser_driver(driver: Path, contract: dict, files: dict | None = Non
 
 TEST_FIXTURE_MANIFEST = "build/test-fixtures.json"
 TEST_FIXTURE_ROOT = "share/exomonad/test-fixtures"
+RECIPE_WORKSPACE_SOURCE = "exomonad/examples/workspace"
+RECIPE_WORKSPACE_ROOT = "share/exomonad/recipe-workspace"
+RECIPE_WORKSPACE_TARGET = "//exomonad/examples/workspace:facade_test_sources"
+
+
+def recipe_workspace_files(source_inputs: dict) -> dict:
+    """Select the authored package from the existing native source snapshot."""
+    prefix = RECIPE_WORKSPACE_SOURCE + "/"
+    files = {name[len(prefix):]: digest for name, digest in source_inputs.items()
+             if name.startswith(prefix) and (name[len(prefix):].startswith(".exomonad/")
+                                             or name[len(prefix):] in ("flake.nix", "flake.lock"))}
+    if not {"flake.nix", "flake.lock", ".exomonad/AgentSpec.hs"}.issubset(files):
+        raise ValueError("native source snapshot lacks the complete recipe workspace package")
+    return files
+
+
+def verify_recipe_workspace(bundle: Path, contract: dict, observed_inventory: dict | None = None) -> None:
+    if contract.get("recipe_workspace") != {"target": RECIPE_WORKSPACE_TARGET}:
+        raise ValueError("native build contract lacks its declared recipe workspace")
+    expected = recipe_workspace_files(contract["source_inputs"])
+    workspace = bundle / RECIPE_WORKSPACE_ROOT
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise ValueError("recipe workspace is missing or aliased")
+    if observed_inventory is None:
+        files = inventory(workspace)
+    else:
+        prefix = RECIPE_WORKSPACE_ROOT + "/"
+        files = {name[len(prefix):]: item for name, item in observed_inventory.items()
+                 if name.startswith(prefix)}
+    if (any(item["kind"] not in ("file", "directory") for item in files.values())
+            or {name: item["sha256"] for name, item in files.items() if item["kind"] == "file"} != expected):
+        raise ValueError("recipe workspace differs from the native build source snapshot")
+
+
+def copy_recipe_workspace(source_inputs: dict, resource: Path, bundle: Path) -> dict:
+    # Buck may expose declared source files through symlinks. Dereference them
+    # into the bundle, then require exactly the source owner's package bytes.
+    record = {"target": RECIPE_WORKSPACE_TARGET}
+    recipe_workspace_files(source_inputs)
+    shutil.copytree(resource, bundle / RECIPE_WORKSPACE_ROOT, symlinks=False)
+    verify_recipe_workspace(bundle, {"source_inputs": source_inputs, "recipe_workspace": record})
+    return record
 
 def read_fixture_manifest(path: Path) -> dict:
     manifest = json.loads(path.read_text())
@@ -1564,6 +1607,7 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
         "EXOMONAD_WORKSPACE_GITLINK": str(root / "share/exomonad/workspace-gitlink.json"),
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": str(root / "share/exomonad/workspace.bundle"),
         "TIDEPOOL_TEST_FIXTURE_ROOT": str(root / TEST_FIXTURE_ROOT),
+        "TIDEPOOL_RECIPE_WORKSPACE": str(root / RECIPE_WORKSPACE_ROOT / ".exomonad"),
         "EXOMONAD_NIX_BIN": str(root / "share/exomonad/runtime-tools/bin/nix"),
         "LD_LIBRARY_PATH": str(root / "lib/tidepool"),
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
@@ -1625,7 +1669,7 @@ class NativeRunnerResources(NamedTuple):
     def from_environment(cls, environment: dict, *, require_catalog: bool = False):
         return cls(tuple(name for name in (
             "TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
-            "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT",
+            "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
         ) if name in environment or (require_catalog and name == "TIDEPOOL_COMPILER_MODULES")))
 
     def arguments(self) -> list[str]:
@@ -1695,8 +1739,11 @@ def assemble(args) -> None:
     for source in args.libraries.iterdir():
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
     copy_harness_performance_roster(args.build_sources, root)
+    source_inputs = {path.relative_to(args.build_sources).as_posix(): sha256(path)
+                     for path in sorted(args.build_sources.rglob("*")) if path.is_file()}
     fixture_record = copy_test_fixtures(args.build_sources, args.fixture_manifest,
                                         args.test_fixtures, shared)
+    recipe_record = copy_recipe_workspace(source_inputs, args.recipe_workspace, root)
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
     shutil.copy2(args.workspace_gitlink, shared / "workspace-gitlink.json")
     shutil.copy2(args.workspace_git_bundle, shared / "workspace.bundle")
@@ -1706,13 +1753,12 @@ def assemble(args) -> None:
     wrapper = root / "bin/exomonad"
     wrapper.write_text(f"#!{tools}/bin/bash\n" + args.entrypoint_template.read_text().split("\n", 1)[1])
     wrapper.chmod(0o755)
-    source_inputs = {path.relative_to(args.build_sources).as_posix(): sha256(path)
-                     for path in sorted(args.build_sources.rglob("*")) if path.is_file()}
     contract = {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed", "startup_mode": "unprepared",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
         "browser_driver": browser_driver_record(shared / "browser-driver", source_inputs),
         "test_fixtures": fixture_record,
+        "recipe_workspace": recipe_record,
         "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
                       for relative, target in ARTIFACT_TARGETS.items()},
     }
@@ -2352,7 +2398,7 @@ def main(argv=None) -> int:
     stage.add_argument("--root-entry", type=Path)
     stage.add_argument("--workbench-entry", type=Path)
     stage.add_argument("--async-workbench-entry", type=Path)
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "browser-driver"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "recipe-workspace", "browser-driver"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")

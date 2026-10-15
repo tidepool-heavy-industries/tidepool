@@ -687,6 +687,16 @@ bundle-owned directory and clears any inherited value before execution. Frozen
 verification rejects a changed manifest, missing or changed fixture, and extra
 fixture file.
 
+The assembly also consumes `//exomonad/examples/workspace:facade_test_sources`
+as one complete recipe package, including its `flake.nix`, `flake.lock` and
+authored `.exomonad` tree. Its files must match the native build source snapshot
+exactly. The bundle retains them under `share/exomonad/recipe-workspace`, and
+verification checks the package against that source contract and frozen
+inventory. `TIDEPOOL_RECIPE_WORKSPACE` names this package's `.exomonad` directory;
+the qualification owner declares it to the native runner and clears inherited
+values. Adding this resource requires a new assembly and freeze; an external
+checkout cannot supply a missing frozen input.
+
 Compiler worker topology is independent of test process concurrency and per-request
 job grants. `run --compiler-workers 2 --foreground-jobs 2 --preparation-jobs 16`
 forwards the worker count through the owned compiler frontend and verifies the
