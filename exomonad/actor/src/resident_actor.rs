@@ -8459,6 +8459,8 @@ where
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        #[cfg(test)]
+        capture_workspace_tests::installation_gate(context.placement.session, kernel, false).await;
         self.bind_initial_generation(context, &installation).await?;
         self.check_application_readiness(kernel, context).await?;
         kernel
@@ -8468,6 +8470,8 @@ where
                 true
             })
             .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+        #[cfg(test)]
+        capture_workspace_tests::installation_gate(context.placement.session, kernel, true).await;
         Ok(())
     }
 

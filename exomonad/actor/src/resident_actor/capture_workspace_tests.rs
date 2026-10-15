@@ -15,6 +15,71 @@ use tidepool_runtime::session::{
 };
 use tidepool_testing::eval_harness;
 
+// Session-scoped fault injection observes real publication without issuing authority.
+struct InstallationGate {
+    published: bool,
+    context: parking_lot::Mutex<Option<KernelContext>>,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+fn installation_gates() -> &'static parking_lot::Mutex<
+    std::collections::HashMap<tidepool_repr::SessionId, Arc<InstallationGate>>,
+> {
+    static GATES: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<tidepool_repr::SessionId, Arc<InstallationGate>>,
+        >,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+
+struct InstallationGateGuard(tidepool_repr::SessionId, Arc<InstallationGate>);
+impl InstallationGateGuard {
+    fn new(session: tidepool_repr::SessionId, published: bool) -> Self {
+        let gate = Arc::new(InstallationGate {
+            published,
+            context: Default::default(),
+            reached: Default::default(),
+            release: Default::default(),
+        });
+        assert!(installation_gates()
+            .lock()
+            .insert(session, gate.clone())
+            .is_none());
+        Self(session, gate)
+    }
+
+    async fn reached(&self) -> KernelContext {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(240),
+            self.1.reached.notified(),
+        )
+        .await
+        .expect("actual installation reaches gate");
+        self.1.context.lock().clone().expect("real kernel context")
+    }
+}
+impl Drop for InstallationGateGuard {
+    fn drop(&mut self) {
+        installation_gates().lock().remove(&self.0);
+        self.1.release.notify_one();
+    }
+}
+
+pub(super) async fn installation_gate(
+    session: tidepool_repr::SessionId,
+    kernel: &KernelContext,
+    published: bool,
+) {
+    let gate = installation_gates().lock().get(&session).cloned();
+    if let Some(gate) = gate.filter(|gate| gate.published == published) {
+        *gate.context.lock() = Some(kernel.clone());
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
 struct PausedWorkspace {
     entered: mpsc::UnboundedSender<String>,
     release: tokio::sync::Semaphore,
@@ -168,8 +233,9 @@ impl CaptureFixture {
             reject: std::sync::atomic::AtomicBool::new(false),
         });
         let (forest, deployments) = ResidentForest::new(
-            ActorWorkbenchSource::new(preamble, include)
-                .with_installed_effect_support(vec![exomonad_tool::ToolEffectKey::ContextReadWrite]),
+            ActorWorkbenchSource::new(preamble, include).with_installed_effect_support(vec![
+                exomonad_tool::ToolEffectKey::ContextReadWrite,
+            ]),
             session,
             machine,
             Some(workspaces.clone()),
@@ -811,6 +877,109 @@ async fn checkpoint_issuer_source_authority_is_checked_before_workspace_effects(
         "workspace preparation must not run before checkpoint source authentication"
     );
     assert_eq!(fixture.workspaces.release.available_permits(), 1);
+    fixture.release_checkpoint(&token, scope).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn supplied_child_publication_has_executor_admission_before_consumer_acknowledges() {
+    let mut fixture = CaptureFixture::new(194, 1).await;
+    let parent = fixture.parent("publication-ready-parent").await;
+    let (token, scope) = fixture
+        .checkpoint(&parent, crate::CheckpointSourceLayer::default())
+        .await;
+    let gate = InstallationGateGuard::new(fixture.session, true);
+    let call = tokio::spawn(run_host_cell(
+        parent,
+        reader_source(&token, "publication-ready", "Core.ActorOwned"),
+    ));
+    let _kernel = gate.reached().await;
+    // The publisher remains suspended. In the old inline pre_start path the
+    // actual lifecycle is still Starting here and refuses this exact operation.
+    let child = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let LocalResidentDeployment::PolicyInstalled(child) =
+                fixture.deployments.recv().await.expect("deployment owner")
+            {
+                break child;
+            }
+        }
+    })
+    .await
+    .expect("real child installation");
+    assert_eq!(child.label, "publication-ready");
+    let admission = child.actor.admit_transaction().await;
+    let admitted = admission.is_ok();
+    let diagnostic = format!("{:?}", admission.as_ref().err());
+    drop(admission);
+    child
+        .spawn_admission
+        .as_ref()
+        .expect("actual spawn admission")
+        .acknowledge(child.actor.identity())
+        .expect("successful attachment acknowledgement");
+    drop(gate);
+    let reply = call.await.expect("spawn caller task");
+    assert_committed(&reply);
+    assert_captured_reader(&child).await;
+    stop_reader(child).await;
+    fixture.release_checkpoint(&token, scope).await;
+    fixture.finish().await;
+    assert!(
+        admitted,
+        "published child must admit the consumer transaction: {diagnostic}"
+    );
+}
+
+#[tokio::test]
+async fn supplied_child_cancelled_before_publication_preserves_first_terminal_and_cleanup() {
+    let mut fixture = CaptureFixture::new(195, 1).await;
+    let parent = fixture.parent("publication-cancel-parent").await;
+    let (token, scope) = fixture
+        .checkpoint(&parent, crate::CheckpointSourceLayer::default())
+        .await;
+    let gate = InstallationGateGuard::new(fixture.session, false);
+    let call = tokio::spawn(run_host_cell(
+        parent,
+        reader_source(&token, "publication-cancel", "Core.ActorOwned"),
+    ));
+    let kernel = gate.reached().await;
+    let retained = kernel.retained_exit();
+    let first = ActorTerminal::new(ActorExitKind::Cancelled, "cancel before child publication");
+    assert_eq!(retained.request_shutdown(first.clone()), first);
+    assert_eq!(
+        retained.request_shutdown(ActorTerminal::new(ActorExitKind::Failed, "later failure")),
+        first
+    );
+    drop(gate);
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(30), retained.wait())
+        .await
+        .expect("cancelled bootstrap retires");
+    assert_eq!(terminal, first);
+    let _reply = call.await.expect("failed spawn caller task");
+    let (retired, observed) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match fixture.deployments.recv().await.expect("deployment owner") {
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    panic!("cancelled child published {}", child.actor.identity())
+                }
+                LocalResidentDeployment::Retired { actor, terminal }
+                    if actor == kernel.identity() =>
+                {
+                    break (actor, terminal)
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("cancelled child retirement event");
+    assert_eq!(retired, kernel.identity());
+    assert_eq!(observed, first);
+    assert!(retained
+        .cleanup()
+        .expect("actual cleanup receipt")
+        .is_confirmed());
     fixture.release_checkpoint(&token, scope).await;
     fixture.finish().await;
 }
