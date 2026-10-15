@@ -491,7 +491,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 assert_reload_outcome(&receipt, "ReloadPublished");
                 let after = policy.snapshot_for_request().expect("issued reloaded workspace tools");
                 assert!(after.tools().iter().any(|tool| tool.name() == "bash"));
-                assert!(exomonad_tool::compare_surfaces(before.tools(), after.tools()).is_empty());
+                assert!(exomonad_tool::surface::compare_surfaces(before.tools(), after.tools()).is_empty());
                 let mut dispatch = tokio::spawn(async move {
                     super::test_campaign::dispatch_structured_tool(
                         after.as_ref(),
