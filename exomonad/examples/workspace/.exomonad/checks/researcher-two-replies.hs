@@ -22,10 +22,10 @@ reportRequest <- do
   case requested of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready
-Right report <- await (result reportRequest)
+report <- either (error . Text.pack . show) pure =<< await (result reportRequest)
 display report
 Right followUpRequest <- requestWithReplyTool @Researcher.FollowUp researcher
   ("Explain the same source in one sentence and cite its URL." :: Text)
   defaultRequestOptions
-Right followUp <- await (result followUpRequest)
+followUp <- either (error . Text.pack . show) pure =<< await (result followUpRequest)
 display followUp

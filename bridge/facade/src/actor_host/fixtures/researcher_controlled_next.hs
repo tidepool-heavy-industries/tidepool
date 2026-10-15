@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Project.Researcher as Researcher
 import Project.PositiveReport (UnsupportedReport)
 unsupported <- requestWithReplyTool @UnsupportedReport researcher ("Do not publish an unsupported reply schema" :: Text) defaultRequestOptions
@@ -8,5 +9,5 @@ display (case unsupported of { Left (RequestReplyToolInvalid _) -> True; _ -> Fa
 Right followUpRequest <- requestWithReplyTool @Researcher.FollowUp researcher
   ("Explain the same source in one sentence and cite its URL." :: Text)
   defaultRequestOptions
-Right followUp <- await (result followUpRequest)
+followUp <- either (error . Text.pack . show) pure =<< await (result followUpRequest)
 display followUp

@@ -23,5 +23,5 @@ reportRequest <- do
   case requested of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready
-Right report <- await (result reportRequest)
+report <- either (error . Text.pack . show) pure =<< await (result reportRequest)
 display report
