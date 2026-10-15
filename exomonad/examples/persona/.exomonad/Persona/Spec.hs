@@ -50,6 +50,6 @@ agentSpec = defaultSpec { specTools = PersonaTools
 data HelperTools mode = HelperTools
   { haskell :: mode :- Sync (HaskellCell HelperEffects) }
   deriving (Generic)
-helperSpec :: Subset HelperEffects (SyncEffects effects) => AgentSpec HelperTools effects
+helperSpec :: AgentSpec HelperTools HelperEffects
 helperSpec = defaultSpec { specTools = HelperTools
   { haskell = haskellTool "Compose an investigation in Haskell. Retain evidence, distinguish uncertainty, and return findings through the typed request. Curate your own context as useful; the companion owns durable memory edits and human-facing forms." } }
