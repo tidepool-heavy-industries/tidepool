@@ -24,7 +24,7 @@ data TestTools effects mode = TestTools
   { notebook :: HaskellTools effects mode,
     rawEcho :: mode :- RawCall Text,
     repeatText :: mode :- Call EchoInput Text,
-    launch :: mode :- Call Shell.Execute Text,
+    launch :: mode :- Call Shell.Execute Shell.CommandToolResult,
     followProcess :: mode :- Call Shell.WriteInput Shell.CommandToolResult,
     readLog :: mode :- Call Shell.ReadOutput Shell.CommandToolResult
   }
@@ -42,7 +42,9 @@ tools =
       repeatText = presentWith id $ tool "Repeat supplied text." $ \EchoInput {text = value, copies = count} -> do
         Files.appendFile ".exomonad/state/handler-calls" "x" >>= either (error . show) pure
         pure (T.replicate count value),
-      launch = presentWith id $ tool "Launch with project postprocessing." $ \input -> Shell.execute input >> pure "handler continued",
+      launch = presentWith presentDisplay $ tool "Launch with project postprocessing." $ \input -> do
+        output <- Shell.execute input
+        pure (output {Shell.presentation = Shell.presentation output <> "\nhandler continued"}),
       followProcess = presentWith presentDisplay $ tool "Continue the retained command." Shell.writeInput,
       readLog = presentWith presentDisplay $ tool "Read retained diagnostics." Shell.readRetained
     }

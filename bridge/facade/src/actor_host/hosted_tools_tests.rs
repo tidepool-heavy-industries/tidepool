@@ -180,13 +180,9 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         text.contains("custom-handler-output") && text.contains("handler continued"),
         "{text}"
     );
-    let session = text
-        .split("session_id: ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap();
+    let facts = &launched["items"][0]["value"];
+    assert_eq!(facts["tag"], "ObservedCommand", "{facts}");
+    let session = facts["session_id"].as_str().unwrap();
     let observed = call(
         "follow_process",
         ToolArguments::Structured(serde_json::json!({"session_id":session,"yield_time_ms":0})),
