@@ -7276,26 +7276,23 @@ where
             ResidentActorBoundary::RegisterReplyTool {
                 continuation,
                 request,
-                definition,
+                installation,
+                session,
+                installer,
             } => Box::pin(async move {
                 let support = self.environment.intrinsic_effect_support();
-                let outcome =
-                    crate::tool_contract::decode_installation(definition.installation.clone())
-                        .and_then(|installation| {
-                            crate::tool_contract::admit_reply_spec_metadata(installation, &support)
-                                .map_err(|error| {
-                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                                })
-                        })
+                let outcome = crate::request_reply_tool::ReplyToolDefinition::prepare(
+                    installation, session, installer, &support,
+                )
                         .map_err(|error| {
                             crate::request_effect::RequestError::RequestReplyToolInvalid(
                                 error.to_string(),
                             )
                         })
-                        .and_then(|_| {
+                        .and_then(|definition| {
                             self.environment
                                 .requests
-                                .register_reply_tool(context.actor, request, definition)
+                                .register_reply_tool(context.actor, request, Arc::new(definition))
                                 .map_err(
                                     crate::request_effect::RequestError::RequestSubmissionRejected,
                                 )
@@ -8080,6 +8077,7 @@ where
                     context.actor,
                     request.request,
                     lease,
+                    definition.schema(),
                 )?))
             } else {
                 None

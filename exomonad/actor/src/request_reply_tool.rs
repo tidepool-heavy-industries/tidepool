@@ -9,6 +9,50 @@ pub(crate) struct ReplyToolDefinition {
     pub(crate) installation: serde_json::Value,
     pub(crate) session: tidepool_repr::SessionId,
     pub(crate) installer: Arc<RootCustody>,
+    schema: Arc<harness_schema::FunctionToolSchema>,
+}
+
+impl ReplyToolDefinition {
+    pub(crate) fn prepare(
+        installation: serde_json::Value,
+        session: tidepool_repr::SessionId,
+        installer: Arc<RootCustody>,
+        support: &[exomonad_tool::ToolEffectKey],
+    ) -> Result<Self, crate::ResidentActorWorkbenchError> {
+        let schema = Self::prepare_schema(installation.clone(), support)?;
+        Ok(Self {
+            installation,
+            session,
+            installer,
+            schema,
+        })
+    }
+
+    fn prepare_schema(
+        installation: serde_json::Value,
+        support: &[exomonad_tool::ToolEffectKey],
+    ) -> Result<Arc<harness_schema::FunctionToolSchema>, crate::ResidentActorWorkbenchError> {
+        let admitted = crate::tool_contract::admit_reply_spec_metadata(
+            crate::tool_contract::decode_installation(installation)?,
+            support,
+        )
+        .map_err(|error| crate::ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let [plan] = admitted.plans.as_slice() else {
+            unreachable!("reply metadata admission requires one endpoint")
+        };
+        let exomonad_tool::HostedTool::Function(declaration) = plan.surface() else {
+            unreachable!("reply metadata admission requires a function endpoint")
+        };
+        let schema =
+            harness_schema::FunctionToolSchema::new(declaration.input_schema).map_err(|error| {
+                crate::ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+            })?;
+        Ok(Arc::new(schema))
+    }
+
+    pub(crate) fn schema(&self) -> Arc<harness_schema::FunctionToolSchema> {
+        self.schema.clone()
+    }
 }
 
 /// One mounted request's decoder and exact recipient. Cloning preserves the
@@ -17,7 +61,7 @@ pub struct RequestReplyActivation {
     actor: crate::ActorRef,
     request: crate::RequestId,
     pub(crate) lease: crate::InstalledToolLease,
-    schema: harness_schema::FunctionToolSchema,
+    schema: Arc<harness_schema::FunctionToolSchema>,
     declarations: Arc<[exomonad_tool::HostedTool]>,
     settled: std::sync::atomic::AtomicBool,
     host_attachment: std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>,
@@ -28,6 +72,7 @@ impl RequestReplyActivation {
         actor: crate::ActorRef,
         request: crate::RequestId,
         lease: crate::InstalledToolLease,
+        schema: Arc<harness_schema::FunctionToolSchema>,
     ) -> Result<Self, crate::ResidentActorWorkbenchError> {
         let mut declarations = lease
             .tools()
@@ -39,10 +84,6 @@ impl RequestReplyActivation {
                 "reply installation lost its sole compiled function endpoint".into(),
             ));
         };
-        let schema = harness_schema::FunctionToolSchema::new(declaration.input_schema.clone())
-            .map_err(|error| {
-                crate::ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-            })?;
         declaration.input_schema = schema.parameters().clone();
         Ok(Self {
             actor,
@@ -172,10 +213,15 @@ pub enum RequestReplyAdmissionError {
 /// Only the retained activation schema can construct checked handler input.
 pub(crate) struct ReplyHostArguments(serde_json::Value);
 impl ReplyHostArguments {
-    fn admit(schema: &harness_schema::FunctionToolSchema, wire: serde_json::Value) -> Result<Self, crate::ResidentToolError> {
+    fn admit(
+        schema: &harness_schema::FunctionToolSchema,
+        wire: serde_json::Value,
+    ) -> Result<Self, crate::ResidentToolError> {
         harness_schema::validate_value(&wire, schema.parameters(), "$")
             .map_err(|error| crate::ResidentToolError::InvalidInvocation(error.to_string()))?;
-        schema.decode_arguments(wire).map(Self)
+        schema
+            .decode_arguments(wire)
+            .map(Self)
             .map_err(|error| crate::ResidentToolError::InvalidInvocation(error.to_string()))
     }
 
@@ -206,7 +252,39 @@ mod tests {
                     "choice":{"anyOf":[{"type":"string"},{"type":"null"}]}
                 }, "required":["count","choice"], "additionalProperties":false
             }}, "required":["result"], "additionalProperties":false
-        })).unwrap()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_prepares_schema_before_accepting_decoder_custody() {
+        use exomonad_tool::{
+            ActorEffectKey, ToolDeclaration, ToolEffectKey, ToolImplementation, ToolKind,
+            ToolScheduling,
+        };
+        let keys = ToolEffectKey::ALL
+            .iter()
+            .copied()
+            .filter(|key| key.is_invocation_only())
+            .chain([ToolEffectKey::Actor(ActorEffectKey::Replies)])
+            .collect::<Vec<_>>();
+        let declaration = ToolDeclaration {
+            name: REPLY_TOOL.into(),
+            description: "Return report".into(),
+            input_schema: json!({"type":"object","properties":{"result":{"type":"string"}},"required":["result"],"additionalProperties":false}),
+            output_schema: None,
+            kind: ToolKind::Call,
+            schedule: ToolScheduling::BeforeNextInference,
+            implementation: ToolImplementation::ResidentHandler,
+            effect_keys: keys.clone(),
+        };
+        let metadata = |declaration| json!({"tools":[declaration],"slots":[]});
+        let schema =
+            ReplyToolDefinition::prepare_schema(metadata(declaration.clone()), &keys).unwrap();
+        assert!(ReplyHostArguments::admit(&schema, json!({"result":"report"})).is_ok());
+        let mut unsupported = declaration;
+        unsupported.input_schema["properties"]["result"] = json!({"type":"unsupported-report"});
+        assert!(ReplyToolDefinition::prepare_schema(metadata(unsupported), &keys).is_err());
     }
 
     #[test]
@@ -224,7 +302,10 @@ mod tests {
             json!({"result":{"count":3,"choice":null}}),
             json!({"result":{"count":3,"note":null,"choice":9}}),
         ] {
-            assert!(ReplyHostArguments::admit(&schema, invalid.clone()).is_err(), "{invalid}");
+            assert!(
+                ReplyHostArguments::admit(&schema, invalid.clone()).is_err(),
+                "{invalid}"
+            );
         }
         // The projected host representation is deliberately not provider wire.
         // Revalidation here catches an adapter accidentally projecting twice.

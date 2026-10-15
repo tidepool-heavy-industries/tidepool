@@ -3757,7 +3757,9 @@ pub(crate) enum ResidentActorBoundary {
     RegisterReplyTool {
         continuation: ResidentHole,
         request: crate::RequestId,
-        definition: Arc<crate::request_reply_tool::ReplyToolDefinition>,
+        installation: serde_json::Value,
+        session: tidepool_repr::SessionId,
+        installer: Arc<RootCustody>,
     },
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
@@ -9927,9 +9929,7 @@ where
                         Ok(ResidentActorBoundary::RegisterReplyTool {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
-                            definition: Arc::new(crate::request_reply_tool::ReplyToolDefinition {
-                                installation, session: context.placement.session, installer: Arc::new(installer),
-                            }),
+                            installation, session: context.placement.session, installer: Arc::new(installer),
                         })
                     }
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
