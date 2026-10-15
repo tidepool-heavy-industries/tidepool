@@ -329,6 +329,7 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
             "end-of-retained-query",
             "second-query",
             "missing-api",
+            "Contract: retained contract hash token",
         ] {
             assert!(rendered.contains(name), "missing {name}: {rendered}");
         }

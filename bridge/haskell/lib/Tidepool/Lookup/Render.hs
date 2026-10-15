@@ -51,6 +51,7 @@ renderEntries entries omitted = T.intercalate "\n" (map renderEntry entries)
 renderEntry :: LookupEntry -> Text
 renderEntry entry = "  " <> availability <> T.strip (lookupDeclaration entry)
   <> maybe "" (\pointer -> " (see: " <> pointer <> ")") (lookupUsage entry)
+  <> maybe "" (\contract -> "\n  Contract: " <> T.strip contract) (lookupContract entry)
   where
     availability = case lookupKind entry of
       LookupValue -> label
