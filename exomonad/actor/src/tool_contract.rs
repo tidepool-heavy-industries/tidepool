@@ -6,6 +6,10 @@ use exomonad_tool::{
 };
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
+#[path = "tool_contract/spec_preflight_tests.rs"]
+mod spec_preflight_tests;
+
 /// Both products of one source installation are published together.
 pub(crate) struct SpecInstallation {
     pub(crate) tools: Vec<ToolDeclaration>,
@@ -109,6 +113,9 @@ pub enum SpecValidationError {
     #[haskell(module = "Tidepool.Effects.Core")]
     #[error("invalid spec input schema: {0}")]
     SpecInputSchemaInvalid(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("spec provider projection invalid: {0}")]
+    SpecProviderProjectionInvalid(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
@@ -118,9 +125,22 @@ pub enum SpecProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
+pub enum SpecProviderValidation {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpecProviderNotChecked,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpecProviderChecked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum SpecValidationReceipt {
     #[haskell(module = "Tidepool.Effects.Core")]
-    SpecValidationReceipt(Vec<String>, Vec<String>, SpecProvenance),
+    SpecValidationReceipt(
+        Vec<String>,
+        Vec<String>,
+        SpecProvenance,
+        SpecProviderValidation,
+    ),
 }
 
 pub(crate) type ToolSurfaceValidator =
@@ -148,14 +168,17 @@ pub(crate) fn preflight_spec_metadata(
     let installation = decode_installation(metadata)
         .map_err(|error| SpecValidationError::SpecMetadataInvalid(error.to_string()))?;
     let admitted = admit_spec_metadata(installation, effects, support)?;
-    if let Some(validate) = validate_surface {
+    let provider_validation = if let Some(validate) = validate_surface {
         let surface = admitted
             .plans
             .iter()
             .map(|plan| plan.surface())
             .collect::<Vec<_>>();
-        validate(&surface).map_err(SpecValidationError::SpecInputSchemaInvalid)?;
-    }
+        validate(&surface).map_err(SpecValidationError::SpecProviderProjectionInvalid)?;
+        SpecProviderValidation::SpecProviderChecked
+    } else {
+        SpecProviderValidation::SpecProviderNotChecked
+    };
     Ok(SpecValidationReceipt::SpecValidationReceipt(
         admitted
             .plans
@@ -166,6 +189,7 @@ pub(crate) fn preflight_spec_metadata(
         SpecProvenance::SpecProvenanceUnavailable(
             "an arbitrary spec value has no single issued source-module identity".into(),
         ),
+        provider_validation,
     ))
 }
 

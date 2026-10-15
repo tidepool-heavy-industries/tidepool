@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -30,7 +31,7 @@ module Tidepool.Actors.Spawn
   , AgentSpecValidationReport (..)
   , SpecValidationError (..)
   , SpecValidationReceipt (..)
-  , SpecProvenance (..)
+  , SpecProvenance (..), SpecProviderValidation (..)
   , validateAgentSpec
   , validatedAgentSpecReport
   , defaultValidatedSpawnOptions
@@ -51,7 +52,9 @@ module Tidepool.Actors.Spawn
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
-import Tidepool.Aeson (Value)
+import Tidepool.Aeson (Value, ToJSON)
+import Tidepool.Aeson.Schema (JsonSchema)
+import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import Prelude
 import Tidepool.Agent.Contract
@@ -67,7 +70,7 @@ import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
   , WorkerLifetime (..), SpawnContextWire (..)
   , SpawnCleanup (..)
-  , SpecReplacementError (..), SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..)
+  , SpecReplacementError (..), SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..), SpecProviderValidation (..)
   )
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
@@ -155,15 +158,24 @@ data ValidatedAgentSpec tools effects = ValidatedAgentSpec (PreparedAgentSpec to
 data AgentSpecValidationReport = AgentSpecValidationReport
   { validationInstallation :: Value
   , validationReceipt :: SpecValidationReceipt
-  } deriving (Show)
+  } deriving (Show, Generic)
+
+instance ToJSON AgentSpecValidationReport
+instance JsonSchema AgentSpecValidationReport
 
 validatedAgentSpecReport :: ValidatedAgentSpec tools effects -> AgentSpecValidationReport
 validatedAgentSpecReport (ValidatedAgentSpec prepared receipt) =
   AgentSpecValidationReport (preparedAgentSpecMetadata prepared) receipt
 
+-- | Reuse the exact prepared value. Spawn still rechecks current admission;
+-- editing draft source cannot substitute another spec into this value.
 defaultValidatedSpawnOptions :: ValidatedAgentSpec tools effects -> SpawnOptions tools effects
 defaultValidatedSpawnOptions validated = SpawnOptions (ValidatedSpawnSpec validated) Nothing Nothing Nothing Nothing ActorOwned Nothing
 
+-- | Inspect this concrete value's declarations on the current host without
+-- allocating a child or running authored handlers, startup or after-tool code.
+-- Acceptance observes current interpreter support, not future launch success.
+-- A report is evidence, not an authority token or proof of handler behavior.
 validateAgentSpec
   :: forall tools childEffects effects.
      (Member AgentLaunch effects, HasInstalledAgentApi tools childEffects,

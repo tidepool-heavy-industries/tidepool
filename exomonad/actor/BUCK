@@ -166,6 +166,7 @@ rust_filegroup(
         "src/status_tool.rs": "exomonad/actor/src/status_tool.rs",
         "src/termination.rs": "exomonad/actor/src/termination.rs",
         "src/tool_contract.rs": "exomonad/actor/src/tool_contract.rs",
+        "src/tool_contract/spec_preflight_tests.rs": "exomonad/actor/src/tool_contract/spec_preflight_tests.rs",
         "src/typed_request.rs": "exomonad/actor/src/typed_request.rs",
         "src/usage_pointer.rs": "exomonad/actor/src/usage_pointer.rs",
         "src/wait.rs": "exomonad/actor/src/wait.rs",
@@ -348,6 +349,7 @@ rust_filegroup(
         "src/resident_actor/after_tool_wait.rs": "exomonad/actor/src/resident_actor/after_tool_wait.rs",
         "src/resident_actor/agent_retention.rs": "exomonad/actor/src/resident_actor/agent_retention.rs",
         "src/resident_actor/capture_workspace_declarations.hs": "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs",
+        "src/resident_actor/capture_workspace_forged_spec.hs": "exomonad/actor/src/resident_actor/capture_workspace_forged_spec.hs",
         "src/resident_actor/capture_workspace_tests.rs": "exomonad/actor/src/resident_actor/capture_workspace_tests.rs",
         "src/resident_actor/checkpoint_shutdown_tests.rs": "exomonad/actor/src/resident_actor/checkpoint_shutdown_tests.rs",
         "src/resident_actor/child_launch.rs": "exomonad/actor/src/resident_actor/child_launch.rs",
@@ -441,6 +443,7 @@ rust_filegroup(
         "src/status_tool.rs": "exomonad/actor/src/status_tool.rs",
         "src/termination.rs": "exomonad/actor/src/termination.rs",
         "src/tool_contract.rs": "exomonad/actor/src/tool_contract.rs",
+        "src/tool_contract/spec_preflight_tests.rs": "exomonad/actor/src/tool_contract/spec_preflight_tests.rs",
         "src/typed_request.rs": "exomonad/actor/src/typed_request.rs",
         "src/usage_pointer.rs": "exomonad/actor/src/usage_pointer.rs",
         "src/wait.rs": "exomonad/actor/src/wait.rs",
@@ -937,6 +940,7 @@ filegroup(
         "exomonad/actor/src/resident_actor/after_tool_wait.rs": "src/resident_actor/after_tool_wait.rs",
         "exomonad/actor/src/resident_actor/agent_retention.rs": "src/resident_actor/agent_retention.rs",
         "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs": "src/resident_actor/capture_workspace_declarations.hs",
+        "exomonad/actor/src/resident_actor/capture_workspace_forged_spec.hs": "src/resident_actor/capture_workspace_forged_spec.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_tests.rs": "src/resident_actor/capture_workspace_tests.rs",
         "exomonad/actor/src/resident_actor/checkpoint_shutdown_tests.rs": "src/resident_actor/checkpoint_shutdown_tests.rs",
         "exomonad/actor/src/resident_actor/child_launch.rs": "src/resident_actor/child_launch.rs",
@@ -1030,6 +1034,7 @@ filegroup(
         "exomonad/actor/src/status_tool.rs": "src/status_tool.rs",
         "exomonad/actor/src/termination.rs": "src/termination.rs",
         "exomonad/actor/src/tool_contract.rs": "src/tool_contract.rs",
+        "exomonad/actor/src/tool_contract/spec_preflight_tests.rs": "src/tool_contract/spec_preflight_tests.rs",
         "exomonad/actor/src/typed_request.rs": "src/typed_request.rs",
         "exomonad/actor/src/usage_pointer.rs": "src/usage_pointer.rs",
         "exomonad/actor/src/wait.rs": "src/wait.rs",
@@ -1256,6 +1261,13 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6465636c61726174696f6e732e6873",
     src = "src/resident_actor/capture_workspace_declarations.hs",
     out = "capture_workspace_declarations.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f666f726765645f737065632e6873",
+    src = "src/resident_actor/capture_workspace_forged_spec.hs",
+    out = "capture_workspace_forged_spec.hs",
     visibility = ["PUBLIC"],
 )
 

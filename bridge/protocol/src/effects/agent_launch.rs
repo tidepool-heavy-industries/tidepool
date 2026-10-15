@@ -249,12 +249,21 @@ fn spawn_types() -> Vec<TypeDef> {
                 ("SpecEffectMismatch", vec![HsType::Text]),
                 ("SpecInterpreterUnavailable", vec![HsType::Text]),
                 ("SpecInputSchemaInvalid", vec![HsType::Text]),
+                ("SpecProviderProjectionInvalid", vec![HsType::Text]),
             ],
         ),
         spec_type(
             "SpecProvenance",
             "crate::tool_contract::SpecProvenance",
             vec![("SpecProvenanceUnavailable", vec![HsType::Text])],
+        ),
+        spec_type(
+            "SpecProviderValidation",
+            "crate::tool_contract::SpecProviderValidation",
+            vec![
+                ("SpecProviderNotChecked", vec![]),
+                ("SpecProviderChecked", vec![]),
+            ],
         ),
         spec_type(
             "SpecValidationReceipt",
@@ -265,6 +274,7 @@ fn spawn_types() -> Vec<TypeDef> {
                     HsType::list(HsType::Text),
                     HsType::list(HsType::Text),
                     HsType::Named("SpecProvenance"),
+                    HsType::Named("SpecProviderValidation"),
                 ],
             )],
         ),

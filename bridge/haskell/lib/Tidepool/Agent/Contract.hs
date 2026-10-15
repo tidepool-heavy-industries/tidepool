@@ -1125,14 +1125,6 @@ afterToolEntry = 1
 initialContextEntry :: Int
 initialContextEntry = 2
 
--- | Install one spec: its declared tool surface and every slot it fills, from
--- a single compile of a single module.
---
--- Declarations and the retained dispatcher are two products of that one
--- compile, so a schema can never advertise a handler built from another
--- revision, and a slot can never be a revision ahead of the tools beside it.
--- Entries 0, 1 and 2 retain the named-call, after-tool and initial-context
--- protocols. Installed endpoints enter at their certified ordinal plus 3.
 -- | One evaluated declaration set coupled to its exact retained dispatcher.
 -- Preparation evaluates schemas and metadata, never tool handlers or slots.
 data PreparedAgentSpec tools effects = PreparedAgentSpec
@@ -1147,6 +1139,14 @@ installPreparedSpec
   :: PreparedAgentSpec tools effects -> Eff (AgentTools ': SyncEffects effects) ()
 installPreparedSpec (PreparedAgentSpec metadata entry) = send (AgentToolsInstallWith metadata entry)
 
+-- | Install one spec: its declared tool surface and every slot it fills, from
+-- a single compile of a single module.
+--
+-- Declarations and the retained dispatcher are two products of that one
+-- compile, so a schema can never advertise a handler built from another
+-- revision, and a slot can never be a revision ahead of the tools beside it.
+-- Entries 0, 1 and 2 retain the named-call, after-tool and initial-context
+-- protocols. Installed endpoints enter at their certified ordinal plus 3.
 installSpec
   :: forall effects tools. (HasInstalledAgentApi tools effects, KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec tools effects -> Eff (AgentTools ': SyncEffects effects) ()
@@ -1161,7 +1161,7 @@ prepareAgentSpec spec = case compileInstalledTools (specTools spec) of
   Left problem -> Left problem
   Right compiled -> forceMetadata installation `seq` Right (PreparedAgentSpec installation entry)
     where
-      forceMetadata (Object fields) = Map.foldr (\value rest -> forceMetadata value `seq` rest) () fields
+      forceMetadata (Object fields) = Map.foldrWithKey (\key value rest -> key `seq` forceMetadata value `seq` rest) () fields
       forceMetadata (Array values) = foldr (\value rest -> forceMetadata value `seq` rest) () values
       forceMetadata value = value `seq` ()
 

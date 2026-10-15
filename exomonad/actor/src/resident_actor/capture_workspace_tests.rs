@@ -139,6 +139,7 @@ impl CaptureFixture {
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
+        include.push(eval_harness::actor_sources_path());
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "Tidepool.Agent.Contract",
@@ -671,6 +672,33 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
     stop_reader(survivor).await;
     assert_captured_reader(&fresh).await;
     stop_reader(fresh).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn forged_spec_metadata_cannot_bypass_actual_installation_and_retains_cleanup() {
+    let mut fixture = CaptureFixture::new(188, 1).await;
+    let parent = fixture.parent("forged-spec-parent").await;
+    let (token, scope) = fixture
+        .checkpoint(&parent, crate::CheckpointSourceLayer::default())
+        .await;
+    let source =
+        include_str!("capture_workspace_forged_spec.hs").replace("CHECKPOINT_TOKEN", &token);
+    let reply = run_host_cell(parent.clone(), source).await;
+    assert_committed(&reply);
+    // The authored case matches the actual typed SpawnPartialFailure and
+    // SpawnCleanupConfirmed constructors before returning this diagnostic.
+    assert!(
+        reply.to_string().contains("SpawnCleanupConfirmed"),
+        "{reply}"
+    );
+    fixture.workspace_wait().await;
+    assert!(
+        fixture.entered.try_recv().is_err(),
+        "one attempted workspace attachment"
+    );
+    assert!(parent.terminal().get().is_none());
+    fixture.release_checkpoint(&token, scope).await;
     fixture.finish().await;
 }
 

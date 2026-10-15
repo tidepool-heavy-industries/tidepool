@@ -344,6 +344,7 @@
     "exomonad/actor/src/request/fixtures/result-request.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs",
+    "exomonad/actor/src/resident_actor/capture_workspace_forged_spec.hs",
     "exomonad/actor/src/resident_actor/green_runtime_cancel.hs",
     "exomonad/actor/src/resident_actor/green_runtime_expression_reverse.hs",
     "exomonad/actor/src/resident_actor/green_runtime_expression_single.hs",

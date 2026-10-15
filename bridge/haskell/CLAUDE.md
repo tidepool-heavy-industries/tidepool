@@ -30,6 +30,16 @@ Retained facts may outlive that allowance; they do not authorize later effects.
 Package cells keep their existing GHC owner, and changed projection inputs still
 use the original worklist's validation and fallback.
 
+## Concrete actor specifications
+
+A module that defines a polymorphic spec has not necessarily instantiated its
+schema dictionaries. Prepare the concrete value through `prepareAgentSpec`;
+`validateAgentSpec` additionally asks the existing host admission owner to check
+its metadata without running handlers or slots. Keep the prepared metadata and
+dispatcher together; a mutable raw spec must not carry an independently cached
+validation result. A validation report records current checks, not future grants
+or a source identity reconstructed from a module name.
+
 ## Build the compiler worker
 
 From the repository root, after materializing and configuring pinned tools:

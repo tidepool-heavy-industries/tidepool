@@ -7,3 +7,6 @@ data CaptureTools mode = CaptureTools
   { ping :: mode :- Call CaptureRead Int
   , haskell :: mode :- HaskellCell '[]
   }
+
+data InvalidCaptureTools mode = InvalidCaptureTools
+  { scalarPing :: mode :- Call Text Int }
