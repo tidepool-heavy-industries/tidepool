@@ -67,6 +67,17 @@ module Tidepool.Agent.Contract
   , HaskellTools (..)
   , AsyncHaskellTools
   , haskellTools
+  , WorkbenchTools (..)
+  , ReloadInput (..)
+  , ReloadError (..)
+  , ReloadOutcome (..)
+  , ReloadOptions (..)
+  , ReloadPolicy (..)
+  , reloadSource
+  , reloadSourceWith
+  , reloadHandler
+  , reloadPresenter
+  , standardReload
   , asyncHaskellTools
   , defaultWorkbenchSpec
   , defaultAsyncWorkbenchSpec
@@ -145,6 +156,8 @@ import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Tidepool.Effects.Core (AgentTools (..))
+import Tidepool.Reload
+
 import Tidepool.Agent.ToolEffects
 import Tidepool.Internal.ActorProfiles (ActorEffects)
 
@@ -346,6 +359,17 @@ haskellTools = HaskellTools
   { haskell = HaskellTool asyncHaskellDescription
   , haskellSync = HaskellTool syncHaskellDescription
   }
+
+-- | An ordinary precompiled synchronous Call handler. Its authored field name
+-- and inclusion are selected by the AgentSpec tool record.
+standardReload :: Presented (SyncTool 'CallKind effects ReloadInput (Either ReloadError ReloadOutcome))
+standardReload = presentWith reloadPresenter (syncTool "Publish edited source; optionally accept supported tool surface changes." reloadHandler)
+
+-- | The shipped editable workbench explicitly includes its reload handler.
+data WorkbenchTools effects mode = WorkbenchTools
+  { notebook :: HaskellTools effects mode
+  , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
+  } deriving (Generic)
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool 'NotifyKind m input ()
@@ -1065,8 +1089,8 @@ defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing, initialContex
 -- model specs still use 'defaultSpec'.
 defaultWorkbenchSpec
   :: (KnownToolEffects effects, AsyncEffects effects)
-  => AgentSpec (HaskellTools effects) effects
-defaultWorkbenchSpec = defaultSpec { specTools = haskellTools }
+  => AgentSpec (WorkbenchTools effects) effects
+defaultWorkbenchSpec = defaultSpec { specTools = WorkbenchTools haskellTools standardReload }
 
 -- | Hosted default when the runtime supplies only ordinary notebook effects.
 defaultAsyncWorkbenchSpec

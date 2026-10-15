@@ -20,12 +20,10 @@ module Tidepool.Agent.ToolEffects
 import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import Tidepool.Effects.Core (ContextReadWrite)
-import Tidepool.Internal.ActorProfiles (AsyncEffects)
+import Tidepool.Internal.ActorProfiles (AsyncEffects, SyncEffects)
 import qualified Tidepool.Internal.ActorProfiles as Catalogue
 import Tidepool.Effects.Row (Subset)
 
-type SyncEffects effects = ContextReadWrite ': effects
 
 data ToolSchedule = Asynchronous | BeforeNextInference
   deriving (Eq, Show)

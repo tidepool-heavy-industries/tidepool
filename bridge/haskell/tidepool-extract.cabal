@@ -847,6 +847,7 @@ test-suite model-turn-test
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
     Tidepool.Agent.Contract
+    Tidepool.Reload
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Scope.Internal
@@ -1002,6 +1003,7 @@ test-suite automation-helper-contract
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
     Tidepool.Agent.Contract
+    Tidepool.Reload
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Scope.Internal
@@ -1131,6 +1133,7 @@ test-suite command-tools-contract
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
     Tidepool.Agent.Contract
+    Tidepool.Reload
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Scope.Internal
@@ -1194,6 +1197,7 @@ test-suite tool-profiles-contract
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
     Tidepool.Agent.Contract
+    Tidepool.Reload
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Scope.Internal

@@ -107,6 +107,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::introspection::introspection(),
         effects::lookup::lookup(),
         effects::source::source(),
+        effects::reload::reload(),
         effects::actor_kernel::actor_kernel(),
         effects::actor_local::actor_local(),
         effects::sleep::sleep(),

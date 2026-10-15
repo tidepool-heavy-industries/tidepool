@@ -176,3 +176,30 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
 fn generated_and_handwritten_substrate_helpers_preserve_semantics() {
     Surface::new().execute("HelperSemantics.hs");
 }
+
+#[test]
+fn synchronous_reload_profile_and_async_source_inspection_compile() {
+    let surface = Surface::new();
+    let compiled = surface.compile("ReloadSync.hs", false);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let refused = surface.compile("ReloadAsync.hs", false);
+    assert!(
+        !refused.status.success(),
+        "asynchronous Reload profile compiled"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("Reload cannot be used by an asynchronous"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+#[test]
+fn reload_defaults_and_structured_receipts_execute() {
+    Surface::new().execute("ReloadCodec.hs");
+}

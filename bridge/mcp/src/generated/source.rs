@@ -5,24 +5,24 @@
 pub fn source_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Source",
-        description: "Inspect source from the executing request's immutable generation. Edit ordinary Haskell and prompt files, then reloadSource [] to activate compatible source, tool implementations and workspace prompts together. Changed configuration starts a fresh notebook; unchanged configuration preserves bindings. Put reusable definitions in .hs files. Already-issued work and children keep their original generation. Reload preserves conversation, resources and published memory context; it does not rerun initialization, refresh memory or commit files to Git. Failed preparation leaves the active generation unchanged. Source roots and grants remain launch inputs. Captured-only actors can inspect their source but cannot publish editable configuration.",
+        description: "Inspect source from the executing request's immutable generation. Source inspection does not publish edited files; synchronous Reload owns publication.",
         prompt_card: None,
         constructors: &[
             "SourceReadModule :: Text -> Source (Either SourceError (Text, Text))",
-            "SourceReloadWith :: [Text] -> Source (Either SourceError ReloadOutcome)",
             "SourceStatusWith :: Source (Either SourceError SourceStatus)",
         ],
         type_defs: &[
-            "data SourceModule = SourceModule { sourceModuleName :: Text, sourceModuleDigest :: Text } deriving (Show, Eq)",
-            "data SourceRevision = SourceRevision { revisionIdentity :: Text, revisionGeneration :: Int, revisionModules :: [SourceModule] } deriving (Show, Eq)",
-            "data SourceStatus = SourceStatus { statusActive :: SourceRevision, statusDisk :: SourceRevision } deriving (Show, Eq)",
-            "data ReloadOutcome = ReloadUnchanged SourceRevision | ReloadPublished SourceRevision SourceRevision [Text] | ReloadRejected SourceRevision SourceRevision Text | ReloadCancelled SourceRevision | ReloadPublishedWithWarnings SourceRevision SourceRevision [Text] [Text] | ReloadPublicationUnconfirmed SourceRevision Text deriving (Show, Eq)",
+            "data SourceModule = SourceModule { sourceModuleName :: Text, sourceModuleDigest :: Text } deriving (Show, Eq, Generic)",
+            "data SourceRevision = SourceRevision { revisionIdentity :: Text, revisionGeneration :: Int, revisionModules :: [SourceModule] } deriving (Show, Eq, Generic)",
+            "data SourceStatus = SourceStatus { statusActive :: SourceRevision, statusDisk :: SourceRevision } deriving (Show, Eq, Generic)",
+            "instance ToJSON SourceModule\ninstance JsonSchema SourceModule",
+            "instance ToJSON SourceRevision\ninstance JsonSchema SourceRevision",
+            "instance ToJSON SourceStatus\ninstance JsonSchema SourceStatus",
             "data SourceError = SourceUnavailable Text | SourceUnreadable Text deriving (Show, Eq)\ninstance ToJSON SourceError where\n  toJSON e = case e of\n    SourceUnavailable detail -> object [\"tag\" .= (\"SourceUnavailable\" :: Text), \"detail\" .= detail]\n    SourceUnreadable detail -> object [\"tag\" .= (\"SourceUnreadable\" :: Text), \"detail\" .= detail]\n",
         ],
         extra_imports: &[],
         helpers: &[
             crate::effect_defs::helper_decl!(@ Some("readSourceModule"), Public, { raw ["-- | Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes.\nreadSourceModule :: forall effs. Member Source effs => Text -> Eff effs (Either SourceError (Text, Text))\nreadSourceModule = send . SourceReadModule"] }),
-            crate::effect_defs::helper_decl!(@ Some("reloadSource"), Public, { raw ["-- | Capture and validate edited source and prompts, then publish one coherent generation.\n-- The list selects additional modules to check. Changed configuration starts a fresh\n-- notebook; unchanged configuration preserves it. This computation retains its issued\n-- generation for the rest of its execution. Memory refresh and Git commits are separate.\nreloadSource :: forall effs. Member Source effs => [Text] -> Eff effs (Either SourceError ReloadOutcome)\nreloadSource alsoCheck = send (SourceReloadWith alsoCheck)"] }),
             crate::effect_defs::helper_decl!(@ Some("sourceStatus"), Public, { raw ["-- | The revision this request captured, and the revision your\n-- own source roots hold right now. Compare `revisionIdentity`s to tell whether an\n-- edit is waiting, and look a module up in `revisionModules` to compare\n-- one module across the two.\nsourceStatus :: forall effs. Member Source effs => Eff effs (Either SourceError SourceStatus)\nsourceStatus = send SourceStatusWith"] }),
         ],
         type_params: &[],

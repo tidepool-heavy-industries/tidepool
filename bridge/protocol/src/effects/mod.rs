@@ -42,6 +42,7 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
+pub mod reload;
 pub mod resource_scope;
 pub mod sleep;
 pub mod source;
@@ -95,6 +96,7 @@ pub fn all() -> Vec<Effect> {
         agent_session::agent_session(),
         reflect::reflect(),
         source::source(),
+        reload::reload(),
         model::model(),
         context_read_write::context_read_write(),
         worktree_facades::bound_worktree(),

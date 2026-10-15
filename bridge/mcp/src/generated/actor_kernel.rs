@@ -21,7 +21,7 @@ pub fn actor_kernel_decl() -> crate::EffectDecl {
             "ActorCommandInputWith :: ActorKernel CommandResult",
         ],
         type_defs: &[
-            "data ActorLifecycle = ActorLive | ActorPaused Text | ActorFinished Text | ActorFailed Text | ActorCancelled Text deriving (Show, Eq)",
+            "data ActorLifecycle = ActorLive | ActorPaused Text | ActorFinished Text | ActorFailed Text | ActorCancelled Text | ActorInterrupted Text deriving (Show, Eq)",
         ],
         extra_imports: &[
             "import Tidepool.Actor",

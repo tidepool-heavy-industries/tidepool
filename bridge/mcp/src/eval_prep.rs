@@ -127,7 +127,7 @@ pub fn effects_authored_module_source() -> String {
         )
     };
     format!(
-        "{}\nmodule Tidepool.Effects.Authored (module Tidepool.Effects.Core) where\n\nimport Tidepool.Effects.Core hiding ({})\n{}",
+        "{}\nmodule Tidepool.Effects.Authored (module Tidepool.Effects.Core, module Tidepool.Reload) where\n\nimport Tidepool.Effects.Core hiding ({})\nimport Tidepool.Reload\n{}",
         tidepool_runtime::session::generated_support_pragmas(),
         crate::generated::AUTHORED_HIDING_IMPORTS.join(", "),
         abstract_import
@@ -157,6 +157,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
     out.push_str("import Data.Kind (Type)\n");
+    out.push_str("import Tidepool.Aeson.Schema (JsonSchema)\n");
     for import in crate::generated::CORE_IMPORTS {
         out.push_str(import);
         out.push('\n');

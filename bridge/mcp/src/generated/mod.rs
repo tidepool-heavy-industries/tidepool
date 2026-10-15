@@ -25,6 +25,7 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
+pub mod reload;
 pub mod repo_event;
 pub mod resource_scopes;
 pub mod sleep;
@@ -60,6 +61,7 @@ pub use notifications::*;
 pub use read_state::*;
 pub use recipe_check::*;
 pub use reflect::*;
+pub use reload::*;
 pub use repo_event::*;
 pub use resource_scopes::*;
 pub use sleep::*;
@@ -108,6 +110,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         agent_session_decl(),
         reflect_decl(),
         source_decl(),
+        reload_decl(),
         model_call_decl(),
         context_read_write_decl(),
         bound_worktree_decl(),
@@ -218,6 +221,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorCompletedStatus",
             "ActorFailedStatus",
             "ActorCancelledStatus",
+            "ActorInterruptedStatus",
             "ActorCallStatus",
             "ActorCallSucceeded",
             "ActorCallFailed",
@@ -241,6 +245,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorFinished",
             "ActorFailed",
             "ActorCancelled",
+            "ActorInterrupted",
             "ActorPublishExitWith",
             "ActorInstallShutdownWith",
             "ActorReadyWith",
@@ -463,6 +468,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "RosterStopped",
             "RosterFailed",
             "RosterCancelled",
+            "RosterInterrupted",
             "AgentWorkbenchTransfer",
             "WorkbenchReplyTransfer",
             "WorkbenchCancellationTransfer",

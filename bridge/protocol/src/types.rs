@@ -141,7 +141,12 @@ impl TypeDef {
                 format!("{name} {}", payload.hs().render_app_arg())
             }
         };
-        format!("data {name} = {body} deriving (Show, Eq)")
+        let derives = if matches!(self.json, JsonInstance::Generic) {
+            "Show, Eq, Generic"
+        } else {
+            "Show, Eq"
+        };
+        format!("data {name} = {body} deriving ({derives})")
     }
 
     /// The `instance ToJSON …` declaration, or `None` for
@@ -157,6 +162,9 @@ impl TypeDef {
         let name = self.name;
         match &self.json {
             JsonInstance::None => None,
+            JsonInstance::Generic => Some(format!(
+                "instance ToJSON {name}\ninstance JsonSchema {name}"
+            )),
             JsonInstance::Transparent => {
                 let TypeShape::Identity { hs_binder, .. } = &self.shape else {
                     panic!("{name}: JsonInstance::Transparent needs TypeShape::Identity");
@@ -259,7 +267,7 @@ impl TypeDef {
         }
 
         match (&self.json, &self.shape) {
-            (JsonInstance::None, _)
+            (JsonInstance::None | JsonInstance::Generic, _)
             | (JsonInstance::Transparent, TypeShape::Identity { .. })
             | (JsonInstance::ShownString { .. }, TypeShape::Sum { .. })
             | (JsonInstance::Object { .. }, TypeShape::Record { .. }) => {}
@@ -478,6 +486,8 @@ fn validate_record_fields(
 /// shapes cover every one of them, so they are policy rather than source.
 #[derive(Clone, Debug)]
 pub enum JsonInstance {
+    /// Derive Generic and publish the matching structured JSON codec and schema.
+    Generic,
     /// No instance emitted.
     None,
     /// `toJSON (X t) = toJSON t` — the id, not a wrapper object. A receipt

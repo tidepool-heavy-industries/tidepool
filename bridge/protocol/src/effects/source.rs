@@ -1,19 +1,15 @@
-//! Source inspection and coherent configuration reload belong to the actor owner.
-//!
-//! A request reads its issued immutable generation. Reload prepares edited source,
-//! compatible handlers and workspace prompts together, then publishes a fresh
-//! notebook generation. Existing requests retain their original environment.
+//! Inspect the executing request's immutable source generation.
 
 use crate::hs::HsType;
 use crate::schema::{
     Arg, Effect, ErrorAdt, ErrorField, ErrorVariant, HandlingClass, Helper, HelperBody,
-    Polymorphism, RecordField, RustBinding, SumVariant, TypeDef, TypeShape, Verb, WireDerive,
-    WireDerives,
+    Polymorphism, RecordField, RustBinding, TypeDef, TypeShape, Verb, WireDerive, WireDerives,
 };
 use crate::types::JsonInstance;
 
 const WIRE: WireDerives = WireDerives(&[
     WireDerive::ToHaskell,
+    WireDerive::FromHaskell,
     WireDerive::Clone,
     WireDerive::Debug,
     WireDerive::PartialEq,
@@ -30,12 +26,7 @@ pub fn source() -> Effect {
         handler_module: "source",
         req_enum: "SourceReq",
         decl_fn: "source_decl",
-        description: &[
-            "Inspect source from the executing request's immutable generation. Edit ordinary Haskell and prompt files, then reloadSource [] to activate compatible source, tool implementations and workspace prompts together. ",
-            "Changed configuration starts a fresh notebook; unchanged configuration preserves bindings. Put reusable definitions in .hs files. Already-issued work and children keep their original generation. ",
-            "Reload preserves conversation, resources and published memory context; it does not rerun initialization, refresh memory or commit files to Git. Failed preparation leaves the active generation unchanged. ",
-            "Source roots and grants remain launch inputs. Captured-only actors can inspect their source but cannot publish editable configuration.",
-        ],
+        description: &["Inspect source from the executing request's immutable generation. Source inspection does not publish edited files; synchronous Reload owns publication."],
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
@@ -51,7 +42,7 @@ pub fn source() -> Effect {
                         field("sourceModuleDigest", "digest", HsType::Text),
                     ],
                 },
-                json: JsonInstance::None,
+                json: JsonInstance::Generic,
                 derives: WIRE,
                 domain: None,
                 doc: &[
@@ -74,7 +65,7 @@ pub fn source() -> Effect {
                         ),
                     ],
                 },
-                json: JsonInstance::None,
+                json: JsonInstance::Generic,
                 derives: WIRE,
                 domain: None,
                 doc: &[
@@ -96,7 +87,7 @@ pub fn source() -> Effect {
                         field("statusDisk", "disk", HsType::Named("SourceRevision")),
                     ],
                 },
-                json: JsonInstance::None,
+                json: JsonInstance::Generic,
                 derives: WIRE,
                 domain: None,
                 doc: &[
@@ -105,73 +96,7 @@ pub fn source() -> Effect {
                     "disk; different ones mean an edit is waiting for a reload.",
                 ],
             },
-            TypeDef {
-                name: "ReloadOutcome",
-                wire_rust: Some("SrReloadOutcome"),
-                haskell_module: None,
-                shape: TypeShape::Sum {
-                    variants: vec![
-                        SumVariant {
-                            ctor: "ReloadUnchanged",
-                            fields: positional_fields![HsType::Named("SourceRevision")],
-                            doc: &[
-                                "The complete configuration is unchanged; notebook bindings are preserved.",
-                            ],
-                        },
-                        SumVariant {
-                            ctor: "ReloadPublished",
-                            fields: positional_fields![
-                                HsType::Named("SourceRevision"),
-                                HsType::Named("SourceRevision"),
-                                HsType::list(HsType::Text),
-                            ],
-                            doc: &[
-                                "The revision that was active, the revision now active, and the",
-                                "modules whose source differs between them. Later cells compile",
-                                "against the new one.",
-                            ],
-                        },
-                        SumVariant {
-                            ctor: "ReloadRejected",
-                            fields: positional_fields![
-                                HsType::Named("SourceRevision"),
-                                HsType::Named("SourceRevision"),
-                                HsType::Text,
-                            ],
-                            doc: &[
-                                "The affected module graph did not typecheck. The first revision",
-                                "is the one still active — unchanged — the second names the",
-                                "snapshot that failed, and the text carries its diagnostics. The",
-                                "edited files are untouched on disk.",
-                            ],
-                        },
-                        SumVariant {
-                            ctor: "ReloadCancelled",
-                            fields: positional_fields![HsType::Named("SourceRevision")],
-                            doc: &["Cancellation won before publication; the issued revision remains active."],
-                        },
-                        SumVariant {
-                            ctor: "ReloadPublishedWithWarnings",
-                            fields: positional_fields![
-                                HsType::Named("SourceRevision"),
-                                HsType::Named("SourceRevision"),
-                                HsType::list(HsType::Text),
-                                HsType::list(HsType::Text),
-                            ],
-                            doc: &["Publication committed; the receipt lists derived projections still needing repair. Do not replay the reload."],
-                        },
-                        SumVariant {
-                            ctor: "ReloadPublicationUnconfirmed",
-                            fields: positional_fields![HsType::Named("SourceRevision"), HsType::Text],
-                            doc: &["Publication acknowledgement is uncertain. New admission is blocked until reconciliation; do not replay."],
-                        },
-                    ],
-                },
-                json: JsonInstance::None,
-                derives: WIRE,
-                domain: None,
-                doc: &["What one reload did. Every case is an ordinary value to match on."],
-            },
+
         ],
         external_types: &[],
         errors: Some(ErrorAdt {
@@ -205,20 +130,6 @@ pub fn source() -> Effect {
                 errors: Some("SourceError"), handling: HandlingClass::Actor,
             },
             Verb {
-                ctor: "SourceReloadWith",
-                method: "source_reload",
-                args: vec![
-                    Arg {
-                        name: "alsoCheck",
-                        ty: HsType::list(HsType::Text),
-                        rust: RustBinding::Derived,
-                    },
-                ],
-                ret: HsType::Named("ReloadOutcome"),
-                errors: Some("SourceError"),
-                handling: HandlingClass::Actor,
-            },
-            Verb {
                 ctor: "SourceStatusWith",
                 method: "source_status",
                 args: Vec::new(),
@@ -230,18 +141,6 @@ pub fn source() -> Effect {
         helpers: vec![
             Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), substrate: false,
                 doc: &["Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
-            Helper {
-                name: "reloadSource",
-                ctor: Some("SourceReloadWith"),
-                substrate: false,
-                doc: &[
-                    "Capture and validate edited source and prompts, then publish one coherent generation.",
-                    "The list selects additional modules to check. Changed configuration starts a fresh",
-                    "notebook; unchanged configuration preserves it. This computation retains its issued",
-                    "generation for the rest of its execution. Memory refresh and Git commits are separate.",
-                ],
-                body: HelperBody::Applied(&["alsoCheck"]),
-            },
             Helper {
                 name: "sourceStatus",
                 ctor: Some("SourceStatusWith"),

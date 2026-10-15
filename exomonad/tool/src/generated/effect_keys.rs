@@ -251,6 +251,7 @@ impl ActorEffectKey {
 pub enum ToolEffectKey {
     Actor(ActorEffectKey),
     ContextReadWrite,
+    Reload,
 }
 
 impl ToolEffectKey {
@@ -284,12 +285,14 @@ impl ToolEffectKey {
         Self::Actor(ActorEffectKey::FsRead),
         Self::Actor(ActorEffectKey::FsWrite),
         Self::ContextReadWrite,
+        Self::Reload,
     ];
 
     pub const fn haskell_name(self) -> &'static str {
         match self {
             Self::Actor(key) => key.haskell_name(),
             Self::ContextReadWrite => "ContextReadWrite",
+            Self::Reload => "Reload",
         }
     }
 
@@ -297,6 +300,7 @@ impl ToolEffectKey {
         match self {
             Self::Actor(key) => key.wire_name(),
             Self::ContextReadWrite => "ContextReadWrite",
+            Self::Reload => "Reload",
         }
     }
 
@@ -304,6 +308,7 @@ impl ToolEffectKey {
         match self {
             Self::Actor(key) => key.haskell_module(),
             Self::ContextReadWrite => Some("Tidepool.Effects.Core"),
+            Self::Reload => Some("Tidepool.Effects.Core"),
         }
     }
 
@@ -311,6 +316,7 @@ impl ToolEffectKey {
         match self {
             Self::Actor(_) => false,
             Self::ContextReadWrite => true,
+            Self::Reload => true,
         }
     }
 
@@ -342,6 +348,7 @@ impl<'de> serde::Deserialize<'de> for ToolEffectKey {
         let name = <String as serde::Deserialize>::deserialize(deserializer)?;
         match name.as_str() {
             "ContextReadWrite" => Ok(Self::ContextReadWrite),
+            "Reload" => Ok(Self::Reload),
             _ => ActorEffectKey::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(
                 &name,
             ))

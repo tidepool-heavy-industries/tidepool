@@ -249,6 +249,20 @@ pub const EFFECTS: &[NominalEffect] = &[
         rust_order: 29,
         bridge_order: 28,
     },
+    NominalEffect {
+        identity: ExternalType {
+            haskell_name: "Reload",
+            rust_wire: "Reload",
+            core_module: Some("Tidepool.Effects.Core"),
+        },
+        origin: DeclarationOrigin::GeneratedCore,
+        constructor: "InvocationReload",
+        wire_name: "Reload",
+        scope: EffectScope::InvocationOnly,
+        default_order: None,
+        rust_order: 30,
+        bridge_order: 29,
+    },
 ];
 
 /// Forks was serialized as an actor key but never had a Haskell nominal type.
@@ -529,7 +543,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         "-- ",
         "Nominal effect identities and profiles",
     ));
-    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName), AsyncEffects ) where\n\nimport Data.Kind (Constraint, Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport GHC.TypeLits (ErrorMessage (..), TypeError)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
+    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName), AsyncEffects, SyncEffects ) where\n\nimport Data.Kind (Constraint, Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport GHC.TypeLits (ErrorMessage (..), TypeError)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
     hs.push_str(&imports(effects));
     hs.push_str("\n\ntype ActorEffects =\n  '[");
     hs.push_str(
@@ -577,6 +591,11 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     for effect in &invocation {
         hs.push_str(&format!("\ninstance {{-# OVERLAPPING #-}} KnownToolEffect {} where\n  knownToolEffectName _ = toolEffectName {}\n", effect.identity.haskell_name, effect.constructor));
     }
+    hs.push_str("\ntype SyncEffects effects = ");
+    for effect in &invocation {
+        hs.push_str(&format!("{} ': ", effect.identity.haskell_name));
+    }
+    hs.push_str("effects\n");
     hs.push_str("\ntype family AsyncEffects (effects :: [Type -> Type]) :: Constraint where\n  AsyncEffects '[] = ()\n");
     for effect in &invocation {
         hs.push_str(&format!("  AsyncEffects ({} ': effects) =\n    TypeError ('Text \"{} cannot be used by an asynchronous tool, model callback, or hook.\")\n", effect.identity.haskell_name, effect.identity.haskell_name));

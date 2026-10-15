@@ -34,6 +34,5 @@ pub enum SourceError {
 )]
 pub enum SourceReq {
     SourceReadModule(String),
-    SourceReloadWith(Vec<String>),
     SourceStatusWith,
 }

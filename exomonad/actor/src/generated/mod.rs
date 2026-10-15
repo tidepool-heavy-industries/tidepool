@@ -20,6 +20,7 @@ pub mod lookup;
 pub mod model_call;
 pub mod notifications;
 pub mod reflect;
+pub mod reload;
 pub mod resource_scopes;
 pub mod sleep;
 pub mod source;

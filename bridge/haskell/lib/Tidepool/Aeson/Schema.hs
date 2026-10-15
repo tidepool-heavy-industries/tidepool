@@ -164,6 +164,13 @@ instance {-# OVERLAPPING #-} JsonSchema [Char] where
 
 -- | 'Nothing' encodes as @null@, including inside arrays and nested values.
 -- In field position absence is also accepted by 'GSchemaRecord'.
+-- | Matches the explicit Left/Right object encoding in Tidepool.Aeson.Value.
+instance (JsonSchema a, JsonSchema b) => JsonSchema (Either a b) where
+  jsonSchema _ = object [("oneOf", Array
+    [ objectSchema Nothing [("Left", jsonSchema (Proxy :: Proxy a), True)]
+    , objectSchema Nothing [("Right", jsonSchema (Proxy :: Proxy b), True)]
+    ])]
+
 instance (JsonSchema a) => JsonSchema (Maybe a) where
   jsonSchema _ = object [("anyOf", Array [jsonSchema (Proxy :: Proxy a), object [("type", String "null")]])]
 

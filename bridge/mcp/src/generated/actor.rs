@@ -20,7 +20,7 @@ pub fn actor_decl() -> crate::EffectDecl {
         ],
         type_defs: &[
             "data ActorEffectProfile = ActorSelectedProfile [ActorEffectKey] deriving (Show, Eq)",
-            "data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)",
+            "data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text | ActorInterruptedStatus Text deriving (Show, Eq)",
             "data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)",
         ],
         extra_imports: &[
