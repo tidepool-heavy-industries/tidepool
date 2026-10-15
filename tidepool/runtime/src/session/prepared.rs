@@ -3832,6 +3832,13 @@ impl PreparedEngine {
             if let Some(boundary) = site_conflict_boundary(owner_facts, owner_row, facts, site)? {
                 let evidence =
                     site_conflict_evidence(boundary, owner_facts, owner_row, facts, site);
+                tracing::warn!(
+                    target: "tidepool_runtime::prepared_install",
+                    site = site.site,
+                    ?owner,
+                    ?evidence,
+                    "typed site admission refused"
+                );
                 return Err(match owner {
                     Some(owner) => PreparedRuntimeError::SiteConflict {
                         site: site.site,
