@@ -3,6 +3,7 @@ module Main where
 import Prelude
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
+import Tidepool.Effects.Core (SpecValidationReceipt (..), SpecValidationError (..), SpecProvenance (..), SpecProviderValidation (..))
 
 assert :: Bool -> String -> IO ()
 assert True _ = pure ()
@@ -29,3 +30,15 @@ main = do
   case (fromJSON (object ["kind" .= ("unknown" :: String)]) :: Result ModelControlStep) of
     Error _ -> pure ()
     Success _ -> fail "unknown control variant was accepted"
+
+  let provenance = SpecProvenanceUnavailable "arbitrary concrete value"
+      checked = SpecValidationReceipt ["search", "open"] ["Web"] provenance SpecProviderChecked
+      unchecked = SpecValidationReceipt [] [] provenance SpecProviderNotChecked
+  assert (toJSON (SpecInputSchemaInvalid "object input required") == object ["tag" .= ("SpecInputSchemaInvalid" :: String), "contents" .= ("object input required" :: String)]) "input refusal category lost"
+  assert (toJSON (SpecProviderProjectionInvalid "provider rejected schema") == object ["tag" .= ("SpecProviderProjectionInvalid" :: String), "contents" .= ("provider rejected schema" :: String)]) "provider refusal category lost"
+  assert (toJSON SpecProviderChecked == String "SpecProviderChecked" && toJSON SpecProviderNotChecked == String "SpecProviderNotChecked") "provider coverage tags changed"
+  assert (toJSON checked == object ["specValidatedEndpoints" .= (["search", "open"] :: [String]), "specRequestedEffects" .= (["Web"] :: [String]), "specProvenance" .= object ["specProvenanceReason" .= ("arbitrary concrete value" :: String)], "specProviderValidation" .= SpecProviderChecked]) "receipt lost exact facts"
+  assert (toJSON checked /= toJSON unchecked) "provider coverage or endpoint facts lost"
+  case toJSON checked of
+    String _ -> fail "spec receipt collapsed to rendered prose"
+    _ -> pure ()

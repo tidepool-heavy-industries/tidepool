@@ -2,8 +2,8 @@
 
 use crate::hs::HsType;
 use crate::schema::{
-    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
-    TypeShape, VariantFields, Verb, WireDerive, WireDerives,
+    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RecordField, RustBinding, SumVariant,
+    TypeDef, TypeShape, VariantFields, Verb, WireDerive, WireDerives,
 };
 
 /// Admit an idle persistent actor with explicit context, directory and tools.
@@ -237,6 +237,33 @@ fn spec_type(
     definition
 }
 
+fn named_spec_type(
+    name: &'static str,
+    rust: &'static str,
+    ctor: &'static str,
+    fields: Vec<(&'static str, HsType)>,
+) -> TypeDef {
+    let mut definition = spec_type(name, rust, vec![]);
+    definition.shape = TypeShape::Sum {
+        variants: vec![SumVariant {
+            ctor,
+            fields: VariantFields::Named(
+                fields
+                    .into_iter()
+                    .map(|(field, ty)| RecordField {
+                        hs_name: field,
+                        rust_name: field,
+                        ty,
+                        doc: &[],
+                    })
+                    .collect(),
+            ),
+            doc: &[],
+        }],
+    };
+    definition
+}
+
 fn spawn_types() -> Vec<TypeDef> {
     let mut types = context_types();
     types.extend(vec![
@@ -252,10 +279,11 @@ fn spawn_types() -> Vec<TypeDef> {
                 ("SpecProviderProjectionInvalid", vec![HsType::Text]),
             ],
         ),
-        spec_type(
+        named_spec_type(
             "SpecProvenance",
             "crate::tool_contract::SpecProvenance",
-            vec![("SpecProvenanceUnavailable", vec![HsType::Text])],
+            "SpecProvenanceUnavailable",
+            vec![("specProvenanceReason", HsType::Text)],
         ),
         spec_type(
             "SpecProviderValidation",
@@ -265,18 +293,19 @@ fn spawn_types() -> Vec<TypeDef> {
                 ("SpecProviderChecked", vec![]),
             ],
         ),
-        spec_type(
+        named_spec_type(
             "SpecValidationReceipt",
             "crate::tool_contract::SpecValidationReceipt",
-            vec![(
-                "SpecValidationReceipt",
-                vec![
-                    HsType::list(HsType::Text),
-                    HsType::list(HsType::Text),
-                    HsType::Named("SpecProvenance"),
+            "SpecValidationReceipt",
+            vec![
+                ("specValidatedEndpoints", HsType::list(HsType::Text)),
+                ("specRequestedEffects", HsType::list(HsType::Text)),
+                ("specProvenance", HsType::Named("SpecProvenance")),
+                (
+                    "specProviderValidation",
                     HsType::Named("SpecProviderValidation"),
-                ],
-            )],
+                ),
+            ],
         ),
         sum_type(
             "SpawnContextWire",
