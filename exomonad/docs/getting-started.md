@@ -150,9 +150,11 @@ project role or delegation hierarchy.
 ## Agent specification
 
 The conventional `AgentSpec` module exports `agentSpec`; `[haskell] spec` can
-select another module. When neither exists, the default spec is empty. The obsolete
-`[haskell] tools` key is rejected: install the typed record through `installSpec`
-and select that spec. Typed tools and actor-mailbox records are different DSLs;
+select another exported spec. When neither exists, the host installs its supported
+notebook spec: `haskell` and `haskell_sync` with context-editing support, otherwise
+only `haskell`. The obsolete `[haskell] tools` key is rejected: put the typed tools
+record in an `AgentSpec` and configure its exported value. Typed tools and
+actor-mailbox records are different DSLs;
 malformed tool arguments return typed dispatch errors before the body runs.
 Every installed function tool must select its model-facing text with
 `presentWith`: use `presentWith id` for `Text` and `presentWith presentJson` for
