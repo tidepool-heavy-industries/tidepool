@@ -284,19 +284,19 @@ fn bounded_model_value(
     budget: usize,
 ) -> Result<Option<(Value, usize)>, serde_json::Error> {
     struct Bytes {
-        bytes: Vec<u8>,
+        written: usize,
         budget: usize,
         exhausted: bool,
     }
     impl std::io::Write for Bytes {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.budget.saturating_sub(self.bytes.len()) {
+            if bytes.len() > self.budget.saturating_sub(self.written) {
                 self.exhausted = true;
                 return Err(std::io::Error::other(
                     "model semantic value allowance exhausted",
                 ));
             }
-            self.bytes.extend_from_slice(bytes);
+            self.written += bytes.len();
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -304,14 +304,12 @@ fn bounded_model_value(
         }
     }
     let mut bytes = Bytes {
-        bytes: Vec::new(),
+        written: 0,
         budget,
         exhausted: false,
     };
     match serde_json::to_writer(&mut bytes, value) {
-        Ok(()) => {
-            serde_json::from_slice(&bytes.bytes).map(|value| Some((value, bytes.bytes.len())))
-        }
+        Ok(()) => Ok(Some((value.clone(), bytes.written))),
         Err(_) if bytes.exhausted => Ok(None),
         Err(error) => Err(error),
     }
@@ -650,6 +648,20 @@ mod tests {
                 assert_eq!(selected, Some((value.clone(), encoded.len())));
             }
         }
+    }
+
+    #[test]
+    fn semantic_projection_keeps_small_deep_native_values_without_redecoding() {
+        let value = (0..192).fold(json!(42), |value, _| json!({"nested":value}));
+        let encoded = serde_json::to_vec(&value).unwrap();
+        assert!(encoded.len() < MODEL_SEMANTIC_VALUE_BYTE_BUDGET);
+        // Projection already has a typed Value; the text decoder's depth policy
+        // must not turn a completed native result into an observation failure.
+        assert!(serde_json::from_slice::<Value>(&encoded).is_err());
+        assert_eq!(
+            bounded_model_value(&value, MODEL_SEMANTIC_VALUE_BYTE_BUDGET).unwrap(),
+            Some((value, encoded.len()))
+        );
     }
 
     #[test]
