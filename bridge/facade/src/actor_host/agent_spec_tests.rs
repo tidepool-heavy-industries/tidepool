@@ -17,7 +17,6 @@
 )]
 
 use std::path::Path;
-use tracing::instrument::WithSubscriber;
 
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
@@ -491,6 +490,12 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
 
 #[tokio::test]
 async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
+    let log = super::call_timing_tests::CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt().json().with_writer(log.clone())
+        .with_env_filter("warn,exomonad_actor::toolset_preparation=info,exomonad_actor::call_timing=info,tidepool_extract_cmd::endpoint=info").finish();
+    // The actor and blocking compiler tasks outlive the dispatch future. Each
+    // native test has its own process, so observe their shared global writer.
+    tracing::subscriber::set_global_default(subscriber).expect("first subscriber in isolated test");
     let campaign = start(DESCRIPTION, "one").await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.as_ref();
@@ -504,10 +509,8 @@ async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
         tools_module(DESCRIPTION, "two"),
     )
     .unwrap();
-    let log = super::call_timing_tests::CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt().json().with_writer(log.clone())
-        .with_env_filter("warn,exomonad_actor::toolset_preparation=info,exomonad_actor::call_timing=info,tidepool_extract_cmd::endpoint=info").finish();
-    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ncase outcome of { ReloadPublished _ _ _ -> pure (); _ -> error \"source reload did not publish\" }").with_subscriber(subscriber).await;
+    log.0.lock().unwrap().clear();
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ncase outcome of { ReloadPublished _ _ _ -> pure (); _ -> error \"source reload did not publish\" }").await;
     assert_eq!(source_reload["status"], "committed", "{source_reload}");
     let captured = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
     let rows = captured.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
