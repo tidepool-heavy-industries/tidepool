@@ -41,6 +41,38 @@ class DepInfoTests(unittest.TestCase):
                          ownership.TEST_ONLY_MODULES["tidepool-extract-cmd"] |
                          ownership.TEST_ONLY_FIXTURES["tidepool-extract-cmd"])
 
+    def test_duplicate_package_declarations_are_refused_before_ownership_is_lost(self):
+        for role in ("modules", "fixtures"):
+            for repeated in (frozenset({"first.rs"}), frozenset({"second.rs"})):
+                with self.subTest(role=role, repeated=repeated):
+                    with self.assertRaisesRegex(ValueError,
+                            f"duplicate test-only {role} ownership for package 'component'"):
+                        ownership._ownership_table(role, (
+                            ("component", frozenset({"first.rs"})),
+                            ("other", frozenset({"other.rs"})),
+                            ("component", repeated),
+                        ))
+
+    def test_actor_fixture_ownership_keeps_all_declared_groups(self):
+        expected = frozenset({
+            "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
+            "exomonad/actor/src/request/fixtures/result-receiver.hs",
+            "exomonad/actor/src/request/fixtures/result-request.hs",
+            "exomonad/actor/src/resident_workbench/replacement_inputs.hs",
+            "exomonad/actor/src/resident_actor/replacement_staging_inputs.hs",
+            "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
+            "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
+            "exomonad/actor/src/fixtures/request-alias-borrow.hs",
+            "exomonad/actor/src/local_actor/failure_origin.hs",
+            "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
+            "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
+        })
+        self.assertLessEqual(expected, ownership.TEST_ONLY_FIXTURES["exomonad-actor"])
+        for fixture in expected:
+            with self.subTest(fixture=fixture):
+                self.assertIn(fixture, ownership.TEST_ONLY_SOURCES["exomonad-actor"])
+                self.assertEqual(ownership.test_source_owner(fixture), "exomonad-actor")
+
     def test_native_macro_declares_module_and_fixture_manifest_as_compile_input(self):
         manifests = []
         binaries = []

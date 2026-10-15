@@ -9,28 +9,39 @@ participation never supplies libtest names or execution counts.
 """
 import re
 
-TEST_ONLY_MODULES = {
-    'exomonad-node': frozenset({
+
+def _ownership_table(role, declarations):
+    """Reject repeated package declarations before any ownership is discarded."""
+    owners = {}
+    for package, sources in declarations:
+        if package in owners:
+            raise ValueError(f"duplicate test-only {role} ownership for package {package!r}")
+        owners[package] = sources
+    return owners
+
+
+TEST_ONLY_MODULES = _ownership_table("modules", (
+    ('exomonad-node', frozenset({
         'exomonad/node/src/command_resources/custody_tests.rs',
         'exomonad/node/src/inbox/history_properties.rs',
-    }),
-    'exomonad-worktree': frozenset({
+    })),
+    ('exomonad-worktree', frozenset({
         'exomonad/worktree/src/journal_properties.rs',
-    }),
-    'exomonad-tool': frozenset({
+    })),
+    ('exomonad-tool', frozenset({
         'exomonad/tool/src/surface/properties.rs',
-    }),
-    'tidepool-heap': frozenset({
+    })),
+    ('tidepool-heap', frozenset({
         'tidepool/heap/src/static_region/properties.rs',
-    }),
-    'tidepool-extract-cmd': frozenset({
+    })),
+    ('tidepool-extract-cmd', frozenset({
         'tidepool/extract-cmd/src/diagnostics_tests.rs',
         'tidepool/extract-cmd/src/response_properties.rs',
-    }),
-    'tidepool-codegen': frozenset({
+    })),
+    ('tidepool-codegen', frozenset({
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
-    }),
-    'tidepool': frozenset({
+    })),
+    ('tidepool', frozenset({
         'bridge/facade/src/actor_host/startup_context_acceptance_tests.rs',
         'bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs',
         'bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs',
@@ -52,8 +63,8 @@ TEST_ONLY_MODULES = {
         'bridge/facade/src/actor_host/scripted_recursive_acceptance.rs',
         'bridge/facade/src/actor_host/workspace_admission_tests.rs',
         'bridge/facade/src/exomonad/workspace/source_capture_tests.rs',
-    }),
-    'exomonad-actor': frozenset({
+    })),
+    ('exomonad-actor', frozenset({
         'exomonad/actor/src/initial_context_properties.rs',
         'exomonad/actor/src/local_actor/reply_settlement_history.rs',
         'exomonad/actor/src/request/readiness/tests.rs',
@@ -71,7 +82,7 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
         'exomonad/actor/src/resident_actor/replacement/refusal_tests.rs',
         'exomonad/actor/src/resident_actor/scope_runtime_tests.rs',
-    'exomonad/actor/src/resident_tools/cancellation_history_tests.rs',
+        'exomonad/actor/src/resident_tools/cancellation_history_tests.rs',
         'exomonad/actor/src/resident_workbench/activation_preview_tests.rs',
         'exomonad/actor/src/resident_workbench/declaration_receipt_tests.rs',
         'exomonad/actor/src/resident_workbench/explicit_effect_support_tests.rs',
@@ -79,15 +90,15 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/resident_workbench/tool_dispatch_tests.rs',
         'exomonad/actor/src/resident_workbench/display_callback_tests.rs',
         'exomonad/actor/src/resident_workbench/replacement_input_tests.rs',
-    }),
-    'tidepool-runtime': frozenset({
+    })),
+    ('tidepool-runtime', frozenset({
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/registry_properties.rs',
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
         'tidepool/runtime/src/session/typed_segment_tests.rs',
-    }),
-    'tidepool-toolchain': frozenset({
+    })),
+    ('tidepool-toolchain', frozenset({
         'tidepool/toolchain/src/artifact_inventory/view_read_properties.rs',
         'tidepool/toolchain/src/artifacts/tests/private_package_input_history.rs',
         'tidepool/toolchain/src/cache/source_manifest_properties.rs',
@@ -107,22 +118,30 @@ TEST_ONLY_MODULES = {
         'tidepool/toolchain/src/module_candidates/product_decode_observer.rs',
         'tidepool/toolchain/src/module_candidates/protected_native_availability_tests.rs',
         'tidepool/toolchain/src/module_candidates/tests/product_carry.rs',
-    }),
-}
+    })),
+))
 
-TEST_ONLY_FIXTURES = {
-    'exomonad-actor': frozenset({
+TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
+    ('exomonad-actor', frozenset({
         'exomonad/actor/src/request/fixtures/request-signature-progress.hs',
         'exomonad/actor/src/resident_actor/jev_recording_semantics.hs',
+        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs',
+        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs',
         'exomonad/actor/src/request/fixtures/result-receiver.hs',
         'exomonad/actor/src/request/fixtures/result-request.hs',
         'exomonad/actor/src/resident_workbench/replacement_inputs.hs',
         'exomonad/actor/src/resident_actor/replacement_staging_inputs.hs',
-    }),
-    'tidepool-extract-cmd': frozenset({
+        'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
+        'exomonad/actor/src/fixtures/prepared-instance-provider.hs',
+        'exomonad/actor/src/fixtures/request-alias-borrow.hs',
+        'exomonad/actor/src/local_actor/failure_origin.hs',
+        'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
+        'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',
+    })),
+    ('tidepool-extract-cmd', frozenset({
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
-    }),
-    'tidepool': frozenset({
+    })),
+    ('tidepool', frozenset({
         'bridge/facade/src/actor_host/fixtures/saved-account-test.json',
         'bridge/facade/src/actor_host/fixtures/jev-recording-reload.hs',
         'bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs',
@@ -183,18 +202,8 @@ TEST_ONLY_FIXTURES = {
         'bridge/facade/src/actor_host/prepared_runtime_spec.hs',
         'bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs',
         'bridge/facade/src/actor_host/restart_effect_once.hs',
-    }),
-    'exomonad-actor': frozenset({
-        'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
-        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs',
-        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs',
-        'exomonad/actor/src/fixtures/prepared-instance-provider.hs',
-        'exomonad/actor/src/fixtures/request-alias-borrow.hs',
-        'exomonad/actor/src/local_actor/failure_origin.hs',
-        'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
-        'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',
-    }),
-    'tidepool-runtime': frozenset({
+    })),
+    ('tidepool-runtime', frozenset({
         'tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs',
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
@@ -252,8 +261,8 @@ TEST_ONLY_FIXTURES = {
         'tidepool/runtime/src/session/fixtures/typed-segment-retained-bottom.hs',
         'tidepool/runtime/src/session/fixtures/typed-segment-strict-publication.hs',
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
-    }),
-    'tidepool-toolchain': frozenset({
+    })),
+    ('tidepool-toolchain', frozenset({
         'tidepool/toolchain/src/fixtures/pure_command_projection_diagnostics.json',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs',
@@ -263,8 +272,8 @@ TEST_ONLY_FIXTURES = {
         'tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs',
         'tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs',
         'tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs',
-    }),
-}
+    })),
+))
 
 # A fixture can contain Rust text without being a parsed module. Keep the roles
 # reviewed explicitly; compiler dep-info does not identify that distinction.
