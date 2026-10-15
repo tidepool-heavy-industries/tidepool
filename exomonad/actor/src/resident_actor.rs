@@ -14305,7 +14305,7 @@ where
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
         self.shutdown_with_terminal(ActorTerminal::new(
             ActorExitKind::Cancelled,
-            "forest shutdown",
+            "forest host shutdown",
         ))
         .await
     }
@@ -15265,7 +15265,7 @@ pub(crate) async fn shutdown_forest_root(
     shutdown_forest_root_with_terminal(
         root,
         grace,
-        ActorTerminal::new(ActorExitKind::Cancelled, "forest shutdown"),
+        ActorTerminal::new(ActorExitKind::Cancelled, "forest host shutdown"),
     )
     .await
 }
