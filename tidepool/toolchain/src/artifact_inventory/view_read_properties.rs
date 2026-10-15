@@ -665,16 +665,24 @@ proptest! {
             "projection has no retained materializations"
         );
         let projected_entries = interface.entries();
-        let projected_entries_are_interfaces =
-            projected_entries.iter().all(|entry| !entry.is_native());
         prop_assert!(
-            projected_entries_are_interfaces,
-            "projection has no native entries"
+            interface.root_entries().iter().all(|entry| !entry.is_native()),
+            "projection selects only interface roots"
+        );
+        prop_assert!(
+            interface.namespace().keys().all(|id| !interface.lease.payloads[id].is_native()),
+            "projection selects only interface compiler roles"
+        );
+        prop_assert!(
+            projected_entries.iter().any(|entry|
+                entry.descriptor.id == catalog.entries[OWNERS].descriptor.id && entry.is_native()),
+            "projection retains the exact original carrier as private custody"
         );
         let retains_interface = projected_entries
             .iter()
             .any(|entry| entry.descriptor.owner == interface_owner);
         prop_assert!(retains_interface, "projection retains the selected interface");
+        check_read_projection(&interface)?;
         drop(interface);
         let initial_indices = left
             .0
@@ -907,9 +915,20 @@ fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
         .unwrap();
     assert!(native_interface.selected_native_groups().is_empty());
     assert!(native_interface
-        .entries()
+        .root_entries()
         .iter()
         .all(|entry| !entry.is_native()));
+    assert!(native_interface
+        .namespace()
+        .keys()
+        .all(|id| !native_interface.lease.payloads[id].is_native()));
+    assert!(native_interface
+        .entries()
+        .iter()
+        .any(
+            |entry| entry.descriptor.id == catalog.entries[OWNERS].descriptor.id
+                && entry.is_native()
+        ));
     check_read_projection(&native_interface).unwrap();
 
     drop(all);
