@@ -59,7 +59,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert!(matches!(&policy.tools()[1], HostedTool::Function(tool) if tool.name == "status"));
     assert!(matches!(&policy.tools()[2], HostedTool::Custom(tool) if tool.name == "raw_echo"));
     assert!(matches!(&policy.tools()[3], HostedTool::Function(tool) if tool.name == "repeat_text"));
-    assert_eq!(policy.tools().len(), 4);
+    assert_eq!(policy.tools().len(), 7);
     let call = |name: &str, arguments| {
         policy.dispatch_json_boxed(ToolInvocation {
             context: None,
