@@ -5391,40 +5391,6 @@ impl ArtifactView {
                 }
             }
         }
-        // A complete carrier can expose another body on a later request. Keep
-        // its already issued native dependencies, including exact historical
-        // versions, without promoting their groups or compiler input roles.
-        // Resolve only inside this view; ambient inventory payloads grant no
-        // custody and an unavailable body remains unavailable.
-        let native_owners = artifact_ids(owned)
-            .into_iter()
-            .filter_map(|id| {
-                let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
-                    return None;
-                };
-                Some((NativeOwnerKey::from_owner(product.owner()), id))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let initial = artifact_ids(&admitted_closure(&state, selected.iter().copied()));
-        let mut retained_ids = initial.clone();
-        let mut pending = initial.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            for required in self.lease.payloads[&id].native_owners.values() {
-                let Some(required_id) = native_owners.get(required).copied() else {
-                    continue;
-                };
-                if retained_ids.insert(required_id) {
-                    pending.push(required_id);
-                }
-            }
-        }
-        let mut custody_roots = retained_ids
-            .difference(&initial)
-            .map(|id| {
-                self.resolve_binding(*id, owned)
-                    .map(InventoryNodeKey::Artifact)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         // Interface projection narrows roots, but cannot discard the exact
         // issued body proof already owned for its retained original carriers.
         // These groups remain custody only; no census is inferred from bytes.
@@ -5478,10 +5444,46 @@ impl ArtifactView {
                     .collect::<Vec<_>>()
             })
             .collect::<BTreeSet<_>>();
+        // Qualify exact original carriers before traversing their complete
+        // native dependency custody. Canonical roots retain these carriers
+        // privately, without selecting their bodies for execution.
+        let native_owners = artifact_ids(owned)
+            .into_iter()
+            .filter_map(|id| {
+                let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
+                    return None;
+                };
+                Some((NativeOwnerKey::from_owner(product.owner()), id))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let initial = artifact_ids(&admitted_closure(
+            &state,
+            selected.iter().chain(carriers.iter()).copied(),
+        ));
+        let mut retained_ids = initial.clone();
+        let mut pending = initial.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            for required in self.lease.payloads[&id].native_owners.values() {
+                let Some(required_id) = native_owners.get(required).copied() else {
+                    continue;
+                };
+                if retained_ids.insert(required_id) {
+                    pending.push(required_id);
+                }
+            }
+        }
+        let mut custody_roots = carriers
+            .into_iter()
+            .filter(|node| !selected_nodes.contains(node))
+            .collect::<Vec<_>>();
         custody_roots.extend(
-            carriers
-                .into_iter()
-                .filter(|node| !selected_nodes.contains(node)),
+            retained_ids
+                .difference(&initial)
+                .map(|id| {
+                    self.resolve_binding(*id, owned)
+                        .map(InventoryNodeKey::Artifact)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         );
         let retained_nodes =
             admitted_closure(&state, selected.iter().chain(custody_roots.iter()).copied());
@@ -13822,7 +13824,12 @@ mod tests {
             let types = selected
                 .interface_projection(&[root.descriptor.owner.clone()])
                 .unwrap();
-            assert!(types.entries().iter().all(|entry| !entry.is_native()));
+            assert!(types.root_entries().iter().all(|entry| !entry.is_native()));
+            assert!(types
+                .namespace()
+                .keys()
+                .all(|id| !types.lease.payloads[id].is_native()));
+            assert!(types.selected_native_groups().is_empty());
             let projection =
                 CompilerInputProjection::from_issued_entries(&[Arc::new(root.clone())]).unwrap();
             assert_eq!(
