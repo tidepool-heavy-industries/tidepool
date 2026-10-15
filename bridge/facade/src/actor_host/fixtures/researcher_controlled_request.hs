@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 import Data.Text (Text)
+import qualified Tidepool.Actors.Exomonad as Agent
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
 import Tidepool.Inspection (display)
@@ -23,5 +24,5 @@ reportRequest <- do
   case requested of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready
-report <- either (error . Text.pack . show) pure =<< await (result reportRequest)
+report <- either (error . Text.pack . show) pure =<< await (Agent.result reportRequest)
 display report
