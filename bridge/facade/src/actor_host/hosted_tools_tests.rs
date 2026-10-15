@@ -149,9 +149,22 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert_eq!(next["items"][0]["output"], "frozen:after-failure");
     let huge = call("raw_echo", ToolArguments::Raw("λ".repeat(32000)))
         .await
-        .unwrap();
-    let text = huge["items"][0]["output"].as_str().unwrap();
-    assert!(text.len() <= 32 * 1024, "UTF-8 bytes: {}", text.len());
+        .expect_err("oversized semantic output cannot publish a partial dispatcher envelope");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(huge_failure),
+    ) = huge else { panic!("expected output observation workbench failure: {huge}") };
+    assert_eq!(huge_failure.point, tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 });
+    assert_eq!(huge_failure.total, 1);
+    assert!(huge_failure.receipts.is_empty(), "{huge_failure:?}");
+    assert_eq!(huge_failure.publication,
+        Some(tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+        }), "{huge_failure:?}");
+    let unicode = "λ".repeat(256);
+    let recovered = call("raw_echo", ToolArguments::Raw(unicode.clone())).await.unwrap();
+    assert_eq!(recovered["status"], "committed", "{recovered}");
+    assert_eq!(recovered["items"][0]["output"], format!("frozen:{unicode}"));
+    assert_eq!(recovered["items"][0]["value"], format!("frozen:{unicode}"));
     let running = tokio::spawn(call(
         "launch",
         ToolArguments::Structured(serde_json::json!({"cmd":"custom", "yield_time_ms":30000})),
