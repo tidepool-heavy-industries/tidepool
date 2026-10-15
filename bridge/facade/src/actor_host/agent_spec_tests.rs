@@ -380,6 +380,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
     let campaign = TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
+            config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
             // The authored spec shadows a pinned shared package on a second
             // source root. The shared tool record still uses Project.Shell
