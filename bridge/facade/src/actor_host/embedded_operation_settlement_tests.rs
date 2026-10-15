@@ -239,34 +239,12 @@ fn operation(actor: ActorRef, call: &str) -> (HostIdentity, OperationId, ToolInv
 
 #[tokio::test]
 async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_operations() {
-    let (actor, task) = exomonad_actor::spawn_local_actor(None, AdmissionSentinel)
-        .await
-        .unwrap();
-    let tools = vec![HostedTool::Function(exomonad_tool::ToolDeclaration {
-        schedule: Default::default(),
-        implementation: Default::default(),
-        effect_keys: Vec::new(),
-        name: "lookup".into(),
-        description: "object input".into(),
-        input_schema: json!({"type":"object","properties":{}}),
-        output_schema: None,
-        kind: exomonad_tool::ToolKind::Call,
-    })];
-    let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
-        exomonad_actor::ResidentInteractivePolicy::local_with_tools(actor.clone(), tools),
-    );
-    let installation = Arc::new(EmbeddedPolicyInstallation::new(
-        actor.identity(),
-        policy.clone(),
-    ));
-    let projection = project_tools(policy.tools()).unwrap();
-    let snapshot = EmbeddedPolicySnapshot {
-        request_activation: None,
-        actor: actor.identity(),
-        policy: policy.clone(),
-        manifest: projection.manifest,
-        schemas: projection.schemas,
-    };
+    let campaign = super::test_campaign::TestCampaign::start_with_shell().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let actor = campaign.actor.clone();
+    let policy = campaign.root_installation.policy.clone();
+    let installation = Arc::new(EmbeddedPolicyInstallation::new(actor.identity(), policy.clone()));
+    let snapshot = installation.request_snapshot().expect("genuine installed shell snapshot");
     let (identity, _, _) = operation(actor.identity(), "schema");
     let (wakes, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let host = AdmissionHost {
@@ -280,12 +258,12 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
     for (call, name, arguments) in [
         (
             "schema",
-            "lookup",
+            "bash",
             ToolArguments::Structured(json!("not an object")),
         ),
         (
             "argument",
-            "lookup",
+            "bash",
             ToolArguments::Raw("wrong kind".into()),
         ),
         (
@@ -295,12 +273,17 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
         ),
     ] {
         let (_, operation, invocation) = operation(actor.identity(), call);
-        assert!(matches!(
-            snapshot
-                .dispatch(name.into(), arguments, invocation.clone(), None, None)
-                .await,
-            Err(ResidentToolError::InvalidInvocation(_))
-        ));
+        let error = snapshot
+            .dispatch(name.into(), arguments, invocation.clone(), None, None)
+            .await
+            .expect_err("invalid input must not enter the installed handler");
+        let expected = match call {
+            "schema" | "argument" => matches!(&error,
+                ResidentToolError::Declaration(exomonad_tool::ToolDeclarationError::InvalidArguments { name }) if name == "bash"),
+            "selected" => matches!(&error, ResidentToolError::InvalidInvocation(_)),
+            _ => unreachable!(),
+        };
+        assert!(expected, "case {call}, tool {name}: {error:?}");
         let owner = policy.retained_operation(invocation).unwrap();
         assert!(matches!(
             owner.finalization(),
@@ -314,15 +297,7 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
     }
     let (_, unknown, _) = operation(actor.identity(), "never-issued");
     assert!(host.output_committed(&unknown).await.is_err());
-    actor
-        .shutdown(ActorTerminal {
-            kind: exomonad_actor::ActorExitKind::Cancelled,
-            summary: "admission test complete".into(),
-            diagnostic: None,
-        })
-        .await
-        .unwrap();
-    task.await.unwrap();
+    })).await;
 }
 
 #[tokio::test]
