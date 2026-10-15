@@ -266,6 +266,18 @@ impl TypeDef {
             }
         }
 
+        if matches!(self.json, JsonInstance::Generic) {
+            let unnamed_singleton = match &self.shape {
+                TypeShape::Identity { .. } => true,
+                TypeShape::Sum { variants } => matches!(variants.as_slice(),
+                    [SumVariant { fields: VariantFields::Positional(fields), .. }] if !fields.is_empty()),
+                TypeShape::Record { .. } => false,
+            };
+            if unnamed_singleton {
+                errs.push(format!("{name}: Generic JSON needs named fields for a payload-bearing singleton; use named fields or Transparent for an Identity"));
+            }
+        }
+
         match (&self.json, &self.shape) {
             (JsonInstance::None | JsonInstance::Generic, _)
             | (JsonInstance::Transparent, TypeShape::Identity { .. })
@@ -287,11 +299,31 @@ impl TypeDef {
         if let (JsonInstance::Object { keys, .. }, TypeShape::Record { fields }) =
             (&self.json, &self.shape)
         {
+            let mut seen_keys = Vec::new();
+            let mut seen_fields = Vec::new();
             for (key, field) in *keys {
+                if seen_keys.contains(key) {
+                    errs.push(format!("{name}: ToJSON repeats key `{key}`"));
+                }
+                if seen_fields.contains(field) {
+                    errs.push(format!(
+                        "{name}: ToJSON maps field `{field}` more than once"
+                    ));
+                }
+                seen_keys.push(*key);
+                seen_fields.push(*field);
                 if !fields.iter().any(|f| f.hs_name == *field) {
                     errs.push(format!(
                         "{name}: ToJSON key `{key}` names field `{field}`, \
                          which the record does not declare"
+                    ));
+                }
+            }
+            for field in fields {
+                if !seen_fields.contains(&field.hs_name) {
+                    errs.push(format!(
+                        "{name}: ToJSON does not map field `{}`",
+                        field.hs_name
                     ));
                 }
             }
@@ -1032,5 +1064,120 @@ mod tests {
             .validate()
             .iter()
             .any(|error| error.contains("must have at least one field")));
+    }
+    fn json_type(shape: TypeShape, json: JsonInstance) -> TypeDef {
+        TypeDef {
+            name: "JsonContract",
+            wire_rust: None,
+            haskell_module: None,
+            shape,
+            json,
+            derives: WireDerives(&[]),
+            domain: None,
+            doc: &[],
+        }
+    }
+
+    #[test]
+    fn generic_json_requires_named_singleton_payloads() {
+        let positional = |count| TypeShape::Sum {
+            variants: vec![SumVariant {
+                ctor: "Only",
+                fields: VariantFields::Positional(vec![HsType::Text; count]),
+                doc: &[],
+            }],
+        };
+        for count in 1..=3 {
+            assert!(!json_type(positional(count), JsonInstance::Generic)
+                .validate()
+                .is_empty());
+        }
+        assert!(json_type(positional(0), JsonInstance::Generic)
+            .validate()
+            .is_empty());
+        let identity = TypeShape::Identity {
+            payload: IdentityPayload::Text,
+            hs_binder: "value",
+            rust_field: "raw",
+            validation: Validation::None,
+        };
+        assert!(!json_type(identity.clone(), JsonInstance::Generic)
+            .validate()
+            .is_empty());
+        assert!(json_type(identity, JsonInstance::Transparent)
+            .validate()
+            .is_empty());
+        let named = TypeShape::Sum {
+            variants: vec![SumVariant {
+                ctor: "Only",
+                fields: VariantFields::Named(vec![named_field("value", "value", HsType::Text)]),
+                doc: &[],
+            }],
+        };
+        assert!(json_type(named, JsonInstance::Generic)
+            .validate()
+            .is_empty());
+        let mixed = TypeShape::Sum {
+            variants: vec![
+                SumVariant {
+                    ctor: "Payload",
+                    fields: VariantFields::Positional(vec![HsType::Text, HsType::Int]),
+                    doc: &[],
+                },
+                SumVariant {
+                    ctor: "Empty",
+                    fields: VariantFields::Positional(vec![]),
+                    doc: &[],
+                },
+            ],
+        };
+        assert!(json_type(mixed, JsonInstance::Generic)
+            .validate()
+            .is_empty());
+        assert!(json_type(sum_shape(&["Yes", "No"]), JsonInstance::Generic)
+            .validate()
+            .is_empty());
+    }
+
+    #[test]
+    fn object_json_mapping_is_a_bijection_with_unique_keys() {
+        let choices = [
+            ("x", "first"),
+            ("y", "first"),
+            ("x", "second"),
+            ("y", "second"),
+            ("z", "unknown"),
+        ];
+        let mut mappings = vec![vec![]];
+        for first in choices {
+            mappings.push(vec![first]);
+            for second in choices {
+                mappings.push(vec![first, second]);
+            }
+        }
+        for mapping in mappings {
+            let expected = mapping.len() == 2
+                && mapping[0].0 != mapping[1].0
+                && ((mapping[0].1 == "first" && mapping[1].1 == "second")
+                    || (mapping[0].1 == "second" && mapping[1].1 == "first"));
+            let keys = Box::leak(mapping.clone().into_boxed_slice());
+            let declaration = json_type(
+                TypeShape::Record {
+                    fields: vec![
+                        named_field("first", "first", HsType::Text),
+                        named_field("second", "second", HsType::Int),
+                    ],
+                },
+                JsonInstance::Object {
+                    binder: "value",
+                    keys,
+                },
+            );
+            assert_eq!(
+                declaration.validate().is_empty(),
+                expected,
+                "mapping={mapping:?}"
+            );
+        }
     }
 }
