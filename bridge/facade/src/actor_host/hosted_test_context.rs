@@ -729,6 +729,12 @@ pub(super) enum HostedChildMachines {
     Dedicated,
 }
 
+pub(super) type HostSourceLayersTransform = Arc<
+    dyn Fn(exomonad_actor::ActorSourceLayerResolver) -> exomonad_actor::ActorSourceLayerResolver
+        + Send
+        + Sync,
+>;
+
 pub(crate) struct HostTestHooks {
     pub(super) observer: HostTestObserver,
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
@@ -736,6 +742,7 @@ pub(crate) struct HostTestHooks {
     pub(super) transport: Option<HostTransportFactory>,
     pub(super) owner_admission: Arc<Mutex<HostOwnerAdmission>>,
     pub(super) child_machines: HostedChildMachines,
+    pub(super) source_layers: Option<HostSourceLayersTransform>,
 }
 
 impl HostTestHooks {
@@ -757,6 +764,7 @@ impl HostTestHooks {
                 transport: Some(Box::new(move |_, _| transport)),
                 owner_admission: Arc::new(Mutex::new(HostOwnerAdmission::NotAdmitted)),
                 child_machines: HostedChildMachines::Shared,
+                source_layers: None,
             },
             stop,
             assembly,
@@ -1383,6 +1391,7 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             None,
+            None,
         )
         .await
     }
@@ -1401,6 +1410,7 @@ impl HostedTestRuntime {
             false,
             Some(diagnostics_root),
             HostedChildMachines::Shared,
+            None,
             None,
         )
         .await
@@ -1437,6 +1447,7 @@ impl HostedTestRuntime {
             None,
             child_machines,
             None,
+            None,
         )
         .await
     }
@@ -1460,6 +1471,7 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             None,
+            None,
         )
         .await
     }
@@ -1480,8 +1492,21 @@ impl HostedTestRuntime {
             None,
             HostedChildMachines::Shared,
             Some(assembled),
+            None,
         )
         .await
+    }
+
+    pub(super) async fn start_configured_with_source_layers(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        source_layers: HostSourceLayersTransform,
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            settings, configure, Some(Arc::clone(transport)), None, false, None,
+            HostedChildMachines::Shared, None, Some(source_layers),
+        ).await
     }
 
     async fn start_owned(
@@ -1493,6 +1518,7 @@ impl HostedTestRuntime {
         diagnostics_root_override: Option<std::path::PathBuf>,
         child_machines: HostedChildMachines,
         mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
+        source_layers: Option<HostSourceLayersTransform>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1626,6 +1652,7 @@ impl HostedTestRuntime {
             transport: transport_factory,
             owner_admission: Arc::clone(&owner_admission),
             child_machines,
+            source_layers,
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();

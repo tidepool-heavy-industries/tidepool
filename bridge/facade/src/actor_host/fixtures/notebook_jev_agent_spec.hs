@@ -8,5 +8,5 @@ agentSpec ::
   ( KnownToolEffects effects
   , AsyncEffects effects
   ) =>
-  AgentSpec (HaskellTools effects) effects
+  AgentSpec (WorkbenchTools effects) effects
 agentSpec = defaultWorkbenchSpec

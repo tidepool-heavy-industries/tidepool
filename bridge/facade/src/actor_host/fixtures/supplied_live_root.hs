@@ -4,5 +4,5 @@ module AgentSpec (agentSpec) where
 import Tidepool.Agent.Contract
 
 agentSpec :: (KnownToolEffects effects, AsyncEffects effects)
-          => AgentSpec (HaskellTools effects) effects
+          => AgentSpec (WorkbenchTools effects) effects
 agentSpec = defaultWorkbenchSpec
