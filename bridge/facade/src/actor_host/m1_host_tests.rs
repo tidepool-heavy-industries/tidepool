@@ -1031,7 +1031,20 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         .await
         .unwrap();
     assert_eq!(duplicate.status(), reqwest::StatusCode::ACCEPTED);
-    let followup = browser_input(&target, "explicit corrected followup");
+    let harness::embedding::HostInferenceState::Blocked { block } =
+        store.embedded_inference_state(&target).unwrap()
+    else {
+        panic!("the rejected provider request must retain its exact block");
+    };
+    assert_eq!(block.request, failed_head);
+    let followup_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+    let followup = harness::server::ClientCommand::Host {
+        operation_id: followup_operation,
+        command: harness::server::HostCommand::Input {
+            target: target.clone(),
+            text: "explicit corrected followup".into(),
+        },
+    };
     let accepted = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
@@ -1041,15 +1054,22 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         .await
         .unwrap();
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(
-        transport.requests.lock().len(),
-        if tool_before_rejection { 2 } else { 1 }
+    let admission = fixture
+        .command_receipt(&target.run, followup_operation)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &admission,
+            harness::server::CommandReceiptOutcome::Admitted {
+                target: Some(admitted_target),
+                continuation: Some(harness::embedding::InputContinuation::Granted { block: granted }),
+                wake_error: None,
+                ..
+            } if admitted_target == &target && granted == &block
+        ),
+        "{admission:?}"
     );
-    assert!(matches!(
-        store.embedded_inference_state(&target).unwrap(),
-        harness::embedding::HostInferenceState::Blocked { .. }
-    ));
-    fixture.http_recover_blocked(&target).await.unwrap();
     let successor = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let head = store.agent(&target.actor).unwrap().unwrap().head_request;
