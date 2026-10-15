@@ -19,6 +19,7 @@ module Tidepool.TypePolicy
   ) where
 
 import Control.Monad.State.Strict
+import Control.Monad (when)
 import Control.Exception (Exception)
 import Codec.CBOR.Encoding qualified as CBOR
 import Codec.CBOR.Write (toStrictByteString)
