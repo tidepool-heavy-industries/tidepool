@@ -12,6 +12,7 @@ import PersonaSeedTest (personaSeedTests)
 import PersonaMemoryTest (personaMemoryTests)
 import PersonaFileTest (personaFileTests)
 import ResearcherSpecTest (researcherSpecTests)
+import ReplyToolTest (replyToolTests)
 import FormJevDialogueTest (formJevDialogueTests)
 import FormLifecycleTest (formLifecycleTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
@@ -63,7 +64,7 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 scenario :: IO ()
 scenario = do

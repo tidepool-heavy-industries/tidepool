@@ -813,6 +813,7 @@ test-suite model-turn-test
     Persona.Patch
     Tidepool.Text.Navigation
     ResearcherSpecTest
+    ReplyToolTest
     Project.Researcher
     Persona.Memory
     Persona.Web
