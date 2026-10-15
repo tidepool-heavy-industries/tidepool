@@ -816,6 +816,28 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         .unwrap();
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
     let store = fixture.runtime.store();
+    let output_origin = test_campaign::actor_output_origin(fixture.runtime.run_identity(), actor);
+    let retained_ancestor_matches = |item: &harness::item::Item| {
+        if item.0["type"] != "custom_tool_call_output"
+            || item.0["call_id"] != "before-rejection-cell"
+        {
+            return false;
+        }
+        let response: Value = serde_json::from_str(
+            item.0["output"]
+                .as_str()
+                .expect("the retained ancestor output is a Workbench response"),
+        )
+        .unwrap();
+        super::hosted_test_context::committed_explicit_display_reference(&response)
+            .expect("the ancestor display retains its issued publication reference");
+        assert_eq!(
+            test_campaign::retained_committed_display_text(&store, &output_origin, &response)
+                .trim(),
+            "42"
+        );
+        true
+    };
     if tool_before_rejection {
         let operation = fixture
             .while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
@@ -942,13 +964,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
                             store
                                 .replay_output_operation(&claim.operation)
                                 .unwrap()
-                                .is_some_and(|item| {
-                                    explicit_cell_display_matches(
-                                        &item,
-                                        "before-rejection-cell",
-                                        "42",
-                                    )
-                                })
+                                .is_some_and(|item| retained_ancestor_matches(&item))
                         }) {
                             assert_eq!(claims.len(), 1);
                             assert_eq!(resources.observation().await.unwrap().historical, 1);
@@ -1094,9 +1110,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             followup_request
                 .input
                 .iter()
-                .filter(|item| {
-                    explicit_cell_display_matches(item, "before-rejection-cell", "42")
-                })
+                .filter(|item| retained_ancestor_matches(item))
                 .count(),
             1,
             "settled ancestor output was not recovered exactly once"
