@@ -5251,16 +5251,11 @@ where
             .as_ref()
             .filter(|_| live_standing)
         {
-            return Some(
-                self.environment
-                    .runner
-                    .workbench(
-                        outstanding.response.clone(),
-                        outstanding.request,
-                        outstanding.type_evidence.clone(),
-                    )
-                    .with_intrinsic_effect_support(self.environment.intrinsic_effect_support()),
-            );
+            return Some(self.environment.request_workbench(
+                outstanding.response.clone(),
+                outstanding.request,
+                outstanding.type_evidence.clone(),
+            ));
         }
         match &self.standing {
             ResidentStanding::Workbench | ResidentStanding::Receiving(_)
@@ -8019,8 +8014,7 @@ where
         .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let workbench = self
             .environment
-            .runner
-            .workbench(
+            .request_workbench(
                 request.response.clone(),
                 request.request,
                 request.type_evidence.clone(),

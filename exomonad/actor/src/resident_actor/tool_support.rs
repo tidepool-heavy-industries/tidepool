@@ -14,6 +14,19 @@ impl<H, O> ResidentEnvironment<H, O> {
         self.application_workbench().boundary_runner()
     }
 
+    /// Request mounting and subsequent dispatch share interpreter composition;
+    /// the request contributes its scope and compiler-issued type evidence.
+    pub(super) fn request_workbench(
+        &self,
+        response: crate::ResponseExpectation,
+        request: crate::RequestId,
+        evidence: std::sync::Arc<tidepool_runtime::session::SiteTypeEvidence>,
+    ) -> crate::ResidentActorWorkbench<H, O> {
+        self.runner
+            .workbench(response, request, evidence)
+            .with_intrinsic_effect_support(self.intrinsic_effect_support())
+    }
+
     pub(super) fn intrinsic_effect_support(&self) -> Vec<ToolEffectKey> {
         crate::resident_workbench::intrinsic_effect_families()
             .into_iter()
