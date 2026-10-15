@@ -939,6 +939,7 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
         .await;
     let gate = InstallationGateGuard::new(fixture.session, false);
+    let parent_id = parent.identity();
     let source = reader_source(&token, "publication-cancel", "Core.ActorOwned");
     let call = tokio::spawn(async move {
         let client = crate::resident_tools::ResidentToolClient::local(parent);
@@ -950,7 +951,6 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
                 client.issue_workbench_call(None),
             )
             .await
-            .expect("actual parent notebook receipt")
     });
     let kernel = gate.reached().await;
     let retained = kernel.retained_exit();
@@ -966,23 +966,6 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .expect("cancelled bootstrap retires");
     assert_eq!(terminal, first);
     let reply = call.await.expect("failed spawn caller task");
-    assert_eq!(reply.items.len(), 1, "{reply:?}");
-    assert_eq!(
-        reply.items[0].status,
-        WorkbenchItemStatus::Stopped,
-        "{reply:?}"
-    );
-    assert!(
-        matches!(
-            reply.publication,
-            Some(
-                tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
-                    reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
-                }
-            )
-        ),
-        "{reply:?}"
-    );
     let (retired, observed) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             match fixture.deployments.recv().await.expect("deployment owner") {
@@ -1008,4 +991,39 @@ async fn supplied_child_cancelled_before_publication_preserves_first_terminal_an
         .is_confirmed());
     fixture.release_checkpoint(&token, scope).await;
     fixture.finish().await;
+    let Err(crate::resident_tools::ResidentToolError::Invocation(
+        KernelInvocationFailure::Workbench(failure),
+    )) = reply
+    else {
+        panic!("cancelled spawn must fail the parent notebook: {reply:?}");
+    };
+    assert_eq!(failure.actor, parent_id);
+    assert_eq!(
+        failure.point,
+        tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 }
+    );
+    assert_eq!(failure.total, 1);
+    assert_eq!(failure.receipts.len(), 1, "{failure:?}");
+    assert_eq!(
+        failure.receipts[0].status,
+        WorkbenchItemStatus::Rejected,
+        "{failure:?}"
+    );
+    assert_eq!(failure.receipts[0].operations.len(), 1, "{failure:?}");
+    assert_eq!(
+        failure.receipts[0].operations[0].disposition,
+        tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+        "{failure:?}"
+    );
+    assert!(
+        matches!(
+            failure.publication,
+            Some(
+                tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                    reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                }
+            )
+        ),
+        "{failure:?}"
+    );
 }
