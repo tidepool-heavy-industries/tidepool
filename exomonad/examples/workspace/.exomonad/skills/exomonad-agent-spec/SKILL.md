@@ -74,8 +74,10 @@ that tool's result. `toolResultValue` is the semantic JSON result, while
 blanket monitor.
 For a specific workflow, prefer an explicit bounded policy over source-identified
 episodes using [`Project.WorkflowReminders`](../../Project/WorkflowReminders.hs).
-Keep experimental judgments in shadow mode until evaluated; no judgment is proof
-of acceptance or completion. Use a tool's typed seam for result presentation.
+Start with a small observable change and retain the original tool result and
+judgment. Use representative actual outcomes to refine the policy; a judgment
+does not establish acceptance or completion. Use a tool's typed seam for result
+presentation.
 
 ## Reload
 
