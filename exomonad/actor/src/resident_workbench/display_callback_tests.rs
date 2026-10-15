@@ -131,14 +131,27 @@ async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixtur
     machines.insert_idle(session_id, Box::new(session));
     let runner = ResidentActorRunner::new(machines, source);
     let realm = context.placement.resource_scope;
+    let boundary = runner
+        .capture_boundary(context.clone(), outcome, realm)
+        .await
+        .unwrap();
+    let boundary = if let ResidentActorBoundary::DisplayAllowance { continuation } = boundary {
+        let outcome = runner
+            .resume_value(context.clone(), continuation, 1024_i64)
+            .await
+            .unwrap();
+        runner
+            .capture_boundary(context.clone(), outcome, realm)
+            .await
+            .unwrap()
+    } else {
+        boundary
+    };
     let ResidentActorBoundary::DisplayPublish {
         continuation,
         callback,
-        ..
-    } = runner
-        .capture_boundary(context.clone(), outcome, realm)
-        .await
-        .unwrap()
+        output: initial,
+    } = boundary
     else {
         panic!("raw DisplayWith must retain the original callback");
     };
@@ -161,6 +174,7 @@ async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixtur
         public_context,
         admission,
         callback: Arc::new(callback),
+        initial,
         execution: crate::request::sources::CallbackExecution {
             context,
             snapshot: None,
@@ -170,6 +184,7 @@ async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixtur
 }
 
 struct CallbackFixture {
+    initial: tidepool_runtime::session::WorkbenchDisplayPage,
     _root: tempfile::TempDir,
     runner: ResidentActorRunner<ImmediatePrintProbe, CapturedOutput>,
     calls: Arc<AtomicUsize>,
@@ -261,4 +276,87 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
         let error = fixture.runner.expand_display(fixture.execution.context.clone(), fixture.callback.clone(), (1, 1, 1), 1, 8192).await.unwrap_err();
         assert!(matches!(error, ResidentActorWorkbenchError::Resident(ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope))) if scope == scope_a), "{error}");
     }).await;
+}
+
+#[tokio::test]
+async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
+    with_test_compiler_owner(async {
+        let fixture = prepare_callback_fixture(
+            tidepool_testing::fixture_source(
+                "exomonad/actor/src/resident_workbench/display_lookup_errors.hs",
+            ),
+            false,
+        )
+        .await;
+        assert!(
+            fixture.initial.text.contains("retained-query"),
+            "{}",
+            fixture.initial.text
+        );
+        assert!(fixture
+            .initial
+            .expansions
+            .iter()
+            .any(|(_, label)| label == "retained-query"));
+        assert!(!fixture.initial.unavailable);
+        assert!(!fixture.initial.expansions.is_empty());
+        let mut pending = fixture.initial.expansions.clone();
+        let mut rendered = fixture.initial.text.clone();
+        let mut callback = fixture.callback.clone();
+        for _ in 0..64 {
+            let Some((key, _)) = pending.first().cloned() else {
+                break;
+            };
+            let (page, retained) = fixture
+                .runner
+                .expand_display(
+                    fixture.execution.context.clone(),
+                    callback,
+                    (1, 1, 1),
+                    key,
+                    8192,
+                )
+                .await
+                .unwrap();
+            assert!(!page.unavailable);
+            rendered.push_str(&page.text);
+            pending = page.expansions;
+            callback = Arc::new(retained);
+        }
+        assert!(pending.is_empty(), "expansion did not settle");
+        for name in [
+            "retained-query",
+            "end-of-retained-query",
+            "second-query",
+            "missing-api",
+        ] {
+            assert!(rendered.contains(name), "missing {name}: {rendered}");
+        }
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let errors = prepare_callback_fixture(
+            tidepool_testing::fixture_source(
+                "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
+            ),
+            false,
+        )
+        .await;
+        assert!(!errors.initial.unavailable);
+        for name in [
+            "FsNotFound",
+            "FsNotUtf8",
+            "FsSandbox",
+            "FsBadRegex",
+            "FsIo",
+            "FsDurabilityUnknown",
+            "FsNonUtf8Path",
+        ] {
+            assert!(
+                errors.initial.text.contains(name),
+                "missing {name}: {}",
+                errors.initial.text
+            );
+        }
+        assert!(errors.initial.text.contains("Right (Left"));
+    })
+    .await;
 }

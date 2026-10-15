@@ -49,7 +49,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
-import Tidepool.Records (WriteOutcome(..))
+import Tidepool.Records (WriteOutcome(..), FsError(..))
+import Tidepool.Lookup (LookupBatch(..), LookupResult(..))
+import Tidepool.Lookup.Render (renderBatch)
 import Tidepool.Source (SourceWindow (..), sourceLines)
 import Tidepool.Inspection.Display
 import Tidepool.View.Types (View(..), viewTree)
@@ -111,6 +113,23 @@ publishDisplay identity state =
         Just detail -> do
           _ <- publishDisplay issued detail
           pure ()) :: Int -> Eff effects ()))
+
+instance Display FsError where
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence failure = case failure of
+    FsNotFound detail -> application precedence "FsNotFound" [displayTreePrec 11 detail]
+    FsNotUtf8 detail -> application precedence "FsNotUtf8" [displayTreePrec 11 detail]
+    FsSandbox detail -> application precedence "FsSandbox" [displayTreePrec 11 detail]
+    FsBadRegex detail -> application precedence "FsBadRegex" [displayTreePrec 11 detail]
+    FsIo detail -> application precedence "FsIo" [displayTreePrec 11 detail]
+    FsDurabilityUnknown detail -> application precedence "FsDurabilityUnknown" [displayTreePrec 11 detail]
+    FsNonUtf8Path detail -> application precedence "FsNonUtf8Path" [displayTreePrec 11 detail]
+
+instance Display LookupBatch where
+  displayTree batch = Constructor "LookupBatch"
+    ([(lookupQuery result, TextLeaf (renderBatch (batch { lookupResults = [result], lookupIssue = Nothing })))
+      | result <- lookupResults batch]
+      ++ [("issue", displayTree (lookupIssue batch)) | lookupIssue batch /= Nothing])
 
 instance Display WriteOutcome where
   displayTree (Written f c) = displayRecord 0 "Written" [("file", displayTree f), ("checks", displayTree c)]
