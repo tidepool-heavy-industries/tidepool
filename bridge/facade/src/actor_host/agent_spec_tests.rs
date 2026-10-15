@@ -27,7 +27,8 @@ use super::*;
 /// declaration must not move with it.
 fn tools_module(description: &str, answer: &str) -> String {
     format!(
-        r#"{{-# LANGUAGE DeriveAnyClass #-}}
+        r#"{{-# LANGUAGE FlexibleContexts #-}}
+{{-# LANGUAGE DeriveAnyClass #-}}
 {{-# LANGUAGE DeriveGeneric #-}}
 {{-# LANGUAGE OverloadedStrings #-}}
 {{-# LANGUAGE TypeOperators #-}}
@@ -45,6 +46,7 @@ newtype Probe = Probe {{ topic :: Text }}
 data SpecTools effects mode = SpecTools
   {{ probe :: mode :- Call Probe Text
   , notebook :: HaskellTools effects mode
+  , reloadSpec :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
   }}
   deriving (Generic)
 
@@ -57,6 +59,7 @@ tools :: (KnownToolEffects effects, AsyncEffects effects) => SpecTools effects (
 tools = SpecTools
   {{ probe = presentWith id $ tool "{description}" probeBody
   , notebook = haskellTools
+  , reloadSpec = standardReload
   }}
 
 agentSpec :: (KnownToolEffects effects, AsyncEffects effects) => AgentSpec (SpecTools effects) effects
@@ -245,10 +248,16 @@ async fn probe(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
 }
 
 /// Ask this actor to rebuild its own spec, and read the receipt.
-async fn reload(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
-    dispatch_structured_tool(policy, "reload_agent_spec", serde_json::json!({}))
-        .await
-        .to_string()
+async fn reload(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> serde_json::Value {
+    dispatch_structured_tool(policy, "reload_spec", serde_json::json!({})).await
+}
+
+fn assert_reload_outcome(receipt: &serde_json::Value, tag: &str) {
+    assert_eq!(receipt["status"], "committed", "{receipt}");
+    assert_eq!(
+        receipt["items"][0]["value"]["Right"]["tag"], tag,
+        "{receipt}"
+    );
 }
 
 async fn status(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
@@ -301,7 +310,7 @@ async fn actor_spec_cost_measurement() {
                         before,
                         started,
                     );
-                    assert!(receipt.contains("swapped"), "{receipt}");
+                    assert_reload_outcome(&receipt, "ReloadUnchanged");
 
                     std::fs::write(
                         campaign
@@ -322,7 +331,7 @@ async fn actor_spec_cost_measurement() {
                         before,
                         started,
                     );
-                    assert!(receipt.contains("swapped"), "{receipt}");
+                    assert_reload_outcome(&receipt, "ReloadPublished");
                     let changed = probe(policy).await;
                     assert!(changed.contains("measurement-two"), "{changed}");
                     assert!(
@@ -357,8 +366,7 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
                 )
                 .unwrap();
                 let receipt = reload(policy).await;
-                assert!(receipt.contains("swapped"), "{receipt}");
-                assert!(receipt.contains("install=2"), "{receipt}");
+                assert_reload_outcome(&receipt, "ReloadPublished");
 
                 let after = probe(policy).await;
                 assert!(after.contains("two"), "{after}");
@@ -481,7 +489,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 )
                 .unwrap();
                 let receipt = reload(policy).await;
-                assert!(receipt.contains("swapped"), "{receipt}");
+                assert_reload_outcome(&receipt, "ReloadPublished");
                 assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
             })
         })
@@ -497,49 +505,80 @@ async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
     // native test has its own process, so observe their shared global writer.
     tracing::subscriber::set_global_default(subscriber).expect("first subscriber in isolated test");
     let campaign = start(DESCRIPTION, "one").await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = campaign.root_installation.policy.as_ref();
-    let old_request = policy.snapshot_for_request().expect("installed old spec");
-    assert!(probe(old_request.as_ref()).await.contains("one"));
-    std::fs::write(
-        campaign
-            ._repository
-            .path()
-            .join(".exomonad/Project/Tools.hs"),
-        tools_module(DESCRIPTION, "two"),
-    )
-    .unwrap();
-    log.0.lock().unwrap().clear();
-    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ncase outcome of { ReloadPublished _ _ _ -> pure (); _ -> error \"source reload did not publish\" }").await;
-    assert_eq!(source_reload["status"], "committed", "{source_reload}");
-    let captured = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
-    let rows = captured.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
-    let waits = rows.iter().filter(|row| row["fields"]["message"] == "toolset preparation wait").collect::<Vec<_>>();
-    assert_eq!(waits.len(), 1, "{captured}");
-    let preparation = &waits[0]["fields"]["preparation"];
-    assert_eq!(waits[0]["fields"]["disposition"], "new");
-    assert_eq!(waits[0]["fields"]["outcome"], "succeeded");
-    for phase in ["service", "producer"] {
-        let producers = rows.iter().filter(|row| row["fields"]["message"] == "toolset preparation producer" && row["fields"]["phase"] == phase && &row["fields"]["preparation"] == preparation).collect::<Vec<_>>();
-        assert_eq!(producers.len(), 1, "{captured}");
-        assert_eq!(producers[0]["fields"]["outcome"], "succeeded");
-    }
-    let summary = rows.iter().find(|row| row["fields"]["message"] == "call timing").expect("reload call timing");
-    assert_eq!(summary["fields"]["preparation_wait_count"], 1);
-    assert_eq!(summary["fields"]["execution"], waits[0]["fields"]["execution"]);
-    assert!(rows.iter().any(|row| row["fields"]["message"] == "compiler request identified" && row["spans"].as_array().is_some_and(|spans| spans.iter().any(|span| &span["preparation"] == preparation))), "producer span must correlate its actual compiler request: {captured}");
-    assert!(probe(policy).await.contains("two"), "coherent reload installs the new handler");
-    assert!(
-        probe(old_request.as_ref()).await.contains("one"),
-        "accepted old call keeps its original handler"
-    );
-})).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.as_ref();
+                let old_request = policy.snapshot_for_request().expect("installed old spec");
+                assert!(probe(old_request.as_ref()).await.contains("one"));
+                std::fs::write(
+                    campaign
+                        ._repository
+                        .path()
+                        .join(".exomonad/Project/Tools.hs"),
+                    tools_module(DESCRIPTION, "two"),
+                )
+                .unwrap();
+                log.0.lock().unwrap().clear();
+                let source_reload = reload(policy).await;
+                assert_reload_outcome(&source_reload, "ReloadPublished");
+                let captured = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+                let rows = captured
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .collect::<Vec<_>>();
+                let waits = rows
+                    .iter()
+                    .filter(|row| row["fields"]["message"] == "toolset preparation wait")
+                    .collect::<Vec<_>>();
+                assert_eq!(waits.len(), 1, "{captured}");
+                let preparation = &waits[0]["fields"]["preparation"];
+                assert_eq!(waits[0]["fields"]["disposition"], "new");
+                assert_eq!(waits[0]["fields"]["outcome"], "succeeded");
+                for phase in ["service", "producer"] {
+                    let producers = rows
+                        .iter()
+                        .filter(|row| {
+                            row["fields"]["message"] == "toolset preparation producer"
+                                && row["fields"]["phase"] == phase
+                                && &row["fields"]["preparation"] == preparation
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(producers.len(), 1, "{captured}");
+                    assert_eq!(producers[0]["fields"]["outcome"], "succeeded");
+                }
+                let summary = rows
+                    .iter()
+                    .find(|row| row["fields"]["message"] == "call timing")
+                    .expect("reload call timing");
+                assert_eq!(summary["fields"]["preparation_wait_count"], 1);
+                assert_eq!(
+                    summary["fields"]["execution"],
+                    waits[0]["fields"]["execution"]
+                );
+                assert!(
+                    rows.iter().any(|row| row["fields"]["message"]
+                        == "compiler request identified"
+                        && row["spans"].as_array().is_some_and(|spans| spans
+                            .iter()
+                            .any(|span| &span["preparation"] == preparation))),
+                    "producer span must correlate its actual compiler request: {captured}"
+                );
+                assert!(
+                    probe(policy).await.contains("two"),
+                    "coherent reload installs the new handler"
+                );
+                assert!(
+                    probe(old_request.as_ref()).await.contains("one"),
+                    "accepted old call keeps its original handler"
+                );
+            })
+        })
+        .await;
 }
 
-/// A changed description is a change a model would see, and the tool bridge
-/// registers a list once and serves it read-only. So the reload is refused, the
-/// difference is returned by name, and the record already installed keeps
-/// answering with what it always answered.
+/// Surface changes require explicit consent. A compatible-only reload retains
+/// the old source and handlers and reports the changed declaration.
 #[tokio::test]
 async fn a_changed_description_is_refused_with_the_difference_and_the_old_record_answers() {
     let campaign = start(DESCRIPTION, "one").await;
@@ -563,9 +602,10 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
                 )
                 .unwrap();
                 let receipt = reload(policy).await;
-                assert!(receipt.contains("refused"), "{receipt}");
-                assert!(receipt.contains("probe: description changed"), "{receipt}");
-                assert!(!receipt.contains("swapped"), "{receipt}");
+                assert_reload_outcome(&receipt, "ReloadRefused");
+                let refusal = &receipt["items"][0]["value"]["Right"]["contents"][2];
+                assert_eq!(refusal["refusalCategory"], "SurfaceIncompatible");
+                assert!(refusal["refusalSurface"]["surfaceChanged"].as_array().unwrap().contains(&serde_json::json!("probe")));
 
                 // The previously installed record is still the one serving calls.
                 let after = probe(policy).await;
@@ -612,9 +652,8 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
                 assert!(broken.contains("undefinedByThisSpecReload"), "{broken}");
                 std::fs::write(workspace.join(".exomonad/Project/Tools.hs"), &broken).unwrap();
                 let receipt = reload(policy).await;
-                assert!(receipt.contains("rejected"), "{receipt}");
-                assert!(receipt.contains("undefinedByThisSpecReload"), "{receipt}");
-                assert!(!receipt.contains("swapped"), "{receipt}");
+                assert_reload_outcome(&receipt, "ReloadRejected");
+                assert!(receipt["items"][0]["value"]["Right"]["contents"][2].as_str().unwrap().contains("undefinedByThisSpecReload"));
 
                 let after = probe(policy).await;
                 assert!(after.contains("one"), "{after}");
@@ -665,8 +704,8 @@ async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
                 )
                 .unwrap();
                 let receipt = reload(policy).await;
-                assert!(receipt.contains("spec preparation failed"), "{receipt}");
-                assert!(!receipt.contains("swapped"), "{receipt}");
+                assert_reload_outcome(&receipt, "ReloadRefused");
+                assert_eq!(receipt["items"][0]["value"]["Right"]["contents"][2]["refusalCategory"], "PreparationFailed");
                 assert_eq!(source_layer.read_active().unwrap(), before_source);
                 assert!(probe(policy).await.contains("one"));
                 let cell = dispatch_haskell_script(
@@ -866,12 +905,11 @@ async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
                 )
                 .unwrap();
                 let receipt = reload(child.policy.as_ref()).await;
-                assert!(receipt.contains("unavailable"), "{receipt}");
-                assert!(
-                    receipt.contains("only the run owner can reload"),
+                assert_eq!(receipt["status"], "committed", "{receipt}");
+                assert_eq!(
+                    receipt["items"][0]["value"]["Left"]["tag"], "ReloadUnavailable",
                     "{receipt}"
                 );
-                assert!(receipt.contains("run module"), "{receipt}");
 
                 assert!(probe(child.policy.as_ref()).await.contains("one"));
                 assert!(probe(root.as_ref()).await.contains("one"));
@@ -1144,8 +1182,17 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
             },
         )
         .unwrap();
-        config.command_resources =
-            Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
+        config.command_resources = Some(
+            exomonad_node::command_resources::CommandResourceClient::local(
+                owner,
+                exomonad_node::command_resources::CommandRunIdentity::new(
+                    "isolated-test".into(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
         write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
         write_spec_config(
             &config.workspace.join(".exomonad"),
@@ -1287,24 +1334,16 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
     .await;
 }
 
-/// The two tools a model repairs a broken slot with are never annotated, so a
-/// slot can never block its own repair — `status` and `reload_agent_spec`
-/// never acquire a dispatcher and never reach the slot at all. An authored
-/// cell's receipt DOES reach the slot, under the `haskell` tool name; this
-/// spec's slot only reacts to `probe`, so the cell still comes back
-/// unannotated.
+/// The status control bypasses authored presentation. An ordinary cell reaches
+/// the slot under its authored tool name, even when the slot returns no annotation.
 #[tokio::test]
-async fn the_repair_tools_are_never_annotated_and_cells_reach_the_slot_unmatched() {
+async fn status_bypasses_presentation_and_cells_reach_the_slot_unmatched() {
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
                 let policy = policy.as_ref();
-
-                let reloaded = reload(policy).await;
-                assert!(reloaded.contains("swapped"), "{reloaded}");
-                assert!(!reloaded.contains("[after-tool]"), "{reloaded}");
 
                 let status_before_cell = status(policy).await;
                 assert!(

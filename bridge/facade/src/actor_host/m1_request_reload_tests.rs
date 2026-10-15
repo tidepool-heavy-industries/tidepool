@@ -359,9 +359,18 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     .unwrap();
     // The independent operator invocation owns reload compilation and its
     // exact completion boundary while the provider request stays held.
-    let policy = exomonad_actor::ResidentInteractivePolicy::local(host.context.actor.clone());
-    let reloaded = dispatch_structured_tool(&policy, "reload_agent_spec", json!({})).await;
-    assert!(reloaded.to_string().contains("swapped"), "{reloaded}");
+    let installed = host
+        .context
+        .observer
+        .installation(host.context.actor.identity())
+        .await;
+    let reloaded =
+        dispatch_structured_tool(installed.policy.as_ref(), "reload_spec", json!({})).await;
+    assert_eq!(reloaded["status"], "committed", "{reloaded}");
+    assert_eq!(
+        reloaded["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
+        "{reloaded}"
+    );
     let compiled_after_reload = tidepool_extract_cmd::extract_spawn_count();
     first
         .reply

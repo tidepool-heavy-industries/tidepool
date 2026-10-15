@@ -15,13 +15,17 @@ import Tidepool.Effects.Core (Sleep, sleep)
 data Probe = Probe { number :: Int, delay :: Int }
   deriving (Generic, FromJSON, JsonSchema)
 
-newtype ReloadTools mode = ReloadTools { probe :: mode :- Call Probe Int }
+data ReloadTools mode = ReloadTools
+  { probe :: mode :- Call Probe Int
+  , reloadSpec :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
+  }
   deriving (Generic)
 
 agentSpec :: Member Sleep effects => AgentSpec ReloadTools effects
 agentSpec = defaultSpec
   { specTools = ReloadTools
-      { probe = presentWith presentJson $ tool "Add the installed offset after the requested delay." answer }
+      { probe = presentWith presentJson $ tool "Add the installed offset after the requested delay." answer
+      , reloadSpec = standardReload }
   }
 
 offset :: Int
