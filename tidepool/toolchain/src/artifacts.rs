@@ -6856,8 +6856,13 @@ mod module_product_tests {
                 tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("must-not-run"),
             );
             command.inject_vals(names);
-            let expected = command.request_bytes();
-            let error = unexecuted_offer(scratch.path())
+            let offer = unexecuted_offer(scratch.path());
+            let mut expected_command = command.clone();
+            if let Some(manifest) = offer.manifest_path() {
+                expected_command.module_candidates(manifest);
+            }
+            let expected = expected_command.request_bytes();
+            let error = offer
                 .apply_to(command.clone(), scratch.path())
                 .err()
                 .unwrap();
@@ -6886,8 +6891,17 @@ mod module_product_tests {
             // A diagnostic destination failure must not replace the typed refusal.
             let unavailable = scratch.path().join("not-a-directory");
             std::fs::write(&unavailable, b"blocked diagnostics").unwrap();
-            let retained = retain_compiler_failure_inner(&unavailable, None, error, None, &command);
-            assert!(matches!(retained, CompileError::SessionValueSelection(_)));
+            let CompileError::SessionValueSelection(expected_error) = error else {
+                panic!("selection refusal changed its primary type");
+            };
+            let refused = unexecuted_offer(scratch.path())
+                .apply_to(command.clone(), &unavailable)
+                .err()
+                .unwrap();
+            let CompileError::SessionValueSelection(actual_error) = refused else {
+                panic!("retention failure replaced the primary selection refusal");
+            };
+            assert_eq!(actual_error, expected_error);
         }
         let scratch = compiler_scratch_directory().unwrap();
         let command = ExtractCmd::with_bin(
@@ -6924,6 +6938,7 @@ mod module_product_tests {
             .prepare_admitted_turn(command, scratch.path())
             .unwrap();
         let output = applied.output_owner.as_ref().unwrap().path().to_owned();
+        let lifetime = Arc::downgrade(applied.output_owner.as_ref().unwrap());
         assert_ne!(output, scratch.path());
         let argv = applied.command().argv();
         assert!(argv
@@ -6946,8 +6961,12 @@ mod module_product_tests {
             output.is_dir(),
             "the frozen request retains its relocated output owner"
         );
+        assert!(lifetime.upgrade().is_some());
         drop(applied);
-        assert!(!output.exists());
+        assert!(
+            lifetime.upgrade().is_none(),
+            "physical custody ends independently of diagnostic path retention"
+        );
     }
 
     #[test]
