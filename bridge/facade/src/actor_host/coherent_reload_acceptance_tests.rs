@@ -628,7 +628,7 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
         let mut settlements = host.runtime.scheduler().operation_settlements();
         gate.arm();
         round.function("accept-surface", "apply_draft", serde_json::json!({"accept_cache_invalidation":true}));
-        host.while_host_running(gate.entered.notified()).await.unwrap();
+        host.while_operation_succeeds(&reload_operation, gate.entered.notified()).await.unwrap();
         let input = host.input("This input arrived while synchronous reload was preparing.").await.unwrap();
         let before = host.runtime.store().embedded_round_frontier(&root_identity).unwrap();
         assert_eq!(before.pending_head.as_ref(), Some(&reload_operation.request));
