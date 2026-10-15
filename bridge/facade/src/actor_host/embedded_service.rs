@@ -956,6 +956,7 @@ pub(super) async fn submit_browser_command(
             control.publish_command_receipt(harness::server::CommandReceipt {
                 command_id: command.command_id,
                 outcome: harness::server::CommandReceiptOutcome::Admitted {
+                    continuation: receipt.continuation.clone(),
                     target: None,
                     envelope_id: receipt.envelope_id.into(),
                     wake_error: receipt.wake_error.clone(),

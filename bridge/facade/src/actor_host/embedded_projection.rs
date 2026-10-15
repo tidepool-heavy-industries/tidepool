@@ -442,6 +442,7 @@ mod tests {
             request: harness::model::RequestId("retained-head".into()),
             generation: 1,
             reason: harness::embedding::InferenceBlockReason::ContinuityUnproven,
+            continuation_refusal: None,
         };
         projection
             .publish(
