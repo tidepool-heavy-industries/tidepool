@@ -137,6 +137,7 @@
     "bridge/facade/src/actor_host/fixtures/narrow_parent_forwarding.hs",
     "bridge/facade/src/actor_host/fixtures/notebook_jev_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
+    "bridge/facade/src/actor_host/fixtures/persona_file_tools_reply_bypass.hs",
     "bridge/facade/src/actor_host/fixtures/persona_file_tools_request.hs",
     "bridge/facade/src/actor_host/fixtures/persona_file_tools_spawn.hs",
     "bridge/facade/src/actor_host/fixtures/persona_snapshot_refusals.hs",

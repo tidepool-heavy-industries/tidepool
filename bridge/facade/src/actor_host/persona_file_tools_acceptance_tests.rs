@@ -70,13 +70,29 @@ async fn installed_file_tools_repair_a_draft_after_notebook_refusal_without_comp
         root_round.call("file-repair-request", &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/persona_file_tools_request.hs"));
         let child = host.while_operation_succeeds(&repair,
-            select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
+            select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::Any)).await.unwrap();
+        if child.host_identity().actor == root {
+            panic!("file request settled before child inference: {}", child.settled_output("file-repair-request"));
+        }
         let child_identity = child.host_identity();
         let write_schema = child.request.tools.iter().find(|tool| tool["name"] == "write_file").unwrap()["parameters"].clone();
         let write_schema = harness::finalize::FunctionToolSchema::new(write_schema).unwrap();
         let invalid = json!({"operation":{"tag":"Create","contents":FIRST,"file":{"path":DRAFT,"version":"0".repeat(64)}}});
         assert!(matches!(write_schema.decode_arguments(invalid),
             Err(harness::finalize::SchemaError::ValueSchemaMismatch(_))));
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
+        let actor = graph.iter().find(|node| host.context.binding(node.actor)
+            .and_then(|binding| binding.conversation())
+            .is_some_and(|conversation| conversation.identity() == &child_identity)).unwrap().actor;
+        let child_origin = actor_output_origin(host.runtime.run_identity(), actor);
+        child.sync_call_named("reply-bypass-refused", "haskell", &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/persona_file_tools_reply_bypass.hs"));
+        let child = host.while_operation_succeeds(&repair,
+            next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();
+        let refusal = child.settled_output("reply-bypass-refused");
+        assert_eq!(retained_committed_display_text(&host.runtime.store(), &child_origin, &refusal), "True",
+            "ordinary Replies cannot settle an explicitly JSON-tool-mode request");
+        assert!(child.request.tools.iter().any(|tool| tool["name"] == "reply"), "same activation remains available");
         child.sync_call_named("notebook-refused", "haskell", "display (1 + True)");
         let created = host.while_operation_succeeds(&repair,
             next_hosted_script_round(&mut requests, &mut pending, &child_identity.actor)).await.unwrap();

@@ -4112,6 +4112,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f7265706c795f6279706173732e6873",
+    src = "src/actor_host/fixtures/persona_file_tools_reply_bypass.hs",
+    out = "persona_file_tools_reply_bypass.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f726571756573742e6873",
     src = "src/actor_host/fixtures/persona_file_tools_request.hs",
     out = "persona_file_tools_request.hs",
