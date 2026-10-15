@@ -51,6 +51,13 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         workspace.parent.mkdir()
         self.run_git(source, "-c", "protocol.file.allow=always", "clone", "--quiet", "--",
                      str(self.bundle), str(workspace))
+        for relative in resource.PUBLISHED_SKILLS:
+            template = source / "exomonad/examples/workspace/.exomonad/skills" / relative
+            template.parent.mkdir(parents=True, exist_ok=True)
+            template.write_bytes(subprocess.check_output([
+                str(self.git), "-C", str(workspace), "show",
+                f'{self.record["revision"]}:skills/{relative}',
+            ]))
         return source, workspace
 
     def test_declared_bundle_has_the_real_gitlink_commit_and_complete_objects(self):
@@ -99,6 +106,35 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         previous = self.run_git(workspace, "rev-parse", self.record["revision"] + "^")
         self.run_git(source, "update-index", "--cacheinfo", f'160000,{previous},.exomonad/workspace')
         with self.assertRaisesRegex(ValueError, "differs from the source index"):
+            resource.provision(source, self.root / "resource", str(self.git))
+        self.assertFalse((self.root / "resource").exists())
+
+    def test_provision_refuses_unpublished_template_changes_before_output(self):
+        source, _ = self.source()
+        templates = source / "exomonad/examples/workspace/.exomonad/skills"
+        for relative in resource.PUBLISHED_SKILLS:
+            with self.subTest(skill=relative):
+                template = templates / relative
+                original = template.read_bytes()
+                template.write_bytes(original + b"\nUnpublished edit.\n")
+                with self.assertRaisesRegex(ValueError, "publication differs from its authored template"):
+                    resource.provision(source, self.root / "resource", str(self.git))
+                self.assertFalse((self.root / "resource").exists())
+                template.write_bytes(original)
+
+    def test_provision_checks_published_objects_not_dirty_workspace_skill_bytes(self):
+        source, workspace = self.source()
+        for relative in resource.PUBLISHED_SKILLS:
+            (workspace / "skills" / relative).write_bytes(b"uncommitted workspace skill\n")
+        output = self.root / "resource"
+        resource.provision(source, output, str(self.git))
+        qualification.verify_workspace_bundle(output / "workspace.bundle", self.record, self.git)
+
+    def test_provision_refuses_missing_authored_template_before_output(self):
+        source, _ = self.source()
+        template = source / "exomonad/examples/workspace/.exomonad/skills" / resource.PUBLISHED_SKILLS[0]
+        template.unlink()
+        with self.assertRaises(FileNotFoundError):
             resource.provision(source, self.root / "resource", str(self.git))
         self.assertFalse((self.root / "resource").exists())
 

@@ -10,6 +10,14 @@ import subprocess
 import tempfile
 
 
+# These skills have one authored source and must be published unchanged in the
+# default workspace. This is a publication invariant, not a behavior check.
+PUBLISHED_SKILLS = (
+    "exomonad-agent-spec/SKILL.md",
+    "exomonad-command/references/hosted-tools.md",
+)
+
+
 def provision(source: Path, output: Path, git: str) -> str:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
@@ -33,6 +41,17 @@ def provision(source: Path, output: Path, git: str) -> str:
         raise ValueError("initialize the recorded workspace submodule before configuration")
     if run(repository, "cat-file", "-t", revision) != "commit":
         raise ValueError("recorded workspace object is not a commit")
+    templates = source / "exomonad/examples/workspace/.exomonad/skills"
+    for relative in PUBLISHED_SKILLS:
+        published = subprocess.check_output(
+            [git, "-C", str(repository), "show", f"{revision}:skills/{relative}"],
+            env=environment,
+        )
+        if published != (templates / relative).read_bytes():
+            raise ValueError(
+                f"workspace skill publication differs from its authored template: {relative}; "
+                "publish the template and record its reviewed workspace commit"
+            )
     tree = run(repository, "rev-parse", revision + "^{tree}")
     output.mkdir()
     # Import original objects into an isolated repository; never change source

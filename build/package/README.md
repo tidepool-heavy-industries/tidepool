@@ -248,6 +248,12 @@ commit and object closure against the Gitlink and seals the copied bundle bytes.
 Scaffolding clones those objects locally and records the public upstream URL for
 future submodule updates. Test execution requires no mutable source repository.
 
+The authored agent-spec skill and command `references/hosted-tools.md` under
+`exomonad/examples/workspace/.exomonad/skills` must be published unchanged in that
+recorded workspace commit. `scripts/workspace-git-resource.py` checks their byte
+parity before creating the resource. This required publication invariant prevents
+shipping older copies of those files; it does not establish behavioral correctness.
+
 ```sh
 python3 build/package/qualification.py freeze \
   --bundle "$BUCK_NATIVE_BUNDLE" --output "$FINAL_BUNDLE" \
