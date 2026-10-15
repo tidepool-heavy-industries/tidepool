@@ -117,7 +117,12 @@ fn transitive_oracle(
                     original_ordinal: group.original_ordinal,
                 };
                 owners
-                    .planned_edges(&state, &selected, &BTreeSet::from([key]))?
+                    .planned_edges(
+                        &state,
+                        &selected,
+                        &BTreeSet::from([key]),
+                        NativeClosureStage::ColdValidation,
+                    )?
                     .0[&LogicalNodeKey::Group(key)]
                     .clone()
             }

@@ -1985,6 +1985,8 @@ enum NativeClosureStage {
     Admission,
     AuthoredCustody,
     AcceptedMerge,
+    #[cfg(test)]
+    ColdValidation,
 }
 
 impl SelectedOwners {
