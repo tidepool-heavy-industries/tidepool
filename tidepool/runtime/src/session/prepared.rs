@@ -12014,6 +12014,199 @@ pub(super) mod tests {
         testing::prepare(program).expect("typed site fixture validates")
     }
 
+    #[test]
+    fn site_conflict_diagnostics_identify_the_refused_comparison() {
+        let types = response_result_types(
+            &[
+                DeclarationForm::Text,
+                DeclarationForm::Integer,
+                DeclarationForm::Natural,
+            ],
+            0,
+            &testing::identity("Fixture", "Result"),
+        );
+        let program = |delivery, wire, inputs: &[u32], origin: &str, ordinal| {
+            let prepared = typed_site_program(7, types.clone(), wire, inputs);
+            let mut unpublished = prepared_data::wire_from_prepared(&prepared);
+            unpublished.sites[0].delivery = delivery;
+            unpublished.sites[0].origin = origin.into();
+            unpublished.sites[0].ordinal = ordinal;
+            testing::prepare(unpublished).unwrap()
+        };
+        let (engine, owner) = PreparedEngine::bootstrap(program(
+            SiteDelivery::HostAnswer,
+            0,
+            &[0, 1],
+            "Fixture.original",
+            41,
+        ))
+        .unwrap();
+        let control = program(SiteDelivery::HostAnswer, 0, &[0, 1], "Fixture.incoming", 91);
+        assert!(engine
+            .plan_sites(&ProgramFacts::of(&control))
+            .unwrap()
+            .is_empty());
+        for (boundary, delivery, wire, inputs, shapes) in [
+            (
+                SiteConflictBoundary::Delivery,
+                SiteDelivery::LiveReentry,
+                1,
+                vec![],
+                None,
+            ),
+            (
+                SiteConflictBoundary::InputArity,
+                SiteDelivery::HostAnswer,
+                1,
+                vec![],
+                None,
+            ),
+            (
+                SiteConflictBoundary::Wire,
+                SiteDelivery::HostAnswer,
+                1,
+                vec![0, 2],
+                Some((ReplyTypeObservation::Text, ReplyTypeObservation::Integer)),
+            ),
+            (
+                SiteConflictBoundary::Input { ordinal: 1 },
+                SiteDelivery::HostAnswer,
+                0,
+                vec![0, 2],
+                Some((ReplyTypeObservation::Integer, ReplyTypeObservation::Natural)),
+            ),
+        ] {
+            let incoming = program(delivery, wire, &inputs, "Fixture.incoming", 91);
+            let error = engine.plan_sites(&ProgramFacts::of(&incoming)).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("boundary: {boundary:?}")));
+            let PreparedRuntimeError::SiteConflict {
+                site: 7,
+                owner: actual_owner,
+                evidence,
+            } = error
+            else {
+                panic!("expected an observed site refusal")
+            };
+            assert_eq!(actual_owner, owner);
+            assert_eq!(evidence.boundary, boundary);
+            assert_eq!(
+                (&*evidence.existing.origin, evidence.existing.ordinal),
+                ("Fixture.original", 41)
+            );
+            assert_eq!(
+                (&*evidence.incoming.origin, evidence.incoming.ordinal),
+                ("Fixture.incoming", 91)
+            );
+            assert_eq!(evidence.existing.delivery, SiteDelivery::HostAnswer);
+            assert_eq!(evidence.incoming.delivery, delivery);
+            assert_eq!(evidence.existing.input_arity, 2);
+            assert_eq!(evidence.incoming.input_arity, inputs.len());
+            assert_eq!(
+                evidence.existing.compared_type.map(|root| root.shape),
+                shapes.as_ref().map(|pair| pair.0.clone())
+            );
+            assert_eq!(
+                evidence.incoming.compared_type.map(|root| root.shape),
+                shapes.map(|pair| pair.1)
+            );
+            assert_eq!(engine.sites[&7].owner, owner);
+            assert_eq!(engine.programs.len(), 1);
+        }
+    }
+
+    #[test]
+    fn duplicate_site_diagnostics_retain_the_compared_roots() {
+        let (engine, _) = PreparedEngine::bootstrap(typed_site_program(
+            99,
+            closed_reply_type(DeclarationForm::Text),
+            0,
+            &[],
+        ))
+        .unwrap();
+        let first = typed_site_program(7, closed_reply_type(DeclarationForm::Text), 0, &[]);
+        let second = typed_site_program(7, closed_reply_type(DeclarationForm::Integer), 0, &[]);
+        let error = match engine
+            .plan_batch_evidence(vec![ProgramFacts::of(&first), ProgramFacts::of(&second)])
+        {
+            Err(error) => error,
+            Ok(_) => panic!("conflicting batch must refuse"),
+        };
+        let PreparedRuntimeError::DuplicateSite { site: 7, evidence } = error else {
+            panic!("batch refusal must retain site evidence")
+        };
+        assert_eq!(evidence.boundary, SiteConflictBoundary::Wire);
+        assert_eq!(
+            evidence.existing.compared_type.unwrap().shape,
+            ReplyTypeObservation::Text
+        );
+        assert_eq!(
+            evidence.incoming.compared_type.unwrap().shape,
+            ReplyTypeObservation::Integer
+        );
+    }
+
+    #[test]
+    fn site_conflict_diagnostics_bound_recursive_type_and_unicode_observations() {
+        let (engine, owner) = PreparedEngine::bootstrap(typed_site_program(
+            7,
+            closed_reply_type(DeclarationForm::Text),
+            0,
+            &[],
+        ))
+        .unwrap();
+        let mut unpublished = prepared_data::wire_from_prepared(&json_mount_program());
+        unpublished.sites[0].origin = "雪".repeat(1000);
+        let incoming = testing::prepare(unpublished).unwrap();
+        let error = engine.plan_sites(&ProgramFacts::of(&incoming)).unwrap_err();
+        let PreparedRuntimeError::SiteConflict { evidence, .. } = error else {
+            panic!("recursive JSON root must refuse the installed Text root")
+        };
+        assert_eq!(evidence.boundary, SiteConflictBoundary::Wire);
+        assert_eq!(evidence.incoming.origin, format!("{}…", "雪".repeat(256)));
+        let ReplyTypeObservation::Data {
+            family,
+            argument_count,
+            constructor_count,
+        } = evidence.incoming.compared_type.unwrap().shape
+        else {
+            panic!("recursive data retains only its root observation")
+        };
+        assert_eq!(family.symbol.module, "Tidepool.Aeson.Value");
+        assert_eq!(family.symbol.occurrence, "Value");
+        assert_eq!((argument_count, constructor_count), (0, 6));
+        assert_eq!(engine.sites[&7].owner, owner);
+        assert_eq!(engine.programs.len(), 1);
+    }
+
+    #[test]
+    fn site_conflict_diagnostics_preserve_exact_nominal_versions() {
+        let existing = versioned_reply_program(1, 1);
+        let (engine, _) = PreparedEngine::bootstrap(existing).unwrap();
+        let incoming = versioned_reply_program(2, 2);
+        let mut unpublished = prepared_data::wire_from_prepared(&incoming);
+        unpublished.sites[0].site = 101;
+        let incoming = testing::prepare(unpublished).unwrap();
+        let error = engine.plan_sites(&ProgramFacts::of(&incoming)).unwrap_err();
+        let PreparedRuntimeError::SiteConflict { evidence, .. } = error else {
+            panic!("versioned request must retain site evidence")
+        };
+        assert_eq!(evidence.boundary, SiteConflictBoundary::Wire);
+        for (root, expected_version) in [
+            (evidence.existing.compared_type.unwrap(), [1; 16]),
+            (evidence.incoming.compared_type.unwrap(), [2; 16]),
+        ] {
+            assert_eq!(root.node, TypeNodeId(1));
+            let ReplyTypeObservation::Data { family, .. } = root.shape else {
+                panic!("versioned wrapper is a data root")
+            };
+            assert_eq!(family.symbol.module, "S4Session");
+            assert_eq!(family.symbol.occurrence, "Nested");
+            assert_eq!(family.version, TypeVersion::GhcAbi(expected_version));
+        }
+    }
+
     fn versioned_reply_program(revision: u8, image: u64) -> PreparedProgram {
         let mut wire = prepared_data::wire_from_prepared(&producer_program());
         let leaf = &mut wire.constructors[0];
