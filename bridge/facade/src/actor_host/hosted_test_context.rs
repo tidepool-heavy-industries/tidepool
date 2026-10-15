@@ -1389,6 +1389,30 @@ impl HostedTestRuntime {
         Self::start_configured(settings, transport, |_| {}).await
     }
 
+    /// Admit command resources in the actual delegated test service, using the
+    /// same run and host incarnation that own the hosted runtime.
+    pub(super) async fn start_configured_with_command_resources(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        policy: exomonad_node::command_resources::CommandResourcePolicy,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            true,
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            HostedChildMachines::Shared,
+            None,
+            None,
+            Some(policy),
+        )
+        .await
+    }
+
     pub(super) async fn start_configured(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
@@ -1403,6 +1427,7 @@ impl HostedTestRuntime {
             false,
             None,
             HostedChildMachines::Shared,
+            None,
             None,
             None,
         )
@@ -1426,6 +1451,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1445,6 +1471,7 @@ impl HostedTestRuntime {
             false,
             Some(diagnostics_root),
             HostedChildMachines::Shared,
+            None,
             None,
             None,
         )
@@ -1484,6 +1511,7 @@ impl HostedTestRuntime {
             child_machines,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1509,6 +1537,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1531,6 +1560,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             Some(assembled),
             None,
+            None,
         )
         .await
     }
@@ -1552,6 +1582,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             Some(source_layers),
+            None,
         )
         .await
     }
@@ -1567,6 +1598,7 @@ impl HostedTestRuntime {
         child_machines: HostedChildMachines,
         mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
         source_layers: Option<HostSourceLayersTransform>,
+        command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1695,6 +1727,17 @@ impl HostedTestRuntime {
         }
         let lease = HostIncarnationLease::claim(&config.run_directory)
             .map_err(|error| error.to_string())?;
+        if let Some(policy) = command_policy {
+            use exomonad_node::command_resources::{
+                CommandResourceClient, CommandResources, CommandRunIdentity,
+            };
+            let owner = CommandResources::delegated(policy).map_err(|error| error.to_string())?;
+            let identity = CommandRunIdentity::new(config.run_id.clone(), lease.incarnation().0)
+                .map_err(|error| error.to_string())?;
+            config.command_resources = Some(
+                CommandResourceClient::local(owner, identity).map_err(|error| error.to_string())?,
+            );
+        }
         let released = lease.release_observation();
         let observer = HostTestObserver::default();
         let (assembled, mut assembly) = oneshot::channel();

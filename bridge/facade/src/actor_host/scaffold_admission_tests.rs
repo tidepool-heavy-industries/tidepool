@@ -171,9 +171,22 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, scaffold)
-        .await
-        .unwrap();
+    let host = HostedTestRuntime::start_configured_with_command_resources(
+        &settings,
+        &provider,
+        exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 2 * exomonad_node::command_resources::GIB,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        },
+        |config| {
+            super::test_campaign::configure_command_path(config);
+            scaffold(config);
+        },
+    )
+    .await
+    .unwrap();
     host.run_scenario(|host| Box::pin(async move {
     let store = host.runtime.store();
     let origin = super::test_campaign::actor_output_origin(
