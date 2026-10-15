@@ -12606,7 +12606,9 @@ mod tests {
             &[&wire],
             &BTreeMap::new(),
         ));
-        for cross_inventory in [false, true] {
+        for (cross_inventory, late_before_merge) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let issuer = ArtifactInventory::default();
             let entries = vec![inspection.clone(), wire.clone()];
             let available = issuer
@@ -12621,7 +12623,12 @@ mod tests {
                 .bind_segment(&available, entries, &selection)
                 .unwrap();
             let mut cursor = issuer.empty_view();
-            for ordinal in [0, 118] {
+            let initial = if late_before_merge {
+                &[0, 118][..]
+            } else {
+                &[0][..]
+            };
+            for &ordinal in initial {
                 cursor = issuer
                     .admit_bound_target(
                         &mut fixed,
@@ -12636,7 +12643,13 @@ mod tests {
                     .unwrap()
                     .artifacts;
             }
-            let selected = cursor.select_roots(vec![inspection.descriptor.id]).unwrap();
+            let selected = available
+                .merge(&cursor)
+                .unwrap()
+                .interface_projection(&[inspection.descriptor.owner.clone()])
+                .unwrap();
+            assert!(available.artifact_ids().contains(&wire.descriptor.id));
+            assert!(selected.artifact_ids().contains(&inspection.descriptor.id));
             let before = selected.binding_dependencies();
             let exact_edge = before
                 .iter()
@@ -12653,8 +12666,8 @@ mod tests {
                                 required_ordinal: 5,
                             }
                 })
-                .expect("issuer-bound Inspection118 to Wire5 edge")
-                .clone();
+                .cloned();
+            assert_eq!(exact_edge.is_some(), late_before_merge);
             let destination = ArtifactInventory::default();
             let inventory = if cross_inventory {
                 &destination
@@ -12665,7 +12678,9 @@ mod tests {
                 .admit(&inventory.empty_view(), vec![entry("Unrelated", &[])])
                 .unwrap();
             let merged = selected.merge(&unrelated).unwrap();
-            assert!(merged.binding_dependencies().contains(&exact_edge));
+            if let Some(exact_edge) = &exact_edge {
+                assert!(merged.binding_dependencies().contains(exact_edge));
+            }
             assert!(before
                 .iter()
                 .all(|edge| merged.binding_dependencies().contains(edge)));
@@ -12691,20 +12706,46 @@ mod tests {
                     &requirements,
                 )
                 .unwrap();
-            assert!(projected.binding_dependencies().contains(&exact_edge));
+            if let Some(exact_edge) = &exact_edge {
+                assert!(projected.binding_dependencies().contains(exact_edge));
+            }
             assert!(!projected.namespace().contains_key(&wire.descriptor.id));
+            let demanded = issuer
+                .admit_bound_target(
+                    &mut fixed,
+                    &projected,
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
+                        &inspection,
+                        118,
+                    )]),
+                    vec![],
+                    &selection,
+                )
+                .unwrap()
+                .artifacts;
+            let edges = demanded.binding_dependencies();
+            let demanded_edge = edges.iter().find(|(source, target, label)| {
+                matches!(source, ArtifactBindingNode::Group(group)
+                    if group.binding.artifact == inspection.descriptor.id && group.original_ordinal == 118)
+                    && matches!(target, ArtifactBindingNode::Group(group)
+                        if group.binding.artifact == wire.descriptor.id && group.original_ordinal == 5)
+                    && *label == ArtifactDependency::NativeGroup { dependent_ordinal: 118, required_ordinal: 5 }
+            }).expect("first or repeated late demand retains exact issued native dependency");
+            if let Some(exact_edge) = &exact_edge {
+                assert_eq!(demanded_edge, exact_edge);
+            }
             let reopened_inventory = ArtifactInventory::default();
             let reopened = reopened_inventory
                 .recover_selection(
                     &reopened_inventory.empty_view(),
-                    projected.entries(),
-                    &projected.capture_graph_selection(),
-                    &projected.binding_dependencies(),
+                    demanded.entries(),
+                    &demanded.capture_graph_selection(),
+                    &demanded.binding_dependencies(),
                 )
                 .unwrap();
             assert_eq!(
                 reopened.binding_dependencies(),
-                projected.binding_dependencies()
+                demanded.binding_dependencies()
             );
             assert!(reopened
                 .native_groups_for_target(None, &[issued_source(&inspection, 118)])
