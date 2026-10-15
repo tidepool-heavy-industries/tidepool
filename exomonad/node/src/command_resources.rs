@@ -1796,6 +1796,10 @@ impl CommandResources {
             )
         };
         let mut directory_removed = false;
+        let mut resource_exhausted = matches!(
+            state.entries[&key].current(),
+            CommandResourceStatus::ResourceExhausted
+        );
         if let Some(directory) = directory {
             let cleanup = (|| -> std::io::Result<bool> {
                 match std::fs::symlink_metadata(&directory) {
@@ -1807,6 +1811,8 @@ impl CommandResources {
                     Ok(_) => {}
                 }
                 if read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
+                    resource_exhausted |=
+                        read_counter(&directory.join("memory.events"), "oom_kill")? > 0;
                     match std::fs::remove_dir(&directory) {
                         Ok(()) => return Ok(true),
                         Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {}
@@ -1826,7 +1832,9 @@ impl CommandResources {
             released |= directory_removed;
         }
         if released {
-            let disposition = if started {
+            let disposition = if resource_exhausted {
+                CommandResourceStatus::ResourceExhausted
+            } else if started {
                 CommandResourceStatus::Cancelled
             } else {
                 CommandResourceStatus::CancelledBeforeStart
@@ -2574,6 +2582,29 @@ mod tests {
         assert_eq!(
             owner.cancel("actor-1", "command-1").unwrap(),
             CommandResourceStatus::Cancelled
+        );
+        assert_eq!(owner.observation().retained_allocations, 0);
+    }
+
+    #[test]
+    fn cancelling_a_drained_oom_allocation_preserves_observed_resource_exhaustion() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation_with_oom(root.path(), "actor-1", "command-1", 1, 1);
+        let owner = owner(root.path());
+        owner.reconcile(allocated_events(true)).unwrap();
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::ResourceExhausted
+        );
+        let directory = root.path().join("actor-1/command-1");
+        // Simulate the kernel-confirmed removal after the observed OOM drains.
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(
+            owner.cancel("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::ResourceExhausted
         );
         assert_eq!(owner.observation().retained_allocations, 0);
     }

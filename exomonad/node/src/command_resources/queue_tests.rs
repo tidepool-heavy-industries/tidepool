@@ -533,3 +533,16 @@ fn generated_queue_histories_match_recomputed_accounting() {
         panic!("command resource queue history property failed: {error}");
     }
 }
+
+#[test]
+fn combined_pool_capacity_does_not_saturate_before_subtracting_usage() {
+    let mut queue = Queue::new(u64::MAX, u64::MAX, u64::MAX);
+    let first = key("first");
+    let second = key("second");
+    queue.recover_active(first.clone(), u64::MAX).unwrap();
+    queue.recover_active(second, u64::MAX).unwrap();
+    queue.release(&first);
+    let next = key("next");
+    queue.push(next.clone(), 1);
+    assert_eq!(queue.next(), Some((next, 1)));
+}

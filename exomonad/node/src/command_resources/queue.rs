@@ -67,20 +67,17 @@ impl Queue {
     }
 
     pub(super) fn next(&mut self) -> Option<(Key, u64)> {
-        let remaining = self
-            .general
-            .saturating_add(self.protected)
-            .saturating_sub(self.general_used)
-            .saturating_sub(self.protected_used)
-            .saturating_sub(self.retained_custody);
+        let remaining = (u128::from(self.general) + u128::from(self.protected))
+            .saturating_sub(u128::from(self.general_used) + u128::from(self.protected_used))
+            .saturating_sub(u128::from(self.retained_custody));
         let protected = self.waiting.iter().position(|(_, bytes)| {
-            *bytes <= remaining
+            u128::from(*bytes) <= remaining
                 && *bytes <= self.small
                 && *bytes <= self.protected - self.protected_used
         });
         let (position, pool) = if let Some(position) = protected {
             (position, Pool::Protected)
-        } else if self.waiting.front()?.1 <= remaining
+        } else if u128::from(self.waiting.front()?.1) <= remaining
             && self.waiting.front()?.1 <= self.general - self.general_used
         {
             (0, Pool::General)
