@@ -101,8 +101,8 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
         assert_ne!(edited, probe);
         std::fs::write(campaign._repository.path().join(".exomonad/Project/RecordingReloadProbe.hs"), edited).unwrap();
         let published = displayed(campaign, endpoint.as_ref(),
-            "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished before after changed _ -> revisionIdentity before /= revisionIdentity after && \"Project.RecordingReloadProbe\" `elem` changed; _ -> False })").await;
-        assert_eq!(published, "True");
+            "outcome <- reloadSource []\ndisplay (case outcome of { Right (ReloadPublished before after changed _) | revisionIdentity before /= revisionIdentity after && \"Project.RecordingReloadProbe\" `elem` changed -> \"published\"; _ -> show outcome })").await;
+        assert_eq!(published, "published", "reload must publish the edited module: {published}");
         let replayed = displayed(campaign, endpoint.as_ref(),
             "import qualified Project.RecordingReloadProbe as Probe\nreplayed <- Probe.replaySaved \".exomonad/state/jev-observation.json\"\ndisplay (show replayed)").await;
         assert_eq!(replayed, "Right 36", "new source supplies the payload; archive supplies only the observation");
