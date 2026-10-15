@@ -3103,12 +3103,15 @@ mod tests {
                         installation.request_snapshot().is_ok(),
                         "the old installation remains published"
                     );
-                    assert!(
-                        host.tool_surface().await.is_err(),
-                        "closed admission must reject a new request"
-                    );
+                    let rejected = host.tool_surface().await;
+                    let admission_closed = matches!(&rejected, Err(EmbeddedError::AdmissionClosed));
+                    let refusal = format!("{:?}", rejected.as_ref().err());
                     drop(held_store_transaction);
                     retiring.await.unwrap().unwrap();
+                    assert!(
+                        admission_closed,
+                        "closed admission must retain its exact cancellation category: {refusal}"
+                    );
                 })
             })
             .await;
