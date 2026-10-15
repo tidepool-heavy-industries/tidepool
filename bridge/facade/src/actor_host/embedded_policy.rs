@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub(super) struct EmbeddedPolicyInstallation {
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
-    projection: Result<Arc<EmbeddedToolProjection>, String>,
+    projection: std::sync::Mutex<Option<CachedToolProjection>>,
     observation: exomonad_actor::ActorRuntimeObservationHandle,
 }
 
@@ -37,11 +37,10 @@ impl EmbeddedPolicyInstallation {
         policy: Arc<dyn ResidentToolEndpoint>,
         observation: exomonad_actor::ActorRuntimeObservationHandle,
     ) -> Self {
-        let projection = project_tools(policy.tools()).map(Arc::new);
         Self {
             actor,
             policy,
-            projection,
+            projection: std::sync::Mutex::new(None),
             observation,
         }
     }
@@ -70,14 +69,22 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
-        let declared = self.policy.tools();
-        let issued = policy.tools();
-        if !std::ptr::eq(declared, issued) && declared != issued {
-            return Err(ResidentToolError::Unavailable(
-                "request endpoint changed its installed tool declarations".into(),
-            ));
+        // Project only the declarations retained by this request's endpoint.
+        // The cache contains metadata, never an execution-owning endpoint.
+        let mut cached = self.projection.lock().unwrap();
+        let declared = policy.tools();
+        if cached
+            .as_ref()
+            .is_none_or(|cached| cached.declarations != declared)
+        {
+            *cached = Some(CachedToolProjection {
+                declarations: declared.to_vec(),
+                projection: project_tools(declared).map(Arc::new),
+            });
         }
-        let projection = self
+        let projection = cached
+            .as_ref()
+            .unwrap()
             .projection
             .as_ref()
             .map_err(|error| ResidentToolError::Unavailable(error.clone()))?
@@ -102,13 +109,20 @@ pub(super) struct EmbeddedPolicySnapshot {
     schemas: Arc<HashMap<String, FunctionToolSchema>>,
 }
 
+struct CachedToolProjection {
+    declarations: Vec<HostedTool>,
+    projection: Result<Arc<EmbeddedToolProjection>, String>,
+}
+
 struct EmbeddedToolProjection {
     manifest: Arc<harness::embedding::EmbeddedToolManifest>,
     schemas: Arc<HashMap<String, FunctionToolSchema>>,
 }
 
 impl EmbeddedPolicySnapshot {
-    pub(super) fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
+    pub(super) fn request_generation(
+        &self,
+    ) -> Option<tidepool_runtime::session::NotebookGenerationId> {
         self.policy.request_generation()
     }
 
@@ -273,6 +287,11 @@ fn project_model_result(
         }
     }
     Ok(projected)
+}
+
+/// Validate the transport contract before a generation can be published.
+pub(super) fn validate_tools(tools: &[HostedTool]) -> Result<(), String> {
+    project_tools(tools).map(|_| ())
 }
 
 fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String> {
@@ -529,7 +548,9 @@ mod tests {
     }
 
     impl ResidentToolEndpoint for ProbePolicy {
-        fn request_instructions(&self) -> Option<&str> { Some(self.marker) }
+        fn request_instructions(&self) -> Option<&str> {
+            Some(self.marker)
+        }
 
         fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
             Ok(self
@@ -723,8 +744,12 @@ mod tests {
         current: std::sync::Mutex<Arc<dyn ResidentToolEndpoint>>,
     }
     impl ResidentToolEndpoint for PromptOnlyReload {
-        fn tools(&self) -> &[HostedTool] { &self.tools }
-        fn instructions(&self) -> Option<&str> { None }
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
         fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
             Ok(self.current.lock().unwrap().clone())
         }
@@ -735,23 +760,91 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_only_reload_keeps_cached_manifest_but_selects_new_prompt_and_dispatcher() {
-        let current = Arc::new(PromptOnlyReload { tools:declared_tools(), current:std::sync::Mutex::new(policy("A")) });
+        let current = Arc::new(PromptOnlyReload {
+            tools: declared_tools(),
+            current: std::sync::Mutex::new(policy("A")),
+        });
         let installation = EmbeddedPolicyInstallation::new(
-            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)), current.clone());
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
+            current.clone(),
+        );
         let first = installation.request_snapshot().unwrap();
         *current.current.lock().unwrap() = policy("B");
         let second = installation.request_snapshot().unwrap();
-        assert!(Arc::ptr_eq(&first.manifest,&second.manifest));
-        assert_eq!(first.request_instructions(),Some("A"));
-        assert_eq!(second.request_instructions(),Some("B"));
-        for (snapshot,expected) in [(first,"A"),(second,"B")] {
-            let result = snapshot.dispatch("haskell".into(),ToolArguments::Raw("1".into()),context(),None,None).await.unwrap();
-            assert_eq!(result["marker"],expected);
+        assert!(Arc::ptr_eq(&first.manifest, &second.manifest));
+        assert_eq!(first.request_instructions(), Some("A"));
+        assert_eq!(second.request_instructions(), Some("B"));
+        for (snapshot, expected) in [(first, "A"), (second, "B")] {
+            let result = snapshot
+                .dispatch(
+                    "haskell".into(),
+                    ToolArguments::Raw("1".into()),
+                    context(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["marker"], expected);
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn issued_surface_histories_keep_schema_schedule_prompt_and_dispatch_together(
+            history in proptest::collection::vec((1usize..6, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY), 2..12)
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let current = Arc::new(PromptOnlyReload {
+                tools: declared_tools(),
+                current: std::sync::Mutex::new(policy("initial")),
+            });
+            let installation = EmbeddedPolicyInstallation::new(
+                exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)), current.clone());
+            let mut issued = Vec::new();
+            for (count, renamed, reverse, synchronous) in history {
+                let marker = if synchronous { "sync" } else { "async" };
+                let mut tools = (0..count).map(|index| HostedTool::Function(ToolDeclaration {
+                    schedule: if synchronous { exomonad_tool::ToolScheduling::BeforeNextInference } else { exomonad_tool::ToolScheduling::Async },
+                    implementation: Default::default(),
+                    effect_keys: Vec::new(),
+                    name: format!("{}_{}", if renamed { "new" } else { "old" }, index),
+                    description: marker.into(),
+                    input_schema: json!({"type":"object","properties":{"value":{"type":if renamed { "integer" } else { "string" }}},"required":["value"],"additionalProperties":false}),
+                    output_schema: None,
+                    kind: ToolKind::Call,
+                })).collect::<Vec<_>>();
+                if reverse { tools.reverse(); }
+                *current.current.lock().unwrap() = policy_with_tools(marker, tools.clone());
+                let snapshot = installation.request_snapshot().unwrap();
+                let repeated = installation.request_snapshot().unwrap();
+                proptest::prop_assert!(Arc::ptr_eq(&snapshot.manifest, &repeated.manifest));
+                issued.push((snapshot, tools, marker, renamed));
+                // Every earlier request remains usable after additions, removals,
+                // renaming, reordering, schema changes and scheduling changes.
+                for (snapshot, tools, marker, integer) in &issued {
+                    proptest::prop_assert_eq!(snapshot.policy.tools(), tools.as_slice());
+                    proptest::prop_assert_eq!(snapshot.request_instructions(), Some(*marker));
+                    let names = snapshot.tools().iter().map(|tool| tool["name"].as_str().unwrap()).collect::<Vec<_>>();
+                    proptest::prop_assert_eq!(names, tools.iter().map(HostedTool::name).collect::<Vec<_>>());
+                    for tool in tools {
+                        let projected = snapshot.tools().iter().find(|entry| entry["name"] == tool.name()).unwrap();
+                        proptest::prop_assert_eq!(&projected["async"], &json!(tool.scheduling() == exomonad_tool::ToolScheduling::Async));
+                        let value = if *integer { json!(17) } else { json!("retained") };
+                        let result = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":value})), context(), None, None)).unwrap();
+                        proptest::prop_assert_eq!(&result["marker"], &json!(marker));
+                        proptest::prop_assert_eq!(&result["arguments"]["structured"]["value"], &value);
+                        let wrong = if *integer { json!("wrong") } else { json!(17) };
+                        proptest::prop_assert!(runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":wrong})), context(), None, None)).is_err());
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn requests_share_the_installed_manifest_and_refuse_changed_declarations() {
+    fn requests_share_unchanged_projection_and_accept_new_issued_declarations() {
         let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7));
         let installation = EmbeddedPolicyInstallation::new(actor, policy("first"));
         let first = installation.request_snapshot().unwrap();
@@ -762,10 +855,11 @@ mod tests {
             marker: "original",
             request_policy: Some(policy_with_tools("changed", vec![])),
         });
-        assert!(matches!(
-            EmbeddedPolicyInstallation::new(actor, incompatible).request_snapshot(),
-            Err(ResidentToolError::Unavailable(_))
-        ));
+        let changed = EmbeddedPolicyInstallation::new(actor, incompatible)
+            .request_snapshot()
+            .unwrap();
+        assert!(changed.tools().is_empty());
+        assert!(!first.tools().is_empty());
     }
 
     #[tokio::test]
@@ -775,7 +869,7 @@ mod tests {
             .run_scenario(|campaign| {
                 Box::pin(async move {
                     // Take the real installed declarations, rather than fixtures that copy
-                    // the three actor-local schemas and can drift from their owners.
+                    // the actor-local schema and can drift from its owner.
                     let tools = campaign.root_installation.policy.tools().to_vec();
                     let snapshot = EmbeddedPolicyInstallation::new(
                         campaign.actor.identity(),
@@ -783,11 +877,7 @@ mod tests {
                     )
                     .request_snapshot()
                     .unwrap();
-                    for (name, field) in [
-                        ("status", "view"),
-                        ("reload_agent_spec", "also_check"),
-                        ("reload_helpers", "also_check"),
-                    ] {
+                    for (name, field) in [("status", "view")] {
                         let declaration = snapshot
                             .tools()
                             .iter()
@@ -864,6 +954,7 @@ mod tests {
             output_schema: None,
             kind: ToolKind::Call,
         });
+        assert!(validate_tools(std::slice::from_ref(&unsupported)).is_err());
         let installation = EmbeddedPolicyInstallation::new(
             exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
             policy_with_tools("never-dispatched", vec![unsupported]),
@@ -872,6 +963,49 @@ mod tests {
             installation.request_snapshot(),
             Err(ResidentToolError::Unavailable(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn rejected_projection_preserves_issued_requests_and_allows_a_later_valid_surface() {
+        let current = Arc::new(PromptOnlyReload {
+            tools: declared_tools(),
+            current: std::sync::Mutex::new(policy("A")),
+        });
+        let installation = EmbeddedPolicyInstallation::new(
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
+            current.clone(),
+        );
+        let issued = installation.request_snapshot().unwrap();
+        let mut invalid = declared_tools();
+        let HostedTool::Function(tool) = &mut invalid[1] else {
+            unreachable!()
+        };
+        tool.input_schema =
+            json!({"type":"object","properties":{"value":{"type":"string","pattern":".*"}}});
+        assert!(validate_tools(&invalid).is_err());
+        // The pure admission check cannot mutate the active endpoint or an
+        // already-issued projection. Publication remains the actor owner's job.
+        let unchanged = installation.request_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&issued.manifest, &unchanged.manifest));
+        assert_eq!(unchanged.request_instructions(), Some("A"));
+        let mut valid = declared_tools();
+        valid.remove(0);
+        *current.current.lock().unwrap() = policy_with_tools("B", valid);
+        let next = installation.request_snapshot().unwrap();
+        assert_eq!(next.tools().len(), 1);
+        assert_eq!(next.tools()[0]["name"], "lookup");
+        assert_eq!(next.request_instructions(), Some("B"));
+        let old = issued
+            .dispatch(
+                "haskell".into(),
+                ToolArguments::Raw("retained".into()),
+                context(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(old["marker"], "A");
     }
 
     #[tokio::test]

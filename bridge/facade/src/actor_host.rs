@@ -3764,6 +3764,7 @@ fn host_workbench_source(
         )
         .with_toolset_support_roots(toolset_support)
         .with_installed_effect_support(host_context_support())
+        .with_tool_surface_validator(Arc::new(embedded_policy::validate_tools))
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
         .with_imports("qualified Tidepool.Command as Cmd");

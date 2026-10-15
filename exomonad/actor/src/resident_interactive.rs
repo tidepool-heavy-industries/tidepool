@@ -18,10 +18,16 @@ pub struct ResidentInteractivePolicy {
     client: ResidentToolClient,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     issued_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    declarations: Arc<parking_lot::Mutex<Option<RequestDeclarations>>>,
+}
+
+struct RequestDeclarations {
+    installed: Arc<[HostedTool]>,
+    exposed: Arc<[HostedTool]>,
 }
 
 impl ResidentInteractivePolicy {
-    /// Project only the reserved status and reload controls of this incarnation.
+    /// Project only the reserved status control of this incarnation.
     /// This constructor does not expose Haskell or other authored AgentSpec tools.
     /// Retain `LocalResidentDeployment::PolicyInstalled`'s installation policy
     /// for authored tools. Native notebook tests use the workbench client's
@@ -51,34 +57,28 @@ impl ResidentInteractivePolicy {
         tools: Vec<HostedTool>,
         installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     ) -> Self {
-        let custom = tools.into_iter().filter(|tool| {
-            !matches!(
-                tool.name(),
-                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
-            )
-        });
+        let custom = tools
+            .into_iter()
+            .filter(|tool| !matches!(tool.name(), crate::status_tool::STATUS_TOOL));
         Self {
             tools: std::iter::once(crate::status_tool::declaration())
-                .chain(std::iter::once(crate::reload_tool::declaration()))
                 .chain(custom)
                 .collect::<Vec<_>>()
                 .into(),
             client: ResidentToolClient::local(actor),
             installed_tools,
             issued_tools: None,
+            declarations: Arc::default(),
         }
     }
 
     fn with_client(client: ResidentToolClient) -> Self {
         Self {
-            tools: vec![
-                crate::status_tool::declaration(),
-                crate::reload_tool::declaration(),
-            ]
-            .into(),
+            tools: vec![crate::status_tool::declaration()].into(),
             client,
             installed_tools: Arc::default(),
             issued_tools: None,
+            declarations: Arc::default(),
         }
     }
 }
@@ -96,10 +96,7 @@ fn builtin_request(
 }
 
 fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
-    )
+    matches!(name, crate::status_tool::STATUS_TOOL)
 }
 
 fn haskell_tool_instructions() -> &'static str {
@@ -120,11 +117,34 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             .ok_or_else(|| {
                 ResidentToolError::Unavailable("actor has no installed tool/source snapshot".into())
             })?;
+        let tools = if let Some(installed) = issued_tools.installation().tools() {
+            let installed = installed.declaration_snapshot();
+            let mut cached = self.declarations.lock();
+            if let Some(cached) = cached
+                .as_ref()
+                .filter(|cached| Arc::ptr_eq(&cached.installed, &installed))
+            {
+                cached.exposed.clone()
+            } else {
+                let exposed: Arc<[HostedTool]> = std::iter::once(crate::status_tool::declaration())
+                    .chain(installed.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .into();
+                *cached = Some(RequestDeclarations {
+                    installed,
+                    exposed: exposed.clone(),
+                });
+                exposed
+            }
+        } else {
+            self.tools.clone()
+        };
         Ok(Arc::new(Self {
-            tools: self.tools.clone(),
+            tools,
             client: self.client.clone(),
             installed_tools: self.installed_tools.clone(),
             issued_tools: Some(issued_tools),
+            declarations: self.declarations.clone(),
         }))
     }
 
@@ -259,7 +279,12 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ))
                 })?;
                 let admitted = selected.admit(arguments)?;
-                Ok(crate::ActorWorkbenchInvocation::installed(admitted, Default::default(), capture, context))
+                Ok(crate::ActorWorkbenchInvocation::installed(
+                    admitted,
+                    Default::default(),
+                    capture,
+                    context,
+                ))
             })();
             let prepared = match validated {
                 Ok(validated) => validated,
@@ -298,10 +323,7 @@ mod tests {
 
     #[test]
     fn builtins_have_an_explicit_route_separate_from_installed_endpoints() {
-        for builtin in [
-            crate::status_tool::declaration(),
-            crate::reload_tool::declaration(),
-        ] {
+        for builtin in [crate::status_tool::declaration()] {
             assert!(is_builtin(builtin.name()));
             let request = builtin_request(
                 builtin.name(),
@@ -312,6 +334,7 @@ mod tests {
             assert!(builtin_request(builtin.name(), ToolArguments::Raw("source".into())).is_err());
         }
         assert!(!is_builtin("haskell"));
+        assert!(!is_builtin("reload"));
     }
 
     #[test]
