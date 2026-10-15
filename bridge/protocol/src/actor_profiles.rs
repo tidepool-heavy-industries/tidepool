@@ -597,7 +597,9 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     }
     hs.push_str("effects\n");
     hs.push_str("\nraiseSync :: Eff effects a -> Eff (SyncEffects effects) a\nraiseSync = ");
-    for _ in &invocation { hs.push_str("raise . "); }
+    for _ in &invocation {
+        hs.push_str("raise . ");
+    }
     hs.push_str("id\n");
     hs.push_str("\ntype family AsyncEffects (effects :: [Type -> Type]) :: Constraint where\n  AsyncEffects '[] = ()\n");
     for effect in &invocation {

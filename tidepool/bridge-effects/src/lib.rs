@@ -272,6 +272,7 @@ mod context_constructor_tests {
                 row(10, "GHC.Types", "[]", 0),
                 row(11, "GHC.Types", ":", 2),
                 row(12, "Data.Text", "Text", 3),
+                row(13, "GHC.Types", "I#", 1),
             ])
             .unwrap();
         for policy in [RlPolicy::CompatibleOnly, RlPolicy::AcceptCacheInvalidation] {
