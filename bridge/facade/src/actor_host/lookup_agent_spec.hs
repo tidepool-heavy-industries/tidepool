@@ -8,8 +8,7 @@ import qualified Project.Tools as Tools
 import Tidepool.Effects.Core (ActorContext, BoundWorktree, Commands, Jev, Lookup, Console, Notifications, Reflect)
 import Tidepool.Agent.Reply (Replies)
 
--- The lookup campaign keeps the shipped tools while isolating their lookup
--- selection from the workspace Watchdog's independent after-tool judgments.
+-- The lookup campaign uses the shipped tools with the default no-hook policy.
 agentSpec ::
   ( KnownToolEffects effects, AsyncEffects effects
   , Member Commands effects, Member Lookup effects, Member Console effects, Member Jev effects

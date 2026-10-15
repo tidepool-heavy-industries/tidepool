@@ -54,6 +54,9 @@ observeHosted = run . handleRelay pure (\request resume -> case request of
   DisplaySelectableWith _ _ -> resume (1,1,1)
   _ -> error "unexpected hosted lookup presentation effect") . observeLookup answer
 
+captureText :: Tools.Selection '[Lookup] () -> Tools.LookupArguments -> Eff '[Lookup] T.Text
+captureText select arguments = Tools.renderCapture <$> Tools.captureWith select arguments
+
 check :: String -> Bool -> IO ()
 check name value = unless value (fail name)
 
@@ -73,8 +76,8 @@ main = do
     (case hostedResult of
       Right (ToolDispatchSuccess value _) -> value == toJSON (Tools.LookupCaptureReceipt 1 1 1 "frozen-view")
       _ -> False)
-  let select _ values = pure (Tools.rankCandidates (zip values [2,3,1,3,2,3]))
-      (requests, output) = observe (Tools.executeWith select (Tools.LookupArguments ["root"]))
+  let select _ values = pure (Tools.SelectionSucceeded () (map (Tools.packedIdentity . (values !!)) [1,3,5,0]))
+      (requests, output) = observe (captureText select (Tools.LookupArguments ["root"]))
   check "one original batch and one nonrecursive follow-up" (length requests == 2)
   check "selected whole declarations with deterministic score order"
     (lookupQueries (requests !! 1) == ["Fixture.Type2", "Fixture.Type4", "Fixture.Type6", "Fixture.Type1"])
@@ -84,12 +87,12 @@ main = do
   check "original miss retained with bounded additions"
     ("no match:" `T.isInfixOf` output && T.count "related to:" output == 4)
   let (none, unchanged) = observe
-        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["root"]))
+        (captureText (\_ _ -> pure (Tools.SelectionSucceeded () [])) (Tools.LookupArguments ["root"]))
   check "abstention preserves original without a follow-up"
     (length none == 1 && not ("Related declarations" `T.isInfixOf` unchanged))
-  let fabricated = LookupCandidate "invented" ["root"] "invented" True Nothing
-      (guarded, guardedOutput) = observe (Tools.executeWith
-        (\_ values -> pure (fabricated : map (\candidate -> candidate {candidateOrigins = ["forged"]}) values ++ values)) (Tools.LookupArguments ["root"]))
+  let foreignId = Tools.packedIdentity (last (Tools.packingCandidates (Tools.packCandidates "immutable-view" (candidates ++ [LookupCandidate "invented" ["root"] "invented" True Nothing]))))
+      (guarded, guardedOutput) = observe (captureText
+        (\_ values -> pure (Tools.SelectionSucceeded () (foreignId : map Tools.packedIdentity values ++ map Tools.packedIdentity values))) (Tools.LookupArguments ["root"]))
   check "custom selector cannot invent a lookup or lift the cap"
     (lookupQueries (guarded !! 1) == map candidateQuery (take 4 candidates))
   check "selector metadata is canonicalized before display"
@@ -101,7 +104,7 @@ main = do
               [(entry query) {lookupDeclaration = T.replicate 10000 "x"}] False)
             | query <- lookupQueries request]}
       (_, bounded) = observeWith oversized
-        (Tools.executeWith select (Tools.LookupArguments ["root"]))
+        (captureText select (Tools.LookupArguments ["root"]))
   check "oversized additions leave bounded recovery names"
     ("Fixture.Type2" `T.isInfixOf` bounded
       && "lookupRaw (LookupRequest" `T.isInfixOf` bounded && T.length bounded < 8192)
@@ -112,7 +115,7 @@ main = do
           [(entry query) {lookupExample = Just (example source)}] False)
         | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, twoExamples) = observeWith (exampleAnswer "Cmd.start command\n")
-        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first", "second"]))
+        (captureText (\_ _ -> pure (Tools.SelectionSucceeded () [])) (Tools.LookupArguments ["first", "second"]))
   check "only first direct hit carries one complete example"
     (T.count "```haskell" twoExamples == 1
       && T.count "Prerequisites: Project/Helper.hs" twoExamples == 1
@@ -124,13 +127,13 @@ main = do
               [(entry query) {lookupExample = Just (example "Cmd.start command\n")}] False)
             | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, relatedOutput) = observeWith relatedExample
-        (Tools.executeWith select (Tools.LookupArguments ["root"]))
+        (captureText select (Tools.LookupArguments ["root"]))
   check "related declarations do not display examples"
     ("Related declarations" `T.isInfixOf` relatedOutput
       && not ("```haskell" `T.isInfixOf` relatedOutput))
   let unicodeSource = T.replicate 700 "😀"
       (_, omittedExample) = observeWith (exampleAnswer unicodeSource)
-        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+        (captureText (\_ _ -> pure (Tools.SelectionSucceeded () [])) (Tools.LookupArguments ["first"]))
   check "oversized UTF-8 example retains complete source and requirements"
     (unicodeSource `T.isInfixOf` omittedExample
       && "checks/example.hs" `T.isInfixOf` omittedExample
@@ -143,7 +146,7 @@ main = do
           [(entry query) {lookupExample = Just longExample}] False)
         | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, boundedMetadata) = observeWith withLongMetadata
-        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+        (captureText (\_ _ -> pure (Tools.SelectionSucceeded () [])) (Tools.LookupArguments ["first"]))
   check "multibyte requirements and complete source survive rendering"
     (unicodeRequirements `T.isInfixOf` boundedMetadata
       && "Project/Helper.hs" `T.isInfixOf` boundedMetadata
@@ -157,7 +160,7 @@ main = do
           [(entry query) {lookupExample = Just maximal}] False)
         | query <- lookupQueries request] [] "frozen-view" Nothing "fixture-capture" (LookupSearchReceipt "frozen-view" LookupSearchCaptured [] [] (LookupDiscoveryNotRun LookupSearchUnavailable))
       (_, maximalOutput) = observeWith maximalAnswer
-        (Tools.executeWith (\_ _ -> pure []) (Tools.LookupArguments ["first"]))
+        (captureText (\_ _ -> pure (Tools.SelectionSucceeded () [])) (Tools.LookupArguments ["first"]))
       (_, maximalBlock) = T.breakOn "\n  Example: " maximalOutput
   check "complete captured source survives large metadata"
     (unicodeSource `T.isInfixOf` maximalBlock && not ("Code omitted" `T.isInfixOf` maximalBlock))

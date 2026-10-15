@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 module LookupFixture where
 
@@ -10,6 +11,9 @@ import Tidepool.Effects (lookupRaw)
 import Tidepool.Effects.Core
 import qualified Tidepool.Lookup.Tools as Tools
 import qualified Project.Lookup as Project
+import qualified Jev.Operators as J
+import Tidepool.Aeson.FromJSON (eitherDecode)
+import Tidepool.Aeson.Value (Value)
 
 data First = First HiddenSecondDegree
 data Second = Second
@@ -30,12 +34,10 @@ candidate name = LookupCandidate name ["root"] "brief" True Nothing
 
 -- Ties retain source order; out-of-rubric values must not outrank evidence.
 rankingCheck :: Bool
-rankingCheck = map candidateQuery (Tools.rankCandidates
-  [(candidate "low", 1.99), (candidate "first", 2),
-   (candidate "second", 2), (candidate "invalid", 4),
-   (candidate "nan", 0 / 0), (candidate "top", 3),
-   (candidate "third", 2), (candidate "fourth", 2)])
-  == ["top", "first", "second", "third"]
+rankingCheck = map Tools.candidateOrdinal (Project.rankCandidates (zip
+  (Tools.packingCandidates (Tools.packCandidates "immutable-view" (map candidate
+    ["low", "first", "second", "invalid", "nan", "top", "third", "fourth"])))
+  [1.99, 2, 2, 4, 0 / 0, 3, 2, 2])) == [6, 2, 3, 7]
 
 -- Supplementary Unicode scalars count as one, and oversized metadata cannot
 -- crowd out a later small candidate or defeat the aggregate scoring budget.
@@ -43,20 +45,23 @@ packingCheck :: Bool
 packingCheck =
   let unicode = (candidate "unicode") {candidateSummary = T.replicate 3000 "😀"}
       tooLarge = candidate (T.replicate 40000 "x")
-      packed = Tools.packCandidates [unicode, unicode, tooLarge, candidate "small"]
-      many = Tools.packCandidates
+      packed = packedValues [unicode, unicode, tooLarge, candidate "small"]
+      many = packedValues
         [(candidate (T.pack (show n))) {candidateSummary = T.replicate 2048 "😀"}
         | n <- [1..200 :: Int]]
   in map candidateQuery packed == ["unicode", "small"]
     && map (length . T.unpack . candidateSummary) packed == [2048, 5]
     && sum (map (length . T.unpack . Tools.candidateText) many) <= 8192 * 4
     && length many <= 128
-    && length (Tools.packCandidates
+    && length (packedValues
       [ (candidate "Second") {candidateReference = Just
           (LookupReference "LookupFixture" "Second" LookupTypeNamespace)}
       , (candidate "Second") {candidateReference = Just
           (LookupReference "LookupFixture" "Second" LookupConstructorNamespace)}
       ]) == 2
+
+packedValues :: [LookupCandidate] -> [LookupCandidate]
+packedValues = map Tools.packedCandidate . Tools.packingCandidates . Tools.packCandidates "immutable-view"
 
 rawLookupCheck :: Member Lookup effects => Eff effects Bool
 rawLookupCheck = do
@@ -79,7 +84,7 @@ exampleIdentityCheck = do
 
 renderedExampleCheck :: Member Lookup effects => Eff effects Bool
 renderedExampleCheck = do
-  rendered <- Tools.executeWith (\_ _ -> pure [])
+  rendered <- Tools.renderCapture <$> Tools.captureWith (\_ _ -> pure (Tools.SelectionSucceeded () []))
     (Tools.LookupArguments ["Cmd.start", "Cmd.start"])
   captured <- lookupRaw (LookupRequest ["Cmd.start"] False Nothing 0 [])
   pure (case lookupResults captured of
@@ -92,7 +97,9 @@ renderedExampleCheck = do
     _ -> False)
 
 emptySelectionCheck :: (Member Jev effects, Member Reflect effects) => Eff effects Bool
-emptySelectionCheck = null <$> Project.select [] []
+emptySelectionCheck = do
+  outcome <- Project.select [] []
+  pure (case outcome of Tools.SelectionSkipped Tools.NoCandidates -> True; _ -> False)
 
 -- The type and constructor have the same spelling but distinct compiler IDs.
 namespaceCheck :: Member Lookup effects => Eff effects Bool
@@ -107,3 +114,25 @@ namespaceCheck = do
       lookupKind typeEntry == LookupType && lookupKind constructorEntry == LookupConstructor
         && lookupKind scopeEntry == LookupConstructor
     _ -> False)
+
+captureEvidence :: (Member Lookup effects, Member Jev effects, Member Reflect effects)
+  => Eff effects (Tools.LookupCapture Project.SelectionEvidence)
+captureEvidence = Project.capture (Tools.LookupArguments ["LookupFixture.relatedRoot"])
+
+-- This equality must run on the prepared runtime, whose JSON text decoder is
+-- real. The native GHC tests deliberately do not claim transport-byte evidence.
+recordingMatches :: Tools.LookupCapture Project.SelectionEvidence -> T.Text -> Bool
+recordingMatches captured actualWire = case (Tools.captureSelection captured, eitherDecode actualWire :: Either T.Text Value) of
+  (Tools.SelectionSucceeded evidence _, Right request) ->
+    case (J.recordings (Project.selectionEvaluation evidence), J.result (Project.selectionEvaluation evidence),
+          J.observations (Project.selectionEvaluation evidence)) of
+      ([recording], Right scores, [observation]) -> J.recordedRequest recording == request
+        && length scores == length (Tools.packingCandidates (Tools.capturePacking captured))
+        && all (\score -> (Project.scoreRelevance score).expectation == 3
+          && (Project.scoreRelevance score).confidence == 1
+          && sum (map snd ((Project.scoreRelevance score).masses)) == 1) scores
+        && case J.observationResult observation of
+          Right response -> J.resolvedModel response == "jev-test"
+          Left _ -> False
+      _ -> False
+  _ -> False

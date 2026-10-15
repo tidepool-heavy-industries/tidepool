@@ -169,8 +169,6 @@ impl JevBackend for SectionScoreJev {
 
 /// Scores every offered declaration as directly useful, or fails on demand.
 /// This tests selection limits without depending on a provider's judgment.
-/// Every actor's after-tool watchdog also asks this backend, one noul battery
-/// per tool call; those answer as untriggered and are counted separately.
 struct LookupScoreJev {
     requests: Mutex<Vec<serde_json::Value>>,
     fail: Mutex<bool>,
@@ -178,14 +176,14 @@ struct LookupScoreJev {
 }
 
 impl LookupScoreJev {
-    /// The candidate-scoring batches received, without the watchdog's.
+    /// Candidate-scoring batches from the captured query occurrence.
     fn scoring_requests(&self) -> Vec<serde_json::Value> {
         self.requests
             .lock()
             .iter()
             .filter(|request| {
                 request["questions"].as_object().is_some_and(|questions| {
-                    questions.keys().any(|key| key.starts_with("candidates."))
+                    questions.keys().any(|key| key.starts_with("0.candidates."))
                 })
             })
             .cloned()
@@ -578,6 +576,15 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             receipts.contains(&retained.lookup_capture_view),
                             "{receipts}"
                         );
+                        let trace = read_lookup_capture(
+                            policy, &retained,
+                            serde_json::json!({"tag":"LookupSelectionTrace"}),
+                        ).await;
+                        assert!(trace.contains("SelectionSucceeded")
+                            && trace.contains("Jev.Response")
+                            && trace.contains("jev-test")
+                            && trace.contains("CandidateScore")
+                            && trace.contains("ExpansionRequested"), "complete selection evidence: {trace}");
                         let scoring = backend.scoring_requests();
                         assert_eq!(
                             scoring.len(),
@@ -596,6 +603,25 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                                     .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
                             "second-degree reference was scored as a candidate: {request}"
                         );
+
+                        backend.requests.lock().clear();
+                        let ordinary = dispatch_haskell_script(
+                            policy,
+                            "capturedLookupEvidence <- LookupFixture.captureEvidence",
+                        ).await;
+                        assert_eq!(ordinary["status"], "committed", "ordinary typed capture: {ordinary}");
+                        let ordinary_requests = backend.scoring_requests();
+                        assert_eq!(ordinary_requests.len(), 1);
+                        let actual_wire = tidepool_runtime::session::escape_workbench_haskell_string(
+                            &serde_json::to_string(&ordinary_requests[0]).unwrap(),
+                        );
+                        let comparison = dispatch_haskell_script(
+                            policy,
+                            &format!("_ <- if LookupFixture.recordingMatches capturedLookupEvidence \"{actual_wire}\" then pure () else error \"lookup request or full response evidence changed\""),
+                        ).await;
+                        assert_eq!(comparison["status"], "committed", "actual prepared JSON comparison: {comparison}");
+                        assert_eq!(backend.scoring_requests().len(), 1,
+                            "typed retained inspection must not repeat judgment");
 
                         backend.requests.lock().clear();
                         let missing = dispatch_structured_tool(
@@ -641,7 +667,15 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                         )
                         .await;
                         assert!(unavailable.contains("CaptureNotRetained"), "{unavailable}");
-                        assert_eq!(backend.scoring_requests().len(), 1);
+                        let empty_trace = read_lookup_capture(
+                            policy, &irrelevant,
+                            serde_json::json!({"tag":"LookupSelectionTrace"}),
+                        ).await;
+                        assert!(empty_trace.contains("SelectionSucceeded")
+                            && empty_trace.contains("ExpansionNotRequested")
+                            && empty_trace.contains("CandidateScore"), "successful empty judgment: {empty_trace}");
+                        assert_eq!(backend.scoring_requests().len(), 1,
+                            "retained reads must not repeat judgment");
 
                         *backend.fail.lock() = true;
                         backend.requests.lock().clear();
@@ -668,7 +702,15 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                         )
                         .await;
                         assert!(absent.contains("CaptureNotRetained"), "{absent}");
-                        assert_eq!(backend.scoring_requests().len(), 1);
+                        let failed_trace = read_lookup_capture(
+                            policy, &fallback,
+                            serde_json::json!({"tag":"LookupSelectionTrace"}),
+                        ).await;
+                        assert!(failed_trace.contains("SelectionFailed")
+                            && failed_trace.contains("JevUnconfigured")
+                            && failed_trace.contains("ExpansionNotRequested"), "typed failed judgment: {failed_trace}");
+                        assert_eq!(backend.scoring_requests().len(), 1,
+                            "retained failure reads must not repeat judgment");
                     })
                     .await;
             })

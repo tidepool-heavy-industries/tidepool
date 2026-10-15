@@ -1,5 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE OverloadedStrings #-}
 module LookupNavigationTest (lookupNavigationTests) where
 import Prelude
@@ -12,8 +14,11 @@ import Tidepool.Lookup
 import Tidepool.Lookup.Navigation
 import qualified Tidepool.Lookup.Tools as Tools
 import Tidepool.Agent.Contract (compileTools, AsServerT)
-import Control.Monad.Freer (Eff)
-import Tidepool.Effects.Core (Lookup, Console)
+import Control.Monad.Freer (Eff, run)
+import Control.Monad.Freer.Internal (handleRelay)
+import Data.List (nubBy)
+import Tidepool.Inspection (displayWith)
+import Tidepool.Effects.Core (Lookup(..), Console)
 
 entry :: T.Text -> LookupEntry
 entry source = LookupEntry "same" (Just "Owner") "same :: Text" LookupValue LookupAvailable LookupModuleExport LookupExact Nothing (Just "owner contract")
@@ -31,7 +36,8 @@ assert :: String -> Bool -> IO ()
 assert label value = unless value (fail label)
 lookupNavigationTests :: TestTree
 lookupNavigationTests = testGroup "retained lookup navigation"
-  [testCase "hosted query and retained read compile through ordinary tool owner" $
+  [lookupPackingTests
+  ,testCase "hosted query and retained read compile through ordinary tool owner" $
      assert "compiled retained tool surface" (case compileTools (Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup, Console]))) of Right _ -> True; Left _ -> False)
   ,testCase "two-stage capture preserves issuing batches receipts and continuation addresses" $ do
      let primary = batch "primary\nremaining-primary\n"
@@ -134,4 +140,144 @@ lookupNavigationTests = testGroup "retained lookup navigation"
          observed = map (fmap excerptText) (selectLookupMany captured (map fst history))
      in observed == map snd history
        && observed == map (fmap excerptText) (selectLookupMany captured (map fst history))
+  ]
+
+
+candidate :: Int -> T.Text -> LookupCandidate
+candidate ordinal summary = LookupCandidate ("Fixture." <> T.pack (show ordinal)) ["root"] summary True Nothing
+
+primary :: [LookupCandidate] -> LookupBatch
+primary candidates = (batch "primary-source") {lookupCandidates = candidates}
+
+observeLookup :: (LookupRequest -> LookupBatch) -> Eff '[Lookup] a -> ([LookupRequest], a)
+observeLookup respond = run . handleRelay (\value -> pure ([], value))
+  (\(LookupRaw request) resume -> do
+    (requests, value) <- resume (respond request)
+    pure (request : requests, value))
+
+-- Independently recompute policy from original String metadata, never from
+-- production assignments, candidateText, or packCandidates' output.
+packingOracle :: [LookupCandidate] -> [Int]
+packingOracle candidates = fit (8192 * 4) unique
+  where
+    unique = take 128 (nubBy (\(_, a) (_, b) -> candidateQuery a == candidateQuery b
+      && candidateReference a == candidateReference b) (zip [1..] candidates))
+    fit _ [] = []
+    fit remaining ((ordinal, value) : rest) =
+      let summary = take 2048 (T.unpack (candidateSummary value))
+          cost = length (T.unpack (candidateQuery value)) + length ("\nFor queries: " :: String)
+            + length (T.unpack (T.intercalate ", " (candidateOrigins value))) + 1 + length summary + 1024
+      in if cost > remaining then fit remaining rest else ordinal : fit (remaining - cost) rest
+
+lookupPackingTests :: TestTree
+lookupPackingTests = testGroup "lookup evidence"
+  [ testProperty "packing agrees with independent scalar oracle across duplicates and threshold histories" $ \(actions :: [Int]) ->
+      let candidates = [candidate (n `mod` 150) (T.replicate (abs (n `mod` 4097)) "🙂") | n <- take 180 actions]
+          packed = Tools.packCandidates "immutable-view" candidates
+      in map Tools.packedOrdinal (Tools.packingCandidates packed) == packingOracle candidates
+        && map Tools.assignmentOrdinal (Tools.packingAssignments packed) == [1..length candidates]
+        && all (\value -> Tools.packedOriginal value == candidates !! (Tools.packedOrdinal value - 1)) (Tools.packingCandidates packed)
+  , testCase "Unicode shortening duplicates budget omission and cap all have assignments" $ do
+      let unicode = candidate 1 (T.replicate 3000 "🙂")
+          oversized = (candidate 2 "brief") {candidateQuery = T.replicate 40000 "x"}
+          values = [unicode, unicode, oversized, candidate 3 "brief"]
+          packed = Tools.packCandidates "immutable-view" values
+      assert "every candidate assigned" (map Tools.assignmentDecision (Tools.packingAssignments packed) ==
+        [Tools.CandidatePacked (head (Tools.packingCandidates packed))
+          (length (T.unpack (Tools.candidateText ((head values) {candidateSummary = T.replicate 2048 "🙂"}))) + 1024) True,
+         Tools.CandidateDuplicate 1, Tools.CandidateBudgetOmitted (length (T.unpack (Tools.candidateText oversized)) + 1024),
+         Tools.CandidatePacked (last (Tools.packingCandidates packed))
+          (length (T.unpack (Tools.candidateText (last values))) + 1024) False])
+      assert "full original metadata remains available" (Tools.packedOriginal (head (Tools.packingCandidates packed)) == unicode)
+      let capped = Tools.packCandidates "immutable-view" [candidate n (T.replicate 40000 "x") | n <- [1..129]]
+      assert "cap precedes aggregate budget" (Tools.assignmentDecision (last (Tools.packingAssignments capped)) == Tools.CandidateCapOmitted)
+  , testCase "aggregate Unicode scalar threshold is inclusive with exact budget accounting" $ do
+      let base = candidate 1 ""
+          overhead = length (T.unpack (Tools.candidateText base)) + 1024 - 4
+          exact = base {candidateOrigins = [T.replicate (8192 * 4 - overhead) "🙂"]}
+          over = exact {candidateOrigins = map (<> "🙂") (candidateOrigins exact)}
+          fits = Tools.packCandidates "immutable-view" [exact, candidate 2 "brief"]
+          omitted = Tools.packCandidates "immutable-view" [over, candidate 2 "brief"]
+      assert "exact threshold admitted" (map Tools.packedOrdinal (Tools.packingCandidates fits) == [1]
+        && Tools.packingRemainingScalars fits == 0)
+      assert "one scalar over omitted without crowding out later candidate" (map Tools.packedOrdinal (Tools.packingCandidates omitted) == [2])
+  , testCase "same spelling namespace references stay distinct and expand exactly" $ do
+      let typeReference = LookupReference "Owner" "T" LookupTypeNamespace
+          constructorReference = LookupReference "Owner" "T" LookupConstructorNamespace
+          values = [(candidate 1 "brief") {candidateQuery = "T", candidateReference = Just reference}
+            | reference <- [typeReference, constructorReference]]
+          original = primary values
+          (requests, captured) = observeLookup (const original) (Tools.captureWith
+            (\_ pool -> pure (Tools.SelectionSucceeded () (map Tools.packedIdentity pool))) (Tools.LookupArguments ["root"]))
+      assert "exact canonical reference pair expanded with original view" (length requests == 2
+        && lookupQueries (requests !! 1) == [] && lookupReferences (requests !! 1) == [typeReference, constructorReference]
+        && lookupExpectedView (requests !! 1) == Just "immutable-view")
+      assert "different namespaces have different candidate identities" (case Tools.captureSelected captured of
+        [first,second] -> Tools.packedIdentity first /= Tools.packedIdentity second
+        _ -> False)
+  , testCase "failed skipped and successful empty selection remain distinct" $ do
+      let original = primary [candidate 1 "brief"]
+          capture select = observeLookup (const original) (Tools.captureWith select (Tools.LookupArguments ["root"]))
+          (failedRequests, failed) = capture (\_ _ -> pure (Tools.SelectionFailed ("typed refusal" :: T.Text)))
+          (emptyRequests, empty) = capture (\_ _ -> pure (Tools.SelectionSucceeded ("completed" :: T.Text) []))
+          (skippedRequests, skipped) = observeLookup (const (primary []))
+            (Tools.captureWith (\_ _ -> error "empty pool invoked selector" :: Eff '[Lookup] (Tools.SelectionOutcome T.Text)) (Tools.LookupArguments ["root"]))
+          refused = original {lookupSearchReceipt = (lookupSearchReceipt original) {searchDisposition = LookupSearchNotExecuted}}
+          (refusedRequests, unavailable) = observeLookup (const refused)
+            (Tools.captureWith (\_ _ -> error "refused primary invoked selector" :: Eff '[Lookup] (Tools.SelectionOutcome T.Text)) (Tools.LookupArguments ["root"]))
+      assert "all preserve original with no expansion" (map length [failedRequests, emptyRequests, skippedRequests, refusedRequests] == [1,1,1,1]
+        && Tools.capturePrimary failed == original && Tools.capturePrimary empty == original)
+      assert "typed failure retained" (case Tools.captureSelection failed of Tools.SelectionFailed "typed refusal" -> True; _ -> False)
+      assert "successful empty retained" (case Tools.captureSelection empty of Tools.SelectionSucceeded "completed" [] -> True; _ -> False)
+      assert "empty pool skipped" (case Tools.captureSelection skipped of Tools.SelectionSkipped Tools.NoCandidates -> True; _ -> False)
+      assert "unavailable primary skipped with native refusal retained" (case Tools.captureSelection unavailable of
+        Tools.SelectionSkipped Tools.PrimaryUnavailable -> Tools.capturePrimary unavailable == refused
+        _ -> False)
+  , testCase "selection is canonical capped and exactly view-fenced with no refetch on reporting" $ do
+      let original = primary [candidate n (T.replicate 3000 "🙂") | n <- [1..6]]
+          foreignId = Tools.packedIdentity (last (Tools.packingCandidates (Tools.packCandidates "immutable-view" [candidate n "brief" | n <- [1..7]])))
+          choose _ pool = pure (Tools.SelectionSucceeded ("completed" :: T.Text)
+            (foreignId : map Tools.packedIdentity pool ++ map Tools.packedIdentity pool))
+          respond request = if lookupDiscover request then original else (batch "related-source") {lookupIdentity = "related-capture"}
+          (requests, captured) = observeLookup respond (Tools.captureWith choose (Tools.LookupArguments ["root"]))
+          retained = Tools.captureRetained captured
+          section = LookupCaptureSelection PrimaryLookup (LookupSelection (LookupAddress 1 1 Example) Nothing)
+          (report, _) = displayWith 65536 (Tools.captureSelection captured)
+      assert "only selected exact originals expanded once" (length requests == 2 && lookupQueries (requests !! 1) == map candidateQuery (take 4 (lookupCandidates original))
+        && lookupExpectedView (requests !! 1) == Just (lookupView original) && not (lookupDiscover (requests !! 1)) && lookupCandidateLimit (requests !! 1) == 0)
+      assert "foreign duplicate and cap decisions inspectable" (map Tools.selectionDecision (Tools.captureSelectionAssignments captured) ==
+        [Tools.SelectionUnknown, Tools.CandidateSelected, Tools.CandidateSelected, Tools.CandidateSelected, Tools.CandidateSelected,
+         Tools.SelectionCapOmitted, Tools.SelectionCapOmitted, Tools.SelectionDuplicate, Tools.SelectionDuplicate,
+         Tools.SelectionDuplicate, Tools.SelectionDuplicate, Tools.SelectionCapOmitted, Tools.SelectionCapOmitted])
+      assert "full original candidates retained after bounded scoring" (all ((== 3000) . length . T.unpack . candidateSummary . Tools.packedOriginal) (Tools.captureSelected captured))
+      assert "report and repeat navigation use retained facts" ("completed" `T.isInfixOf` report && map (fmap (excerptText . captureExcerpt)) (selectLookupCaptureMany retained [section,section]) == [Right "primary-source", Right "primary-source"])
+      case Tools.captureExpansion captured of
+        Tools.ExpansionRequested exact expanded -> assert "exact expansion evidence" (exact == requests !! 1 && lookupIdentity expanded == "related-capture")
+        _ -> fail "missing expansion"
+  , testProperty "cross-capture selection refuses stale views changed keys and reordered candidates" $ \(NonNegative index) ->
+      let first = 1 + index `mod` 100
+          values = [candidate first "brief", candidate (first + 1) "brief"]
+          original = primary values
+          idFrom view candidates = Tools.packedIdentity (head (Tools.packingCandidates (Tools.packCandidates view candidates)))
+          variants = [idFrom "old-view" values, idFrom "immutable-view" (reverse values),
+            idFrom "immutable-view" [candidate (first + 2) "brief"]]
+          select identity _ _ = pure (Tools.SelectionSucceeded () [identity])
+          runSelection identity = observeLookup (const original)
+            (Tools.captureWith (select identity) (Tools.LookupArguments ["root"]))
+          refused identity = let (requests, captured) = runSelection identity in length requests == 1
+            && null (Tools.captureSelected captured)
+            && map Tools.selectionDecision (Tools.captureSelectionAssignments captured) == [Tools.SelectionUnknown]
+          (sameRequests, same) = runSelection (idFrom "immutable-view" values)
+      in all refused variants && length sameRequests == 2
+        && map (candidateQuery . Tools.packedOriginal) (Tools.captureSelected same) == [candidateQuery (head values)]
+  , testCase "failed optional expansion preserves primary and typed stale refusal" $ do
+      let original = primary [candidate 1 "brief"]
+          stale = original {lookupView = "changed", lookupIssue = Just "stale", lookupResults = []}
+          respond request = if lookupDiscover request then original else stale
+          (_, captured) = observeLookup respond (Tools.captureWith (\_ pool -> pure
+            (Tools.SelectionSucceeded () (map Tools.packedIdentity pool))) (Tools.LookupArguments ["root"]))
+          retained = Tools.captureRetained captured
+          section part = LookupCaptureSelection part (LookupSelection (LookupAddress 1 1 Example) Nothing)
+      assert "primary preserved" (Tools.capturePrimary captured == original && case selectLookupCapture retained (section PrimaryLookup) of Right _ -> True; _ -> False)
+      assert "stale refusal remains explicit" (selectLookupCapture retained (section RelatedLookup) == Left (CaptureViewMismatch "immutable-view" "changed"))
   ]
