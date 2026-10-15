@@ -114,7 +114,7 @@ Primary checks:
 
 ```bash
 just test-lib tidepool-mcp --exact FULL_TEST_NAME --expected-count 1
-just test-target tidepool-mcp protocol_goldens
+just test-target tidepool-mcp mcp --exact protocol_goldens::tool_description_effects_index_golden_matches_committed_file --expected-count 1
 ```
 
 Intentional golden replacement is a separate writer step. Native acceptance
