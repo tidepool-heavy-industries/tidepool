@@ -119,6 +119,17 @@ async fn research_history(child_machines: HostedChildMachines) {
         let first = host.while_operation_succeeds(&tutorial,
             select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
         let child = first.host_identity();
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
+        let selected = graph.iter().filter(|node| host.context.binding(node.actor)
+            .and_then(|binding| binding.conversation())
+            .is_some_and(|conversation| conversation.identity() == &child)).collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1, "one native actor owns the actual child provider request");
+        let child_session = host.context.forest.actor_session(selected[0].actor).await.unwrap().unwrap();
+        let root_session = host.context.forest.actor_session(host.context.actor.identity()).await.unwrap().unwrap();
+        match child_machines {
+            HostedChildMachines::Shared => assert_eq!(child_session, root_session),
+            HostedChildMachines::Dedicated => assert_ne!(child_session, root_session),
+        }
         let installed_requests = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(reply_properties(&first), ["question", "sources", "summary"]);
         let names = first.request.tools.iter().filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
