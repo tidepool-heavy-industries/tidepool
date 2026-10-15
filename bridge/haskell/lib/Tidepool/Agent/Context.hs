@@ -24,6 +24,9 @@ module Tidepool.Agent.Context
   , contextBlocks
   , editableTexts
   , visibleTexts
+  , referencedTexts
+  , ContextEditError (..)
+  , removeText
   , trimText
   , blockKind
   , blockProvenance
@@ -90,6 +93,7 @@ instance Display Context where
           "ContextVisibleText"
           [ ("selector", displayTree (contextVisibleTextSelector visibleText))
           , ("editable", displayTree (contextVisibleTextEditable visibleText))
+          , ("removable", displayTree (contextVisibleTextRemovable visibleText))
           ]
 
 data ContextBlockKind
@@ -135,6 +139,44 @@ visibleTexts = folding (concatMap visible . blocks . unwrap)
     visible (Text _ _ body _) = [body]
     visible (Native _ _ _ _ texts) = map contextVisibleTextText texts
 
+-- | Issued text identities in transcript order. A newly staged text block has
+-- no reference until publication; read it again after the tool result.
+referencedTexts :: Fold Context ContextVisibleText
+referencedTexts = folding (concatMap referenced . blocks . unwrap)
+  where
+    unwrap (Context document) = document
+    referenced (Text (Just reference) _ body _) =
+      [ContextVisibleText reference (MessageText 0) body True True]
+    referenced (Text Nothing _ _ _) = []
+    referenced (Native _ _ _ _ texts) = texts
+
+data ContextEditError
+  = ReferenceNotVisible
+  | ReferenceAmbiguous
+  | RemovalNotAllowed
+  deriving (Show, Eq)
+
+-- | Remove one exact issued text occurrence. Native evidence may contain
+-- independently authored notes; only fields issued as removable can be omitted.
+-- This edits data only. 'putContext' still validates and stages publication.
+removeText :: ContextReference -> Context -> Either ContextEditError Context
+removeText selected (Context document) = case matches of
+  [] -> Left ReferenceNotVisible
+  [False] -> Left RemovalNotAllowed
+  [True] -> Right (Context (document {blocks = concatMap remove (blocks document)}))
+  _ -> Left ReferenceAmbiguous
+  where
+    matches = concatMap matching (blocks document)
+    matching (Text (Just reference) _ _ _) | reference == selected = [True]
+    matching (Native _ _ _ _ texts) =
+      [contextVisibleTextRemovable field | field <- texts, contextVisibleTextReference field == selected]
+    matching _ = []
+    remove block@(Text (Just reference) _ _ _) | reference == selected = []
+                                             | otherwise = [block]
+    remove (Native reference kind preview protected texts) =
+      [Native reference kind preview protected (filter ((/= selected) . contextVisibleTextReference) texts)]
+    remove block = [block]
+
 -- | Mark retained context text with a short, author-supplied explanation.
 -- The marker is ordinary text and has no runtime control meaning.
 trimText :: Text -> Text -> Text
@@ -169,6 +211,8 @@ toNotes selected (Context document) =
 
 -- | Observe startup's retained result and historical publication receipt.
 -- This performs no startup effects and does not claim its text is still active.
+-- The receipt is historical: inspect current context by its exact reference
+-- before refreshing or replacing that block. Other authored notes are independent.
 -- 'InitialContextPublished' identifies one exact authored block: read current
 -- context and replace that reference, refusing a missing target. Editing an
 -- existing block preserves its reference through the context owner's provenance.

@@ -675,6 +675,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "contextVisibleTextSelector",
             "contextVisibleTextText",
             "contextVisibleTextEditable",
+            "contextVisibleTextRemovable",
             "ContextBlock",
             "Text",
             "contextTextReference",

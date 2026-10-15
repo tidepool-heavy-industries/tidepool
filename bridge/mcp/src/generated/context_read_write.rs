@@ -22,7 +22,7 @@ pub fn context_read_write_decl() -> crate::EffectDecl {
             "data ContextRole = User | Assistant deriving (Show, Eq)",
             "data ContextNativeKind = CompletedExchange | Opaque | Pending deriving (Show, Eq)",
             "data ContextTextSelector = MessageText { contextMessagePart :: Int } | ToolResultText deriving (Show, Eq)",
-            "data ContextVisibleText = ContextVisibleText { contextVisibleTextReference :: ContextReference, contextVisibleTextSelector :: ContextTextSelector, contextVisibleTextText :: Text, contextVisibleTextEditable :: Bool } deriving (Show, Eq)",
+            "data ContextVisibleText = ContextVisibleText { contextVisibleTextReference :: ContextReference, contextVisibleTextSelector :: ContextTextSelector, contextVisibleTextText :: Text, contextVisibleTextEditable :: Bool, contextVisibleTextRemovable :: Bool } deriving (Show, Eq)",
             "data ContextBlock = Text { contextTextReference :: Maybe ContextReference, contextTextRole :: ContextRole, contextTextBody :: Text, contextTextSources :: [ContextReference] } | Native { contextNativeReference :: ContextReference, contextNativeKind :: ContextNativeKind, contextNativePreview :: Text, contextNativeProtected :: Bool, contextNativeTexts :: [ContextVisibleText] } deriving (Show, Eq)",
             "data ContextDocument = ContextDocument { blocks :: [ContextBlock] } deriving (Show, Eq)",
             "instance ToJSON ContextReference where toJSON (ContextReference reference) = toJSON reference",

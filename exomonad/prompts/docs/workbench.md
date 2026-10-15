@@ -82,7 +82,13 @@ helpers make later calls shorter but do not make their source editable.
 `editableTexts` uses full visible text, never bounded previews. Use
 `C.trimText reason retainedText` to keep exact source beside an ordinary
 `[Trimmed: reason]` marker. `toNotes` preserves provenance for selected
-nonopaque completed exchanges; opaque group removal is refused.
+nonopaque completed exchanges; opaque group removal is refused. Authored notes
+inside native groups keep independent identities: use `C.referencedTexts` to
+inspect the issued removal flag and `C.removeText reference` to remove exactly
+one occurrence. Text equality does not identify an occurrence. Read current
+context after publication to obtain its reference. `getInitialContext` reports
+the historical startup publication; it does not assert that text is still active
+or replace other authored notes when memory is refreshed.
 
 Same-model continuation forwards opaque reasoning unchanged, although edited
 facts may make earlier conclusions stale. Unsupported cross-model opaque history

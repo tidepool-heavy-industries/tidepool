@@ -6,6 +6,7 @@
 module PersonaMemoryTest (personaMemoryTests) where
 
 import Prelude
+import Control.Lens (toListOf)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.Freer (Eff, Member, interpret, run)
 import Control.Monad.Freer.State (State, get, modify, runState)
@@ -16,7 +17,7 @@ import Test.Tasty.HUnit (assertBool, assertEqual)
 import Test.Tasty.QuickCheck (testProperty, (===))
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Tidepool.Agent.Contract (StartupInput(..), ContextSeed(..), ContextSection(..))
-import Tidepool.Effects.Core (FsRead(..), FsWrite(..), FsSnapshot(..), ContextReadWrite(..))
+import Tidepool.Effects.Core (FsRead(..), FsWrite(..), FsSnapshot(..), ContextReadWrite(..), ContextDocument(..), ContextReference(..))
 import Tidepool.Records (FsError(..))
 import qualified Tidepool.Agent.Context as C
 import qualified Persona.Memory as Memory
@@ -40,6 +41,13 @@ render files = fst $ run $ runState files $ interpret readHost O.renderMemory
 startup :: Files -> (ContextSeed, Files)
 startup files = run $ runState files $ interpret readHost $ interpret writeHost $
   O.startup (StartupInput "test-startup" Nothing)
+
+observedContext :: [C.ContextBlock] -> C.Context
+observedContext blocks = run (interpret owner C.getContext)
+  where
+    owner :: ContextReadWrite a -> Eff '[] a
+    owner GetContextWith = pure (ContextDocument blocks)
+    owner _ = error "read-only context observation"
 
 personaMemoryTests :: TestTree
 personaMemoryTests = testGroup "persona memory"
@@ -110,4 +118,31 @@ personaMemoryTests = testGroup "persona memory"
           (result, after) = run $ runState (Map.empty :: Files) $ interpret owner $ interpret readHost Context.refresh
       assertEqual "missing remains a read failure" (Left (Context.MemoryReadFailed (FsNotFound (head paths)))) result
       assertEqual "refresh did not create seeds" Map.empty after
+  , testCase "remove an issued note inside native evidence without removing equal text" $ do
+      let note = ContextReference "note"
+          provider = ContextReference "provider"
+          plain = ContextReference "plain"
+          context = observedContext
+            [ C.Text (Just plain) C.User "same" []
+            , C.Native (ContextReference "group") C.Opaque "original preview" False
+                [ C.ContextVisibleText note (C.MessageText 0) "same" True True
+                , C.ContextVisibleText provider (C.MessageText 0) "same" True False
+                ]
+            ]
+      case C.removeText note context of
+        Left err -> error (show err)
+        Right removed -> do
+          assertEqual "only selected occurrence removed" [plain, provider]
+            (map C.contextVisibleTextReference (toListOf C.referencedTexts removed))
+          assertEqual "other identical text survives" ["same", "same"] (toListOf C.visibleTexts removed)
+      assertEqual "provider text cannot be removed" (Just C.RemovalNotAllowed)
+        (either Just (const Nothing) (C.removeText provider context))
+      assertEqual "missing identity is explicit" (Just C.ReferenceNotVisible)
+        (either Just (const Nothing) (C.removeText (ContextReference "missing") context))
+  , testCase "context removal refuses ambiguous references and does not issue staged identities" $ do
+      let reference = ContextReference "duplicate"
+          context = observedContext [C.Text (Just reference) C.User "first" [], C.Text (Just reference) C.Assistant "second" [], C.Text Nothing C.Assistant "staged" []]
+      assertEqual "duplicate identity is explicit" (Just C.ReferenceAmbiguous)
+        (either Just (const Nothing) (C.removeText reference context))
+      assertEqual "only issued identities are exposed" 2 (length (toListOf C.referencedTexts context))
   ]

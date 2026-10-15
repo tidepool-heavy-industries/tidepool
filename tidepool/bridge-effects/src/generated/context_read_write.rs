@@ -100,6 +100,7 @@ pub struct ContextVisibleText {
     pub selector: ContextTextSelector,
     pub text: String,
     pub editable: bool,
+    pub removable: bool,
 }
 
 /// One editable text block or host-owned native evidence block.

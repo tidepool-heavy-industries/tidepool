@@ -99,6 +99,7 @@ fn text_to_wire(text: &ContextVisibleText) -> WireVisibleText {
         },
         text: text.text.clone(),
         editable: text.editable,
+        removable: text.removable,
     }
 }
 
@@ -113,6 +114,7 @@ fn text_from_wire(text: WireVisibleText) -> Result<ContextVisibleText, ContextEr
         },
         text: text.text,
         editable: text.editable,
+        removable: text.removable,
     })
 }
 
@@ -193,6 +195,7 @@ mod tests {
                         selector: ContextTextSelector::ToolResultText,
                         text: "[Trimmed: repetitive output]\nsuccess".into(),
                         editable: true,
+                        removable: false,
                     }],
                 },
                 ContextBlock::Native {
@@ -203,8 +206,9 @@ mod tests {
                     texts: vec![ContextVisibleText {
                         reference: ContextReference::from_raw("message:3".into()),
                         selector: ContextTextSelector::MessageText { part: 2 },
-                        text: "Visible message in an opaque envelope".into(),
+                        text: "Authored note in an opaque envelope".into(),
                         editable: true,
+                        removable: true,
                     }],
                 },
                 ContextBlock::Native {
@@ -217,6 +221,7 @@ mod tests {
                         selector: ContextTextSelector::MessageText { part: 0 },
                         text: "Protected visible text".into(),
                         editable: false,
+                        removable: false,
                     }],
                 },
             ],
@@ -235,6 +240,7 @@ mod tests {
                 selector: super::WireTextSelector::MessageText { part },
                 text: "replacement".into(),
                 editable: true,
+                removable: false,
             };
             assert!(matches!(
                 super::text_from_wire(text),

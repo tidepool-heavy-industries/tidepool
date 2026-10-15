@@ -263,6 +263,7 @@ fn type_defs() -> Vec<TypeDef> {
                     ),
                     field("contextVisibleTextText", "text", HsType::Text),
                     field("contextVisibleTextEditable", "editable", HsType::Bool),
+                    field("contextVisibleTextRemovable", "removable", HsType::Bool),
                 ],
             },
             json: JsonInstance::None,

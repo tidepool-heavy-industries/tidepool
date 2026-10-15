@@ -8,8 +8,10 @@ Use hosted `lookup` if declared; otherwise use
 synchronous profile can add `ContextReadWrite` (`setNextModel`, `setNextEffort`).
 Edits commit together on success; external effects are not undone. Capture a
 completed context explicitly when another agent should start from it.
-`editableTexts` exposes full eligible message/result bodies and authored text;
-tool source/input and arguments stay pinned. With
+`visibleTexts` includes authored notes inside native groups; `referencedTexts`
+exposes their issued identities and removal flags. `removeText reference` removes
+one eligible occurrence. `editableTexts` exposes full eligible bodies; tool
+source/input and arguments stay pinned. With
 `import qualified Tidepool.Agent.Context as C`, `C.trimText reason retainedText`
 keeps exact source plus `[Trimmed: reason]`. Same-model continuation keeps
 opaque reasoning. See `doc workbench` for restore rules.
