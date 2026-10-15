@@ -1522,11 +1522,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-            &ActorHostConfig,
-        ) -> Arc<dyn harness::engine::ResponsesTransport>
-        + Send
-        + 'static,
+                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+                &ActorHostConfig,
+            ) -> Arc<dyn harness::engine::ResponsesTransport>
+            + Send
+            + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             true,
@@ -2457,12 +2457,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(scheduler.wait(&operation).await.unwrap(), output);
-            assert!(
-                store
-                    .replay_tool_output_operation(&operation)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .is_none());
             assert_eq!(
                 observe_operation_barrier(
                     &store,
@@ -2759,11 +2757,9 @@ mod tests {
         .await;
         assert!(matches!(refused, Err(error) if error.to_string().contains("prompt changed")));
         let refused_run = root.child("refused-run").unwrap();
-        assert!(
-            prepared
-                .select_for_run(repository.path(), refused_run.path())
-                .is_err()
-        );
+        assert!(prepared
+            .select_for_run(repository.path(), refused_run.path())
+            .is_err());
         assert!(!refused_run.path().join("workspace-prepared.json").exists());
         assert_eq!(std::fs::read(selection).unwrap(), completed);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
@@ -3622,14 +3618,13 @@ mod tests {
             exomonad_actor::ActorExitKind::Cancelled,
             "recovery shutdown must not turn into an ordinary unexpected actor failure"
         );
-        assert!(
-            host.context
-                .actor
-                .terminal()
-                .cleanup()
-                .unwrap()
-                .is_confirmed()
-        );
+        assert!(host
+            .context
+            .actor
+            .terminal()
+            .cleanup()
+            .unwrap()
+            .is_confirmed());
         assert!(pending.is_empty());
         assert!(
             requests.try_recv().is_err(),
