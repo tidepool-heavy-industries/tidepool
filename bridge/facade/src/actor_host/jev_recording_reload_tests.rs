@@ -70,16 +70,7 @@ async fn displayed(
     let mut consumed = std::collections::HashSet::new();
     for page_number in 1..=MAX_PAGES {
         let page = test_campaign::retained_committed_display_text(&store, &origin, &receipt);
-        let displays: Vec<_> = receipt["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|item| item["operations"].as_array().unwrap())
-            .filter_map(|operation| operation.get("display"))
-            .collect();
-        let [display] = displays.as_slice() else {
-            panic!("one diagnostic scalar display: {receipt}")
-        };
+        let display = &test_campaign::explicit_display_operation(&receipt)["display"];
         let current: (i64, i64, i64) = serde_json::from_value(display["identity"].clone()).unwrap();
         if let Some(expected) = identity {
             assert_eq!(

@@ -1201,7 +1201,7 @@ pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
     explicit_display_text(response)
 }
 
-fn explicit_display_operation(response: &serde_json::Value) -> &serde_json::Value {
+pub(super) fn explicit_display_operation(response: &serde_json::Value) -> &serde_json::Value {
     let items = response["items"].as_array().expect("cell item receipts");
     let operations = items
         .iter()
@@ -2202,7 +2202,7 @@ mod tests {
         let projected = serde_json::json!({
             "status": "committed",
             "items": [
-                {"status": "committed", "output": "unrelated item", "operations": []},
+                {"status": "committed", "output": "unrelated import item"},
                 {"status": "committed", "output": page, "operations": [{
                     "display": {"textSource": "/items/1/output",
                         "output": {"run": "run", "sequence": 7}}
