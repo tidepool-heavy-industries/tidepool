@@ -1032,10 +1032,11 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
 
                 write_spec(&workspace, "new-handler", "new slot");
                 let before_reload = tidepool_extract_cmd::extract_spawn_count();
-                let receipt = dispatch_haskell_script(
+                let receipt = super::test_campaign::dispatch_haskell_script_named(
                     old_request.as_ref(),
+                    "haskell_sync",
                     "Right outcome <- reloadSource []\n\
-                     if (case outcome of { ReloadPublished _ _ _ -> True; _ -> False }) \
+                     if (case outcome of { ReloadPublished _ _ _ _ -> True; _ -> False }) \
                      then pure () else error \"same-surface source reload was refused\"",
                 )
                 .await;
