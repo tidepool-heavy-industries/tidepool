@@ -103,6 +103,40 @@ pub enum ReplyTypeObservation {
     },
 }
 
+/// The first refused comparison, in the site's normal admission order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SiteConflictBoundary {
+    Delivery,
+    InputArity,
+    Wire,
+    Input { ordinal: usize },
+}
+
+/// Bounded observations of a refused site admission, never compatibility or
+/// authority evidence. Root summaries need not expose a nested difference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteConflictEvidence {
+    pub boundary: SiteConflictBoundary,
+    pub existing: SiteRowObservation,
+    pub incoming: SiteRowObservation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteRowObservation {
+    pub origin: String,
+    pub ordinal: u64,
+    pub delivery: SiteDelivery,
+    pub input_arity: usize,
+    /// Present only for the wire or ordered input comparison that refused.
+    pub compared_type: Option<SiteTypeObservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteTypeObservation {
+    pub node: TypeNodeId,
+    pub shape: ReplyTypeObservation,
+}
+
 /// The package evidence observed when a sealed package owner cannot be
 /// resolved. These facts explain the refusal; they never authorize a fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,8 +343,11 @@ pub enum PreparedRuntimeError {
     MachineNotInstalled,
     /// One artifact declares the same typed site twice with different
     /// evidence: a projection defect, refused before anything installs.
-    #[error("the artifact declares typed site {site} twice with different evidence")]
-    DuplicateSite { site: u64 },
+    #[error("the artifact declares typed site {site} twice with different evidence: {evidence:?}")]
+    DuplicateSite {
+        site: u64,
+        evidence: Box<SiteConflictEvidence>,
+    },
     /// A pattern bind's settled value did not carry one managed field per
     /// GHC binder. The extractor projects the binders as one tuple, so this
     /// is a stale or foreign artifact, never a user error.
@@ -320,8 +357,12 @@ pub enum PreparedRuntimeError {
     /// program already declares with different evidence (delivery, wire or
     /// input types). Installation is refused before anything is published;
     /// the existing owner stays canonical.
-    #[error("typed site {site} is already installed by program {owner:?} with different evidence")]
-    SiteConflict { site: u64, owner: ProgramId },
+    #[error("typed site {site} is already installed by program {owner:?} with different evidence: {evidence:?}")]
+    SiteConflict {
+        site: u64,
+        owner: ProgramId,
+        evidence: Box<SiteConflictEvidence>,
+    },
     /// A suspended request named a typed site no installed program declares.
     /// The request and continuation were released; nothing was parked.
     #[error("the suspended request names typed site {site}, which no installed program declares")]
@@ -2697,6 +2738,52 @@ fn constructor_replies_equivalent(
     }
 }
 
+fn conflict_text(value: &str) -> String {
+    const MAX_CHARS: usize = 256;
+    let mut chars = value.chars();
+    let mut bounded: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn conflict_identity(value: &SymbolIdentity) -> SymbolIdentity {
+    SymbolIdentity {
+        unit: conflict_text(&value.unit),
+        module: conflict_text(&value.module),
+        namespace: conflict_text(&value.namespace),
+        occurrence: conflict_text(&value.occurrence),
+        record_parent: value.record_parent.as_deref().map(conflict_text),
+    }
+}
+
+fn reply_type_observation(facts: &ProgramFacts, node: TypeNodeId) -> ReplyTypeObservation {
+    let mut budget = TypeWorkBudget::new(256);
+    match facts.types.open_root(node, &mut budget) {
+        Err(source) => ReplyTypeObservation::Refused(source),
+        Ok(cursor) => match cursor.view(&mut budget) {
+            Err(source) => ReplyTypeObservation::Refused(source),
+            Ok(TypeView::Data(data)) => ReplyTypeObservation::Data {
+                family: TypeIdentity {
+                    symbol: conflict_identity(&data.family().symbol),
+                    version: data.family().version.clone(),
+                },
+                argument_count: data.argument_count(),
+                constructor_count: data.constructors().count(),
+            },
+            Ok(TypeView::Text) => ReplyTypeObservation::Text,
+            Ok(TypeView::Integer) => ReplyTypeObservation::Integer,
+            Ok(TypeView::Natural) => ReplyTypeObservation::Natural,
+            Ok(TypeView::Scalar(rep)) => ReplyTypeObservation::Scalar(rep),
+            Ok(TypeView::Unconstructible(reason)) => ReplyTypeObservation::Unconstructible {
+                reason: conflict_text(&reason.to_string()),
+                rendered: conflict_text(cursor.rendered()),
+            },
+        },
+    }
+}
+
 fn reply_conflict_evidence(
     constructor: DataConId,
     existing: &ProgramFacts,
@@ -2704,26 +2791,6 @@ fn reply_conflict_evidence(
     incoming: &ProgramFacts,
     incoming_reply: ConstructorReply,
 ) -> Box<ConstructorReplyConflictEvidence> {
-    fn text(value: &str) -> String {
-        const MAX_CHARS: usize = 256;
-        let mut chars = value.chars();
-        let mut bounded: String = chars.by_ref().take(MAX_CHARS).collect();
-        if chars.next().is_some() {
-            bounded.push('…');
-        }
-        bounded
-    }
-
-    fn identity(value: &SymbolIdentity) -> SymbolIdentity {
-        SymbolIdentity {
-            unit: text(&value.unit),
-            module: text(&value.module),
-            namespace: text(&value.namespace),
-            occurrence: text(&value.occurrence),
-            record_parent: value.record_parent.as_deref().map(text),
-        }
-    }
-
     fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
         match reply {
             ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
@@ -2738,34 +2805,9 @@ fn reply_conflict_evidence(
                     } => Some((field, payload_field, capture_input)),
                     _ => None,
                 };
-                let mut budget = TypeWorkBudget::new(256);
-                let shape = match facts.types.open_root(node, &mut budget) {
-                    Err(source) => ReplyTypeObservation::Refused(source),
-                    Ok(cursor) => match cursor.view(&mut budget) {
-                        Err(source) => ReplyTypeObservation::Refused(source),
-                        Ok(TypeView::Data(data)) => ReplyTypeObservation::Data {
-                            family: TypeIdentity {
-                                symbol: identity(&data.family().symbol),
-                                version: data.family().version.clone(),
-                            },
-                            argument_count: data.argument_count(),
-                            constructor_count: data.constructors().count(),
-                        },
-                        Ok(TypeView::Text) => ReplyTypeObservation::Text,
-                        Ok(TypeView::Integer) => ReplyTypeObservation::Integer,
-                        Ok(TypeView::Natural) => ReplyTypeObservation::Natural,
-                        Ok(TypeView::Scalar(rep)) => ReplyTypeObservation::Scalar(rep),
-                        Ok(TypeView::Unconstructible(reason)) => {
-                            ReplyTypeObservation::Unconstructible {
-                                reason: text(&reason.to_string()),
-                                rendered: text(cursor.rendered()),
-                            }
-                        }
-                    },
-                };
                 ConstructorReplyObservation::Static {
                     node,
-                    shape,
+                    shape: reply_type_observation(facts, node),
                     input_site,
                 }
             }
@@ -2778,9 +2820,9 @@ fn reply_conflict_evidence(
             .iter()
             .find_map(|(constructor_identity, host)| {
                 (*host == constructor).then(|| ConstructorIdentity {
-                    symbol: identity(&constructor_identity.symbol),
+                    symbol: conflict_identity(&constructor_identity.symbol),
                     family: TypeIdentity {
-                        symbol: identity(&constructor_identity.family.symbol),
+                        symbol: conflict_identity(&constructor_identity.family.symbol),
                         version: constructor_identity.family.version.clone(),
                     },
                 })
@@ -2790,28 +2832,62 @@ fn reply_conflict_evidence(
     })
 }
 
-fn sites_equivalent(
+fn site_conflict_boundary(
     a: &ProgramFacts,
     a_row: &SiteRow,
     b: &ProgramFacts,
     b_row: &SiteRow,
-) -> Result<bool, TypeGraphError> {
-    if a_row.delivery != b_row.delivery || a_row.inputs.len() != b_row.inputs.len() {
-        return Ok(false);
+) -> Result<Option<SiteConflictBoundary>, TypeGraphError> {
+    if a_row.delivery != b_row.delivery {
+        return Ok(Some(SiteConflictBoundary::Delivery));
+    }
+    if a_row.inputs.len() != b_row.inputs.len() {
+        return Ok(Some(SiteConflictBoundary::InputArity));
     }
     let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
     if !a
         .types
         .rooted_compatible(a_row.wire, &b.types, b_row.wire, &mut budget)?
     {
-        return Ok(false);
+        return Ok(Some(SiteConflictBoundary::Wire));
     }
-    for (x, y) in a_row.inputs.iter().zip(&b_row.inputs) {
+    for (ordinal, (x, y)) in a_row.inputs.iter().zip(&b_row.inputs).enumerate() {
         if !a.types.rooted_compatible(*x, &b.types, *y, &mut budget)? {
-            return Ok(false);
+            return Ok(Some(SiteConflictBoundary::Input { ordinal }));
         }
     }
-    Ok(true)
+    Ok(None)
+}
+
+fn site_conflict_evidence(
+    boundary: SiteConflictBoundary,
+    existing: &ProgramFacts,
+    existing_row: &SiteRow,
+    incoming: &ProgramFacts,
+    incoming_row: &SiteRow,
+) -> Box<SiteConflictEvidence> {
+    let observe = |facts: &ProgramFacts, row: &SiteRow| {
+        let node = match boundary {
+            SiteConflictBoundary::Wire => Some(row.wire),
+            SiteConflictBoundary::Input { ordinal } => Some(row.inputs[ordinal]),
+            SiteConflictBoundary::Delivery | SiteConflictBoundary::InputArity => None,
+        };
+        SiteRowObservation {
+            origin: conflict_text(&row.origin),
+            ordinal: row.ordinal,
+            delivery: row.delivery,
+            input_arity: row.inputs.len(),
+            compared_type: node.map(|node| SiteTypeObservation {
+                node,
+                shape: reply_type_observation(facts, node),
+            }),
+        }
+    };
+    Box::new(SiteConflictEvidence {
+        boundary,
+        existing: observe(existing, existing_row),
+        incoming: observe(incoming, incoming_row),
+    })
 }
 
 /// A boxed or unboxed non-negative `Int` field: the leading site argument of
@@ -3612,7 +3688,7 @@ impl PreparedEngine {
     /// The rows of `facts` that installing it would make canonical: every
     /// site no installed program declares yet. A site already installed (by
     /// an earlier program, or earlier in `facts` itself) is accepted only when
-    /// the two rows carry the same evidence ([`sites_equivalent`]); the
+    /// the two rows carry the same evidence ([`site_conflict_boundary`]); the
     /// existing owner stays canonical and nothing is added for it. A
     /// conflicting duplicate is [`PreparedRuntimeError::SiteConflict`] and the
     /// caller installs nothing.
@@ -3634,13 +3710,19 @@ impl PreparedEngine {
                 planned.push((site.site, row));
                 continue;
             };
-            if !sites_equivalent(owner_facts, owner_row, facts, site)? {
+            if let Some(boundary) = site_conflict_boundary(owner_facts, owner_row, facts, site)? {
+                let evidence =
+                    site_conflict_evidence(boundary, owner_facts, owner_row, facts, site);
                 return Err(match owner {
                     Some(owner) => PreparedRuntimeError::SiteConflict {
                         site: site.site,
                         owner,
+                        evidence,
                     },
-                    None => PreparedRuntimeError::DuplicateSite { site: site.site },
+                    None => PreparedRuntimeError::DuplicateSite {
+                        site: site.site,
+                        evidence,
+                    },
                 });
             }
         }
@@ -3732,13 +3814,22 @@ impl PreparedEngine {
             let mut accepted_sites = Vec::new();
             for (site, row) in plan.sites.drain(..) {
                 if let Some(&(prior_group, prior_row)) = sites.get(&site) {
-                    if !sites_equivalent(
+                    if let Some(boundary) = site_conflict_boundary(
                         &facts[prior_group],
                         &facts[prior_group].sites[prior_row],
                         group_facts,
                         &group_facts.sites[row],
                     )? {
-                        return Err(PreparedRuntimeError::DuplicateSite { site });
+                        return Err(PreparedRuntimeError::DuplicateSite {
+                            site,
+                            evidence: site_conflict_evidence(
+                                boundary,
+                                &facts[prior_group],
+                                &facts[prior_group].sites[prior_row],
+                                group_facts,
+                                &group_facts.sites[row],
+                            ),
+                        });
                     }
                 } else {
                     sites.insert(site, (group, row));
