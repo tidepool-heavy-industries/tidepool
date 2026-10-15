@@ -17,7 +17,7 @@ import qualified Tidepool.Agent.Watch.Internal as Watch
 import Tidepool.Agent.Contract
 import Tidepool.Aeson.Value (Value (..), ToJSON (toJSON), object, (.=))
 import qualified Tidepool.Aeson.KeyMap as KM
-import Tidepool.Effects.Core (AgentTools (..), Commands, ContextReadWrite (..))
+import Tidepool.Effects.Core (AgentTools (..), Commands, ContextReadWrite (..), Reload)
 import Tidepool.Internal.ActorProfiles (ActorEffects)
 import Tidepool.Test.Runner
 
@@ -92,11 +92,14 @@ tools = Tools
 require :: String -> Bool -> IO ()
 require label observed = unless observed (error label) >> putStrLn ("passed: " ++ label)
 
-context :: ContextReadWrite a -> Eff '[State [Text]] a
+context :: ContextReadWrite a -> Eff '[State [Text], Reload] a
 context (SetNextModelWith model) = modify (++ [model])
 context _ = error "unexpected context request"
 
-installation :: AgentTools a -> Eff '[State Value, ContextReadWrite] a
+noReload :: Reload a -> Eff effects a
+noReload _ = error "unexpected reload request"
+
+installation :: AgentTools a -> Eff '[State Value, ContextReadWrite, Reload] a
 installation (AgentToolsInstallWith value _) = modify (const value)
 installation _ = error "installation executed the retained handler"
 
@@ -114,14 +117,14 @@ installedToolContracts :: IO ()
 installedToolContracts = do
   compiled <- either (error . show) pure (compileInstalledTools tools)
   let declared = declarations compiled
-      runTool name = run $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
+      runTool name = run $ interpret noReload $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
   require "one traversal preserves field order"
     (map dtdName declared == ["ordinary", "curate", "raw_curate", "notify_curate", "haskell", "haskell_sync"])
   require "async default and explicit sync scheduling"
     (map dtdSchedule declared == [Asynchronous, BeforeNextInference, BeforeNextInference, BeforeNextInference, Asynchronous, BeforeNextInference])
   require "native notebook scheduling preserves the same selected row"
     (map dtdEffectKeys (drop 4 declared) == [Just [], Just []])
-  let runIndex index = run $ runState [] $ reinterpret context $ dispatchAt compiled index (toJSON ("executor" :: Text))
+  let runIndex index = run $ interpret noReload $ runState [] $ reinterpret context $ dispatchAt compiled index (toJSON ("executor" :: Text))
   require "installed ordinal dispatch matches declared order"
     (and [runIndex index == runTool (dtdName declaration) | (index, declaration) <- zip [0..] declared])
   require "invalid installed ordinal refuses without running a handler"
@@ -129,7 +132,7 @@ installedToolContracts = do
   contextCompiled <- either (error . show) pure (compileInstalledTools contextNotebookTools)
   require "context-editing notebooks declare their additional effect explicitly"
     (map (\entry -> (dtdSchedule entry, dtdEffectKeys entry)) (declarations contextCompiled)
-      == [(BeforeNextInference, Just ["ContextReadWrite"])])
+      == [(BeforeNextInference, Just ["ContextReadWrite", "Reload"])])
   require "native endpoints cannot enter the handler dispatcher"
     (fst (runTool "haskell") == Left (NativeToolInvocation "haskell"))
   require "async compiled handler is lifted into shared dispatcher"
@@ -179,13 +182,13 @@ installedToolContracts = do
   require "notebook profile may select a strict subset of actor effects"
     (map dtdEffectKeys (declarations narrowCompiled) == [Just []])
   let spec = defaultSpec {specTools = tools, afterTool = Just (\_ _ -> pure NoAnnotation)}
-      (_, manifest) = run $ interpret (\(_ :: ContextReadWrite a) -> error "bootstrap context access") $
+      (_, manifest) = run $ interpret noReload $ interpret (\(_ :: ContextReadWrite a) -> error "bootstrap context access") $
         runState Null $ reinterpret installation $ installSpec spec
       installed = case field "tools" manifest of Just (Array values) -> values; _ -> []
   require "installation resolves sync profile and async hook profile"
     (field "slotEffectKeys" manifest == Just (object ["afterTool" .= ([] :: [Text])]) &&
       map (field "effectKeys") installed == map (Just . toJSON)
-        ([[], ["ContextReadWrite"], ["ContextReadWrite"], ["ContextReadWrite"], [], []] :: [[Text]]))
+        ([[], ["ContextReadWrite", "Reload"], ["ContextReadWrite", "Reload"], ["ContextReadWrite", "Reload"], [], []] :: [[Text]]))
   require "installed manifest includes implementation identity"
     (map (field "implementation") (drop 4 installed) == replicate 2 (Just (toJSON ("haskell_cell" :: Text))))
   where
@@ -204,7 +207,7 @@ presentedCompositionContracts = do
         , Right (ToolDispatchSuccess (toJSON ()) "selected notice")
         ]
       inRow = run (traverse (\name -> dispatch bounded name input) names)
-      raised = run $ interpret (\(_ :: ContextReadWrite a) -> error "unexpected context request") $
+      raised = run $ interpret noReload $ interpret (\(_ :: ContextReadWrite a) -> error "unexpected context request") $
         traverse (\name -> dispatch installed name input) names
   require "nested presentation composes under bounded and installed compilation"
     (declarations bounded == declarations installed && map dtdName (declarations bounded) == names)

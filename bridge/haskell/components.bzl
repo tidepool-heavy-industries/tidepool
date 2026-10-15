@@ -92,6 +92,8 @@ NATIVE_CATALOG_COHORT = {
         "Tidepool.Internal.ModelControl": "lib/Tidepool/Internal/ModelControl.hs",
         "Tidepool.Internal.RequestSite": "lib/Tidepool/Internal/RequestSite.hs",
         "Tidepool.Journal": "lib/Tidepool/Journal.hs",
+        "Tidepool.Lookup": "lib/Tidepool/Lookup.hs",
+        "Tidepool.Lookup.Render": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool.Model": "lib/Tidepool/Model.hs",
         "Tidepool.Patch": "lib/Tidepool/Patch.hs",
         "Tidepool.Prelude": "lib/Tidepool/Prelude.hs",
@@ -6155,6 +6157,8 @@ def declare_haskell_components():
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "Tidepool/File.hs": "lib/Tidepool/File.hs",
         "Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "Tidepool/Lookup/Render.hs": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
@@ -7099,6 +7103,8 @@ def declare_haskell_components():
         "Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "Tidepool/Lookup/Render.hs": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
@@ -7125,6 +7131,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -7144,6 +7151,7 @@ def declare_haskell_components():
         "-Wno-simplifiable-class-constraints"
     ]),
         linker_flags = haskell_component_link_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -7487,6 +7495,8 @@ def declare_haskell_components():
         "Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "Tidepool/Lookup/Render.hs": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
@@ -7510,6 +7520,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -7527,6 +7538,7 @@ def declare_haskell_components():
         "-Wno-simplifiable-class-constraints"
     ]),
         linker_flags = haskell_component_link_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -7869,6 +7881,8 @@ def declare_haskell_components():
         "Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "Tidepool/Lookup/Render.hs": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
@@ -7893,6 +7907,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -7910,6 +7925,7 @@ def declare_haskell_components():
         "-Wno-simplifiable-class-constraints"
     ]),
         linker_flags = haskell_component_link_flags([
+        "bytestring",
         "containers",
         "errors",
         "freer-simple",
@@ -8147,6 +8163,8 @@ def declare_haskell_components():
         "Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
         "Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "Tidepool/Lookup/Render.hs": "lib/Tidepool/Lookup/Render.hs",
         "Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
@@ -8170,6 +8188,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "bytestring",
         "containers",
         "directory",
         "errors",
@@ -8188,6 +8207,7 @@ def declare_haskell_components():
         "-Wno-simplifiable-class-constraints"
     ]),
         linker_flags = haskell_component_link_flags([
+        "bytestring",
         "containers",
         "directory",
         "errors",

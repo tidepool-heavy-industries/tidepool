@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-simplifiable-class-constraints -Wno-orphans #-}
 -- | Typed source publication through an admitted synchronous invocation.
 module Tidepool.Reload
   ( ReloadInput (..), ReloadError (..), ReloadOutcome (..)
@@ -40,6 +41,7 @@ instance JsonSchema ReloadInput where
     , "additionalProperties" .= False
     ]
 
+-- The generated Core owns ReloadError; this companion supplies its authored schema.
 instance JsonSchema ReloadError where
   jsonSchema _ = object [("oneOf", Array
     [ objectSchema Nothing [("tag", object ["enum" .= (["ReloadUnavailable"] :: [Text])], True), ("detail", jsonSchema (Proxy :: Proxy Text), True)]

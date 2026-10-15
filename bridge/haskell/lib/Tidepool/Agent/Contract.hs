@@ -85,6 +85,7 @@ module Tidepool.Agent.Contract
   , installDefaultAsyncWorkbench
   , BuiltinDispatcherEffects
   , SyncEffects
+  , raiseSync
   , KnownToolEffects
   , AsyncEffects
   , Subset

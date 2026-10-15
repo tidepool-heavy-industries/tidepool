@@ -870,6 +870,8 @@ test-suite model-turn-test
     Tidepool.FilePath
     Tidepool.File
     Tidepool.Inspection
+    Tidepool.Lookup
+    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1027,6 +1029,8 @@ test-suite automation-helper-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.Lookup
+    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1048,7 +1052,7 @@ test-suite automation-helper-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, profunctors, selective, safe, errors, witherable, template-haskell
+  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, profunctors, selective, safe, errors, witherable, template-haskell
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints
 
@@ -1093,6 +1097,8 @@ test-suite browser-scenario-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.Lookup
+    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1111,7 +1117,7 @@ test-suite browser-scenario-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
+  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints
 
@@ -1157,6 +1163,8 @@ test-suite command-tools-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.Lookup
+    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1176,7 +1184,7 @@ test-suite command-tools-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
+  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints
 
@@ -1219,6 +1227,8 @@ test-suite tool-profiles-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.Lookup
+    Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
@@ -1237,6 +1247,6 @@ test-suite tool-profiles-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, directory, process
+  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, safe, errors, witherable, directory, process
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints

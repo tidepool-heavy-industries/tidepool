@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds, OverloadedStrings #-}
 module RaisedModelTurn where
-import Control.Monad.Freer (Eff, raise)
+import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import Tidepool.Agent.Contract
 import Tidepool.Effects.Core (ModelCall)
@@ -12,4 +12,4 @@ retainedTurn = Model.invokeModel (Model.textTurn defaultSpec "instructions") "in
 -- A synchronous cell can reuse an ordinary compiled model program without
 -- lending its context capability to that program's callbacks or hooks.
 synchronousTurn :: Eff (SyncEffects '[ModelCall]) (Model.ModelResult Text)
-synchronousTurn = raise retainedTurn
+synchronousTurn = raiseSync retainedTurn
