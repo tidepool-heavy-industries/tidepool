@@ -52,6 +52,7 @@ fn configure_research(config: &mut super::ActorHostConfig) {
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.models.insert("luna".into(), "gpt-6-luna".into());
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["Project.Researcher".into(), "AgentSpec".into()];
         project.haskell.spec = Some("AgentSpec.agentSpec".into());
@@ -121,6 +122,7 @@ async fn research_history(child_machines: HostedChildMachines) {
         if first.host_identity().actor == root {
             panic!("tutorial settled before child inference: {}", first.settled_output("researcher-tutorial"));
         }
+        assert_eq!(first.request.model, "gpt-6-luna", "the frozen Luna alias selects its actual provider model");
         let child = first.host_identity();
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let selected = graph.iter().filter(|node| host.context.binding(node.actor)
