@@ -729,7 +729,7 @@ pub(super) enum HostedChildMachines {
     Dedicated,
 }
 
-pub(super) struct HostTestHooks {
+pub(crate) struct HostTestHooks {
     pub(super) observer: HostTestObserver,
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
     pub(super) stopping: watch::Receiver<bool>,
@@ -738,18 +738,44 @@ pub(super) struct HostTestHooks {
     pub(super) child_machines: HostedChildMachines,
 }
 
+impl HostTestHooks {
+    /// Observe and stop the real outer host while replacing only model traffic.
+    pub(crate) fn external_provider(
+        transport: Arc<dyn harness::engine::ResponsesTransport>,
+    ) -> (
+        Self,
+        watch::Sender<bool>,
+        oneshot::Receiver<HostedActorContext>,
+    ) {
+        let (stop, stopping) = watch::channel(false);
+        let (assembled, assembly) = oneshot::channel();
+        (
+            Self {
+                observer: HostTestObserver::default(),
+                assembled: Some(assembled),
+                stopping,
+                transport: Some(Box::new(move |_, _| transport)),
+                owner_admission: Arc::new(Mutex::new(HostOwnerAdmission::NotAdmitted)),
+                child_machines: HostedChildMachines::Shared,
+            },
+            stop,
+            assembly,
+        )
+    }
+}
+
 /// These handles are issued by the production assembly after durable startup.
 #[derive(Clone)]
-pub(super) struct HostedActorContext {
-    pub(super) config: ActorHostConfig,
-    pub(super) service_address: std::net::SocketAddr,
-    pub(super) actor: LocalActorRef,
-    pub(super) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
-    pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
-    pub(super) recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
-    pub(super) journal_status: watch::Receiver<exomonad_actor::JournalOwnerStatus>,
-    pub(super) observer: HostTestObserver,
-    pub(super) owners: InteractiveOwners,
+pub(crate) struct HostedActorContext {
+    pub(crate) config: ActorHostConfig,
+    pub(crate) service_address: std::net::SocketAddr,
+    pub(crate) actor: LocalActorRef,
+    pub(crate) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
+    pub(crate) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
+    pub(crate) recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
+    pub(crate) journal_status: watch::Receiver<exomonad_actor::JournalOwnerStatus>,
+    pub(crate) observer: HostTestObserver,
+    pub(crate) owners: InteractiveOwners,
 }
 
 #[derive(Debug)]
@@ -772,7 +798,7 @@ impl std::fmt::Display for RootExitedBeforeBarrier {
 impl std::error::Error for RootExitedBeforeBarrier {}
 
 impl HostedActorContext {
-    pub(super) async fn http_command(
+    pub(crate) async fn http_command(
         &self,
         operation_id: harness::embedding::ClientOperationId,
         command: harness::server::HostCommand,
@@ -830,7 +856,7 @@ impl HostedActorContext {
         Ok(())
     }
 
-    pub(super) fn binding(
+    pub(crate) fn binding(
         &self,
         actor: ActorRef,
     ) -> Option<embedded_harness::EmbeddedActorBinding> {
@@ -1577,6 +1603,9 @@ impl HostedTestRuntime {
                     .select_for_run(&config.workspace, config.run_directory.path())
                     .map_err(|error| error.to_string())?,
             );
+            crate::exomonad::source::SourceLayer::new(config.run_directory.path())
+                .ensure_active(config.workspace_inputs.as_ref().expect("selected preparation"))
+                .map_err(|error| error.to_string())?;
         }
         if let Some(diagnostics) = &mut diagnostics {
             diagnostics.workspace = config.workspace.clone();
