@@ -97,7 +97,7 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 14 with eleven fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 15 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
 or null, the exact published source selection roots with their issued dependency originals, and an input acquisition.
 Each publication row keeps its public root separate from dependency interface/product pairs.
@@ -113,13 +113,18 @@ Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]
 for native authored originals, `["join"]`, or `["value"]`. Native product
 owners require canonical module evidence. Roles never come from module-name spelling.
 
-Native product rows retain exact selected ordinals and a logical path/SHA
-descriptor for the existing `TPHOMEOWNERS` version 5 certificate. The worker
-admits and indexes its full native census once against the original owner, native
-bytes and canonical certificate. Selected projections borrow indexed groups;
-private availability explicitly selects the complete certified ordinal set. Availability and selected roots
-remain separate: later checked demand selects groups from the same stored native
-carrier, without promoting that owner's Core or emitting another native product.
+Native product rows have nine fields: unit, module, version, interface SHA, native
+SHA, native path, selected ordinals, the logical path/SHA descriptor for the
+existing `TPHOMEOWNERS` version 5 certificate, and closed availability.
+Availability is `["full-carrier"]` or `["issued-groups", ordinals]`; selected
+ordinals must belong to that availability. The Rust issuer grants full availability
+only from an independently qualified complete carrier before custody merging.
+The worker authenticates and indexes the full census against the original owner,
+native bytes and canonical certificate, then retains the issued availability
+through continuation and revalidation. Full availability with zero selected roots
+remains full; a bounded dependency carrier adds no selected roots. Later checked
+demand borrows only available groups from the stored native carrier, without
+promoting that owner's Core or emitting another native product.
 
 Canonical module certificates bind the compiler producer, finalized interface
 and package bytes, original source digest, exact dependency seals, optional

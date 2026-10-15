@@ -389,7 +389,10 @@ data ScopeInterfaceInput = ScopeInterfaceInput InterfaceRow ExactInterfaceEviden
   deriving (Eq, Show)
 -- Native availability is an immutable projection of the original receipt. It
 -- adds no selected executable groups to the scope.
-data AdmittedOriginalCensus = AdmittedOriginalCensus FilePath String ExactProduct OriginalNativeCensus
+data NativeAvailability = FullCarrier | IssuedGroups [ExactOriginalGroup]
+  deriving (Eq, Show)
+data AdmittedOriginalCensus = AdmittedOriginalCensus
+  FilePath String ExactProduct OriginalNativeCensus NativeAvailability
   deriving (Eq, Show)
 data AdmittedScopeInputs = AdmittedScopeInputs [InterfaceOwner]
   (Map.Map InterfaceOwner ScopeInterfaceInput) AdmittedPackageImports
@@ -518,23 +521,32 @@ makeScopeInputs rows evidence roots = AdmittedScopeInputs (map rowOwner rows)
 scopeAvailableOriginalProducts :: ExactScope -> [ExactProduct]
 scopeAvailableOriginalProducts scope =
   [case Map.lookup (originalUnit selected,originalModule selected) census of
-     Just (AdmittedOriginalCensus _ _ full _) -> full
+     Just (AdmittedOriginalCensus _ _ full _ availability) -> availableNativeProduct full availability
      -- Request-private additions already carry the full groups issued by the
      -- current original inventory. They need no fabricated external receipt.
      Nothing -> selected
   | selected <- scopeProducts scope]
   where AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
 
-validateNativeSelection :: ExactProduct -> ExactProduct -> OriginalNativeCensus -> IO ()
-validateNativeSelection selected full census = do
+availableNativeProduct :: ExactProduct -> NativeAvailability -> ExactProduct
+availableNativeProduct full FullCarrier = full
+availableNativeProduct full (IssuedGroups groups) = full {originalGroups=groups}
+
+validateNativeSelection :: ExactProduct -> ExactProduct -> OriginalNativeCensus -> NativeAvailability -> IO ()
+validateNativeSelection selected full census availability = do
   unless (selected {originalGroups=[]} == full {originalGroups=[]})
     (fail "selected native product differs from its admitted full carrier")
   unless (nativeCensusSelectionMatches census (originalGroups selected))
     (fail "selected native groups differ from their authenticated census")
+  let available = Set.fromList (map originalOrdinal (originalGroups (availableNativeProduct full availability)))
+  unless (Set.fromList (map originalOrdinal (originalGroups selected)) `Set.isSubsetOf` available)
+    (fail "selected native groups exceed their issued availability")
 
 newtype NativeOrdinalSelection = NativeOrdinalSelection [Word]
 
-type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String))
+data OfferedNativeAvailability = OfferedFullCarrier | OfferedIssuedGroups NativeOrdinalSelection
+
+type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String), OfferedNativeAvailability)
 
 admitOriginalCensusWith :: RequestInputReader -> String -> Map.Map InterfaceOwner ExactInterfaceEvidence
   -> [OfferedNativeProduct] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
@@ -544,7 +556,7 @@ admitOriginalCensusUsing :: (FilePath -> String -> IO OriginalNativeCensus) -> S
   -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [OfferedNativeProduct]
   -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
 admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> forM offered
-  (\(selected,_,(path,sha)) -> do
+  (\(selected,_,(path,sha),offeredAvailability) -> do
     native <- readFacts path sha
     let key = (originalUnit selected,originalModule selected)
         expectedOwner = (originalUnit selected,originalModule selected,originalVersion selected,
@@ -557,16 +569,22 @@ admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> 
         , nativeCensusCanonicalCertificate native == Just (canonicalCertificateSha256 proof)
         , nativeCensusRequirements native == canonicalRequirements proof -> pure ()
       _ -> fail ("original native certification differs from its canonical owner: " ++ show key)
+    availability <- case offeredAvailability of
+      OfferedFullCarrier -> pure FullCarrier
+      OfferedIssuedGroups (NativeOrdinalSelection ordinals) ->
+        IssuedGroups <$> either fail pure (selectNativeCensusGroups native ordinals)
     let full = selected {originalGroups=nativeCensusExactGroups native}
-    pure (key,AdmittedOriginalCensus path sha full native))
+    pure (key,AdmittedOriginalCensus path sha full native availability))
 
 selectedCensusProducts :: [OfferedNativeProduct] -> Map.Map InterfaceOwner AdmittedOriginalCensus -> IO [ExactProduct]
-selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_) -> do
+selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_,_) -> do
   let key = (originalUnit product,originalModule product)
   case Map.lookup key admitted of
-    Just (AdmittedOriginalCensus _ _ _ census) -> do
+    Just (AdmittedOriginalCensus _ _ full census availability) -> do
       groups <- either fail pure (selectNativeCensusGroups census ordinals)
-      pure product {originalGroups=groups}
+      let selected = product {originalGroups=groups}
+      validateNativeSelection selected full census availability
+      pure selected
     Nothing -> fail "selected native owner lacks its authenticated census"
 
 rowOwner :: InterfaceRow -> InterfaceOwner
@@ -694,9 +712,9 @@ validateInputClosure producer inputs products = do
     unless (Map.lookup key seals == Just (originalIfaceSha256 product') && hasCore)
       (fail "exact interface evidence is incomplete or lacks native module proof")
   let AdmittedScopeInputs _ _ _ census _ = inputs
-  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full native) ->
+  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full native availability) ->
     case [product' | product' <- products, (originalUnit product',originalModule product') == key] of
-      [selected] -> validateNativeSelection selected full native
+      [selected] -> validateNativeSelection selected full native availability
       _ -> fail "admitted native census lacks its unique scope product"
   where firstOfThree (value,_,_) = value
 
@@ -1959,7 +1977,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
                 ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (_,proof) <- evidence]
         ++ [(InputNative,originalProductPath product,originalProductSha256 product) | product <- products]
-        ++ [(InputCensus,path,sha) | (_,_,(path,sha)) <- census]
+        ++ [(InputCensus,path,sha) | (_,_,(path,sha),_) <- census]
         ++ [(InputGraph,path,sha) | (sha,path) <- graphs]
       ownedParts = [((exactUnit iface,exactModule iface),(kind,path,sha)) | (iface,packages,packageSha) <- rows
         , (kind,path,sha) <- [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]]
@@ -1968,7 +1986,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
               ++ [(key,(InputCore,canonicalCorePath core,canonicalCoreSha256 core)) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (key,proof) <- evidence]
         ++ [((originalUnit product,originalModule product),(InputNative,originalProductPath product,originalProductSha256 product)) | product <- products]
-        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,_,(path,sha)) <- census]
+        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,_,(path,sha),_) <- census]
       byOwner = Map.fromListWith Set.union [(key,Set.singleton part) | (key,part) <- ownedParts]
       owners = Set.fromList [(exactUnit iface,exactModule iface) | (iface,_,_) <- rows]
   unless (Set.fromList parts == Set.fromList expected)
@@ -1987,7 +2005,7 @@ decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "14" && count == 11)
+  unless (magic == "TPEXACTSCOPE" && version == "15" && count == 11)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -2030,15 +2048,19 @@ decodeScope = do
     unique "exact lexical imports" imports
     pure (node, imports)
   nativeProducts <- bounded 4096 $ do
-    array 8
+    array 9
     originalProduct <- ExactProduct <$> nonempty <*> nonempty <*> digestField
       <*> digestField <*> digestField <*> absolute <*> pure []
-    ordinals <- bounded 65536 decodeWord
-    unless (all (<= 4294967295) ordinals) (fail "exact native ordinal exceeds u32")
-    unique "exact original ordinals" ordinals
+    selected <- nativeOrdinals "selected"
     descriptor <- array 2 >> (,) <$> absolute <*> canonicalDigest
-    pure (originalProduct,NativeOrdinalSelection ordinals,descriptor)
-  let products = [product | (product,_,_) <- nativeProducts]
+    availabilityCount <- decodeListLen
+    availabilityTag <- nonempty
+    availability <- case (availabilityTag,availabilityCount) of
+      ("full-carrier",1) -> pure OfferedFullCarrier
+      ("issued-groups",2) -> OfferedIssuedGroups <$> nativeOrdinals "available"
+      _ -> fail "invalid exact native availability"
+    pure (originalProduct,selected,descriptor,availability)
+  let products = [product | (product,_,_,_) <- nativeProducts]
       keys = [(exactUnit iface, exactModule iface) | (iface, _, _) <- interfaces]
       selected = map fst lexical
       productKeys = [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- products]
@@ -2116,6 +2138,11 @@ decodeScope = do
   pure (OfferedScope producer semantic interfaces lexical products executionOwners
     checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts,acquisition)
   where
+    nativeOrdinals role = do
+      ordinals <- bounded 65536 decodeWord
+      unless (all (<= 4294967295) ordinals) (fail ("exact native " ++ role ++ " ordinal exceeds u32"))
+      unique ("exact native " ++ role ++ " ordinals") ordinals
+      pure (NativeOrdinalSelection ordinals)
     decodePurpose authCount purpose = case purpose of
       "host-activation-renderer1" -> do
         unless (authCount == 9) (fail "invalid activation renderer admission")

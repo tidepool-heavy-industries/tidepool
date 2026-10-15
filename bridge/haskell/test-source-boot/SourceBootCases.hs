@@ -3163,17 +3163,18 @@ originalNativeAvailabilityChecks environment scope emitted = do
         _ -> fail "native census fixture lost its unique admitted carrier"
       normalizedGroups = sortOn originalOrdinal . map (\group -> group
         {originalGlobals=Set.toAscList (Set.fromList (originalGlobals group))})
-      replaceOwner selected = readScopeVariant scope (\fields ->
+      replaceOwner selected = replaceAvailability selected Nothing
+      replaceAvailability selected availability = readScopeVariant scope (\fields ->
         [if index == 6 then case field of
-            TList rows -> TList (map (replaceRow selected) rows)
+            TList rows -> TList (map (replaceRow selected availability) rows)
             _ -> field
           else field | (index,field) <- zip [0::Int ..] fields])
-      replaceRow selected entry = case entry of
-        TList [TString unit,TString name,_,_,_,_,_,descriptor]
+      replaceRow selected availability entry = case entry of
+        TList [TString unit,TString name,_,_,_,_,_,descriptor,issued]
           | (T.unpack unit,T.unpack name) == owner -> TList
             [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
             ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
-            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor]
+            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor,maybe issued id availability]
         _ -> entry
       text = TString . T.pack
       requireInvalid action = action >>= \case
@@ -3199,6 +3200,48 @@ originalNativeAvailabilityChecks environment scope emitted = do
       fail "selection changed the old native payload, version or full census"
   unless (map originalGroups (filter ((== owner) . productOwner) (scopeProducts zeroScope)) == [[]]) $
     fail "zero selected groups acquired an executable root"
+  -- Narrow only the request projection of an actual Rust-issued full census.
+  -- Available groups never become executable selection, and continuation must
+  -- retain this bound rather than reconstructing fullness from the census.
+  let issued groups = TList [text "issued-groups",TList
+        (map (TInteger . fromIntegral . originalOrdinal) groups)]
+      absentOrdinal = 1 + maximum (map originalOrdinal full)
+  forM_ [([],[]),([],[selected]),([selected],[selected])] $ \(selection,availability) -> do
+    let boundedAvailable = [if productOwner value == owner
+          then value {originalGroups=availability} else value | value <- available]
+        fullSelection = if null selection then zeroScope else selectedScope
+    bounded <- replaceAvailability (snapshot {originalGroups=selection}) (Just (issued availability))
+      >>= either fail pure
+    unless (scopeRequestSha256 bounded /= scopeRequestSha256 fullSelection) $
+      fail "bounded native availability did not enter the actual request identity"
+    extended <- extendExactScopeInputs bounded [] >>= either fail pure
+    generation <- extendExactScopeGeneration bounded [] [] [] >>= either fail pure
+    reread <- readExactScope (scopeManifestPath bounded) >>= either fail pure
+    forM_ [bounded,extended,generation,reread] $ \retained -> do
+      revalidateExactScope environment retained >>= either fail pure
+      reconciled <- either fail pure (reconcile retained [])
+      unless (scopeAvailableOriginalProducts retained == boundedAvailable
+          && unrecoveredExactProducts reconciled == boundedAvailable
+          && [originalGroups value | value <- scopeProducts retained, productOwner value == owner] == [selection]) $
+        fail "issued native availability widened or changed executable selection during continuation"
+  outside <- case filter ((/= originalOrdinal selected) . originalOrdinal) full of
+    group:_ -> pure group
+    [] -> fail "bounded native control has no unrelated genuine ordinal"
+  requireInvalid (replaceAvailability (snapshot {originalGroups=[outside]}) (Just (issued [selected])))
+  requireInvalid (replaceAvailability (snapshot {originalGroups=[]}) (Just (issued [selected,selected])))
+  requireInvalid (replaceAvailability (snapshot {originalGroups=[]})
+    (Just (TList [text "issued-groups",TList [TInteger (fromIntegral absentOrdinal)]])))
+  forM_ [TList [text "unknown"],TList [text "full-carrier",TList []]
+        ,TList [text "issued-groups"],TList [text "issued-groups",TList [],TNull]] $ \mode ->
+    requireInvalid (replaceAvailability (snapshot {originalGroups=[]}) (Just mode))
+  requireInvalid (readScopeVariant scope (\fields ->
+    [if index == 6 then case field of
+        TList rows -> TList [case entry of
+          TList values@(TString unit:TString name:_)
+            | (T.unpack unit,T.unpack name) == owner -> TList (take 8 values)
+          _ -> entry | entry <- rows]
+        _ -> field
+      else field | (index,field) <- zip [0::Int ..] fields]))
   -- Identical canonical provenance or group outlines never authorize a second
   -- native production for the existing owner, including an empty selection.
   forM_ [selectedScope,zeroScope] $ \selection ->
@@ -3224,7 +3267,6 @@ originalNativeAvailabilityChecks environment scope emitted = do
     fail "ordinary original inventory admitted duplicate fresh owners"
   -- Serialized mutations reach admission against the issuer's original census.
   let altered group = replaceOwner (snapshot {originalGroups=[group]})
-      absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
   requireInvalid (altered (selected {originalOrdinal=absentOrdinal}))
   requireInvalid (replaceOwner (snapshot {originalGroups=[selected,selected]}))
   let changedDigest value = case value of
@@ -3253,8 +3295,8 @@ originalNativeAvailabilityChecks environment scope emitted = do
   unless (unrecoveredExactProducts retry == unrecoveredExactProducts disjoint) $
     fail "refused native replacement changed a pristine retry"
 
--- Reuse the Rust issuer's complete HOME v5 bytes and v10 scope. Only selected
--- groups may shrink; the private admitted census has no test constructor.
+-- Reuse the Rust issuer's complete HOME v5 bytes and schema 15 scope. Selected
+-- groups and availability may narrow; the admitted census has no test constructor.
 originalNativeCensusRoundTripChecks
   :: HscEnv -> ExactScope -> (String,String) -> [ExactProduct] -> IO ()
 originalNativeCensusRoundTripChecks environment scope owner available = do
@@ -3286,8 +3328,8 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
       [values | (6,TList rows) <- zip [0::Int ..] fields
         , TList values@(TString unit:TString name:_) <- rows
         , (T.unpack unit,T.unpack name) == owner] of
-    [[_,_,_,_,_,_,_,TList [TString path,TString sha]]] -> pure (T.unpack path,T.unpack sha)
-    _ -> fail "genuine native owner lacks its unique v10 descriptor"
+    [[_,_,_,_,_,_,_,TList [TString path,TString sha],TList [TString "full-carrier"]]] -> pure (T.unpack path,T.unpack sha)
+    _ -> fail "genuine native owner lacks its unique full-carrier descriptor"
   nativeBytes <- BS.readFile descriptorPath
   nativeTerm <- decode nativeBytes
   case nativeTerm of
@@ -3315,18 +3357,18 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
         ]
   unless (isSuccess property) (fail "authenticated native census ordinal projection property failed")
   zero <- readAltered "zero-selection" (\case
-      [unit,name,version,iface,productSha,path,_,descriptor] ->
-        pure [unit,name,version,iface,productSha,path,TList [],descriptor]
+      [unit,name,version,iface,productSha,path,_,descriptor,availability] ->
+        pure [unit,name,version,iface,productSha,path,TList [],descriptor,availability]
       _ -> fail "genuine native row has another layout") fields >>= either fail pure
   unless (scopeAvailableOriginalProducts zero == available
       && [originalGroups value | value <- scopeProducts zero
         , (originalUnit value,originalModule value) == owner] == [[]]) $
     fail "real selected-zero scope lost full availability or promoted native roots"
   refused "descriptor-sha" (\case
-      [unit,name,version,iface,productSha,path,groups,TList [certificate,_]] ->
-        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")]]
+      [unit,name,version,iface,productSha,path,groups,TList [certificate,_],availability] ->
+        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")],availability]
       _ -> fail "genuine native descriptor has another layout") fields
-  let legacy = [if index == 1 then TString "9" else field | (index,field) <- zip [0::Int ..] fields]
+  let legacy = [if index == 1 then TString "14" else field | (index,field) <- zip [0::Int ..] fields]
       legacyPath = directory </> "native-census-legacy.scope.cbor"
   BS.writeFile legacyPath (encode (TList legacy))
   readExactScope legacyPath >>= \case
@@ -3342,9 +3384,9 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
             certificateBytes = encode certificate
         BS.writeFile certificateCopy certificateBytes
         refused label (\case
-            [unit,name,version,iface,productSha,path,groups,_] -> pure
+            [unit,name,version,iface,productSha,path,groups,_,availability] -> pure
               [unit,name,version,iface,productSha,path,groups,
-                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))]]
+                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))],availability]
             _ -> fail "genuine native row has another layout") fields
   rejectCertificate "certificate-version" legacyCertificate
   changedCanonical <- case nativeTerm of
