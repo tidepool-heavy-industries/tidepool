@@ -586,6 +586,7 @@ async fn pending_retirement_keeps_command_admission_live_and_never_reclaims_its_
                 &bindings,
                 &fixture.lifecycle,
                 tasks,
+                None,
             )
             .unwrap();
         };
@@ -728,6 +729,7 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
             &bindings,
             &fixture.lifecycle,
             &mut commands,
+            None,
         )
         .unwrap();
         fixture.hosts[&retiring].retire_entered.notified().await;
@@ -920,6 +922,7 @@ async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
         &bindings,
         &fixture.lifecycle,
         &mut tasks,
+        None,
     )
     .unwrap();
     fixture.hosts[&actor].retire_entered.notified().await;
@@ -953,6 +956,7 @@ async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
         &bindings,
         &fixture.lifecycle,
         &mut tasks,
+        None,
     )
     .unwrap();
     assert!(tasks.is_empty());
@@ -989,6 +993,7 @@ async fn timed_out_command_observation_is_joined_and_does_not_fabricate_a_receip
         &bindings,
         &fixture.lifecycle,
         &mut tasks,
+        None,
     )
     .unwrap();
     fixture.hosts[&actor].retire_entered.notified().await;
@@ -1024,6 +1029,7 @@ async fn timed_out_command_observation_is_joined_and_does_not_fabricate_a_receip
         &bindings,
         &fixture.lifecycle,
         &mut tasks,
+        None,
     )
     .unwrap();
     assert!(
@@ -1089,6 +1095,7 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
             &conversations,
             &fixture.lifecycle,
             &mut tasks,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1267,4 +1274,161 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         "recovering the two jobs must not rerun either command"
     );
 })).await;
+}
+
+#[tokio::test]
+async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation() {
+    use harness::transport::{
+        auth::chatgpt::{RunAccountAuth, SavedAccounts},
+        Auth,
+    };
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut fixture = RoutingFixture::new().await;
+    let root = actor(99);
+    for node in &mut fixture.nodes {
+        if node.actor != root {
+            node.creator = Some(root);
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let launch = directory.path().join("first.json");
+    let second = directory.path().join("second.json");
+    let source = include_str!("fixtures/saved-account-test.json");
+    for (path, bytes) in [
+        (&launch, source.to_owned()),
+        (
+            &second,
+            source
+                .replace("test-account-a", "test-account-b")
+                .replace("first@example.test", "second@example.test"),
+        ),
+    ] {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(bytes.as_bytes())
+            .unwrap();
+    }
+    let auth = RunAccountAuth::new(
+        fixture.store.clone(),
+        "run".into(),
+        SavedAccounts::beside(launch).unwrap(),
+    )
+    .unwrap();
+    let existing_child = auth.clone();
+    let notebook = auth.clone();
+    let held = auth.access().unwrap();
+    let selected = auth
+        .selection()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|account| account.label == "second@example.test")
+        .unwrap()
+        .id;
+    let (_, control, _) = harness::server::server(directory.path().into());
+    let root_target = fixture.hosts[&root].identity.clone();
+    let before = fixture
+        .store
+        .embedded_inference_state(&root_target)
+        .unwrap();
+    let operation = new_operation();
+    let command = HostCommand::SelectAccount {
+        target: root_target.clone(),
+        account_id: selected.clone(),
+    };
+    fixture
+        .store
+        .enqueue_embedded_command(operation, &command)
+        .unwrap();
+    let receipt = prepare_embedded_browser_command(
+        operation,
+        &command,
+        &fixture.store,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        |_| panic!("account selection must not acquire conversation authority"),
+        &fixture.lifecycle,
+        Some((&auth, &control)),
+    )
+    .unwrap()
+    .complete()
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandReceiptOutcome::AccountSelected { .. }
+    ));
+    assert_eq!(held, "test-account-a");
+    for consumer in [&auth, &existing_child, &notebook, &auth.clone()] {
+        assert_eq!(consumer.access().unwrap(), "test-account-b");
+    }
+    assert_eq!(
+        fixture
+            .store
+            .embedded_inference_state(&root_target)
+            .unwrap(),
+        before
+    );
+    for host in fixture.hosts.values() {
+        assert_eq!(host.wakes.load(Ordering::Relaxed), 0);
+        assert_eq!(host.admissions.load(Ordering::Relaxed), 0);
+        assert!(host.controls.lock().unwrap().is_empty());
+    }
+    let child_operation = new_operation();
+    let child_command = HostCommand::SelectAccount {
+        target: fixture.hosts[&actor(1)].identity.clone(),
+        account_id: selected,
+    };
+    fixture
+        .store
+        .enqueue_embedded_command(child_operation, &child_command)
+        .unwrap();
+    let refused = prepare_embedded_browser_command(
+        child_operation,
+        &child_command,
+        &fixture.store,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        |_| panic!("child must refuse before conversation authority"),
+        &fixture.lifecycle,
+        Some((&auth, &control)),
+    )
+    .unwrap()
+    .complete()
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        refused.outcome,
+        CommandReceiptOutcome::Refused { .. }
+    ));
+    // Durable replay reads the exact receipt without consulting current actors.
+    let replay = prepare_embedded_browser_command(
+        operation,
+        &command,
+        &fixture.store,
+        "run",
+        &[],
+        &BTreeSet::new(),
+        &fixture.projection,
+        |_| panic!("retained account receipt must not resolve actors"),
+        &fixture.lifecycle,
+        None,
+    )
+    .unwrap()
+    .complete()
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay, receipt);
 }

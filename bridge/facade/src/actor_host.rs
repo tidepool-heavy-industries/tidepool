@@ -1140,7 +1140,10 @@ fn prepare_embedded_browser_command(
     projection: &embedded_projection::EmbeddedProjection,
     conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
-    accounts: Option<&harness::transport::auth::chatgpt::SavedAccounts>,
+    accounts: Option<(
+        &harness::transport::auth::chatgpt::RunAccountAuth,
+        &harness::server::ServerControl,
+    )>,
 ) -> Result<EmbeddedBrowserCommandDispatch, String> {
     use harness::server::CommandReceiptOutcome;
 
@@ -1199,13 +1202,16 @@ fn prepare_embedded_browser_command(
         {
             return refuse("account selection must target the current root actor".into());
         }
-        let Some(accounts) = accounts else {
+        let Some((auth, control)) = accounts else {
             return refuse("saved accounts are unavailable".into());
         };
-        return store
-            .select_run_account(run, operation, accounts)
-            .map(|receipt| EmbeddedBrowserCommandDispatch::Settled(Some(receipt)))
-            .map_err(|e| e.to_string());
+        return Ok(EmbeddedBrowserCommandDispatch::SelectAccount {
+            operation,
+            run: run.to_owned(),
+            store: store.clone(),
+            auth: auth.clone(),
+            control: control.clone(),
+        });
     }
     let Some(conversation) = conversation_for(actor) else {
         return refuse("target has no live model conversation".into());
@@ -1222,6 +1228,13 @@ fn prepare_embedded_browser_command(
 }
 
 enum EmbeddedBrowserCommandDispatch {
+    SelectAccount {
+        operation: harness::embedding::ClientOperationId,
+        run: String,
+        store: Arc<harness::store::Store>,
+        auth: harness::transport::auth::chatgpt::RunAccountAuth,
+        control: harness::server::ServerControl,
+    },
     Settled(Option<harness::server::CommandReceipt>),
     Admitted {
         operation: harness::embedding::ClientOperationId,
@@ -1239,6 +1252,59 @@ impl EmbeddedBrowserCommandDispatch {
 
         let (operation, command, store, actor, conversation, lifecycle) = match self {
             Self::Settled(receipt) => return Ok(receipt),
+            Self::SelectAccount {
+                operation,
+                run,
+                store,
+                auth,
+                control,
+            } => {
+                let (receipt, selection) = tokio::task::spawn_blocking(move || {
+                    let accounts = match auth.accounts() {
+                        Ok(accounts) => accounts,
+                        Err(_) => {
+                            let target = store
+                                .embedded_command(&run, operation)
+                                .map_err(|e| e.to_string())?
+                                .ok_or("account command is missing")?
+                                .command
+                                .target()
+                                .clone();
+                            let receipt = store
+                                .settle_embedded_command(
+                                    &run,
+                                    operation,
+                                    CommandReceiptOutcome::Refused {
+                                        target: Some(target),
+                                        reason: "Saved accounts are unavailable.".into(),
+                                    },
+                                )
+                                .map_err(|e| e.to_string())?;
+                            return Ok::<_, String>((receipt, None));
+                        }
+                    };
+                    let receipt = store
+                        .select_run_account(&run, operation, &accounts)
+                        .map_err(|e| e.to_string())?;
+                    let selection = match &receipt.outcome {
+                        CommandReceiptOutcome::AccountSelected { account_id, .. } => {
+                            Some(accounts.projection(account_id.clone()))
+                        }
+                        _ => None,
+                    };
+                    Ok((receipt, selection))
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                if let Some(selection) = selection {
+                    control.publish(
+                        harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
+                            selection,
+                        ),
+                    );
+                }
+                return Ok(Some(receipt));
+            }
             Self::Admitted {
                 operation,
                 command,
@@ -1377,7 +1443,7 @@ fn drain_embedded_browser_commands(
     conversations: &HashMap<ActorRef, embedded_harness::EmbeddedActorBinding>,
     lifecycle: &embedded_projection::LifecycleSender,
     tasks: &mut BrowserCommandTasks,
-    account_auth: &harness::transport::auth::chatgpt::RunAccountAuth,
+    account_auth: Option<&harness::transport::auth::chatgpt::RunAccountAuth>,
 ) -> Result<(), String> {
     // The channel is a wake hint. Store rows survive the persist/enqueue gap
     // and are also drained by the existing host health tick.
@@ -1399,14 +1465,6 @@ fn drain_embedded_browser_commands(
                 continue;
             }
         }
-        let accounts = if matches!(
-            record.command,
-            harness::server::HostCommand::SelectAccount { .. }
-        ) {
-            account_auth.accounts().ok()
-        } else {
-            None
-        };
         let dispatch = prepare_embedded_browser_command(
             record.operation_id,
             &record.command,
@@ -1426,26 +1484,15 @@ fn drain_embedded_browser_commands(
                     })
             },
             lifecycle,
-            accounts.as_ref(),
+            account_auth.map(|auth| (auth, control)),
         )?;
         match dispatch {
             EmbeddedBrowserCommandDispatch::Settled(Some(receipt)) => {
-                if let harness::server::CommandReceiptOutcome::AccountSelected {
-                    account_id, ..
-                } = &receipt.outcome
-                {
-                    if let Some(accounts) = accounts.as_ref() {
-                        control.publish(
-                            harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
-                                accounts.projection(account_id.clone()),
-                            ),
-                        );
-                    }
-                }
                 control.publish_command_receipt(receipt);
             }
             EmbeddedBrowserCommandDispatch::Settled(None) => {}
-            admitted @ EmbeddedBrowserCommandDispatch::Admitted { .. } => {
+            admitted @ (EmbeddedBrowserCommandDispatch::Admitted { .. }
+            | EmbeddedBrowserCommandDispatch::SelectAccount { .. }) => {
                 // The sole supervisor must keep receiving native release events
                 // while this exact conversation awaits its retirement receipt.
                 tasks.spawn(admitted.complete());

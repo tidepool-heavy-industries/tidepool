@@ -843,7 +843,6 @@ pub(super) struct EmbeddedHostActor {
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
     context_models: Arc<OnceLock<ModelResolver>>,
-    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
     #[cfg(test)]
     admission_test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -893,7 +892,6 @@ impl EmbeddedHostActor {
             round_control,
             next_surface: AtomicU64::new(1),
             context_models: Arc::new(OnceLock::new()),
-            account_auth: OnceLock::new(),
             #[cfg(test)]
             admission_test_hooks: None,
         })
@@ -1018,7 +1016,6 @@ struct EmbeddedCancellationOwner {
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
     context_models: Arc<OnceLock<ModelResolver>>,
-    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
     identity: HostIdentity,
     issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,
