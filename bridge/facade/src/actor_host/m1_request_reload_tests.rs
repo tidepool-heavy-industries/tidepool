@@ -487,7 +487,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
             completed(host, &new, 43).await;
             assert_eq!(outputs(&after_new_call.request, OLD_CALL).count(), 0);
             // Retain the already-issued model request while the original Sleep settles.
-            // The final answer then sees both jobs ready; their outputs enter later input.
+            // Its final answer is followed by the pending job's retained-output continuation.
             completed(host, &old, 42).await;
             after_new_call
                 .reply
@@ -497,25 +497,14 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
                     MessagePhase::FinalAnswer,
                 ))
                 .unwrap();
-            let (mut socket, snapshot) =
-                browser_snapshot_until(host.address, &cookie, "waiting").await;
-            assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
-            socket.close(None).await.unwrap();
             assert_eq!(
                 tidepool_extract_cmd::extract_spawn_count(),
                 compiled_after_reload,
                 "old and new installed typed handlers must issue no compiler requests"
             );
 
-            real_host_late_output_tests::submit_host_input(
-                &client,
-                host.address,
-                &origin,
-                &cookie,
-                &target,
-                "Read both retained typed results.",
-            )
-            .await;
+            // The retained late output drives the actual successor inference.
+            // Consume that request before expecting the host to become idle.
             let final_request = issued(&mut receiver).await;
             assert_eq!(final_request.request.tools, declared);
             for (call, expected) in [(OLD_CALL, 42), (NEW_CALL, 43)] {
