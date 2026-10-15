@@ -887,6 +887,7 @@ where
             Err(error) => return terminal_task(Err(error)),
         };
         let WorkbenchAdmission {
+            current_builtin,
             issued_snapshot,
             initial_context,
             context,
@@ -901,10 +902,15 @@ where
             invocation,
             ..
         } = admitted;
-        let inspection = request
-            .tool_call()
-            .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
-            .map(|call| crate::status_tool::parse(call.arguments.clone()));
+        let inspection = current_builtin.then(|| {
+            crate::status_tool::parse(
+                request
+                    .tool_call()
+                    .expect("issued status request")
+                    .arguments
+                    .clone(),
+            )
+        });
         if inspection.is_none() && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),

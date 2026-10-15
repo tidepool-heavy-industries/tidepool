@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
+#[cfg(test)]
 use tidepool_runtime::session::WorkbenchRequest;
 
 use crate::prompt_catalog::PromptId;
@@ -81,18 +82,6 @@ impl ResidentInteractivePolicy {
             declarations: Arc::default(),
         }
     }
-}
-
-fn builtin_request(
-    name: &str,
-    arguments: ToolArguments,
-) -> Result<WorkbenchRequest, ResidentToolError> {
-    let ToolArguments::Structured(value @ serde_json::Value::Object(_)) = arguments else {
-        return Err(ResidentToolError::InvalidInvocation(format!(
-            "invalid argument kind for {name:?}"
-        )));
-    };
-    Ok(WorkbenchRequest::for_tool(name.into(), value))
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -268,8 +257,8 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             let validated = (|| {
                 let arguments = arguments?;
                 if is_builtin(&invocation.name) {
-                    return Ok(crate::ActorWorkbenchInvocation::issued(
-                        builtin_request(&invocation.name, arguments)?,
+                    return Ok(crate::ActorWorkbenchInvocation::inspection(
+                        crate::status_tool::inspection_request(arguments)?,
                         installed_tools.ok(),
                         capture,
                         context,
@@ -329,13 +318,16 @@ mod tests {
     fn builtins_have_an_explicit_route_separate_from_installed_endpoints() {
         for builtin in [crate::status_tool::declaration()] {
             assert!(is_builtin(builtin.name()));
-            let request = builtin_request(
-                builtin.name(),
-                ToolArguments::Structured(serde_json::json!({})),
-            )
-            .unwrap();
+            let request = crate::status_tool::inspection_request(ToolArguments::Structured(
+                serde_json::json!({}),
+            ))
+            .unwrap()
+            .into_request();
             assert_eq!(request.tool_call().unwrap().name, builtin.name());
-            assert!(builtin_request(builtin.name(), ToolArguments::Raw("source".into())).is_err());
+            assert!(
+                crate::status_tool::inspection_request(ToolArguments::Raw("source".into()))
+                    .is_err()
+            );
         }
         assert!(!is_builtin("haskell"));
         assert!(!is_builtin("reload"));

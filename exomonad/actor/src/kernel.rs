@@ -312,13 +312,14 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// at mailbox admission; provider calls freeze their selected endpoint before it.
 pub(crate) enum WorkbenchToolOperation {
     Unbound(Option<crate::resident_workbench::ActorRequestSnapshot>),
+    Inspection(Option<crate::resident_workbench::ActorRequestSnapshot>),
     Installed(std::sync::Arc<crate::resident_workbench::AdmittedToolCall>),
 }
 
 impl WorkbenchToolOperation {
     pub(crate) fn installation(&self) -> Option<&crate::InstalledToolLease> {
         match self {
-            Self::Unbound(installation) => installation
+            Self::Unbound(installation) | Self::Inspection(installation) => installation
                 .as_ref()
                 .map(|snapshot| snapshot.installation()),
             Self::Installed(call) => Some(call.selected().lease()),
@@ -327,7 +328,7 @@ impl WorkbenchToolOperation {
 
     pub(crate) fn snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
         match self {
-            Self::Unbound(snapshot) => snapshot.as_ref(),
+            Self::Unbound(snapshot) | Self::Inspection(snapshot) => snapshot.as_ref(),
             Self::Installed(call) => Some(call.selected().snapshot()),
         }
     }
@@ -336,7 +337,7 @@ impl WorkbenchToolOperation {
         &self,
     ) -> Option<&std::sync::Arc<crate::resident_workbench::AdmittedToolCall>> {
         match self {
-            Self::Unbound(_) => None,
+            Self::Unbound(_) | Self::Inspection(_) => None,
             Self::Installed(call) => Some(call),
         }
     }
@@ -394,6 +395,22 @@ impl ActorWorkbenchInvocation {
 
     pub fn request(&self) -> &WorkbenchRequest {
         &self.request
+    }
+
+    pub(crate) fn is_inspection(&self) -> bool {
+        matches!(self.operation, WorkbenchToolOperation::Inspection(_))
+    }
+
+    pub(crate) fn inspection(
+        request: crate::status_tool::StatusInspectionRequest,
+        installation: Option<crate::resident_workbench::ActorRequestSnapshot>,
+        capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+        context: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
+    ) -> Self {
+        Self {
+            operation: WorkbenchToolOperation::Inspection(installation),
+            ..Self::issued(request.into_request(), None, capture, context)
+        }
     }
 
     pub(crate) fn selected_endpoint(&self) -> Option<&exomonad_tool::EndpointPlan> {

@@ -5,6 +5,26 @@ use serde::Deserialize;
 
 pub(crate) const STATUS_TOOL: &str = "status";
 
+pub(crate) struct StatusInspectionRequest(serde_json::Value);
+
+impl StatusInspectionRequest {
+    pub(crate) fn into_request(self) -> tidepool_runtime::session::WorkbenchRequest {
+        tidepool_runtime::session::WorkbenchRequest::for_tool(STATUS_TOOL.into(), self.0)
+    }
+}
+
+pub(crate) fn inspection_request(
+    arguments: exomonad_tool::ToolArguments,
+) -> Result<StatusInspectionRequest, crate::ResidentToolError> {
+    let exomonad_tool::ToolArguments::Structured(value @ serde_json::Value::Object(_)) = arguments
+    else {
+        return Err(crate::ResidentToolError::InvalidInvocation(
+            "invalid argument kind for status".into(),
+        ));
+    };
+    Ok(StatusInspectionRequest(value))
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StatusView {

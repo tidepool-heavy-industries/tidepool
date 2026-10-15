@@ -3841,10 +3841,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 })?;
             context.haskell_effects_alias = initial_context.execution_effects.clone();
         }
-        let current_builtin = operation.selected().is_none()
-            && request
-                .tool_call()
-                .is_some_and(|call| matches!(call.name.as_str(), crate::status_tool::STATUS_TOOL));
+        let current_builtin = matches!(
+            &operation,
+            crate::kernel::WorkbenchToolOperation::Inspection(_)
+        );
         if !self.policy_installed
             || !matches!(
                 self.standing,
@@ -12222,7 +12222,7 @@ where
     ) -> bool {
         serializes_reload_plan(
             invocation.selected_endpoint(),
-            invocation.request().tool_call().is_some(),
+            !invocation.is_inspection() && invocation.request().tool_call().is_some(),
         )
     }
 
@@ -15430,6 +15430,31 @@ mod tests {
             proptest::prop_assert!(super::serializes_reload_plan(None, true));
             proptest::prop_assert!(!super::serializes_reload_plan(None, false));
         }
+    }
+
+    #[test]
+    fn issued_inspection_is_independent_without_acquiring_reload_authority() {
+        let inspection = crate::ActorWorkbenchInvocation::inspection(
+            crate::status_tool::inspection_request(exomonad_tool::ToolArguments::Structured(
+                serde_json::json!({}),
+            ))
+            .unwrap(),
+            None,
+            None,
+            None,
+        );
+        assert!(inspection.is_inspection());
+        assert!(!super::serializes_reload_plan(
+            inspection.selected_endpoint(),
+            !inspection.is_inspection() && inspection.request().tool_call().is_some(),
+        ));
+        assert!(!super::admits_reload_plan(inspection.selected_endpoint()));
+        let unresolved = crate::ActorWorkbenchInvocation::unbound(inspection.request().clone());
+        assert!(!unresolved.is_inspection());
+        assert!(super::serializes_reload_plan(
+            unresolved.selected_endpoint(),
+            unresolved.request().tool_call().is_some(),
+        ));
     }
 
     #[test]
