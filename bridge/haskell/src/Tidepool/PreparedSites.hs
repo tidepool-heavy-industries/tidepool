@@ -4,7 +4,7 @@ module Tidepool.PreparedSites
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment
   , preparedSiteRequestAuthority
   , PreparedSiteDependencies, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
-  , elaboratePreparedSitesWithDependencies
+  , PreparedSiteAcquisition, acquirePreparedSitesWithDependencies, completePreparedSites
   , resolveRequestSiteTyCon
   , SiteRejection(..)
   , lookupPreparedVerb
@@ -15,9 +15,13 @@ module Tidepool.PreparedSites
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.State.Strict
-import Data.Bits ((.&.), xor)
+import Data.Bits ((.&.), (.|.), shiftL)
+import Data.ByteString qualified as BS
+import Crypto.Hash.SHA256 qualified as SHA256
+import Codec.CBOR.Encoding qualified as CBOR
+import Codec.CBOR.Write (toStrictByteString)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -25,13 +29,14 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core
-import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
+import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr, extendIdSubst)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Core.TyCo.FVs (tyConsOfType)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Var.Env (mkInScopeSet)
+import GHC.Types.Var.Set (unionVarSets)
 import GHC.Core.Make (mkCoreConApps)
-import GHC.Builtin.Types (intDataCon, intTy, mkListTy, mkPromotedListTy, liftedTypeKind)
+import GHC.Builtin.Types (intDataCon, intTy, mkListTy, mkPromotedListTy, liftedTypeKind, manyDataConTy)
 import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
 import GHC.Core.TyCo.Subst (substTyWith)
 import GHC.Core.Coercion
@@ -56,7 +61,7 @@ import GHC.Types.Name (Name, isSystemName, nameModule_maybe, nameOccName, nameUn
 import GHC.Types.Name.Occurrence (OccName, mkTcOcc, mkVarOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Types.Var (varType)
-import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
+import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
@@ -76,12 +81,13 @@ import GHC.Types.TypeEnv (typeEnvIds, lookupTypeEnv)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
 import Tidepool.CheckedCell (captureCheckedTypeWitness, captureRequestTypeSignatures)
+import Tidepool.ConstructorIdentity (IdentityResolver)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
 import Tidepool.TypePolicy
   ( TypeGraph, TypeGraphBuilder, TypeNodeId, emptyTypeGraphBuilder
-  , finishTypeGraph, internType, modulesOfType
+  , finishTypeGraph, internType, modulesOfType, encodeTypeSyntaxIdentity, TypeSyntaxIdentityError
   , nominalHeadsOfType
   )
 
@@ -481,8 +487,7 @@ data PreparedSite = PreparedSite
 data ElaborationState = ElaborationState
   { esUniques :: UniqSupply
   , esCounters :: !(Map T.Text Word64)
-  , esSites :: ![YieldSite]
-  , esPreparedSites :: ![PreparedSite]
+  , esPendingSites :: ![PendingSite]
   , esTypeGraph :: !TypeGraphBuilder
   , esRejections :: ![SiteRejection]
   , esDependencyQueries :: !(Set.Set DependencyQuery)
@@ -519,10 +524,16 @@ data SiteRejection = SiteRejection
 -- bottoming before this pass replaces the call.
 -- | The queried objects and this witness come from the same elaboration. The
 -- caller cannot supply a dependency census or replace the resolved authority.
-elaboratePreparedSitesWithDependencies :: PreparedSiteEnvironment
-  -> Map String Id -> Map String Id -> [CoreBind]
-  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], PreparedSiteDependencies)
-elaboratePreparedSitesWithDependencies environment owned imported bindings = do
+-- Acquired Core is private until one immutable resolver completes every site.
+-- Placeholder Ids are fresh compiler locals, never numeric site identities.
+data PendingSite = PendingSite Id Id VerbSpec T.Text Word64
+  (Word64 -> YieldSite) TypeNodeId [TypeNodeId]
+data PreparedSiteAcquisition = PreparedSiteAcquisition
+  [CoreBind] [PendingSite] TypeGraph [SiteRejection] PreparedSiteDependencies
+
+acquirePreparedSitesWithDependencies :: PreparedSiteEnvironment
+  -> Map String Id -> Map String Id -> [CoreBind] -> IO PreparedSiteAcquisition
+acquirePreparedSitesWithDependencies environment owned imported bindings = do
   let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
       recovered = Map.fromList
         [(verbKey spec, sibling)
@@ -532,23 +543,39 @@ elaboratePreparedSitesWithDependencies environment owned imported bindings = do
         , Just siblingOwner <- [nameModule_maybe (idName sibling)]
         , moduleUnit surfaceOwner == moduleUnit siblingOwner]
       siblings = Map.unions [owned, imported, environmentInterfaceSiblings environment, recovered]
-  (rewritten, yields, issued, graph, failures, queries) <-
-    elaboratePreparedSitesTracked (environmentSignatureContext environment)
+  (rewritten, pending, graph, failures, queries) <-
+    acquirePreparedSitesTracked (environmentSignatureContext environment)
       (environmentAuthority environment) siblings bindings
   let facts = Map.fromSet (observeDependency environment owned imported) queries
-  pure (rewritten, yields, issued, graph, failures, PreparedSiteDependencies owned facts)
+  pure (PreparedSiteAcquisition rewritten pending graph failures (PreparedSiteDependencies owned facts))
 
-elaboratePreparedSitesTracked :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
-  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], Set.Set DependencyQuery)
-elaboratePreparedSitesTracked env authority siblings bindings = do
+completePreparedSites :: IdentityResolver -> PreparedSiteAcquisition
+  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], PreparedSiteDependencies)
+completePreparedSites resolver (PreparedSiteAcquisition bindings pending graph failures dependencies) = do
+  issued <- forM pending $ \(PendingSite placeholder owner spec origin ordinal metadata wire inputs) -> do
+    identity <- either throwIO pure (siteIdentity resolver graph spec origin ordinal wire inputs)
+    let site = metadata identity
+        literal = mkCoreConApps intDataCon [Lit (LitNumber LitNumInt (fromIntegral identity))]
+    pure (placeholder, literal, site, PreparedSite owner site (vsDelivery spec) wire inputs)
+  let free = unionVarSets [exprFreeVars rhs | binding <- bindings, rhs <- case binding of
+        NonRec _ body -> [body]; Rec pairs -> map snd pairs]
+      substitution = foldl (\current (placeholder, literal, _, _) -> extendIdSubst current placeholder literal)
+        (mkEmptySubst (mkInScopeSet free)) issued
+      complete (NonRec binder rhs) = NonRec binder (substExpr substitution rhs)
+      complete (Rec pairs) = Rec [(binder, substExpr substitution rhs) | (binder, rhs) <- pairs]
+  pure (map complete bindings, [site | (_, _, site, _) <- issued],
+    [site | (_, _, _, site) <- issued], graph, failures, dependencies)
+
+acquirePreparedSitesTracked :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
+  -> IO ([CoreBind], [PendingSite], TypeGraph, [SiteRejection], Set.Set DependencyQuery)
+acquirePreparedSitesTracked env authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
   (bindings', final) <- runStateT (traverse rewriteBind bindings)
-        (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder []
+        (ElaborationState uniques mempty [] emptyTypeGraphBuilder []
           (Set.singleton (NominalQuery RequestCarrier)))
   graph <- either throwIO pure (finishTypeGraph (esTypeGraph final))
   pure ( bindings'
-       , reverse (esSites final)
-       , reverse (esPreparedSites final)
+       , reverse (esPendingSites final)
        , graph
        , reverse (esRejections final)
        , esDependencyQueries final)
@@ -675,16 +702,15 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
                   signatures <- liftIO (traverse (\(reply, progress) ->
                     captureRequestTypeSignatures env reply progress) requestTypes)
-                  let site = (buildYieldSite spec originName ordinal (spAnswer plan) siteInputs)
+                  placeholder <- freshEvidence (Scaled manyDataConTy intTy)
+                  let metadata identity = (buildYieldSite identity spec originName ordinal (spAnswer plan) siteInputs)
                         { ysInputTypeWitnesses = witnesses, ysRequestTypeSignatures = signatures }
-                      literal = mkCoreConApps intDataCon
-                        [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
                       -- Sites are elaborated after simplify/tidy. A newtype
                       -- worker application cannot survive into CorePrep/STG;
                       -- use its genuine representation axiom to wrap the Int.
                       carrierArguments =
                         [mkPromotedListTy liftedTypeKind siteInputs, carrierReply]
-                      carrier = mkCast literal (mkSymCo
+                      carrier = mkCast (Var placeholder) (mkSymCo
                         (mkUnbranchedAxInstCo Representational
                           (newTyConCo carrierTyCon) carrierArguments []))
                   current <- get
@@ -692,11 +718,9 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
                     (runStateT (internType wireType) (esTypeGraph current))
                   (inputNodes, graph2) <- either (liftIO . throwIO) pure
                     (runStateT (traverse internType siteInputs) graph1)
-                  let preparedSite = PreparedSite topBinder site (vsDelivery spec)
-                        wireNode inputNodes
+                  let pending = PendingSite placeholder topBinder spec originName ordinal metadata wireNode inputNodes
                   put current
-                    { esSites = site : esSites current
-                    , esPreparedSites = preparedSite : esPreparedSites current
+                    { esPendingSites = pending : esPendingSites current
                     , esTypeGraph = graph2
                     }
                   current' <- get
@@ -831,20 +855,30 @@ stripRepresentationPragmas =
   T.replace "{-# UNPACK #-} !" "" . T.replace "{-# UNPACK #-}!" "" .
   T.replace "{-# UNPACK #-} " "" . T.replace "{-# UNPACK #-}" ""
 
-buildYieldSite :: VerbSpec -> T.Text -> Word64 -> Type -> [Type] -> YieldSite
-buildYieldSite spec origin ordinal answer inputs =
+buildYieldSite :: Word64 -> VerbSpec -> T.Text -> Word64 -> Type -> [Type] -> YieldSite
+buildYieldSite identity spec origin ordinal answer inputs =
   let answerSite = siteType (vsListAnswer spec) answer
       inputSites = map (siteType False) inputs
-      identity = siteIdentity spec origin ordinal answerSite inputSites
   in YieldSite identity origin ordinal answerSite inputSites (replicate (length inputSites) Nothing)
       (replyDeclaration answer) Nothing
 
-siteIdentity :: VerbSpec -> T.Text -> Word64 -> SiteType -> [SiteType] -> Word64
-siteIdentity spec origin ordinal answer inputs =
-  let Fingerprint high low = fingerprintString
-        (T.unpack origin ++ "#" ++ show ordinal ++ "#" ++ vsName spec
-          ++ "#" ++ show answer ++ "#" ++ show inputs)
-  in (high `xor` low) .&. 0x7fffffffffffffff
+siteIdentity :: IdentityResolver -> TypeGraph -> VerbSpec -> T.Text -> Word64
+  -> TypeNodeId -> [TypeNodeId] -> Either TypeSyntaxIdentityError Word64
+siteIdentity resolver graph spec origin ordinal wire inputs = do
+  syntax <- encodeTypeSyntaxIdentity resolver graph (wire : inputs)
+  let array fields = CBOR.encodeListLen (fromIntegral (length fields)) <> fold fields
+      delivery = case vsDelivery spec of
+        DeliverHostAnswer -> 0
+        DeliverLiveReentry -> 1
+        DeliverExitCellFill -> 2
+        DeliverTerminalCapture -> 3
+      payload = toStrictByteString (array
+        [ CBOR.encodeString "tidepool-typed-site/v2", CBOR.encodeString origin
+        , CBOR.encodeWord64 ordinal, CBOR.encodeString (T.pack (verbKey spec))
+        , CBOR.encodeWord delivery, CBOR.encodeBytes syntax ])
+      hashed = BS.foldl' (\acc byte -> (acc `shiftL` 8) .|. fromIntegral byte) 0
+        (BS.take 8 (SHA256.hash payload))
+  pure (hashed .&. 0x7fffffffffffffff)
 
 -- | The saturated final lifted result index is an intrinsic constructor fact.
 -- Unresolved indices remain explicit unconstructible nodes in the type graph.

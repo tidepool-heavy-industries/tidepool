@@ -90,7 +90,7 @@ import Tidepool.PreparedSites
   ( PreparedSite, SiteRejection, IntrinsicCensus
   , censusPreparedIntrinsics, intrinsicFree, intrinsicNames
   , resolvePreparedSiblings, PreparedSiteEnvironment, PreparedSiteDependencies
-  , resolvePreparedSiteEnvironment, elaboratePreparedSitesWithDependencies )
+  , resolvePreparedSiteEnvironment, acquirePreparedSitesWithDependencies, completePreparedSites )
 import Tidepool.PreparedSites qualified as Sites
 import Tidepool.PreparedStg.Internal
 import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts, finalizedHomeModInfo)
@@ -225,24 +225,16 @@ acquirePreparedModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModu
   -> IO PreparedModuleTask
 acquirePreparedModule env location siblings finalized = do
   let guts = finalizedTidyGuts finalized
-  task <- acquireTypedBindings CompleteSourceModule env (cg_module guts) location
-       (cg_tycons guts) siblings (cg_binds guts)
-  retainDefiningInterface env (hm_iface (finalizedHomeModInfo finalized)) task
+  acquireTypedBindings (Just (hm_iface (finalizedHomeModInfo finalized))) CompleteSourceModule
+    env (cg_module guts) location (cg_tycons guts) siblings (cg_binds guts)
 
 acquirePreparedModuleWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv -> ModLocation
   -> Map String Id -> FinalizedModule -> IO PreparedModuleTask
 acquirePreparedModuleWithSiteEnvironment environment env location siblings finalized = do
   let guts = finalizedTidyGuts finalized
-  task <- acquireTypedBindingsWithSiteEnvironment (Just environment) CompleteSourceModule env
-       (cg_module guts) location (cg_tycons guts) siblings (cg_binds guts)
-  retainDefiningInterface env (hm_iface (finalizedHomeModInfo finalized)) task
-
-retainDefiningInterface :: HscEnv -> ModIface -> PreparedModuleTask -> IO PreparedModuleTask
-retainDefiningInterface env iface task = do
-  resolver <- captureIdentityResolver env (Just iface)
-  pure $ PreparedModuleTask $ do
-    output <- runPreparedModuleTask task
-    pure output { preparedIdentityResolver = resolver }
+  acquireTypedBindingsWithSiteEnvironment (Just (hm_iface (finalizedHomeModInfo finalized)))
+    (Just environment) CompleteSourceModule env (cg_module guts) location
+    (cg_tycons guts) siblings (cg_binds guts)
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -284,14 +276,14 @@ acquireRecoveredModule = acquireRecoveredModuleUsingSiteEnvironment Nothing
 
 acquireRecoveredModuleUsingSiteEnvironment :: Maybe PreparedSiteEnvironment
   -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
-acquireRecoveredModuleUsingSiteEnvironment = acquireRecoveredModuleWithWorkers IncludeConstructorWorkers
+acquireRecoveredModuleUsingSiteEnvironment = acquireRecoveredModuleWithWorkers Nothing IncludeConstructorWorkers
 
-acquireRecoveredModuleWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment
+acquireRecoveredModuleWithWorkers :: Maybe ModIface -> ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment
   -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
-acquireRecoveredModuleWithWorkers workers environment hscEnv input = do
+acquireRecoveredModuleWithWorkers defining workers environment hscEnv input = do
   let entries = recoveredEntries input
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
-  task <- acquireTypedBindingsWithEntryScope entries workers environment ExactBodySubset
+  task <- acquireTypedBindingsWithEntryScope entries workers defining environment ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
   pure $ PreparedModuleTask $ do
@@ -319,14 +311,14 @@ restoreRecoveredEntries entries binding = case binding of
         pure (metadata, etaExpand arity body)
 
 -- Both complete modules and recovered subsets elaborate before CorePrep erases types.
-acquireTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
+acquireTypedBindings :: Maybe ModIface -> PreparedCoverage -> HscEnv -> Module -> ModLocation
   -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
-acquireTypedBindings coverage env owner location tycons imported bindings = do
-  acquireTypedBindingsWithSiteEnvironment Nothing coverage env owner location tycons imported bindings
+acquireTypedBindings defining coverage env owner location tycons imported bindings =
+  acquireTypedBindingsWithSiteEnvironment defining Nothing coverage env owner location tycons imported bindings
 
-acquireTypedBindingsWithSiteEnvironment :: Maybe PreparedSiteEnvironment -> PreparedCoverage
+acquireTypedBindingsWithSiteEnvironment :: Maybe ModIface -> Maybe PreparedSiteEnvironment -> PreparedCoverage
   -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
-acquireTypedBindingsWithSiteEnvironment = acquireTypedBindingsWithWorkers IncludeConstructorWorkers
+acquireTypedBindingsWithSiteEnvironment defining = acquireTypedBindingsWithWorkers IncludeConstructorWorkers defining
 
 -- Canonical components own original groups; the defining constructor workers
 -- are prepared once as a separate unit, rather than injected in every subset.
@@ -336,29 +328,37 @@ data ConstructorWorkerPolicy = IncludeConstructorWorkers | OmitConstructorWorker
 data FatPreparationUnit = OriginalComponent Int | ConstructorWorkers | SiteComponents [Int]
   deriving (Eq, Ord)
 
-acquireTypedBindingsWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> PreparedCoverage
+acquireTypedBindingsWithWorkers :: ConstructorWorkerPolicy -> Maybe ModIface -> Maybe PreparedSiteEnvironment -> PreparedCoverage
   -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
 acquireTypedBindingsWithWorkers = acquireTypedBindingsWithEntryScope Map.empty
 
 acquireTypedBindingsWithEntryScope :: Map Name Id -> ConstructorWorkerPolicy
-  -> Maybe PreparedSiteEnvironment -> PreparedCoverage -> HscEnv -> Module -> ModLocation
+  -> Maybe ModIface -> Maybe PreparedSiteEnvironment -> PreparedCoverage -> HscEnv -> Module -> ModLocation
   -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
-acquireTypedBindingsWithEntryScope entries workers selected coverage env owner location tycons imported bindings = do
+acquireTypedBindingsWithEntryScope entries workers defining selected coverage env owner location tycons imported bindings = do
   timing <- readTimingEnabled
   let census = censusPreparedIntrinsics tycons bindings
       ownedSiblings = resolvePreparedSiblings bindings
-  (rewritten, sites, preparedSites, graph, rejections, carrier, dependencies) <-
-    if intrinsicFree census then pure (bindings, [], [], emptyTypeGraph, [], Nothing, Nothing)
-    else do
-      environment <- maybe (timePhase timing "prepared_site_authority" (resolvePreparedSiteEnvironment env))
-        pure selected
+  acquired <- if intrinsicFree census then pure Nothing else do
+    environment <- maybe (timePhase timing "prepared_site_authority" (resolvePreparedSiteEnvironment env))
+      pure selected
+    task <- timePhase timing "prepared_site_acquire"
+      (acquirePreparedSitesWithDependencies environment ownedSiblings imported bindings)
+    pure (Just (environment, task))
+  -- Acquisition has demanded the complete selected typed graphs, including
+  -- lazy package declarations. Freeze once before issuing any numeric site;
+  -- executable projection retains precisely this same immutable resolver.
+  resolver <- captureIdentityResolver env defining
+  (rewritten, sites, preparedSites, graph, rejections, carrier, dependencies) <- case acquired of
+    Nothing -> pure (bindings, [], [], emptyTypeGraph, [], Nothing, Nothing)
+    Just (environment, task) -> do
       (bodies, yields, issued, types, failures, evidence) <- timePhase timing "prepared_sites"
-        (elaboratePreparedSitesWithDependencies environment ownedSiblings imported bindings)
+        (completePreparedSites resolver task)
       pure (bodies, yields, issued, types, failures, Sites.preparedSiteRequestAuthority environment, Just evidence)
   let subset = case coverage of
         CompleteSourceModule -> []
         ExactBodySubset -> recoveredSubsetScope owner rewritten
-  acquireBindingsWithScope workers timing subset entries env owner location tycons
+  acquireBindingsWithScope resolver workers timing subset entries env owner location tycons
     rewritten coverage ownedSiblings sites preparedSites graph rejections carrier dependencies census
 
 -- | An exact subset can reference other external tops in its defining module.
@@ -949,12 +949,11 @@ acquireRecoveredWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvi
   -> OwnerInterfaceContext -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModuleTask)
 acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = do
   prepared <- trySynchronous $ do
-    task <- acquireRecoveredModuleWithWorkers workers environment hscEnv
+    task <- acquireRecoveredModuleWithWorkers (Just (ownerInterfaceModIface context)) workers environment hscEnv
       (RecoveredModuleInput owner (ownerInterfaceLocation context)
         (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context))
-    retained <- retainDefiningInterface hscEnv (ownerInterfaceModIface context) task
     pure (PreparedModuleTask $ do
-      output <- runPreparedModuleTask retained
+      output <- runPreparedModuleTask task
       pure output { preparedExpectedEntries = DeclaringEntries context })
   pure $ case prepared of
     Left reason -> Left (RecoveredModulePreparationFailure owner reason)
@@ -1001,13 +1000,12 @@ trySynchronous action = do
       Nothing -> pure (Left (displayException (exception :: SomeException)))
     Right value -> pure (Right value)
 
-acquireBindingsWithScope :: ConstructorWorkerPolicy -> Bool -> [Id] -> Map Name Id
+acquireBindingsWithScope :: IdentityResolver -> ConstructorWorkerPolicy -> Bool -> [Id] -> Map Name Id
   -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
   -> [SiteRejection] -> Maybe TyCon -> Maybe PreparedSiteDependencies -> IntrinsicCensus -> IO PreparedModuleTask
-acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule location tycons optimizedCore coverage
+acquireBindingsWithScope resolver workers timing subsetScope entries hscEnv thisModule location tycons optimizedCore coverage
     siblings yieldSites sites graph rejections carrierTyCon dependencies census = do
-  resolver <- captureIdentityResolver hscEnv Nothing
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set

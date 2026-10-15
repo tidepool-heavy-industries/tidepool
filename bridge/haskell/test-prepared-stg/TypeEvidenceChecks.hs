@@ -327,6 +327,11 @@ verifyHydratedSiteIdentities result wire = do
   hydratedResolver <- captureIdentityResolver hydrated Nothing
   source <- mapM (requireRight . resolveTypeIdentity (pmIdentityResolver prepared)) types
   restored <- mapM (requireRight . resolveTypeIdentity hydratedResolver) restoredTypes
+  sourceSyntax <- requireRight (Policy.encodeTypeSyntaxIdentity (pmIdentityResolver prepared)
+    (pmTypeGraph prepared) [psWireNode site])
+  restoredSyntax <- requireRight (Policy.encodeTypeSyntaxIdentity hydratedResolver restoredGraph [restoredRoot])
+  assert (sourceSyntax == restoredSyntax)
+    "site syntax identity changed with source/interface hydration or unrelated arena indices"
   let inventory identities = Map.fromList [(typeSymbol identity, identity) | identity <- identities]
   assert (not (null source) && inventory source == siteIdentities wire)
     "projected reachable nominal identities differ from their issuing prepared resolver"
