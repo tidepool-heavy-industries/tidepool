@@ -12,6 +12,7 @@ use tidepool_runtime::session::{
 use tracing::{instrument::WithSubscriber, Instrument};
 
 use super::ResolvedSpec;
+use crate::call_timing::PreparationPhase;
 
 /// The two shipped policies share the generated standard actor row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -218,11 +219,30 @@ pub(crate) enum PreparationFailure {
 }
 
 struct PreparationTask {
+    observation: uuid::Uuid,
     outcome: Mutex<Option<Result<Arc<PreparedToolset>, PreparationFailure>>>,
     completed: tokio::sync::Notify,
 }
 
 impl PreparationTask {
+    fn new() -> Self {
+        Self {
+            observation: uuid::Uuid::new_v4(),
+            outcome: Mutex::new(None),
+            completed: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_observed(
+        &self,
+        disposition: PreparationLookupDisposition,
+    ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
+        let mut timing = crate::call_timing::PreparationWait::new(self.observation, disposition);
+        let outcome = self.wait().await;
+        timing.complete(outcome.is_ok());
+        outcome
+    }
+
     async fn wait(&self) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         loop {
             let completed = self.completed.notified();
@@ -255,14 +275,14 @@ struct PreparationState {
 const RETAINED_TOOLSETS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PreparationLookupDisposition {
+pub(crate) enum PreparationLookupDisposition {
     New,
     JoinedPending,
     ReadyHit,
 }
 
 impl PreparationLookupDisposition {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::New => "new",
             Self::JoinedPending => "joined_pending",
@@ -310,10 +330,7 @@ impl ToolsetPreparation {
                 (task, disposition)
             }
             None => {
-                let task = Arc::new(PreparationTask {
-                    outcome: Mutex::new(None),
-                    completed: tokio::sync::Notify::new(),
-                });
+                let task = Arc::new(PreparationTask::new());
                 state.tasks.insert(recipe.clone(), Arc::clone(&task));
                 (task, PreparationLookupDisposition::New)
             }
@@ -329,9 +346,10 @@ impl ToolsetPreparation {
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let (task, disposition) = self.lookup(&recipe);
-        tracing::debug!(
+        tracing::info!(
             target: "exomonad_actor::toolset_preparation",
             phase = "lookup",
+            preparation = %task.observation,
             disposition = disposition.as_str(),
             source_revision = %recipe.source_revision,
             entry = %recipe.entry,
@@ -352,7 +370,7 @@ impl ToolsetPreparation {
                         &task,
                         Err(PreparationFailure::Admission(Arc::new(error))),
                     );
-                    return task.wait().await;
+                    return task.wait_observed(disposition).await;
                 }
             };
             #[cfg(test)]
@@ -360,12 +378,23 @@ impl ToolsetPreparation {
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
+            let mut producer_timing = crate::call_timing::PreparationInterval::new(
+                task.observation,
+                PreparationPhase::Producer,
+            );
+            let preparation = task.observation;
+            let producer_span = tracing::info_span!(target: "exomonad_actor::toolset_preparation",
+                "toolset_preparation", %preparation, source_revision = %recipe.source_revision, entry = %recipe.entry);
             // This task belongs to the preparation owner, independently of any
             // actor waiting for it. Dropping a waiter cannot interrupt its peers.
             tokio::spawn(
                 async move {
                     let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                        compiler_work.run_for_workload(workload, |settlement| {
+                        let mut service_timing = crate::call_timing::PreparationInterval::new(
+                            preparation,
+                            PreparationPhase::Service,
+                        );
+                        let outcome = compiler_work.run_for_workload(workload, |settlement| {
                             tidepool_extract_cmd::compiler_host_checkpoint()
                                 .map_err(preparation_io_failure)?;
                             let completed_original = selected_original_present(&recipe, &source)?;
@@ -394,17 +423,20 @@ impl ToolsetPreparation {
                                 acquisition,
                                 settlement,
                             )
-                        })
+                        });
+                        service_timing.complete(outcome.is_ok());
+                        outcome
                     })
                     .await
                     .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
+                    producer_timing.complete(outcome.is_ok());
                     owner.settle(key, &task, outcome);
                 }
-                .in_current_span()
+                .instrument(producer_span)
                 .with_current_subscriber(),
             );
         }
-        task.wait().await
+        task.wait_observed(disposition).await
     }
 
     /// Reopen the exact completed original selected by durable installation
@@ -425,13 +457,31 @@ impl ToolsetPreparation {
                     .register_work()
             })
             .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
-        tidepool_runtime::spawn_blocking_in_span(move || {
-            compiler_work.run_for_workload(workload, |_settlement| {
-                restore_installer(recipe, resolved, source, acquisition, registry)
+        let preparation = uuid::Uuid::new_v4();
+        let mut wait_timing = crate::call_timing::PreparationWait::restore(preparation);
+        let mut producer_timing =
+            crate::call_timing::PreparationInterval::new(preparation, PreparationPhase::Producer);
+        let span = tracing::info_span!(target: "exomonad_actor::toolset_preparation",
+            "toolset_preparation", %preparation, source_revision = %recipe.source_revision, entry = %recipe.entry, restore = true);
+        let pending = span.in_scope(|| {
+            tidepool_runtime::spawn_blocking_in_span(move || {
+                let mut service_timing = crate::call_timing::PreparationInterval::new(
+                    preparation,
+                    PreparationPhase::Service,
+                );
+                let outcome = compiler_work.run_for_workload(workload, |_settlement| {
+                    restore_installer(recipe, resolved, source, acquisition, registry)
+                });
+                service_timing.complete(outcome.is_ok());
+                outcome
             })
-        })
-        .await
-        .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())))
+        });
+        let outcome = pending
+            .await
+            .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
+        producer_timing.complete(outcome.is_ok());
+        wait_timing.complete(outcome.is_ok());
+        outcome
     }
 
     fn settle(
@@ -441,6 +491,11 @@ impl ToolsetPreparation {
         outcome: Result<Arc<PreparedToolset>, PreparationFailure>,
     ) {
         let succeeded = outcome.is_ok();
+        tracing::info!(target: "exomonad_actor::toolset_preparation",
+            preparation = %task.observation,
+            acquisition = ?outcome.as_ref().ok().map(|prepared| &prepared.acquisition),
+            succeeded,
+            "toolset preparation result");
         let mut state = self.state.lock();
         // A waiter can observe completion while this lock is held, but its next
         // lookup cannot pass the failed-task retirement or ready-cache bound.
@@ -672,11 +727,16 @@ pub(crate) mod tests {
             );
             if let Some((_, expected_handle)) = self.handles.get(&expected_task) {
                 assert!(Arc::ptr_eq(&actual, expected_handle));
+                assert_eq!(actual.observation, expected_handle.observation);
             } else {
                 assert!(self
                     .handles
                     .values()
                     .all(|(_, issued)| !Arc::ptr_eq(&actual, issued)));
+                assert!(self
+                    .handles
+                    .values()
+                    .all(|(_, issued)| actual.observation != issued.observation));
                 self.handles
                     .insert(expected_task, (key.clone(), Arc::clone(&actual)));
             }
@@ -1004,6 +1064,7 @@ pub(crate) mod tests {
         assert!(!owner.state.lock().tasks.contains_key(&key));
         let (retry, disposition) = owner.lookup(&key);
         assert_eq!(disposition, PreparationLookupDisposition::New);
+        assert_ne!(retry.observation, failed.observation);
         owner.settle(
             key.clone(),
             &failed,
@@ -1021,10 +1082,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn dropping_one_waiter_preserves_the_other_waiter_and_completion() {
-        let task = Arc::new(PreparationTask {
-            outcome: Mutex::new(None),
-            completed: tokio::sync::Notify::new(),
-        });
+        let task = Arc::new(PreparationTask::new());
         let cancelled_task = Arc::clone(&task);
         let cancelled = tokio::spawn(async move { cancelled_task.wait().await });
         let remaining_task = Arc::clone(&task);

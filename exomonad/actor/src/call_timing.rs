@@ -30,6 +30,8 @@ struct Totals {
     compile_ms: AtomicU64,
     compile_count: AtomicU64,
     compile_observations: AtomicU64,
+    preparation_wait_ms: AtomicU64,
+    preparation_wait_count: AtomicU64,
     semantic_rebases: AtomicU64,
     metadata_restages: AtomicU64,
     publication_attempts: AtomicU64,
@@ -52,6 +54,149 @@ fn saturating_add(field: &AtomicU64, ms: u128) {
 fn observation_ns() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+/// A wait is caller work; the shared producer's service is recorded once under
+/// its preparation identity instead of being added to every caller's compile sum.
+pub(crate) struct PreparationWait {
+    interval: PreparationInterval,
+    kind: PreparationWaitKind,
+    totals: Option<Arc<Totals>>,
+}
+
+enum PreparationWaitKind {
+    Lookup(crate::agent_spec::preparation::PreparationLookupDisposition),
+    Restore,
+}
+
+impl PreparationWaitKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lookup(disposition) => disposition.as_str(),
+            Self::Restore => "restore",
+        }
+    }
+}
+
+impl PreparationWait {
+    pub(crate) fn new(
+        preparation: uuid::Uuid,
+        disposition: crate::agent_spec::preparation::PreparationLookupDisposition,
+    ) -> Self {
+        Self::with_kind(preparation, PreparationWaitKind::Lookup(disposition))
+    }
+
+    pub(crate) fn restore(preparation: uuid::Uuid) -> Self {
+        Self::with_kind(preparation, PreparationWaitKind::Restore)
+    }
+
+    fn with_kind(preparation: uuid::Uuid, kind: PreparationWaitKind) -> Self {
+        Self {
+            interval: PreparationInterval::new(preparation, PreparationPhase::Wait),
+            kind,
+            totals: CURRENT.try_with(Arc::clone).ok(),
+        }
+    }
+
+    pub(crate) fn complete(&mut self, succeeded: bool) {
+        self.interval.complete(succeeded);
+    }
+}
+
+impl Drop for PreparationWait {
+    fn drop(&mut self) {
+        let elapsed = self.interval.started.elapsed();
+        if let Some(totals) = &self.totals {
+            saturating_add(&totals.preparation_wait_ms, elapsed.as_millis());
+            totals
+                .preparation_wait_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        tracing::info!(target: "exomonad_actor::toolset_preparation",
+            process_id = std::process::id(), clock_domain = "actor_process_monotonic",
+            preparation = %self.interval.preparation,
+            execution = self.totals.as_ref().and_then(|totals| totals.execution.as_ref()).map(|id| id.as_str()),
+            disposition = self.kind.as_str(),
+            start_ns = self.interval.start_ns, end_ns = observation_ns(),
+            wall_ns = elapsed.as_nanos() as u64, outcome = self.interval.outcome.as_str(),
+            "toolset preparation wait");
+    }
+}
+
+pub(crate) struct PreparationInterval {
+    preparation: uuid::Uuid,
+    phase: PreparationPhase,
+    started: Instant,
+    start_ns: u64,
+    outcome: PreparationOutcome,
+}
+
+enum PreparationOutcome {
+    Abandoned,
+    Succeeded,
+    Failed,
+}
+
+impl PreparationOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Abandoned => "abandoned",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PreparationPhase {
+    Wait,
+    Producer,
+    Service,
+}
+
+impl PreparationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::Producer => "producer",
+            Self::Service => "service",
+        }
+    }
+}
+
+impl PreparationInterval {
+    pub(crate) fn new(preparation: uuid::Uuid, phase: PreparationPhase) -> Self {
+        Self {
+            preparation,
+            phase,
+            started: Instant::now(),
+            start_ns: observation_ns(),
+            outcome: PreparationOutcome::Abandoned,
+        }
+    }
+
+    pub(crate) fn complete(&mut self, succeeded: bool) {
+        self.outcome = if succeeded {
+            PreparationOutcome::Succeeded
+        } else {
+            PreparationOutcome::Failed
+        };
+    }
+}
+
+impl Drop for PreparationInterval {
+    fn drop(&mut self) {
+        // The wait owns its additional caller/disposition fields and emits once.
+        if matches!(self.phase, PreparationPhase::Wait) {
+            return;
+        }
+        tracing::info!(target: "exomonad_actor::toolset_preparation",
+            process_id = std::process::id(), clock_domain = "actor_process_monotonic",
+            preparation = %self.preparation, phase = self.phase.as_str(),
+            start_ns = self.start_ns, end_ns = observation_ns(),
+            wall_ns = self.started.elapsed().as_nanos() as u64, outcome = self.outcome.as_str(),
+            "toolset preparation producer");
+    }
 }
 
 struct CompilerInterval {
@@ -283,6 +428,8 @@ impl CallScope {
             checkout_hold_ms = self.totals.checkout_hold_ms.load(Ordering::Relaxed),
             compile_ms = self.totals.compile_ms.load(Ordering::Relaxed),
             compile_count = self.totals.compile_count.load(Ordering::Relaxed),
+            preparation_wait_ms = self.totals.preparation_wait_ms.load(Ordering::Relaxed),
+            preparation_wait_count = self.totals.preparation_wait_count.load(Ordering::Relaxed),
             semantic_rebases = self.totals.semantic_rebases.load(Ordering::Relaxed),
             metadata_restages = self.totals.metadata_restages.load(Ordering::Relaxed),
             publication_attempts = self.totals.publication_attempts.load(Ordering::Relaxed),
@@ -299,6 +446,105 @@ impl CallScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_preparation_waits_do_not_multiply_compile_work() {
+        use crate::agent_spec::preparation::PreparationLookupDisposition;
+
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let preparation = uuid::Uuid::new_v4();
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([1; 16]);
+        let first = CallScope::for_execution("reload", 1, 1, Some(execution.clone()));
+        let joined = CallScope::new("reload", 2, 1);
+        let mut producer = PreparationInterval::new(preparation, PreparationPhase::Producer);
+        let mut service = PreparationInterval::new(preparation, PreparationPhase::Service);
+        first
+            .run(async {
+                let mut wait = PreparationWait::new(preparation, PreparationLookupDisposition::New);
+                wait.interval.started -= std::time::Duration::from_millis(17);
+                wait.complete(true);
+            })
+            .await;
+        joined
+            .run(async {
+                let mut wait =
+                    PreparationWait::new(preparation, PreparationLookupDisposition::JoinedPending);
+                wait.interval.started -= std::time::Duration::from_millis(11);
+                // An abandoned wait still reports time without cancelling its producer.
+            })
+            .await;
+        assert!(first.totals.preparation_wait_ms.load(Ordering::Relaxed) >= 17);
+        assert!(joined.totals.preparation_wait_ms.load(Ordering::Relaxed) >= 11);
+        for scope in [&first, &joined] {
+            assert_eq!(
+                scope.totals.preparation_wait_count.load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(scope.compile_count(), 0);
+            assert_eq!(scope.totals.compile_ms.load(Ordering::Relaxed), 0);
+        }
+        let unrelated = CallScope::new("cell", 3, 1);
+        assert_eq!(
+            unrelated
+                .totals
+                .preparation_wait_count
+                .load(Ordering::Relaxed),
+            0
+        );
+        service.complete(true);
+        drop(service);
+        producer.complete(true);
+        drop(producer);
+        first.finish("Committed");
+        joined.finish("Cancelled");
+        drop(guard);
+        let rows = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let waits = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "toolset preparation wait")
+            .map(|row| &row["fields"])
+            .collect::<Vec<_>>();
+        assert_eq!(waits.len(), 2);
+        assert!(waits
+            .iter()
+            .all(|row| row["preparation"] == preparation.to_string()));
+        assert_eq!(waits[0]["execution"], execution.as_str());
+        assert_eq!(waits[0]["disposition"], "new");
+        assert_eq!(waits[0]["outcome"], "succeeded");
+        assert_eq!(waits[1]["disposition"], "joined_pending");
+        assert_eq!(waits[1]["outcome"], "abandoned");
+        let producers = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "toolset preparation producer")
+            .map(|row| &row["fields"])
+            .collect::<Vec<_>>();
+        assert_eq!(producers.len(), 2);
+        assert_eq!(producers[0]["phase"], "service");
+        assert_eq!(producers[1]["phase"], "producer");
+        assert!(producers
+            .iter()
+            .all(|row| row["preparation"] == preparation.to_string()));
+        let summaries = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "call timing")
+            .map(|row| &row["fields"])
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2);
+        for summary in summaries {
+            assert_eq!(summary["preparation_wait_count"], 1);
+            assert_eq!(summary["compile_count"], 0);
+        }
+    }
 
     #[tokio::test]
     async fn accumulates_only_inside_its_own_scope() {

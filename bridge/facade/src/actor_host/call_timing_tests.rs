@@ -16,7 +16,7 @@ use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 /// `resident_workbench`'s own `CapturedLog` test helper (see
 /// `exomonad/actor/src/resident_workbench.rs`).
 #[derive(Clone)]
-struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(super) struct CapturedLog(pub(super) Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for CapturedLog {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

@@ -53,6 +53,17 @@ another waiter does not issue another physical compilation. Attribute startup
 requests using that ancestry and the exact daemon request identity, never by
 matching counts or assuming everything within a host's lifetime is startup.
 
+`exomonad_actor::toolset_preparation` records the preparation identity shared by
+new, pending-join and ready-hit callers. Each caller's wait records its execution
+and disposition; `call timing` includes `preparation_wait_ms` and
+`preparation_wait_count` separately from `compile_ms`. Producer and blocking
+service intervals are emitted once per preparation, including failure or
+abandonment. Their spans carry that identity into compiler request observations.
+Service includes native host preparation and is not synonymous with daemon
+compiler service. Wait, producer and service intervals overlap; never sum them.
+Restoring a completed original has its own identity and `restore` wait, and can
+perform authentication without submitting a physical compiler request.
+
 ## Prepare matched producers
 
 Use a separate compiler producer and fresh request cohort. Debug information

@@ -17,6 +17,7 @@
 )]
 
 use std::path::Path;
+use tracing::instrument::WithSubscriber;
 
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
@@ -503,11 +504,30 @@ async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
         tools_module(DESCRIPTION, "two"),
     )
     .unwrap();
-    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ _ -> True; _ -> False })").await;
+    let log = super::call_timing_tests::CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt().json().with_writer(log.clone())
+        .with_env_filter("warn,exomonad_actor::toolset_preparation=info,exomonad_actor::call_timing=info,tidepool_extract_cmd::endpoint=info").finish();
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ _ -> True; _ -> False })").with_subscriber(subscriber).await;
     assert!(
         source_reload.to_string().contains("True"),
         "{source_reload}"
     );
+    let captured = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let rows = captured.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let waits = rows.iter().filter(|row| row["fields"]["message"] == "toolset preparation wait").collect::<Vec<_>>();
+    assert_eq!(waits.len(), 1, "{captured}");
+    let preparation = &waits[0]["fields"]["preparation"];
+    assert_eq!(waits[0]["fields"]["disposition"], "new");
+    assert_eq!(waits[0]["fields"]["outcome"], "succeeded");
+    for phase in ["service", "producer"] {
+        let producers = rows.iter().filter(|row| row["fields"]["message"] == "toolset preparation producer" && row["fields"]["phase"] == phase && &row["fields"]["preparation"] == preparation).collect::<Vec<_>>();
+        assert_eq!(producers.len(), 1, "{captured}");
+        assert_eq!(producers[0]["fields"]["outcome"], "succeeded");
+    }
+    let summary = rows.iter().find(|row| row["fields"]["message"] == "call timing").expect("reload call timing");
+    assert_eq!(summary["fields"]["preparation_wait_count"], 1);
+    assert_eq!(summary["fields"]["execution"], waits[0]["fields"]["execution"]);
+    assert!(rows.iter().any(|row| row["fields"]["message"] == "compiler request identified" && row["spans"].as_array().is_some_and(|spans| spans.iter().any(|span| &span["preparation"] == preparation))), "producer span must correlate its actual compiler request: {captured}");
     assert!(probe(policy).await.contains("two"), "coherent reload installs the new handler");
     assert!(
         probe(old_request.as_ref()).await.contains("one"),
