@@ -315,238 +315,249 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     })
     .await
     .unwrap();
-    let client = reqwest::Client::new();
-    let origin = format!("https://{}", host.address);
-    let login = client
-        .post(format!("http://{}/api/session", host.address))
-        .header("Origin", &origin)
-        .json(&json!({"secret":secret}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(login.status(), reqwest::StatusCode::OK);
-    let cookie = login.headers()[reqwest::header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let target = browser_target(&host.context);
-    real_host_late_output_tests::submit_host_input(
-        &client,
-        host.address,
-        &origin,
-        &cookie,
-        &target,
-        "Run the old issued typed request.",
-    )
-    .await;
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let client = reqwest::Client::new();
+            let origin = format!("https://{}", host.address);
+            let login = client
+                .post(format!("http://{}/api/session", host.address))
+                .header("Origin", &origin)
+                .json(&json!({"secret":secret}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(login.status(), reqwest::StatusCode::OK);
+            let cookie = login.headers()[reqwest::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            let target = browser_target(&host.context);
+            real_host_late_output_tests::submit_host_input(
+                &client,
+                host.address,
+                &origin,
+                &cookie,
+                &target,
+                "Run the old issued typed request.",
+            )
+            .await;
 
-    let first = issued(&mut receiver).await;
-    let original_request = first.id.clone().expect("normal Engine request identity");
-    assert!(first
-        .request
-        .tools
-        .iter()
-        .any(|tool| tool["name"] == "probe"));
-    let declared = first.request.tools.clone();
-    // The transport already owns the request. Reload before its call is emitted.
-    std::fs::write(
-        host.context.config.workspace.join(".exomonad/AgentSpec.hs"),
-        request_reload_spec().replace("offset = 2", "offset = 3"),
-    )
-    .unwrap();
-    // The independent operator invocation owns reload compilation and its
-    // exact completion boundary while the provider request stays held.
-    let installed = host
-        .context
-        .observer
-        .installation(host.context.actor.identity())
-        .await;
-    let reloaded =
-        dispatch_structured_tool(installed.policy.as_ref(), "reload_spec", json!({})).await;
-    assert_eq!(reloaded["status"], "committed", "{reloaded}");
-    assert_eq!(
-        reloaded["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
-        "{reloaded}"
-    );
-    let compiled_after_reload = tidepool_extract_cmd::extract_spawn_count();
-    first
-        .reply
-        .send(probe_turn(
-            "old-issued-handler",
-            OLD_CALL,
-            60,
-            ToolExecution::Asynchronous,
-        ))
-        .unwrap();
+            let first = issued(&mut receiver).await;
+            let original_request = first.id.clone().expect("normal Engine request identity");
+            assert!(
+                first
+                    .request
+                    .tools
+                    .iter()
+                    .any(|tool| tool["name"] == "probe")
+            );
+            let declared = first.request.tools.clone();
+            // The transport already owns the request. Reload before its call is emitted.
+            std::fs::write(
+                host.context.config.workspace.join(".exomonad/AgentSpec.hs"),
+                request_reload_spec().replace("offset = 2", "offset = 3"),
+            )
+            .unwrap();
+            // The independent operator invocation owns reload compilation and its
+            // exact completion boundary while the provider request stays held.
+            let installed = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            let reloaded =
+                dispatch_structured_tool(installed.policy.as_ref(), "reload_spec", json!({})).await;
+            assert_eq!(reloaded["status"], "committed", "{reloaded}");
+            assert_eq!(
+                reloaded["items"][0]["value"]["Right"]["tag"], "ReloadPublished",
+                "{reloaded}"
+            );
+            let compiled_after_reload = tidepool_extract_cmd::extract_spawn_count();
+            first
+                .reply
+                .send(probe_turn(
+                    "old-issued-handler",
+                    OLD_CALL,
+                    60,
+                    ToolExecution::Asynchronous,
+                ))
+                .unwrap();
 
-    let before_compaction = issued(&mut receiver).await;
-    let old = operation(&host, &original_request, OLD_CALL);
-    assert_eq!(old.request, original_request);
-    assert_eq!(
-        old.origin,
-        ConversationIdentity::Embedded {
-            run: target.run.clone(),
-            actor: target.actor.clone(),
-            incarnation: target.incarnation.clone()
-        }
-    );
-    let context = exomonad_tool::ToolInvocationContext {
-        origin: exomonad_tool::ToolInvocationOrigin::Model(
-            embedded_harness::original_operation(&target, &old).unwrap(),
-        ),
-        call_id: OLD_CALL.into(),
-        namespace: None,
-    };
-    tokio::time::timeout(Duration::from_secs(90), async {
-        while host
-            .context
-            .actor
-            .hosted_workbench_waiting(&context)
-            .is_none()
-        {
-            assert_pending(&host, &old, "before-sleep-armed").await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+            let before_compaction = issued(&mut receiver).await;
+            let old = operation(host, &original_request, OLD_CALL);
+            assert_eq!(old.request, original_request);
+            assert_eq!(
+                old.origin,
+                ConversationIdentity::Embedded {
+                    run: target.run.clone(),
+                    actor: target.actor.clone(),
+                    incarnation: target.incarnation.clone()
+                }
+            );
+            let context = exomonad_tool::ToolInvocationContext {
+                origin: exomonad_tool::ToolInvocationOrigin::Model(
+                    embedded_harness::original_operation(&target, &old).unwrap(),
+                ),
+                call_id: OLD_CALL.into(),
+                namespace: None,
+            };
+            tokio::time::timeout(Duration::from_secs(90), async {
+                while host
+                    .context
+                    .actor
+                    .hosted_workbench_waiting(&context)
+                    .is_none()
+                {
+                    assert_pending(host, &old, "before-sleep-armed").await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("old installed handler must park in actual resident Sleep");
+            assert_eq!(before_compaction.request.tools, declared);
+            assert_eq!(outputs(&before_compaction.request, OLD_CALL).count(), 0);
+            let mut trigger = message_turn(
+                "compact-pending-typed-call",
+                100_001,
+                MessagePhase::Commentary,
+            );
+            trigger.items[0].0["content"][0]["text"] = json!(
+                real_host_late_output_tests::compressible_history(&before_compaction.request)
+            );
+            before_compaction.reply.send(trigger).unwrap();
+
+            let compact = issued(&mut receiver).await;
+            assert!(
+                compact
+                    .request
+                    .tools_allowed
+                    .as_ref()
+                    .is_some_and(Vec::is_empty)
+            );
+            assert_pending(host, &old, "compaction-issued").await;
+            compact
+                .reply
+                .send(message_turn(
+                    "pending-typed-summary",
+                    0,
+                    MessagePhase::FinalAnswer,
+                ))
+                .unwrap();
+            let successor = issued(&mut receiver).await;
+            let successor_request = successor.id.clone().expect("compacted successor identity");
+            assert_ne!(successor_request, original_request);
+            assert_eq!(successor.request.tools, declared);
+            assert!(successor.request.input.iter().any(|item| {
+                item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL
+            }));
+            assert_eq!(outputs(&successor.request, OLD_CALL).count(), 0);
+            assert_eq!(
+                real_host_late_output_tests::assert_applied_compaction(host, &old),
+                successor_request,
+            );
+            let inherited = host.runtime.store().claims_for_operation(&old).unwrap();
+            assert_eq!(inherited.len(), 2, "original and compacted claimant only");
+            assert!(
+                inherited
+                    .iter()
+                    .any(|claim| claim.request == successor_request)
+            );
+            assert!(
+                inherited
+                    .iter()
+                    .all(|claim| claim.operation == old && claim.state == ClaimState::Pending)
+            );
+            successor
+                .reply
+                .send(probe_turn(
+                    "new-installed-handler",
+                    NEW_CALL,
+                    0,
+                    ToolExecution::Synchronous,
+                ))
+                .unwrap();
+
+            let after_new_call = issued(&mut receiver).await;
+            let new = operation(host, &successor_request, NEW_CALL);
+            assert_eq!(new.request, successor_request);
+            assert_eq!(new.origin, old.origin);
+            completed(host, &new, 43).await;
+            assert_eq!(outputs(&after_new_call.request, OLD_CALL).count(), 0);
+            // Retain the already-issued model request while the original Sleep settles.
+            // The final answer then sees both jobs ready; their outputs enter later input.
+            completed(host, &old, 42).await;
+            after_new_call
+                .reply
+                .send(message_turn(
+                    "new-result-is-retained",
+                    0,
+                    MessagePhase::FinalAnswer,
+                ))
+                .unwrap();
+            let (mut socket, snapshot) =
+                browser_snapshot_until(host.address, &cookie, "waiting").await;
+            assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
+            socket.close(None).await.unwrap();
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                compiled_after_reload,
+                "old and new installed typed handlers must issue no compiler requests"
+            );
+
+            real_host_late_output_tests::submit_host_input(
+                &client,
+                host.address,
+                &origin,
+                &cookie,
+                &target,
+                "Read both retained typed results.",
+            )
+            .await;
+            let final_request = issued(&mut receiver).await;
+            assert_eq!(final_request.request.tools, declared);
+            for (call, expected) in [(OLD_CALL, 42), (NEW_CALL, 43)] {
+                let retained = outputs(&final_request.request, call).collect::<Vec<_>>();
+                assert_eq!(
+                    retained.len(),
+                    1,
+                    "each original typed result must appear exactly once"
+                );
+                assert_value(retained[0], call, expected);
+            }
+            assert_eq!(
+                host.runtime
+                    .store()
+                    .claims(&CallId(OLD_CALL.into()))
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert_eq!(
+                host.runtime
+                    .store()
+                    .claims(&CallId(NEW_CALL.into()))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            final_request
+                .reply
+                .send(message_turn(
+                    "both-original-results-once",
+                    0,
+                    MessagePhase::FinalAnswer,
+                ))
+                .unwrap();
+            let (mut socket, _) = browser_snapshot_until(host.address, &cookie, "waiting").await;
+            socket.close(None).await.unwrap();
+            assert!(
+                receiver.try_recv().is_err(),
+                "completed operations must not replay"
+            );
+        })
     })
-    .await
-    .expect("old installed handler must park in actual resident Sleep");
-    assert_eq!(before_compaction.request.tools, declared);
-    assert_eq!(outputs(&before_compaction.request, OLD_CALL).count(), 0);
-    let mut trigger = message_turn(
-        "compact-pending-typed-call",
-        100_001,
-        MessagePhase::Commentary,
-    );
-    trigger.items[0].0["content"][0]["text"] = json!(
-        real_host_late_output_tests::compressible_history(&before_compaction.request)
-    );
-    before_compaction.reply.send(trigger).unwrap();
-
-    let compact = issued(&mut receiver).await;
-    assert!(compact
-        .request
-        .tools_allowed
-        .as_ref()
-        .is_some_and(Vec::is_empty));
-    assert_pending(&host, &old, "compaction-issued").await;
-    compact
-        .reply
-        .send(message_turn(
-            "pending-typed-summary",
-            0,
-            MessagePhase::FinalAnswer,
-        ))
-        .unwrap();
-    let successor = issued(&mut receiver).await;
-    let successor_request = successor.id.clone().expect("compacted successor identity");
-    assert_ne!(successor_request, original_request);
-    assert_eq!(successor.request.tools, declared);
-    assert!(successor
-        .request
-        .input
-        .iter()
-        .any(|item| { item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL }));
-    assert_eq!(outputs(&successor.request, OLD_CALL).count(), 0);
-    assert_eq!(
-        real_host_late_output_tests::assert_applied_compaction(&host, &old),
-        successor_request,
-    );
-    let inherited = host.runtime.store().claims_for_operation(&old).unwrap();
-    assert_eq!(inherited.len(), 2, "original and compacted claimant only");
-    assert!(inherited
-        .iter()
-        .any(|claim| claim.request == successor_request));
-    assert!(inherited
-        .iter()
-        .all(|claim| claim.operation == old && claim.state == ClaimState::Pending));
-    successor
-        .reply
-        .send(probe_turn(
-            "new-installed-handler",
-            NEW_CALL,
-            0,
-            ToolExecution::Synchronous,
-        ))
-        .unwrap();
-
-    let after_new_call = issued(&mut receiver).await;
-    let new = operation(&host, &successor_request, NEW_CALL);
-    assert_eq!(new.request, successor_request);
-    assert_eq!(new.origin, old.origin);
-    completed(&host, &new, 43).await;
-    assert_eq!(outputs(&after_new_call.request, OLD_CALL).count(), 0);
-    // Retain the already-issued model request while the original Sleep settles.
-    // The final answer then sees both jobs ready; their outputs enter later input.
-    completed(&host, &old, 42).await;
-    after_new_call
-        .reply
-        .send(message_turn(
-            "new-result-is-retained",
-            0,
-            MessagePhase::FinalAnswer,
-        ))
-        .unwrap();
-    let (mut socket, snapshot) = browser_snapshot_until(host.address, &cookie, "waiting").await;
-    assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
-    socket.close(None).await.unwrap();
-    assert_eq!(
-        tidepool_extract_cmd::extract_spawn_count(),
-        compiled_after_reload,
-        "old and new installed typed handlers must issue no compiler requests"
-    );
-
-    real_host_late_output_tests::submit_host_input(
-        &client,
-        host.address,
-        &origin,
-        &cookie,
-        &target,
-        "Read both retained typed results.",
-    )
     .await;
-    let final_request = issued(&mut receiver).await;
-    assert_eq!(final_request.request.tools, declared);
-    for (call, expected) in [(OLD_CALL, 42), (NEW_CALL, 43)] {
-        let retained = outputs(&final_request.request, call).collect::<Vec<_>>();
-        assert_eq!(
-            retained.len(),
-            1,
-            "each original typed result must appear exactly once"
-        );
-        assert_value(retained[0], call, expected);
-    }
-    assert_eq!(
-        host.runtime
-            .store()
-            .claims(&CallId(OLD_CALL.into()))
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        host.runtime
-            .store()
-            .claims(&CallId(NEW_CALL.into()))
-            .unwrap()
-            .len(),
-        1
-    );
-    final_request
-        .reply
-        .send(message_turn(
-            "both-original-results-once",
-            0,
-            MessagePhase::FinalAnswer,
-        ))
-        .unwrap();
-    let (mut socket, _) = browser_snapshot_until(host.address, &cookie, "waiting").await;
-    socket.close(None).await.unwrap();
-    assert!(
-        receiver.try_recv().is_err(),
-        "completed operations must not replay"
-    );
-    host.stop().await.unwrap();
 }
