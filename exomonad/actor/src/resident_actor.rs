@@ -2783,7 +2783,6 @@ pub struct ResidentKernelBehavior<H, O> {
     /// How many specs this incarnation has installed. `policy_installed` stays
     /// the first-install latch; a reload is a second, explicit path that
     /// replaces the current installed record and advances this.
-    spec_installs: u64,
     /// Every after-tool invocation this actor has made, and what became of it.
     /// An abstention's reason lives here and nowhere else.
     after_tool: crate::after_tool::AfterToolLog,
@@ -3310,6 +3309,23 @@ impl CurrentEffectOwner<'_> {
         }
     }
 
+    fn admits_reload(&self, actor: ActorRef) -> bool {
+        match self {
+            Self::Scoped { base, .. } => base.admits_reload(actor),
+            Self::Workbench(execution)
+                if !execution.after_tool_active
+                    && !execution.initial_context
+                    && execution.context.actor == actor =>
+            {
+                execution
+                    .operation
+                    .selected()
+                    .is_some_and(|call| admits_reload_plan(Some(call.selected().endpoint().plan())))
+            }
+            _ => false,
+        }
+    }
+
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
             Self::Scoped { base, .. } => base.context_binding(),
@@ -3490,6 +3506,15 @@ struct WorkbenchAdmission {
 enum WorkbenchPreflight {
     Retained(crate::KernelWorkbenchReply),
     Admitted(WorkbenchAdmission),
+}
+
+fn admits_reload_plan(selected: Option<&exomonad_tool::EndpointPlan>) -> bool {
+    selected.is_some_and(|plan| {
+        plan.scheduling() == exomonad_tool::ToolScheduling::BeforeNextInference
+            && plan
+                .effect_keys()
+                .contains(&exomonad_tool::ToolEffectKey::Reload)
+    })
 }
 
 fn admit_context_authority(
@@ -3706,7 +3731,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             initial_configuration: InitialActorConfiguration::Unselected,
             actor_callback_execution: None,
             installed_tools: Arc::default(),
-            spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
             forest_control: false,
             pending_program: None,
@@ -3808,12 +3832,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             context.haskell_effects_alias = initial_context.execution_effects.clone();
         }
         let current_builtin = operation.selected().is_none()
-            && request.tool_call().is_some_and(|call| {
-                matches!(
-                    call.name.as_str(),
-                    crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
-                )
-            });
+            && request
+                .tool_call()
+                .is_some_and(|call| matches!(call.name.as_str(), crate::status_tool::STATUS_TOOL));
         if !self.policy_installed
             || !matches!(
                 self.standing,
@@ -3875,7 +3896,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
                     !self.descriptor.capabilities().effect_keys().contains(key)
                 }
-                exomonad_tool::ToolEffectKey::ContextReadWrite => false,
+                exomonad_tool::ToolEffectKey::ContextReadWrite
+                | exomonad_tool::ToolEffectKey::Reload => false,
             }) {
                 return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
@@ -3924,7 +3946,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             }
         }
         let admitted_source = if current_builtin {
-            // Builtins inspect current state or prepare a fresh reload source;
+            // Builtins inspect current state;
             // they acquire no compilation authority from this admission.
             installed_tools
                 .as_ref()
@@ -5614,6 +5636,21 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Reload {
+                continuation,
+                request,
+            } => {
+                let authorized = effect_owner.admits_reload(context.actor);
+                let operation = self.prepare_reload_effect(
+                    context,
+                    effect_owner.issued_snapshot().cloned(),
+                    control,
+                    continuation,
+                    request,
+                    authorized,
+                );
+                return Box::pin(std::future::ready(Ok(operation)));
+            }
             ResidentActorBoundary::Source {
                 continuation,
                 request,
@@ -5621,7 +5658,6 @@ where
                 let operation = self.prepare_source_effect(
                     context,
                     effect_owner.issued_snapshot().cloned(),
-                    control,
                     continuation,
                     request,
                 );
@@ -8187,7 +8223,7 @@ where
                     "local actor was absent from its routing directory".into(),
                 )
             })?;
-        self.spec_installs = 1;
+        let install = 1;
         let prepare_started = std::time::Instant::now();
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
             context.clone(),
@@ -8220,7 +8256,7 @@ where
             Some(installer) => compiler_owner
                 .scope(application_workbench.prepare_explicit_application(
                     compile_context.clone(),
-                    self.spec_installs,
+                    install,
                     self.descriptor.capabilities().effect_keys().to_vec(),
                     Arc::clone(installer),
                 ))
@@ -8246,7 +8282,7 @@ where
                 compiler_owner
                     .scope(application_workbench.prepare_recovered_tools(
                         compile_context.clone(),
-                        self.spec_installs,
+                        install,
                         self.descriptor.capabilities().effect_keys().to_vec(),
                         &recovered,
                     ))
@@ -8256,7 +8292,7 @@ where
                 compiler_owner
                     .scope(application_workbench.prepare_tools(
                         compile_context.clone(),
-                        self.spec_installs,
+                        install,
                         self.descriptor.capabilities().effect_keys().to_vec(),
                     ))
                     .await
@@ -8265,7 +8301,7 @@ where
         tracing::info!(
             actor = %context.actor,
             phase = "startup",
-            install = self.spec_installs,
+            install = install,
             elapsed_ms = prepare_started.elapsed().as_millis(),
             success = compiled_tools.is_ok(),
             "agent spec preparation"
@@ -10024,9 +10060,6 @@ where
             let status_call = builtin_call
                 .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
                 .cloned();
-            let reload_spec_call = builtin_call
-                .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
-                .cloned();
             if !cursor.dispatch_initialized {
                 cursor.resident_tool = effects.operation.selected().is_some_and(|call| {
                     if !matches!(call.selected().endpoint().plan().execution(), exomonad_tool::EndpointExecution::ResidentAsync(_) | exomonad_tool::EndpointExecution::ResidentSync(_)) { return false; }
@@ -10035,16 +10068,6 @@ where
                     true
                 });
                 cursor.dispatch_initialized = true;
-            }
-            if reload_spec_call.is_some() {
-                return Err(workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "reload requires its owned preparation task".into(),
-                    ),
-                ));
             }
             let default_workbench = if admitted_workbench.is_none() {
                 Some(
@@ -12175,12 +12198,6 @@ where
                 definition,
             )
             .await;
-            if outcome.is_ok() {
-                self.spec_installs = self
-                    .installed_tools
-                    .current_tools()
-                    .map_or(self.spec_installs, |tools| tools.install);
-            }
             outcome
         }))
     }
@@ -12189,10 +12206,11 @@ where
         true
     }
 
-    fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
-        request
-            .tool_call()
-            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL))
+    fn serializes_workbench_publication(
+        &self,
+        invocation: &crate::ActorWorkbenchInvocation,
+    ) -> bool {
+        admits_reload_plan(invocation.selected_endpoint())
     }
 
     fn dispatch_workbench(
@@ -15368,6 +15386,33 @@ mod tests {
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
         ChildExitObservations,
     };
+
+    proptest::proptest! {
+        #[test]
+        fn reload_admission_follows_exact_sync_effect_rows_independent_of_endpoint_name(
+            name in "[a-z_]{1,24}",
+            raw in proptest::prelude::any::<bool>(),
+            sync in proptest::prelude::any::<bool>(),
+            reload in proptest::prelude::any::<bool>(),
+        ) {
+            use exomonad_tool::{EndpointPlan, ToolDeclaration, ToolEffectKey, ToolImplementation, ToolKind, ToolScheduling};
+            let declaration = ToolDeclaration {
+                name, description:"Reload admission property".into(),
+                input_schema: if raw { serde_json::json!({"type":"string"}) } else { serde_json::json!({"type":"object","properties":{},"additionalProperties":false}) },
+                output_schema:None,
+                kind:if raw { ToolKind::Raw } else { ToolKind::Call },
+                implementation:if raw {ToolImplementation::HaskellCell} else {ToolImplementation::ResidentHandler},
+                schedule:if sync {ToolScheduling::BeforeNextInference} else {ToolScheduling::Async},
+                effect_keys:if reload {vec![ToolEffectKey::Reload]} else {Vec::new()},
+            };
+            let plan = EndpointPlan::admit(declaration);
+            match plan {
+                Ok(plan) => proptest::prop_assert_eq!(super::admits_reload_plan(Some(&plan)), sync && reload),
+                Err(_) => proptest::prop_assert!(!sync && reload),
+            }
+            proptest::prop_assert!(!super::admits_reload_plan(None));
+        }
+    }
 
     #[test]
     fn native_context_authority_requires_explicit_effect_and_exact_sync_invocation() {

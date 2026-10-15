@@ -51,9 +51,12 @@ pub(super) fn reload_disposition(
         Ok(
             SrReloadOutcome::ReloadPublished(..) | SrReloadOutcome::ReloadPublishedWithWarnings(..),
         ) => WorkbenchOperationDisposition::Committed,
-        Ok(SrReloadOutcome::ReloadRejected(..) | SrReloadOutcome::ReloadCancelled(_)) | Err(_) => {
-            WorkbenchOperationDisposition::Rejected
-        }
+        Ok(
+            SrReloadOutcome::ReloadRejected(..)
+            | SrReloadOutcome::ReloadRefused(..)
+            | SrReloadOutcome::ReloadCancelled(_),
+        )
+        | Err(_) => WorkbenchOperationDisposition::Rejected,
         Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(..)) => {
             WorkbenchOperationDisposition::Unknown
         }
@@ -62,10 +65,10 @@ pub(super) fn reload_disposition(
 
 /// The source owner settles before delivering its answer. A later failure of
 /// the original continuation cannot erase an already known publication fact.
-async fn resume_source_answer<T, F>(
-    answer: Result<T, SourceError>,
+async fn resume_source_answer<T, E, F>(
+    answer: Result<T, E>,
     disposition: WorkbenchOperationDisposition,
-    resume: impl FnOnce(Result<T, SourceError>) -> F,
+    resume: impl FnOnce(Result<T, E>) -> F,
 ) -> commands::CommandResolution
 where
     F: std::future::Future<Output = Result<ResidentOutcome, ResidentActorWorkbenchError>>,
@@ -82,7 +85,6 @@ where
         &self,
         context: ActorSessionContext,
         issued: Option<ActorRequestSnapshot>,
-        control: Option<Arc<crate::WorkbenchExecutionControl>>,
         continuation: ResidentHole,
         request: SourceReq,
     ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
@@ -128,36 +130,60 @@ where
                 })
                 .await
             }),
-            SourceReq::SourceReloadWith(also_check) => {
-                let operation = issued
-                    .as_ref()
-                    .and_then(ActorRequestSnapshot::generation)
-                    .cloned()
-                    .ok_or_else(|| {
-                        SourceError::SourceUnavailable(
-                            "reload requires an initialized notebook generation".into(),
-                        )
-                    })
-                    .and_then(|generation| {
-                        self.coherent_reload_operation(generation, control, also_check)
-                    });
-                Box::pin(async move {
-                    // Keep the complete issued owner through resumption in A,
-                    // including after the publication operation releases its copy.
-                    let _issued = issued;
-                    let result = match operation {
-                        Ok(operation) => operation.run().await,
-                        Err(error) => Err(error),
-                    };
-                    let disposition = reload_disposition(&result);
-                    // The caller continues in A even when this operation publishes B.
-                    resume_source_answer(result, disposition, |answer| {
-                        runner.resume_value(context, continuation, answer)
-                    })
-                    .await
-                })
-            }
         }
+    }
+    pub(super) fn prepare_reload_effect(
+        &self,
+        context: ActorSessionContext,
+        issued: Option<ActorRequestSnapshot>,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        continuation: ResidentHole,
+        request: crate::generated::reload::ReloadReq,
+        authorized: bool,
+    ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
+        use crate::generated::reload::{ReloadError, ReloadReq};
+        let runner = self.environment.runner.clone();
+        let ReloadReq::ReloadSourceWith(options) = request;
+        let operation = if !authorized {
+            Err(SourceError::SourceUnavailable(
+                "reload requires an exact synchronous Reload invocation".into(),
+            ))
+        } else {
+            issued
+                .as_ref()
+                .and_then(ActorRequestSnapshot::generation)
+                .cloned()
+                .ok_or_else(|| {
+                    SourceError::SourceUnavailable(
+                        "reload requires an initialized notebook generation".into(),
+                    )
+                })
+                .and_then(|generation| {
+                    self.coherent_reload_operation(
+                        generation,
+                        control,
+                        options.also_check,
+                        options.policy,
+                    )
+                })
+        };
+        Box::pin(async move {
+            // Publication B and continuation A retain their separate immutable owners.
+            let _issued = issued;
+            let answer = match operation {
+                Ok(operation) => operation.run().await,
+                Err(error) => Err(error),
+            };
+            let disposition = reload_disposition(&answer);
+            let answer = answer.map_err(|error| match error {
+                SourceError::SourceUnavailable(detail) => ReloadError::ReloadUnavailable(detail),
+                SourceError::SourceUnreadable(detail) => ReloadError::ReloadUnreadable(detail),
+            });
+            resume_source_answer(answer, disposition, |answer| {
+                runner.resume_value(context, continuation, answer)
+            })
+            .await
+        })
     }
 }
 
@@ -187,6 +213,11 @@ mod tests {
                     revision("A"),
                     revision("B"),
                     vec!["Helper".into()],
+                    tidepool_bridge_effects::RlSurfaceDiff {
+                        added: vec![],
+                        removed: vec![],
+                        changed: vec![],
+                    },
                 )),
                 WorkbenchOperationDisposition::Committed,
             ),
@@ -196,8 +227,29 @@ mod tests {
                     revision("B"),
                     vec!["Helper".into()],
                     vec!["derived projection unavailable".into()],
+                    tidepool_bridge_effects::RlSurfaceDiff {
+                        added: vec![],
+                        removed: vec![],
+                        changed: vec![],
+                    },
                 )),
                 WorkbenchOperationDisposition::Committed,
+            ),
+            (
+                Ok(SrReloadOutcome::ReloadRefused(
+                    revision("A"),
+                    revision("B"),
+                    tidepool_bridge_effects::RlRefusal {
+                        category: tidepool_bridge_effects::RlRefusalCategory::SurfaceIncompatible,
+                        detail: "opt-in required".into(),
+                        surface: tidepool_bridge_effects::RlSurfaceDiff {
+                            added: vec!["new_tool".into()],
+                            removed: vec![],
+                            changed: vec![],
+                        },
+                    },
+                )),
+                WorkbenchOperationDisposition::Rejected,
             ),
             (
                 Ok(SrReloadOutcome::ReloadRejected(

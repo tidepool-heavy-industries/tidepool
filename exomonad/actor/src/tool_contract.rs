@@ -93,7 +93,7 @@ pub(crate) fn admit_installation(
     dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
 ) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
     let SpecInstallation {
-        tools,
+        mut tools,
         slots,
         slot_effect_keys,
     } = installation;
@@ -106,10 +106,35 @@ pub(crate) fn admit_installation(
         installed_support,
     )
     .map_err(|failure| error(failure.to_string()))?;
-    let mut names = HashSet::from([
-        crate::status_tool::STATUS_TOOL.to_string(),
-        crate::reload_tool::RELOAD_TOOL.to_string(),
-    ]);
+    // Native notebook declarations select an actor-effect subset. Synchronous
+    // invocation capabilities are supplied by the installed scheduling contract.
+    for tool in &mut tools {
+        if tool.implementation == ToolImplementation::HaskellCell
+            && tool.schedule == ToolScheduling::BeforeNextInference
+        {
+            let subset = tool
+                .effect_keys
+                .iter()
+                .copied()
+                .filter(|effect| !effect.is_invocation_only())
+                .collect::<Vec<_>>();
+            tool.effect_keys = ToolEffectKey::ALL
+                .iter()
+                .copied()
+                .filter(|effect| effect.is_invocation_only())
+                .chain(subset)
+                .collect();
+            validate_row(
+                &tool.name,
+                tool.schedule,
+                &tool.effect_keys,
+                admitted_base,
+                installed_support,
+            )
+            .map_err(|failure| error(failure.to_string()))?;
+        }
+    }
+    let mut names = HashSet::from([crate::status_tool::STATUS_TOOL.to_string()]);
     let endpoints = tools
         .into_iter()
         .map(|tool| {
@@ -183,7 +208,7 @@ pub enum ToolContractError {
     DuplicateTool(String),
     #[error("tool {tool:?} repeats effect {effect:?}")]
     DuplicateEffect { tool: String, effect: ToolEffectKey },
-    #[error("async tool {0:?} cannot use ContextReadWrite")]
+    #[error("async tool {0:?} cannot use invocation-only effects")]
     AsyncContext(String),
     #[error("tool {tool:?} requests an ungranted effect {effect:?}")]
     Ungranted {
@@ -227,7 +252,13 @@ pub(crate) fn validate_installation(
         }
         let mut canonical = base.clone();
         if tool.schedule == ToolScheduling::BeforeNextInference {
-            canonical.insert(0, ToolEffectKey::ContextReadWrite);
+            canonical.splice(
+                0..0,
+                ToolEffectKey::ALL
+                    .iter()
+                    .copied()
+                    .filter(|effect| effect.is_invocation_only()),
+            );
         }
         if tool.implementation == ToolImplementation::ResidentHandler
             && tool.effect_keys != canonical
@@ -545,19 +576,82 @@ mod tests {
         );
     }
     #[test]
+    fn native_sync_notebook_issues_the_catalogue_prefix_over_its_granted_subset() {
+        let actor = ActorEffectKey::Console;
+        let prefix = ToolEffectKey::ALL
+            .iter()
+            .copied()
+            .filter(|effect| effect.is_invocation_only())
+            .collect::<Vec<_>>();
+        let support = prefix
+            .iter()
+            .copied()
+            .chain([actor.into()])
+            .collect::<Vec<_>>();
+        let installation = |keys| SpecInstallation {
+            tools: vec![native(ToolScheduling::BeforeNextInference, keys)],
+            slots: Vec::new(),
+            slot_effect_keys: BTreeMap::new(),
+        };
+        for keys in [
+            vec![actor.into()],
+            vec![ToolEffectKey::ContextReadWrite, actor.into()],
+        ] {
+            let selected = admit_installation(
+                installation(keys),
+                &[actor],
+                &support,
+                &"UnusedDispatcher".into(),
+            )
+            .unwrap();
+            let expected = prefix
+                .iter()
+                .copied()
+                .chain([actor.into()])
+                .collect::<Vec<_>>();
+            assert_eq!(selected.endpoints[0].plan().effect_keys(), expected);
+            assert!(selected.endpoints[0]
+                .execution_effects()
+                .expression()
+                .contains("Tidepool.Effects.Core.Reload"));
+        }
+        let missing_reload = support
+            .iter()
+            .copied()
+            .filter(|effect| *effect != ToolEffectKey::Reload)
+            .collect::<Vec<_>>();
+        assert!(admit_installation(
+            installation(vec![actor.into()]),
+            &[actor],
+            &missing_reload,
+            &"UnusedDispatcher".into()
+        )
+        .is_err());
+        assert!(admit_installation(
+            installation(vec![ActorEffectKey::Web.into()]),
+            &[actor],
+            &support,
+            &"UnusedDispatcher".into()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn canonical_rows_follow_the_exact_admitted_base() {
         let support = [
             ActorEffectKey::Console.into(),
             ToolEffectKey::ContextReadWrite,
+            ToolEffectKey::Reload,
         ];
         let mut async_tool = native(ToolScheduling::Async, vec![ActorEffectKey::Console.into()]);
         async_tool.implementation = ToolImplementation::ResidentHandler;
         validate(async_tool.clone(), &[ActorEffectKey::Console], &support).unwrap();
         let mut sync_tool = async_tool.clone();
         sync_tool.schedule = ToolScheduling::BeforeNextInference;
-        sync_tool
-            .effect_keys
-            .insert(0, ToolEffectKey::ContextReadWrite);
+        sync_tool.effect_keys.splice(
+            0..0,
+            [ToolEffectKey::ContextReadWrite, ToolEffectKey::Reload],
+        );
         validate(sync_tool, &[ActorEffectKey::Console], &support).unwrap();
         // A descriptor compiled against the wider role cannot be paired with
         // the dispatcher compiled against the narrower supported base.

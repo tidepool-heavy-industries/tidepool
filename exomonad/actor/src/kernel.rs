@@ -396,6 +396,12 @@ impl ActorWorkbenchInvocation {
         &self.request
     }
 
+    pub(crate) fn selected_endpoint(&self) -> Option<&exomonad_tool::EndpointPlan> {
+        self.operation
+            .selected()
+            .map(|call| call.selected().endpoint().plan())
+    }
+
     /// Execute an existing display callback through the actor's serialized mailbox.
     /// Identity and key are validated against the actor's retained display slots.
     pub fn for_display_expansion(identity: (i64, i64, i64), key: i64) -> Self {

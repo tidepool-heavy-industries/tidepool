@@ -41,8 +41,12 @@ actor generation or bootstrap installation. Argument admission travels with that
 selection; dispatch enters the retained handler by ordinal, without declaration
 equality or a second name lookup. Reload replaces the active generation while
 issued selections retain their original source, context, public owner and
-implementation. Builtin controls use their owning actor routes and reserve their
-names at authored endpoint admission. After-tool and initial-context execution
+implementation. The native status control reserves its name at authored endpoint admission.
+Reload uses the ordinary Haskell effect route from an exact admitted synchronous
+endpoint carrying Reload, with separate source-owner authorization. Compatible
+publication preserves the surface; explicit opt-in still validates the candidate
+through the installed provider projection before publishing. The caller retains
+its original generation and settled publication fact while continuing. After-tool and initial-context execution
 retain separate optional admitted slots from the same installation; one slot's
 presence cannot issue another slot. After-tool presentation awaits the
 completed receipt before model delivery while the actor scheduler continues

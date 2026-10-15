@@ -59,8 +59,11 @@ async fn unavailable_generation_does_not_recapture_source_or_discard_bindings() 
         })
         .await
         .unwrap();
-    assert_eq!(refused["status"], "rejected");
-    assert_eq!(refused["items"][0]["value"]["outcome"], "unavailable");
+    assert_eq!(refused["status"], "committed");
+    assert_eq!(
+        refused["items"][0]["value"]["Left"]["tag"],
+        "ReloadUnavailable"
+    );
     fixture.check_value("source-retained", "kept == 42").await;
     assert_eq!(
         source.freezes.load(Ordering::Acquire),

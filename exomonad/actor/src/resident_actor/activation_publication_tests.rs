@@ -386,10 +386,6 @@ async fn interrupt_during_preview(
     }
     assert!(fixture.deployments.try_recv().is_err());
     if genuine_preparation {
-        assert_eq!(
-            behavior.spec_installs, 1,
-            "real installer completed before publication refusal"
-        );
         assert!(behavior.installed_tools.current().is_none());
     }
     assert!(behavior.outstanding_interactive.is_none());

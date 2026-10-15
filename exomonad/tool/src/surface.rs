@@ -1,10 +1,9 @@
 //! What changed between two model-visible tool surfaces.
 //!
-//! An actor's declared tool surface is registered once with the attached agent
-//! application and served read-only for the life of that registration, so a
-//! recompiled tool record may replace implementations but must declare the same
-//! surface. This module answers whether two surfaces are the same, and when
-//! they are not, what a model would see differently.
+//! Compatible reloads preserve the registered surface. An explicitly admitted
+//! synchronous reload may replace it; callers retain their issued immutable
+//! surface while later requests select the replacement generation. This module
+//! reports the exact visible differences for that policy decision and receipt.
 //!
 //! Everything a model reads is compared: the set of tools, each one's
 //! description, input and output schema and kind, and the order they are

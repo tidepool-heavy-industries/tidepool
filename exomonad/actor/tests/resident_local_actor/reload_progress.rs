@@ -1,4 +1,4 @@
-//! Generic notebooks refuse configuration reload without blocking other work.
+//! Authored synchronous reload refusal preserves independent notebook work.
 use super::*;
 
 async fn hosted_tool(
@@ -72,8 +72,11 @@ async fn unavailable_reload_leaves_parked_cells_and_control_independent() {
     )
     .await
     .unwrap();
-    assert_eq!(reload["status"], "rejected");
-    assert_eq!(reload["items"][0]["value"]["outcome"], "unavailable");
+    assert_eq!(reload["status"], "committed");
+    assert_eq!(
+        reload["items"][0]["value"]["Left"]["tag"],
+        "ReloadUnavailable"
+    );
     assert!(!a.is_finished() && !b.is_finished());
     fixture.read("reload-C", "c <- pure (42 :: Int)").await;
     let status = ConcurrentResident::settle(
@@ -102,7 +105,7 @@ async fn unavailable_reload_leaves_parked_cells_and_control_independent() {
 }
 
 #[tokio::test]
-async fn invalid_reload_arguments_release_the_administrative_owner() {
+async fn invalid_authored_reload_arguments_release_the_invocation() {
     let fixture = ConcurrentResident::new_with_source(192, &[], None).await;
     fixture
         .read("reload-kept", "kept <- pure (42 :: Int)")
@@ -112,14 +115,13 @@ async fn invalid_reload_arguments_release_the_administrative_owner() {
             &fixture,
             "invalid-reload",
             "reload",
-            serde_json::json!({"unexpected":true}),
+            serde_json::json!({"also_check":true}),
         )
         .await,
     )
     .await
     .unwrap();
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["items"][0]["value"]["outcome"], "unreadable");
     fixture
         .check_value("retained-after-refusal", "kept == 42")
         .await;
@@ -128,6 +130,9 @@ async fn invalid_reload_arguments_release_the_administrative_owner() {
     )
     .await
     .unwrap();
-    assert_eq!(next["items"][0]["value"]["outcome"], "unavailable");
+    assert_eq!(
+        next["items"][0]["value"]["Left"]["tag"],
+        "ReloadUnavailable"
+    );
     fixture.shutdown(&[]).await;
 }

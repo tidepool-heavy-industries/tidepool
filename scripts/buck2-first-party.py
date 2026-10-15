@@ -1067,7 +1067,7 @@ def actor_notebook_contract_test_cases(binary, env, resources, worker):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     tests = ["resident_local_actor::" + name for name in (
         "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
-        "reload_progress::invalid_reload_arguments_release_the_administrative_owner",
+        "reload_progress::invalid_authored_reload_arguments_release_the_invocation",
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     )]

@@ -905,10 +905,7 @@ where
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
             .map(|call| crate::status_tool::parse(call.arguments.clone()));
-        let reload = request
-            .tool_call()
-            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL));
-        if inspection.is_none() && !reload && compilation_authority.is_none() {
+        if inspection.is_none() && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
                 actor: context.actor,
@@ -952,7 +949,7 @@ where
             }),
             attempt: crate::request::WorkbenchReservationAttempt::fresh(),
         };
-        let model = if inspection.is_none() && !reload {
+        let model = if inspection.is_none() {
             self.environment.cell_model_factory.as_ref().map(|factory| {
                 let RequestReservationOwner::Workbench { execution, .. } = &reservation_owner
                 else {
@@ -1049,9 +1046,6 @@ where
             cleanup,
             resources,
         };
-        if reload {
-            return WorkbenchDispatch::Owned(self.owned_reload_task(owned));
-        }
         if let Some(inspection) = inspection {
             return WorkbenchDispatch::Owned(match inspection {
                 Ok(view) => self.owned_inspection_task(kernel, owned, view),

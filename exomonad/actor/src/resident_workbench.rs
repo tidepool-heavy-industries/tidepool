@@ -458,7 +458,8 @@ pub struct ActorWorkbenchSource {
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
-    tool_surface_validator: Option<Arc<dyn Fn(&[exomonad_tool::HostedTool]) -> Result<(), String> + Send + Sync>>,
+    tool_surface_validator:
+        Option<Arc<dyn Fn(&[exomonad_tool::HostedTool]) -> Result<(), String> + Send + Sync>>,
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     toolset_support: Arc<[PathBuf]>,
@@ -509,6 +510,13 @@ fn installer_program_recipe(
     }
 }
 
+fn sync_effects_supported(supported: &[exomonad_tool::ToolEffectKey]) -> bool {
+    exomonad_tool::ToolEffectKey::ALL
+        .iter()
+        .filter(|effect| effect.is_invocation_only())
+        .all(|effect| supported.contains(effect))
+}
+
 fn builtin_toolset_policy(
     rule: crate::agent_spec::SpecRule,
     effects: &[crate::ActorEffectKey],
@@ -519,13 +527,11 @@ fn builtin_toolset_policy(
     {
         return None;
     }
-    Some(
-        if supported.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
-            crate::BuiltinToolsetPolicy::Workbench
-        } else {
-            crate::BuiltinToolsetPolicy::AsyncWorkbench
-        },
-    )
+    Some(if sync_effects_supported(supported) {
+        crate::BuiltinToolsetPolicy::Workbench
+    } else {
+        crate::BuiltinToolsetPolicy::AsyncWorkbench
+    })
 }
 
 impl PreparedSourceToolset {
@@ -891,7 +897,7 @@ impl ActorWorkbenchSource {
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?
         };
         let entry = resolved.entry.clone().unwrap_or_else(|| {
-            if supported_effects.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+            if sync_effects_supported(supported_effects) {
                 "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
             } else {
                 "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
@@ -3621,6 +3627,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         request: crate::generated::source::SourceReq,
     },
+    Reload {
+        continuation: ResidentHole,
+        request: crate::generated::reload::ReloadReq,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -3830,7 +3840,6 @@ impl ResidentActorBoundary {
                     | crate::generated::source::SourceReq::SourceStatusWith,
                 ..
             } => WorkbenchOperationDisposition::Read,
-            Self::Source { .. } => WorkbenchOperationDisposition::Committed,
             Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
                 WorkbenchOperationDisposition::Read
             }
@@ -3850,6 +3859,7 @@ impl ResidentActorBoundary {
             Self::Model { .. } => "model call",
             Self::Context { .. } => "context transformation",
             Self::Source { request, .. } => source_operation(request),
+            Self::Reload { .. } => "reloadSource",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::Form { .. } => "human form",
@@ -4019,6 +4029,7 @@ resident_request_roster! {
     Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
     Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
     Context(crate::ContextReq) => None,
+    Reload(crate::generated::reload::ReloadReq) => Some(exomonad_tool::ToolEffectKey::Reload),
     Source(crate::generated::source::SourceReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Source)),
     Actor(crate::generated::actor::ActorReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Actor)),
     ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
@@ -4040,7 +4051,6 @@ fn source_operation(request: &crate::generated::source::SourceReq) -> &'static s
     use crate::generated::source::SourceReq;
     match request {
         SourceReq::SourceReadModule(_) => "readSourceModule",
-        SourceReq::SourceReloadWith(_) => "reloadSource",
         SourceReq::SourceStatusWith => "sourceStatus",
     }
 }
@@ -4078,6 +4088,7 @@ impl ResidentRequest {
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
         try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Source, crate::generated::source::SourceReq);
+        try_member!(Self::Reload, crate::generated::reload::ReloadReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::AskUser, crate::generated::ask_user::AskUserReq);
@@ -4141,6 +4152,7 @@ impl ResidentRequest {
             Self::ResourceScopes(_) => "withScope",
             Self::Context(_) => "context transformation",
             Self::Source(request) => source_operation(request),
+            Self::Reload(_) => "reloadSource",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::AskUser(_) => "human form",
@@ -4974,7 +4986,10 @@ fn admit_explicit_effects(
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
     #[error("unsupported tool surface: {detail}")]
-    UnsupportedToolSurface { detail: String, surface: Arc<[exomonad_tool::HostedTool]> },
+    UnsupportedToolSurface {
+        detail: String,
+        surface: Arc<[exomonad_tool::HostedTool]>,
+    },
     #[error(transparent)]
     Directory(#[from] crate::local_actor::run_control::DirectoryError),
     #[error("compiler work requires an invocation or actor lifecycle cleanup owner")]
@@ -9335,6 +9350,7 @@ where
                         request,
                         table: session.data_con_table().clone(),
                     }),
+                    ResidentRequest::Reload(request) => Ok(ResidentActorBoundary::Reload { continuation: hole, request }),
                     ResidentRequest::Source(request) => Ok(ResidentActorBoundary::Source {
                         continuation: hole,
                         request,
@@ -13257,7 +13273,7 @@ pub(crate) mod request_tests {
             use crate::agent_spec::SpecRule;
             let standard = exomonad_tool::DEFAULT_ACTOR_EFFECTS;
             let support = if context_support {
-                vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
+                exomonad_tool::ToolEffectKey::ALL.iter().copied().filter(|effect| effect.is_invocation_only()).collect::<Vec<_>>()
             } else { Vec::new() };
             let expected = if context_support { crate::BuiltinToolsetPolicy::Workbench }
                 else { crate::BuiltinToolsetPolicy::AsyncWorkbench };
@@ -13296,7 +13312,7 @@ pub(crate) mod request_tests {
                     .map(exomonad_tool::ToolEffectKey::Actor)
                     .collect::<Vec<_>>();
                 if context_support {
-                    support.push(exomonad_tool::ToolEffectKey::ContextReadWrite);
+                    support.extend(exomonad_tool::ToolEffectKey::ALL.iter().copied().filter(|effect| effect.is_invocation_only()));
                 }
                 let actual = workbench.source_toolset_recipe(&source, requested, &support).unwrap();
                 proptest::prop_assert_eq!(actual.requested_effects.as_slice(), requested);

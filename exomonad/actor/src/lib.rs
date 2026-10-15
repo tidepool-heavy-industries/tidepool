@@ -54,7 +54,6 @@ mod mount;
 mod notification;
 mod owned_result;
 mod prompt_catalog;
-pub(crate) mod reload_tool;
 mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;
