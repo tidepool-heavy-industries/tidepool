@@ -1307,26 +1307,50 @@ async fn outer_host_pending_effect_after_crash_remains_blocked_without_replay() 
         block.reason,
         harness::embedding::InferenceBlockReason::HostInterrupted
     ));
-    let recovery = fixture
-        .command(
-            &ready,
-            harness::server::HostCommand::Recover {
-                target: identity.clone(),
-                expected_block: block.clone(),
-                mode: harness::embedding::RecoveryMode::Exact,
-            },
-        )
-        .await;
-    let receipt = fixture
-        .command_receipt(&identity, recovery, &mut restored)
-        .await;
-    assert!(
-        matches!(receipt.outcome, harness::server::CommandReceiptOutcome::Refused { target: Some(target), .. } if target == identity)
-    );
-    assert_eq!(
-        fixture.store().embedded_inference_state(&identity).unwrap(),
-        harness::embedding::HostInferenceState::Blocked { block }
-    );
+    let mut expected_block = block;
+    for mode in [
+        harness::embedding::RecoveryMode::Exact,
+        harness::embedding::RecoveryMode::VisibleHistory,
+    ] {
+        let recovery = fixture
+            .command(
+                &ready,
+                harness::server::HostCommand::Recover {
+                    target: identity.clone(),
+                    expected_block: expected_block.clone(),
+                    mode,
+                },
+            )
+            .await;
+        let receipt = fixture
+            .command_receipt(&identity, recovery, &mut restored)
+            .await;
+        assert!(matches!(
+            &receipt.outcome,
+            harness::server::CommandReceiptOutcome::ContinuationRefused {
+                target,
+                block: refused,
+                reason: harness::embedding::ContinuationRefusal::UncertainEffects,
+            } if target == &identity && refused == &expected_block
+        ));
+        let harness::embedding::HostInferenceState::Blocked { block: current } =
+            fixture.store().embedded_inference_state(&identity).unwrap()
+        else {
+            panic!("exact and visible-history recovery must retain the uncertain-effect block");
+        };
+        assert_eq!(current.request, expected_block.request);
+        assert_eq!(current.reason, expected_block.reason);
+        assert_eq!(
+            current.continuation_refusal,
+            Some(harness::embedding::ContinuationRefusal::UncertainEffects)
+        );
+        if expected_block.continuation_refusal.is_none() {
+            assert!(current.generation > expected_block.generation);
+        } else {
+            assert_eq!(current, expected_block);
+        }
+        expected_block = current;
+    }
     let retained = fixture.store().claims_for_operation(&original).unwrap();
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].state, harness::store::ClaimState::Pending);

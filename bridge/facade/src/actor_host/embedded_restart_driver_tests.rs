@@ -406,7 +406,8 @@ async fn observe_second_automatic_retry(
                         .iter()
                         .any(|event| event.kind == "model_interrupted"));
                     let (mut socket, snapshot) =
-                        super::m1_host_tests::browser_snapshot(host.address, cookie).await;
+                        crate::actor_host::m1_host_tests::browser_snapshot(host.address, cookie)
+                            .await;
                     let snapshot: harness::server::browser_contract::Snapshot =
                         serde_json::from_value(snapshot["snapshot"].clone()).unwrap();
                     let projected = snapshot

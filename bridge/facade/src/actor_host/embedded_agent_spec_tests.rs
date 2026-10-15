@@ -1,9 +1,7 @@
 //! Retained installed tools and their after-tool slot survive a live spec reload.
 
 use super::hosted_test_context::{HostedActorContext, HostedTestRuntime, ObservedInstallation};
-use super::test_campaign::{
-    commit_workspace, dispatch_haskell_script, dispatch_structured_tool, TestCampaign,
-};
+use super::test_campaign::{commit_workspace, dispatch_structured_tool, TestCampaign};
 use super::test_campaign::{
     hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
