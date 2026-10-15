@@ -478,6 +478,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                 let policy = policy.as_ref();
 
                 assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
+                let before = policy.snapshot_for_request().expect("issued original workspace tools");
 
                 std::fs::write(
                     workspace.join(".exomonad/AgentSpec.hs"),
@@ -486,9 +487,28 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                     ),
                 )
                 .unwrap();
-                let receipt = reload(policy).await;
+                let receipt = dispatch_structured_tool(policy, "reload", serde_json::json!({})).await;
                 assert_reload_outcome(&receipt, "ReloadPublished");
-                assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
+                let after = policy.snapshot_for_request().expect("issued reloaded workspace tools");
+                assert!(after.tools().iter().any(|tool| tool.name() == "bash"));
+                assert!(exomonad_tool::compare_surfaces(before.tools(), after.tools()).is_empty());
+                let mut dispatch = tokio::spawn(async move {
+                    super::test_campaign::dispatch_structured_tool(
+                        after.as_ref(),
+                        "bash",
+                        serde_json::json!({"cmd":"echo retained-shell", "yield_time_ms":30000}),
+                    ).await
+                });
+                let request = tokio::select! {
+                    request = super::command_test_support::backend_request(campaign) => request,
+                    result = &mut dispatch => panic!("the exact post-reload shell call ended before command admission: {result:?}"),
+                };
+                let backend = super::command_test_support::TestCommands::completed("retained-shell");
+                request.supply(Ok(backend.clone()));
+                let result = dispatch.await.expect("post-reload shell task joins");
+                assert_eq!(result["status"], "committed", "{result}");
+                assert!(result["items"][0]["output"].as_str().unwrap().contains("retained-shell"), "{result}");
+                assert_eq!(backend.executions(), 1, "{result}");
             })
         })
         .await;
