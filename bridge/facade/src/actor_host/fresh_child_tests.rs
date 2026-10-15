@@ -422,24 +422,44 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                 .iter()
                 .find(|tool| tool.name() == "haskell_sync")
                 .expect("supplied child spec notebook");
-            let supplied_effects = [
+            let supplied_actor_effects = [
                 ActorEffectKey::Replies,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Lookup,
                 ActorEffectKey::BoundWorktree,
-            ]
-            .into_iter()
-            .map(exomonad_tool::ToolEffectKey::from)
-            .collect::<std::collections::HashSet<_>>();
+            ];
+            assert_eq!(
+                child_installation.capabilities.effect_keys().len(),
+                supplied_actor_effects.len()
+            );
+            assert_eq!(
+                child_installation.capabilities.effect_keys()
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>(),
+                supplied_actor_effects.into_iter().collect(),
+                "the child retains the caller's exact narrow actor profile"
+            );
+            let mut supplied_effects = supplied_actor_effects
+                .into_iter()
+                .map(exomonad_tool::ToolEffectKey::from)
+                .collect::<std::collections::HashSet<_>>();
+            supplied_effects.insert(exomonad_tool::ToolEffectKey::ContextReadWrite);
+            supplied_effects.insert(exomonad_tool::ToolEffectKey::Reload);
             let actual_effects = child_notebook
                 .effect_keys()
                 .iter()
                 .copied()
                 .collect::<std::collections::HashSet<_>>();
             assert_eq!(
+                child_notebook.effect_keys().len(),
+                supplied_effects.len(),
+                "the synchronous invocation row contains no duplicate effects"
+            );
+            assert_eq!(
                 actual_effects,
                 supplied_effects,
-                "the child's notebook exposes the caller's supplied spec effect row"
+                "the synchronous notebook exposes SyncEffects of the supplied narrow base"
             );
             assert!(!child_notebook
                 .effect_keys()
