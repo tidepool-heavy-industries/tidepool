@@ -1,6 +1,6 @@
 ---
 name: exomonad-agent-spec
-description: Define an Exomonad actor's typed tool record, effect profiles and result presentation, or reload implementations without changing its registered surface. Use when reusable Haskell behavior should become a hosted tool.
+description: Define an Exomonad actor's typed tools, effect profiles and result presentation, or publish source and tool changes through an authored synchronous reload field. Use when reusable Haskell behavior should become a hosted tool.
 ---
 
 An agent spec selects one Haskell record of tools. Its fields and their types
@@ -81,23 +81,37 @@ presentation.
 
 ## Reload
 
-Edit ordinary `.hs` definitions and workspace prompts, then call the native
-`reload` tool; Haskell `reloadSource []` uses the same owner. Saving alone does not
-activate a draft. Source, compatible tool handlers and workspace prompts publish
-as one generation. Supply `also_check` when additional modules need validation.
+Reload is an ordinary synchronous `Call` field in the authored spec. Shipped
+editable specs name it `reload` and use `standardReload`; another field name works
+with the same handler. Its field type is
+`mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))`.
+Edit ordinary `.hs` definitions and workspace prompts, call that field, and read
+its typed receipt before relying on the new generation. Saving alone does not
+activate a draft. Source, tools and workspace prompts publish together.
+
+`also_check` adds modules to validation. `accept_cache_invalidation` defaults to
+false: an incompatible tool surface is refused with its diff. Explicitly setting
+it to true permits supported tool additions, removals, renames, reordering and
+schema changes, after validation of the next provider request. Authority checks,
+typed actor protocols and provider schema restrictions still apply.
+
+Only an admitted synchronous hosted invocation can use `Reload`. Synchronous
+notebook cells and ordinary `Sync` function fields share this owner; asynchronous
+endpoints and programmatic calls cannot activate drafts.
+`reloadHandler` and `reloadPresenter` compose in a custom field; `reloadSource []`
+is the compatible-only Haskell operation in a synchronous notebook or handler, and
+`reloadSourceWith` accepts typed options. Synchrony alone does not grant source
+ownership. Captured-only actors remain pinned.
+
 Changed configuration creates a fresh notebook; unchanged configuration preserves
 bindings. Keep durable definitions in `.hs` files. Reload preserves conversation,
 resources and published memory context, and does not rerun startup or refresh memory.
-
-Read the receipt. Preparation failure, incompatible registered surface or typed
-actor protocol, cancellation before commit, or a stale candidate retains the
-previous generation. A confirmed commit with a projection repair warning is still
-committed; uncertain commit state requires reconciliation, not blind replay.
-Draft files remain on disk. Tool names, descriptions, kinds, schemas, scheduling,
-implementation kinds, effect profiles and order must remain compatible with the
-registered surface. A changed surface needs a new actor incarnation.
+Preparation failure, refused surface changes or typed actor protocols, cancellation
+before commit, and stale candidates retain the previous generation. A confirmed
+commit with a projection repair warning is committed; uncertain state requires
+reconciliation rather than replay. Draft files remain on disk.
 
 Accepted calls and existing children retain their issued generation. Fresh-context
-children select the published source; captured-only children stay pinned. Source-backed
-actors edit within declared roots, without older workspace-source fallback.
-Package pins, source roots, external services and capability grants remain launch inputs.
+children select the published source. Source-backed actors edit within declared
+roots, without older workspace-source fallback. Package pins, source roots,
+external services and capability grants remain launch inputs.

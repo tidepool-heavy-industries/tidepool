@@ -72,10 +72,13 @@ reference material describes a vocabulary, not a grant.
 | Write memory or a note | Durable content changes; current arrival context remains as it was |
 | `Persona.Context.refresh` | Reads the current memory files and replaces the published authored context block synchronously; missing or unpublished targets refuse |
 | Edit ordinary `.hs` files or workspace prompts | Drafts change; active configuration stays unchanged until reload |
-| Native `reload`; Haskell `reloadSource []` | Publishes one coherent source, compatible tool and workspace-prompt generation; changed configuration resets the notebook, unchanged configuration preserves it |
+| Authored synchronous `reload` field | Publishes source, tools and workspace prompts together; changed configuration resets the notebook, unchanged configuration preserves it |
 
-`reloadSource` takes only the list of additional modules to validate. Reload
-does not commit files to Git; commit authored changes separately when wanted.
+Use `reload`, an ordinary synchronous field in `Persona.Spec`, or call
+`reloadSource []` in the synchronous notebook. `also_check` adds modules to validation. Tool surface changes
+refuse with a diff by default; `accept_cache_invalidation: true` approves supported
+changes after provider validation. The source owner and existing grants still
+authorize the operation. Reload does not commit files to Git.
 
 Keep reusable definitions in `.hs` files and update directly affected prompt
 examples when changing their interface. Notebook names are discarded by changed
@@ -85,8 +88,9 @@ Already-issued work and existing children retain their captured generation;
 fresh-context children select the published source. Captured-only children stay
 pinned.
 
-Adding an ordinary helper does not register a native tool. Incompatible registered
-tool surfaces or typed actor protocols refuse publication. Preparation failure or
+Adding an ordinary helper does not register a tool; add an explicit field to the
+spec when the model needs that entry point. Surface changes need the explicit
+approval above; incompatible typed actor protocols refuse publication. Preparation failure or
 cancellation before commit retains the active generation. Read reload receipts:
 a confirmed commit with a projection repair warning is committed; uncertain state
 requires reconciliation rather than replay. Source-backed actors can add, edit or

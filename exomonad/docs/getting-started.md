@@ -347,18 +347,24 @@ bindings; `-` reads the cell from standard input and `--actors` prints the actor
 graph. See [the operator interface](operator-http.md).
 
 **Change code without restarting.** Edit ordinary `.hs` definitions and workspace
-prompt files, then call the native `reload` tool. Haskell `reloadSource []` invokes
-the same operation; its only argument is a list of additional modules to validate.
+prompt files, then call the authored synchronous reload field (`reload` in the
+shipped editable specs). This ordinary `Sync (Call ...)` endpoint uses
+`standardReload`; its name is not reserved. `also_check` adds modules to validation.
+Synchronous notebook cells can call `reloadSource []` or typed `reloadSourceWith`
+options. Custom synchronous handlers can compose `reloadHandler`; asynchronous
+cells and programmatic calls cannot activate drafts.
 Reload never commits files implicitly; Git commits are a separate choice.
-It prepares source, compatible AgentSpec handlers and
-workspace prompts together. Changed configuration replaces notebook bindings
+It prepares source, AgentSpec handlers and workspace prompts together. Changed configuration replaces notebook bindings
 with a fresh notebook; unchanged configuration preserves them. Keep definitions
 you want to retain in `.hs` files. Conversation, owned resources and the published
 memory block persist. Reload does not rerun startup or refresh memory; memory
 writes need their own explicit context refresh.
 
-Preparation failures, incompatible registered tools or typed actor protocols,
-and cancellation before commit retain the active generation. Read the publication
+Tool surface changes refuse with a diff by default. Set
+`accept_cache_invalidation` to true to approve supported additions, removals,
+renames, reordering and schemas after provider validation. Runtime grants and
+typed actor protocols remain enforced. Preparation failures, refusals and
+cancellation before commit retain the active generation. Read the publication
 receipt: a confirmed commit with a projection repair warning is still committed;
 an uncertain commit requires reconciliation rather than blind replay. Already-issued
 work and existing children remain pinned; fresh-context children select the

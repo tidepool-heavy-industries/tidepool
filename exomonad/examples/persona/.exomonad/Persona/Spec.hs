@@ -29,7 +29,9 @@ type HelperEffects =
    , Actor, ActorContext, AgentLaunch, AgentInspection, AgentControl
    , Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 data PersonaTools mode = PersonaTools
-  { haskell :: mode :- Sync (HaskellCell PersonaEffects) }
+  { haskell :: mode :- Sync (HaskellCell PersonaEffects)
+  , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
+  }
   deriving (Generic)
 -- Try adding an afterTool hook here to notice something useful after a call.
 -- A hook receives ToolCall and ToolResult and returns Annotation: Annotated
@@ -41,7 +43,8 @@ data PersonaTools mode = PersonaTools
 agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools
-  { haskell = haskellTool "Use the persistent Haskell notebook to read and edit workspace files, recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections." }
+  { haskell = haskellTool "Use the persistent Haskell notebook to read and edit workspace files, recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections."
+  , reload = standardReload }
   , initialContext = Just Orientation.startup }
 
 data HelperTools mode = HelperTools

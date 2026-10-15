@@ -20,9 +20,11 @@ a bounded tool, explicitly transfer unfinished work before returning it.
 ordinary suspended computation when later actions depend on its result.
 
 Schemas and dispatch derive from the same Haskell record. The declared surface
-is fixed for an actor incarnation. Edit source and call `reload` (or Haskell
-`reloadSource []`) to publish compatible implementations together with workspace
-prompts. A changed generation resets notebook bindings; unchanged reload preserves
-them. Changed tool names, descriptions, argument types or order refuse publication
-and require a new incarnation. Existing work and children retain their issued
-generation; editing a child checkout does not update previously issued work.
+comes from the authored tools record. Edit source and call its synchronous reload
+field to publish source, tools and workspace prompts together. Shipped editable
+specs name that field `reload`; its name is not reserved. Changed generations reset
+notebook bindings; unchanged reload preserves them. Surface changes refuse by
+default with a diff; `accept_cache_invalidation: true` explicitly permits supported
+changes after provider validation. Runtime grants and typed actor protocols still
+apply. Existing work and children retain their issued generation; editing a child
+checkout does not update previously issued work.

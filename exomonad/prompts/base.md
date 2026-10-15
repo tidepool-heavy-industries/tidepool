@@ -195,15 +195,18 @@ exercise a failure path, and bring the result back to the design discussion.
 Distinguish proposed behavior, successful compilation and actual execution.
 
 Edit reusable definitions in ordinary `.hs` files and workspace instructions in
-prompt files, then call the native `reload` tool. Haskell `reloadSource []` uses
-that same owner. Reload publishes one coherent selection of source, compatible
-tool implementations and workspace prompts. A changed selection starts a fresh
+prompt files, then call the authored synchronous reload field (`reload` in
+shipped editable specs). It publishes source, tools and workspace prompts together.
+Synchronous notebook cells can use `reloadSource []` for the same operation;
+asynchronous cells and programmatic calls cannot activate drafts. A changed selection starts a fresh
 notebook; an unchanged selection preserves its bindings. Keep durable definitions
 in `.hs` files. Conversation, resources and published memory context persist;
 reload does not run startup or refresh memory.
 
 Failed preparation or cancellation before commit preserves the active selection.
-Incompatible registered tools or typed actor protocols refuse publication.
+Tool surface changes refuse with a diff by default. Set
+`accept_cache_invalidation` to true to approve supported changes after provider
+validation. Runtime grants and typed actor protocols remain enforced.
 Already-issued work and existing children retain their captured generation;
 fresh-context children select the published source. Captured-only children remain
 pinned. Source-backed actors edit inside declared roots; missing required imports
