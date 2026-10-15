@@ -1342,6 +1342,20 @@ async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation
         .store
         .embedded_inference_state(&root_target)
         .unwrap();
+    let host_observations: BTreeMap<_, _> = fixture
+        .hosts
+        .iter()
+        .map(|(actor, host)| {
+            (
+                *actor,
+                (
+                    host.wakes.load(Ordering::Relaxed),
+                    host.admissions.load(Ordering::Relaxed),
+                    host.controls.lock().unwrap().len(),
+                ),
+            )
+        })
+        .collect();
     let operation = new_operation();
     let command = HostCommand::SelectAccount {
         target: root_target.clone(),
@@ -1383,10 +1397,15 @@ async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation
             .unwrap(),
         before
     );
-    for host in fixture.hosts.values() {
-        assert_eq!(host.wakes.load(Ordering::Relaxed), 0);
-        assert_eq!(host.admissions.load(Ordering::Relaxed), 0);
-        assert!(host.controls.lock().unwrap().is_empty());
+    for (actor, host) in &fixture.hosts {
+        assert_eq!(
+            (
+                host.wakes.load(Ordering::Relaxed),
+                host.admissions.load(Ordering::Relaxed),
+                host.controls.lock().unwrap().len()
+            ),
+            host_observations[actor]
+        );
     }
     let child_operation = new_operation();
     let child_command = HostCommand::SelectAccount {
