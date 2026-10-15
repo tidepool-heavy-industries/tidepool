@@ -5,10 +5,11 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Inspection (display)
 import qualified Project.Researcher as Researcher
 
+Right checkedResearcher <- validateAgentSpec Researcher.researcherSpec
 Right researcher <- spawnSubagent
   (FreshCtx "Use search and open for source evidence. Complete each request with its active reply tool; preserve returned source URLs and references.")
   SameDir
-  ((defaultSpawnOptions Researcher.researcherSpec) { spawnModel = Just Luna })
+  ((defaultValidatedSpawnOptions checkedResearcher) { spawnModel = Just Luna })
 Right reportRequest <- requestWithReplyTool @Researcher.Report researcher
   ("Which plants retain water? Search for moss and open a source; return a sourced report." :: Text)
   defaultRequestOptions

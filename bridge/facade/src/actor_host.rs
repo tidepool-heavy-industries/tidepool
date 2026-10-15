@@ -142,7 +142,6 @@ mod observation_budget_tests;
 #[cfg(test)]
 mod researcher_acceptance_tests;
 #[cfg(test)]
-#[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
 mod terminal_transfer_tests;
