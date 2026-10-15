@@ -39,6 +39,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph)
 import Tidepool.TypePolicy qualified as Policy
+import Tidepool.TypeSyntaxIdentity (encodeTypeSyntaxIdentity)
 
 -- Two genuine compiler results test alpha and same-layout field semantics. They remain different
 -- source originals; graph equality never admits one as the other's certificate.
@@ -327,9 +328,9 @@ verifyHydratedSiteIdentities result wire = do
   hydratedResolver <- captureIdentityResolver hydrated Nothing
   source <- mapM (requireRight . resolveTypeIdentity (pmIdentityResolver prepared)) types
   restored <- mapM (requireRight . resolveTypeIdentity hydratedResolver) restoredTypes
-  sourceSyntax <- requireRight (Policy.encodeTypeSyntaxIdentity (pmIdentityResolver prepared)
+  sourceSyntax <- requireRight (encodeTypeSyntaxIdentity (pmIdentityResolver prepared)
     (pmTypeGraph prepared) [psWireNode site])
-  restoredSyntax <- requireRight (Policy.encodeTypeSyntaxIdentity hydratedResolver restoredGraph [restoredRoot])
+  restoredSyntax <- requireRight (encodeTypeSyntaxIdentity hydratedResolver restoredGraph [restoredRoot])
   assert (sourceSyntax == restoredSyntax)
     "site syntax identity changed with source/interface hydration or unrelated arena indices"
   -- This is a structural encoder input only: the genuine TyCons and resolver
@@ -357,7 +358,7 @@ verifyHydratedSiteIdentities result wire = do
         (concat (IntMap.elems (typeGraphEdges restoredGraph))))
     "nonidentity controls lack a real data declaration and constructor field template"
   forM_ variants $ \(label, structuralGraph) -> do
-    syntax <- requireRight (Policy.encodeTypeSyntaxIdentity hydratedResolver structuralGraph [restoredRoot])
+    syntax <- requireRight (encodeTypeSyntaxIdentity hydratedResolver structuralGraph [restoredRoot])
     assert (syntax == restoredSyntax) (label ++ " unexpectedly salted the typed site identity")
   let inventory identities = Map.fromList [(typeSymbol identity, identity) | identity <- identities]
   assert (not (null source) && inventory source == siteIdentities wire)

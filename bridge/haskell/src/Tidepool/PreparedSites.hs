@@ -85,9 +85,10 @@ import Tidepool.ConstructorIdentity (IdentityResolver)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
+import Tidepool.TypeSyntaxIdentity (encodeTypeSyntaxIdentity, TypeSyntaxIdentityError)
 import Tidepool.TypePolicy
   ( TypeGraph, TypeGraphBuilder, TypeNodeId, emptyTypeGraphBuilder
-  , finishTypeGraph, internType, modulesOfType, encodeTypeSyntaxIdentity, TypeSyntaxIdentityError
+  , finishTypeGraph, internType, modulesOfType
   , nominalHeadsOfType
   )
 

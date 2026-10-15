@@ -138,6 +138,7 @@ library tidepool-extract-internal
     Tidepool.SessionArtifacts
     Tidepool.Timing
     Tidepool.TypePolicy
+    Tidepool.TypeSyntaxIdentity
     Tidepool.TypedSegment
     Tidepool.TypedSegment.Source
     Tidepool.TurnSource
