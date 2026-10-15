@@ -82,15 +82,92 @@ pub struct PrepareOptions {
 }
 
 pub struct HostOptions {
-    pub workspace: PathBuf,
-    pub session: String,
     pub run_id: String,
     pub run_root: PathBuf,
-    pub status_path: PathBuf,
-    pub root_binding_path: PathBuf,
+}
 
-    pub resume_root: bool,
-    pub agent: ExomonadAgentDefaults,
+/// Immutable coordinates only; prepared source/configuration and Store remain
+/// owned by their existing run selections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunLaunchCoordinates {
+    version: u32,
+    run_id: String,
+    workspace: PathBuf,
+    session: String,
+    agent: ExomonadAgentDefaults,
+}
+
+struct AdmittedHost {
+    workspace: PathBuf,
+    session: String,
+    run_id: String,
+    run_root: PathBuf,
+    status_path: PathBuf,
+    agent: ExomonadAgentDefaults,
+}
+
+impl RunLaunchCoordinates {
+    fn read(root: &Path, expected: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(root.join("launch.json")).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("cannot read admitted launch coordinates: {error}; legacy runs require their retained matching binary"))
+        })?;
+        let value: Self = serde_json::from_slice(&bytes)?;
+        if value.version != 1 || value.run_id != expected || !value.workspace.is_absolute() {
+            return Err(runtime_error(
+                "run launch coordinates do not match requested identity",
+            ));
+        }
+        TmuxSession::new(value.session.clone())?;
+        Ok(value)
+    }
+    fn publish(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = serde_json::to_vec_pretty(self)?;
+        if !tidepool_atomic_write::write_durable_new(&root.join("launch.json"), &bytes)? {
+            return Err(runtime_error("run launch coordinates already published"));
+        }
+        Ok(())
+    }
+    fn admit(self, run_root: PathBuf) -> AdmittedHost {
+        AdmittedHost {
+            workspace: self.workspace,
+            session: self.session,
+            run_id: self.run_id,
+            status_path: run_root.join("status.json"),
+            run_root,
+            agent: self.agent,
+        }
+    }
+}
+
+/// Permanent admission failures require operator action, not a service retry.
+#[derive(Debug)]
+pub struct HostBootRefusal {
+    stage: &'static str,
+    source: Box<dyn std::error::Error>,
+}
+impl std::fmt::Display for HostBootRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "host {} refused: {}", self.stage, self.source)
+    }
+}
+impl std::error::Error for HostBootRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+pub use exomonad_node::systemd_slice::HOST_BOOT_REFUSAL_EXIT;
+fn boot_refusal(error: impl Into<Box<dyn std::error::Error>>) -> Box<dyn std::error::Error> {
+    boot_stage_refusal("admission", error)
+}
+pub(crate) fn boot_stage_refusal(
+    stage: &'static str,
+    error: impl Into<Box<dyn std::error::Error>>,
+) -> Box<dyn std::error::Error> {
+    Box::new(HostBootRefusal {
+        stage,
+        source: error.into(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,64 +176,6 @@ pub enum ExomonadBackend {
     Codex,
     #[default]
     Embedded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunBackendRecord {
-    version: u32,
-    run_id: String,
-    backend: ExomonadBackend,
-}
-
-fn record_run_backend(
-    run_root: &Path,
-    run_id: &str,
-    backend: ExomonadBackend,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if backend == ExomonadBackend::Codex {
-        return Err(runtime_error(
-            "the Codex backend is retired; historical runs cannot be resumed",
-        ));
-    }
-    let path = run_root.join("backend.json");
-    let selected = RunBackendRecord {
-        version: 1,
-        run_id: run_id.to_owned(),
-        backend,
-    };
-    let bytes = serde_json::to_vec_pretty(&selected)?;
-    if !tidepool_atomic_write::write_durable_new(&path, &bytes)? {
-        let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
-        if existing != selected {
-            return Err(runtime_error(format!(
-                "run backend record disagrees with selected {backend} backend: {}",
-                path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn verify_run_backend(
-    run_root: &Path,
-    run_id: &str,
-    backend: ExomonadBackend,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let path = run_root.join("backend.json");
-    let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
-    if existing.backend == ExomonadBackend::Codex {
-        return Err(runtime_error(
-            "the Codex backend is retired; historical runs cannot be resumed",
-        ));
-    }
-    if existing.version != 1 || existing.run_id != run_id || existing.backend != backend {
-        return Err(runtime_error(format!(
-            "host backend {backend} does not match the immutable run record at {}",
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
 impl std::fmt::Display for ExomonadBackend {
@@ -1086,7 +1105,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let session_directory = tidepool_atomic_write::DirectoryAnchor::open_existing(&workspace)?
         .child(Path::new(".exomonad/sessions").join(&session_name))?;
     let session_root = session_directory.path();
-    let root_binding_path = session_root.join("root-binding.json");
     preflight(&workspace).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = exomonad_log_path(&workspace, &run_id);
@@ -1103,36 +1121,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             compiler_socket.display()
         ))
     })?;
-    record_run_backend(&run_root, &run_id, selected_backend)?;
-    workspace::FrozenWorkspace::select_prepared(
-        &workspace,
-        &run_root,
-        options.prepared.as_deref(),
-    )?;
-    if options.recreate {
-        let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
-            runtime_error(format!(
-                "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
-            ))
-        })?;
-        stop(previous_run.trim(), &session_name).await?;
-    }
-    crate::actor_host::ensure_actor_workspace_available(&workspace)?;
-
-    tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
-
-    let status_path = run_root.join("status.json");
-    write_status(
-        &status_path,
-        &RunStatus::new(
-            &run_id,
-            &workspace,
-            &session_name,
-            agent.clone(),
-            RunPhase::Starting,
-        ),
-    )?;
-
     let executable = retain_run_executable(&run_root, "exomonad", &std::env::current_exe()?)?;
     let view_helper = exomonad_node::view_command::helper_path()?;
     retain_run_executable(&run_root, "exomonad-view-helper", &view_helper)?;
@@ -1152,24 +1140,48 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         retain_run_executable(&run_root, "tidepool-extract-worker", &authority.worker_path)?;
     let deployment_path = run_root.join("compiler-deployment.json");
     tidepool_atomic_write::write_durable(&deployment_path, &serde_json::to_vec_pretty(authority)?)?;
-    let selected_environment = std::collections::BTreeMap::from([
-        (
-            "TIDEPOOL_EXTRACT".to_owned(),
-            compiler_bin.display().to_string(),
+    let selected_environment = compiler_environment(&run_root, authority, &compiler_bin, &worker);
+    let coordinates = RunLaunchCoordinates {
+        version: 1,
+        run_id: run_id.clone(),
+        workspace: workspace.clone(),
+        session: session_name.clone(),
+        agent: agent.clone(),
+    };
+    admit_run_launch(&run_root, &coordinates, options.prepared.as_deref()).await?;
+    if options.recreate {
+        let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
+            runtime_error(format!(
+                "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
+            ))
+        })?;
+        uuid::Uuid::parse_str(previous_run.trim())?;
+        let previous_root = state_boundary
+            .path()
+            .join(&state_relative)
+            .join("exomonad/runs")
+            .join(previous_run.trim());
+        let previous = RunLaunchCoordinates::read(&previous_root, previous_run.trim())?;
+        if previous.workspace != workspace || previous.session != session_name {
+            return Err(runtime_error(
+                "recorded previous run does not own this workspace session",
+            ));
+        }
+        stop_admitted_run(&previous_root, &previous).await?;
+    }
+    crate::actor_host::ensure_actor_workspace_available(&workspace)?;
+    tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
+    let status_path = run_root.join("status.json");
+    write_status(
+        &status_path,
+        &RunStatus::new(
+            &run_id,
+            &workspace,
+            &session_name,
+            agent.clone(),
+            RunPhase::Starting,
         ),
-        (
-            "TIDEPOOL_EXTRACT_WORKER".to_owned(),
-            worker.display().to_string(),
-        ),
-        (
-            "TIDEPOOL_GHC_LIBDIR".to_owned(),
-            authority.ghc_libdir.display().to_string(),
-        ),
-        (
-            tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT.to_owned(),
-            deployment_path.display().to_string(),
-        ),
-    ]);
+    )?;
     println!(
         "launch: backend=embedded model={} effort={} extractor={}",
         agent.model,
@@ -1235,77 +1247,17 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         return Err(error);
     }
 
-    let mut args = vec![
-        "host".into(),
-        "--workspace".into(),
-        workspace.display().to_string(),
-        "--session".into(),
-        session_name.clone(),
-        "--run-id".into(),
-        run_id.clone(),
-        "--run-root".into(),
-        run_root.display().to_string(),
-        "--status-path".into(),
-        status_path.display().to_string(),
-        "--root-binding-path".into(),
-        root_binding_path.display().to_string(),
-    ];
-
-    // Replacing a session resumes its root conversation. A session whose first
-    // launch never got as far as a conversation has no binding at all: there is
-    // nothing to resume and nothing to lose, so it starts fresh. A binding that
-    // exists and cannot be read is a different case, and the host fails closed
-    // on it rather than quietly abandoning a conversation.
-    if options.recreate {
-        if root_binding_path.exists() {
-            args.push("--resume-root".into());
-        } else {
-            println!(
-                "no earlier root conversation in session {session_name:?}; starting a new one"
-            );
-        }
-    }
-    args.extend(["--model".into(), agent.model.clone()]);
-    args.extend(["--effort".into(), agent.effort.to_string()]);
-    let mut host_environment = host_environment(&compiler_socket);
-    host_environment.extend(selected_environment);
-    let host_launch = slice.supervised_service(
-        &format!("exomonad-host-{run_id}"),
-        slice.verified_command(
-            &executable,
-            exomonad_node::ProcessInvocation {
-                program: executable.display().to_string(),
-                args,
-            },
-        ),
-        &host_environment,
+    launch_host_window(
+        &coordinates,
+        &run_root,
+        &executable,
+        &compiler_socket,
+        selected_environment,
+        &slice,
         &configuration.launch.host_filesystem,
-    );
-    let unset_environment = deployment_environment_unsets(&host_environment);
-    let launch = tmux
-        .spawn_window(&TmuxLaunch {
-            window_name: "Host".into(),
-            cwd: workspace.clone(),
-            program: host_launch.program,
-            args: host_launch.args,
-            environment: host_environment,
-            unset_environment,
-        })
-        .await;
-    if let Err(error) = launch {
-        write_startup_failure(
-            &status_path,
-            &run_id,
-            &workspace,
-            &session_name,
-            &agent,
-            &error,
-        )?;
-        if let Err(kill_error) = tmux.kill().await {
-            tracing::warn!(%kill_error, "cannot kill tmux session after startup failure");
-        }
-        return Err(error.into());
-    }
+        &tmux,
+    )
+    .await?;
     println!("log:    {}", log_path.display());
     println!(
         "compiler: {} (tmux window Compiler)",
@@ -1354,7 +1306,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     println!("config: {}", workspace.join(EXOMONAD_CONFIG).display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
-        println!("stop:   exomonad stop --run-id {run_id} --session {session_name}");
+        println!("stop:   exomonad stop --run-id {run_id}");
         Ok(())
     } else {
         tmux.attach_or_switch()
@@ -1363,18 +1315,278 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-pub async fn stop(run_id: &str, session: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if run_id.is_empty()
-        || !run_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(runtime_error("invalid Exomonad run identity"));
+/// Complete initial source/product admission before publishing the launch coordinates.
+async fn admit_run_launch(
+    root: &Path,
+    coordinates: &RunLaunchCoordinates,
+    prepared: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for name in [
+        "exomonad",
+        "exomonad-view-helper",
+        "tidepool-extract",
+        "tidepool-extract-worker",
+    ] {
+        verify_retained_executable(root, name)?;
     }
-    let tmux = TmuxSession::new(session)?;
-    let unit = format!("exomonad-host-{run_id}.service");
-    stop_host_unit(Path::new("systemctl"), &unit).await?;
-    tmux.kill().await?;
+    let _: tidepool_toolchain::toolchain::CompilerDeploymentAuthority =
+        serde_json::from_slice(&std::fs::read(root.join("compiler-deployment.json"))?)?;
+    let frozen =
+        workspace::FrozenWorkspace::select_prepared(&coordinates.workspace, root, prepared)?;
+    frozen.config()?;
+    source::SourceLayer::new(root).ensure_active(&frozen)?;
+    crate::actor_host::admit_run_journals(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(root)?,
+        &coordinates.workspace,
+        &coordinates.run_id,
+    )
+    .await?;
+    coordinates.publish(root)
+}
+
+/// Relaunch the same admitted run. Validation happens before stopping its host.
+pub async fn restart(run_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    uuid::Uuid::parse_str(run_id)?;
+    let run_root = durable_state_directory()?
+        .path()
+        .join("exomonad/runs")
+        .join(run_id);
+    let coordinates = RunLaunchCoordinates::read(&run_root, run_id).map_err(boot_refusal)?;
+    let frozen = workspace::FrozenWorkspace::load_prepared_run(&coordinates.workspace, &run_root)
+        .map_err(boot_refusal)?;
+    source::SourceLayer::new(&run_root)
+        .reopen_active()
+        .map_err(boot_refusal)?;
+    let configuration = frozen.config().map_err(boot_refusal)?;
+    let executable = verify_retained_executable(&run_root, "exomonad").map_err(boot_refusal)?;
+    verify_retained_executable(&run_root, "exomonad-view-helper").map_err(boot_refusal)?;
+    let compiler =
+        verify_retained_executable(&run_root, "tidepool-extract").map_err(boot_refusal)?;
+    let worker =
+        verify_retained_executable(&run_root, "tidepool-extract-worker").map_err(boot_refusal)?;
+    let authority: tidepool_toolchain::toolchain::CompilerDeploymentAuthority =
+        serde_json::from_slice(&std::fs::read(run_root.join("compiler-deployment.json"))?)
+            .map_err(boot_refusal)?;
+    let selected_environment = compiler_environment(&run_root, &authority, &compiler, &worker);
+    let slice = &configuration.launch.systemd_slice;
+    enter_workspace_budget(slice).await?;
+    crate::actor_host::HostIncarnationLease::last_issued(&run_root).map_err(boot_refusal)?;
+    let compiler_socket = run_root.join("compiler.sock");
+    let deployment =
+        tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::Configured(authority);
+    let compiler_ready = match tidepool_extract_cmd::preflight_compiler_daemon(&compiler_socket) {
+        Ok(ready) => {
+            deployment
+                .admit(*ready.producer_bytes(), *ready.consumed_worker_bytes())
+                .map_err(boot_refusal)?;
+            true
+        }
+        Err(_) => false,
+    };
+    stop_host_unit(
+        Path::new("systemctl"),
+        &format!("exomonad-host-{run_id}.service"),
+    )
+    .await?;
+    wait_for_host_release(&run_root).await?;
+    let prior_generation = crate::actor_host::HostIncarnationLease::last_issued(&run_root)
+        .map_err(boot_refusal)?
+        .map_or(0, |epoch| epoch.0);
+    let minimum_generation = prior_generation
+        .checked_add(1)
+        .ok_or_else(|| boot_refusal("host epoch exhausted"))?;
+    let tmux = TmuxSession::new(coordinates.session.clone())?;
+    if !compiler_ready {
+        let mut launch = compiler_daemon_launch(
+            &coordinates.workspace,
+            &compiler_socket,
+            compiler.display().to_string(),
+            run_id,
+            &exomonad_compiler_log_path(&coordinates.workspace, run_id),
+            &configuration.compiler,
+        );
+        launch.environment.extend(selected_environment.clone());
+        let scoped = slice.scope(slice.verified_command(
+            &executable,
+            exomonad_node::ProcessInvocation {
+                program: launch.program,
+                args: launch.args,
+            },
+        ));
+        launch.program = scoped.program;
+        launch.args = scoped.args;
+        if tmux.exists().await? {
+            tmux.spawn_window(&launch).await?;
+        } else {
+            tmux.create(&launch).await?;
+        }
+        wait_until_compiler_daemon(&tmux, &compiler_socket, &deployment).await?;
+    }
+    launch_host_window(
+        &coordinates,
+        &run_root,
+        &executable,
+        &compiler_socket,
+        selected_environment,
+        slice,
+        &configuration.launch.host_filesystem,
+        &tmux,
+    )
+    .await?;
+    wait_until_interactive_generation(
+        &tmux,
+        &run_root.join("status.json"),
+        run_id,
+        minimum_generation,
+    )
+    .await?;
+    Ok(())
+}
+
+fn compiler_environment(
+    run_root: &Path,
+    authority: &tidepool_toolchain::toolchain::CompilerDeploymentAuthority,
+    compiler: &Path,
+    worker: &Path,
+) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([
+        ("TIDEPOOL_EXTRACT".into(), compiler.display().to_string()),
+        (
+            "TIDEPOOL_EXTRACT_WORKER".into(),
+            worker.display().to_string(),
+        ),
+        (
+            "TIDEPOOL_GHC_LIBDIR".into(),
+            authority.ghc_libdir.display().to_string(),
+        ),
+        (
+            tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT.into(),
+            run_root
+                .join("compiler-deployment.json")
+                .display()
+                .to_string(),
+        ),
+    ])
+}
+
+async fn launch_host_window(
+    coordinates: &RunLaunchCoordinates,
+    run_root: &Path,
+    executable: &Path,
+    compiler_socket: &Path,
+    selected: std::collections::BTreeMap<String, String>,
+    slice: &exomonad_node::systemd_slice::SystemdSlice,
+    filesystem: &exomonad_node::systemd_slice::HostFilesystemPolicy,
+    tmux: &TmuxSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut environment = host_environment(compiler_socket);
+    environment.extend(selected);
+    let unset_environment = deployment_environment_unsets(&environment);
+    let command = slice.supervised_service(
+        &format!("exomonad-host-{}", coordinates.run_id),
+        slice.verified_command(
+            executable,
+            exomonad_node::ProcessInvocation {
+                program: executable.display().to_string(),
+                args: vec![
+                    "host".into(),
+                    "--run-id".into(),
+                    coordinates.run_id.clone(),
+                    "--run-root".into(),
+                    run_root.display().to_string(),
+                ],
+            },
+        ),
+        &environment,
+        &unset_environment,
+        filesystem,
+    );
+    tracing::info!(present = ?environment.keys().collect::<Vec<_>>(), absent = ?unset_environment, "host startup environment names");
+    let launch = TmuxLaunch {
+        window_name: "Host".into(),
+        cwd: coordinates.workspace.clone(),
+        program: command.program,
+        args: command.args,
+        environment,
+        unset_environment,
+    };
+    if tmux.exists().await? {
+        tmux.spawn_window(&launch).await?;
+    } else {
+        tmux.create(&launch).await?;
+    }
+    Ok(())
+}
+
+fn verify_retained_executable(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("bin").join(name);
+    if std::fs::metadata(&path)?.permissions().mode() & 0o111 == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "retained product is not executable",
+        ));
+    }
+    let bytes = std::fs::read(&path)?;
+    let expected = std::fs::read_to_string(root.join("bin").join(format!("{name}.blake3")))?;
+    if blake3::hash(&bytes).to_hex().as_str() != expected.trim() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "retained executable hash mismatch",
+        ));
+    }
+    Ok(path)
+}
+
+pub fn init_run_host_tracing(
+    root: &Path,
+    run_id: &str,
+) -> Result<(PathBuf, tracing_appender::non_blocking::WorkerGuard), Box<dyn std::error::Error>> {
+    let coordinates = RunLaunchCoordinates::read(root, run_id).map_err(boot_refusal)?;
+    init_host_tracing(&coordinates.workspace, run_id)
+}
+
+pub async fn stop(run_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    uuid::Uuid::parse_str(run_id)?;
+    let root = durable_state_directory()?
+        .path()
+        .join("exomonad/runs")
+        .join(run_id);
+    let coordinates = RunLaunchCoordinates::read(&root, run_id).map_err(boot_refusal)?;
+    stop_admitted_run(&root, &coordinates).await
+}
+
+async fn stop_admitted_run(
+    root: &Path,
+    coordinates: &RunLaunchCoordinates,
+) -> Result<(), Box<dyn std::error::Error>> {
+    stop_host_unit(
+        Path::new("systemctl"),
+        &format!("exomonad-host-{}.service", coordinates.run_id),
+    )
+    .await?;
+    wait_for_host_release(root).await?;
+    TmuxSession::new(coordinates.session.clone())?
+        .kill()
+        .await?;
+    Ok(())
+}
+
+async fn wait_for_host_release(run_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match crate::actor_host::HostIncarnationLease::verify_released(run_root) {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tracing::debug!(%error, "waiting for exact host lease release");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -1576,14 +1788,36 @@ async fn read_bounded_diagnostics(
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
+    host_owned(
+        options,
+        #[cfg(test)]
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn host_with_test_hooks(
+    options: HostOptions,
+    hooks: crate::actor_host::HostTestHooks,
+    resource_endpoint: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    host_owned(options, Some(hooks), Some(resource_endpoint)).await
+}
+
+async fn host_owned(
+    options: HostOptions,
+    #[cfg(test)] hooks: Option<crate::actor_host::HostTestHooks>,
+    #[cfg(test)] resource_endpoint: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // `init` establishes this root. An explicit host/recovery invocation must
     // supply an existing durable root; it cannot adopt a partially created tree.
-    let run_directory = reopen_run_directory(&options.run_root)?;
-    verify_run_backend(
-        &options.run_root,
-        &options.run_id,
-        ExomonadBackend::Embedded,
-    )?;
+    let run_directory = reopen_run_directory(&options.run_root).map_err(boot_refusal)?;
+    let options = RunLaunchCoordinates::read(&options.run_root, &options.run_id)
+        .map_err(boot_refusal)?
+        .admit(options.run_root);
     let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&run_directory)?;
     let generation = host_incarnation.incarnation().0;
     if generation > 1 {
@@ -1613,7 +1847,17 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         host_generation = generation,
         "starting Exomonad actor host"
     );
-    let result = run_host(&options, generation, host_incarnation, run_directory).await;
+    let result = run_host(
+        &options,
+        generation,
+        host_incarnation,
+        run_directory,
+        #[cfg(test)]
+        hooks,
+        #[cfg(test)]
+        resource_endpoint,
+    )
+    .await;
     let settled = settle_host_result(result, &options, generation);
     if let Err(error) = &settled {
         tracing::error!(run_id = %options.run_id, error = %error, "Exomonad actor host failed");
@@ -1624,22 +1868,19 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
 }
 
 async fn run_host(
-    options: &HostOptions,
+    options: &AdmittedHost,
     host_generation: u64,
     host_incarnation: crate::actor_host::HostIncarnationLease,
     run_directory: tidepool_atomic_write::DirectoryAnchor,
+    #[cfg(test)] hooks: Option<crate::actor_host::HostTestHooks>,
+    #[cfg(test)] resource_endpoint: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = options.root_binding_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let workspace_inputs =
-        workspace::FrozenWorkspace::load_prepared_run(&options.workspace, &options.run_root)?;
-    if !options.resume_root && workspace_inputs.preparation.is_some() {
-        workspace_inputs.verify_current_inputs(&options.workspace)?;
-    }
+        workspace::FrozenWorkspace::load_prepared_run(&options.workspace, &options.run_root)
+            .map_err(boot_refusal)?;
     let accepted_source = source::SourceLayer::new(&options.run_root)
-        .ensure_active(&workspace_inputs)?
+        .reopen_active()
+        .map_err(boot_refusal)?
         .identity;
     let mut unavailable_actors = Vec::new();
     let mut actor_observations = None;
@@ -1647,58 +1888,9 @@ async fn run_host(
         tokio::sync::watch::Receiver<Vec<harness::server::HostActorProjection>>,
     > = None;
     let lost_state = recovery_lost_state(host_generation);
-    if host_generation > 1 {
-        let mut status = RunStatus::new(
-            &options.run_id,
-            &options.workspace,
-            &options.session,
-            options.agent.clone(),
-            RunPhase::Recovering {
-                stage: RecoveryStage::StoppingPredecessors,
-                restored_source: Some(accepted_source.clone()),
-            },
-        )
-        .at_generation(host_generation);
-        status.lost_state = lost_state.clone();
-        write_status(&options.status_path, &status)?;
-        let predecessors = crate::actor_host::stop_predecessor_processes(&options.run_root).map_err(
-            |error| {
-                runtime_error(format!(
-                    "host recovery cannot prove predecessor native applications stopped; actors remain unavailable: {error}"
-                ))
-            },
-        )?;
-        let unavailable_names = predecessors.unavailable_names();
-        if !predecessors.root_available() {
-            return Err(runtime_error(format!(
-                "host recovery cannot prove the predecessor root stopped; actor remains unavailable: {}",
-                unavailable_names.join(", ")
-            )));
-        }
-        let unavailable = if unavailable_names.is_empty() {
-            "none".into()
-        } else {
-            unavailable_names.join(", ")
-        };
-        unavailable_actors = unavailable_names.clone();
-        let notice = format!(
-            "Recovery notice [{}:{}]. Restored accepted source {}. Live Haskell computations, requests, watches, and bindings from the prior host were lost. Native work was interrupted. The recorded conversation is being resumed without replaying unresolved tool calls. Unavailable predecessor actors: {unavailable}. Inspect Exomonad status and retained command jobs before starting new work.",
-            options.run_id, host_generation, accepted_source,
-        );
-        tidepool_atomic_write::write_durable(
-            &options.run_root.join("host-recovery-notice.txt"),
-            notice.as_bytes(),
-        )?;
-        tracing::info!(
-            host_generation,
-            stopped = predecessors.stopped,
-            unavailable = ?unavailable_names,
-            "predecessor native applications reconciled"
-        );
-    }
-    let configuration = workspace_inputs.config()?;
+    let configuration = workspace_inputs.config().map_err(boot_refusal)?;
     if configuration.launch.backend != ExomonadBackend::Embedded {
-        return Err(runtime_error(
+        return Err(boot_refusal(
             "workspace backend differs from the admitted run backend",
         ));
     }
@@ -1707,7 +1899,8 @@ async fn run_host(
         .embedded
         .as_ref()
         .ok_or_else(|| runtime_error("native host requires [launch.embedded]"))?
-        .validate()?;
+        .validate()
+        .map_err(boot_refusal)?;
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
     let limits = slice.inspect().await?;
@@ -1732,8 +1925,32 @@ async fn run_host(
         status.lost_state = lost_state.clone();
         write_status(&options.status_path, &status)?;
     }
-    let command_resources =
-        resources::connect(configuration.resources, &options.run_id, &slice).await?;
+    let resource_identity = exomonad_node::command_resources::CommandRunIdentity::new(
+        options.run_id.clone(),
+        host_generation,
+    )?;
+    let command_resources = {
+        #[cfg(test)]
+        if let Some(endpoint) = resource_endpoint {
+            exomonad_node::command_resources::CommandResourceClient::connect(
+                endpoint,
+                resource_identity,
+                &configuration.resources,
+            )
+            .await?
+        } else {
+            resources::connect(configuration.resources, resource_identity, &slice).await?
+        }
+        #[cfg(not(test))]
+        resources::connect(configuration.resources, resource_identity, &slice).await?
+    };
+    if host_generation > 1 {
+        let notice = format!("Host replacement attempt [{}:{}]. Reopened accepted source {} after the command resource owner confirmed predecessor cleanup. Prior process-local computations and bindings, if any, are unavailable. Unresolved tool calls are not replayed. Inspect durable actor and command observations before starting new work.", options.run_id, host_generation, accepted_source);
+        tidepool_atomic_write::write_durable(
+            &options.run_root.join("host-recovery-notice.txt"),
+            notice.as_bytes(),
+        )?;
+    }
     let mut recovered_actors = Vec::new();
     if host_generation > 1 {
         let status = observe_run_runtime(
@@ -1757,29 +1974,39 @@ async fn run_host(
         write_status(&options.status_path, &status)?;
     }
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
-    let run = crate::actor_host::run(
-        crate::actor_host::ActorHostConfig {
-            systemd_slice: Some(slice),
-            source_exclude: configuration.launch.source_exclude,
-            source_import: configuration.launch.source,
-            command_resources: Some(std::sync::Arc::clone(&command_resources)),
-            exomonad_executable: std::env::current_exe()?,
-            workspace: options.workspace.clone(),
-            haskell_root,
-            run_directory,
-            root_binding_path: options.run_root.join("root-binding.json"),
+    let actor_config = crate::actor_host::ActorHostConfig {
+        run_id: options.run_id.clone(),
+        systemd_slice: Some(slice),
+        source_exclude: configuration.launch.source_exclude,
+        source_import: configuration.launch.source,
+        command_resources: Some(std::sync::Arc::clone(&command_resources)),
+        exomonad_executable: std::env::current_exe()?,
+        workspace: options.workspace.clone(),
+        haskell_root,
+        run_directory,
+        root_binding_path: options.run_root.join("root-binding.json"),
 
-            embedded: configuration.launch.embedded,
-            tmux_session: options.session.clone(),
-            model: options.agent.model.clone(),
-            effort: options.agent.effort.into(),
-            workspace_inputs: Some(workspace_inputs),
-            pane_environment: pane_environment(),
-            jev: None,
-        },
-        readiness_tx,
-        host_incarnation,
-    )
+        embedded: configuration.launch.embedded,
+        tmux_session: options.session.clone(),
+        model: options.agent.model.clone(),
+        effort: options.agent.effort.into(),
+        workspace_inputs: Some(workspace_inputs),
+        pane_environment: pane_environment(),
+        jev: None,
+    };
+    let run = async move {
+        #[cfg(test)]
+        if let Some(hooks) = hooks {
+            return crate::actor_host::run_with_test_hooks(
+                actor_config,
+                readiness_tx,
+                host_incarnation,
+                hooks,
+            )
+            .await;
+        }
+        crate::actor_host::run(actor_config, readiness_tx, host_incarnation).await
+    }
     .instrument(tracing::info_span!(
         "exomonad_host",
         run_id = %options.run_id
@@ -1938,10 +2165,10 @@ fn recovery_lost_state(host_generation: u64) -> Vec<String> {
         return Vec::new();
     }
     vec![
-        "live Haskell computations".into(),
-        "resident requests and watches".into(),
-        "live Haskell bindings".into(),
-        "interrupted native work".into(),
+        "prior process-local Haskell computations, if any".into(),
+        "prior resident requests and watches, if any".into(),
+        "prior live Haskell bindings, if any".into(),
+        "prior interrupted native work, if any".into(),
     ]
 }
 
@@ -2008,7 +2235,7 @@ fn reopen_run_directory(root: &Path) -> std::io::Result<tidepool_atomic_write::D
 
 fn settle_host_result(
     result: Result<(), Box<dyn std::error::Error>>,
-    options: &HostOptions,
+    options: &AdmittedHost,
     host_generation: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let phase = match &result {
@@ -2115,11 +2342,20 @@ async fn wait_until_interactive(
     status_path: &Path,
     run_id: &str,
 ) -> Result<RunStatus, Box<dyn std::error::Error>> {
+    wait_until_interactive_generation(tmux, status_path, run_id, 1).await
+}
+
+async fn wait_until_interactive_generation(
+    tmux: &TmuxSession,
+    status_path: &Path,
+    run_id: &str,
+    minimum_generation: u64,
+) -> Result<RunStatus, Box<dyn std::error::Error>> {
     tokio::time::timeout(INTERACTIVE_START_TIMEOUT, async {
         loop {
             if let Ok(bytes) = tokio::fs::read(status_path).await {
                 let status = decode_run_status(&bytes)?;
-                if status.run_id == run_id {
+                if status.run_id == run_id && status.host_generation >= minimum_generation {
                     match &status.phase {
                         RunPhase::AwaitingBinding { .. }
                         | RunPhase::Ready { .. }
@@ -2507,63 +2743,64 @@ pub(crate) fn pane_environment() -> std::collections::BTreeMap<String, String> {
 fn pane_environment_from(
     read: impl Fn(&str) -> Option<String>,
 ) -> std::collections::BTreeMap<String, String> {
-    const NAMES: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "TMPDIR",
-        "TMUX_TMPDIR",
-        "XDG_RUNTIME_DIR",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_HOME",
-        "TIDEPOOL_EXTRACT",
-        "TIDEPOOL_EXTRACT_WORKER",
-        "TIDEPOOL_PRELUDE_DIR",
-        "TIDEPOOL_GHC_LIBDIR",
-        "TIDEPOOL_COMPILE_CACHE_DIR",
-        "TIDEPOOL_BUILD_PRODUCTS_DIR",
-        "TIDEPOOL_CONFIG_DIR",
-        "TIDEPOOL_TOOLCHAIN_STAMP",
-        "TIDEPOOL_TOOLCHAIN_HANDSHAKE",
-        "EXOMONAD_INTERACTIVE_CODEX_BIN",
-        "EXOMONAD_CODEX_CLOSURE",
-        "EXOMONAD_NIX_STORE_BIN",
-        "EXOMONAD_NIX_BIN",
-        "EXOMONAD_NIX_OFFLINE",
-        "CODEX_HOME",
-        "CODEX_ROLLOUT_TRACE_ROOT",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "TYPESAFE_API_KEY",
-        "TAVILY_API_KEY",
-        "SSL_CERT_FILE",
-        "NIX_SSL_CERT_FILE",
-        "SSH_AUTH_SOCK",
-        "RUST_LOG",
-        "EXOMONAD_TRACE",
-        "TIDEPOOL_TIMING",
-        "TIDEPOOL_KEEP_TEST_LOGS",
-        "TIDEPOOL_TEST_ARTIFACT_ROOT",
-        "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
-    ];
-    NAMES
+    FORWARDED_ENV_NAMES
         .iter()
         .chain(DEPLOYMENT_ENV_NAMES)
         .filter_map(|name| read(name).map(|value| ((*name).into(), value)))
         .collect()
 }
 
+const FORWARDED_ENV_NAMES: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "TMUX_TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CONFIG_HOME",
+    "TIDEPOOL_EXTRACT",
+    "TIDEPOOL_EXTRACT_WORKER",
+    "TIDEPOOL_PRELUDE_DIR",
+    "TIDEPOOL_GHC_LIBDIR",
+    "TIDEPOOL_COMPILE_CACHE_DIR",
+    "TIDEPOOL_BUILD_PRODUCTS_DIR",
+    "TIDEPOOL_CONFIG_DIR",
+    "TIDEPOOL_TOOLCHAIN_STAMP",
+    "TIDEPOOL_TOOLCHAIN_HANDSHAKE",
+    "EXOMONAD_INTERACTIVE_CODEX_BIN",
+    "EXOMONAD_CODEX_CLOSURE",
+    "EXOMONAD_NIX_STORE_BIN",
+    "EXOMONAD_NIX_BIN",
+    "EXOMONAD_NIX_OFFLINE",
+    "CODEX_HOME",
+    "CODEX_ROLLOUT_TRACE_ROOT",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "TYPESAFE_API_KEY",
+    "TAVILY_API_KEY",
+    "SSL_CERT_FILE",
+    "NIX_SSL_CERT_FILE",
+    "SSH_AUTH_SOCK",
+    "RUST_LOG",
+    "EXOMONAD_TRACE",
+    "TIDEPOOL_TIMING",
+    "TIDEPOOL_KEEP_TEST_LOGS",
+    "TIDEPOOL_TEST_ARTIFACT_ROOT",
+    "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
+];
 fn deployment_environment_unsets(
     environment: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeSet<String> {
-    DEPLOYMENT_ENV_NAMES
+    FORWARDED_ENV_NAMES
         .iter()
+        .chain(DEPLOYMENT_ENV_NAMES)
         .filter(|name| !environment.contains_key(**name))
         .map(|name| (*name).to_owned())
         .collect()
@@ -2677,13 +2914,11 @@ mod tests {
         assert!(!state.exists(), "scope admission does not create storage");
         let directory = boundary.child(relative).unwrap();
         assert_eq!(directory.path(), state.canonicalize().unwrap());
-        assert!(
-            directory
-                .child("exomonad/runs/new-run")
-                .unwrap()
-                .path()
-                .is_dir()
-        );
+        assert!(directory
+            .child("exomonad/runs/new-run")
+            .unwrap()
+            .path()
+            .is_dir());
     }
 
     #[test]
@@ -2730,12 +2965,10 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(
-            std::process::Command::new(selected)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(selected)
+            .status()
+            .unwrap()
+            .success());
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -2839,13 +3072,11 @@ mod tests {
             "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
         ).unwrap();
         assert!(config.session_secret_file.is_none());
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("tailscale0")
-        );
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tailscale0"));
     }
 
     #[test]
@@ -2864,12 +3095,10 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(
-            toml::from_str::<EmbeddedLaunchConfig>(&format!(
-                "{config}public_origin_scheme = 'ftp'\n"
-            ))
-            .is_err()
-        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{config}public_origin_scheme = 'ftp'\n"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2879,13 +3108,11 @@ mod tests {
                 "provider = 'chatgpt_plan'\nlisten = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(
-                config
-                    .validate()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("tailscale0")
-            );
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0"));
         }
     }
 
@@ -2927,12 +3154,10 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(
-            toml::from_str::<ExomonadConfig>(
-                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-            )
-            .is_err()
-        );
+        assert!(toml::from_str::<ExomonadConfig>(
+            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+        )
+        .is_err());
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3504,12 +3729,10 @@ mod tests {
             "[prompts]\ncore = 'core.md'\n",
         ] {
             std::fs::write(&path, format!("{base}{retired}")).unwrap();
-            assert!(
-                read_project_config(workspace.path())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid Exomonad configuration")
-            );
+            assert!(read_project_config(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Exomonad configuration"));
         }
     }
 
@@ -3531,12 +3754,10 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(
-            read_project_config(repo.path())
-                .unwrap_err()
-                .to_string()
-                .contains("contains tracked source")
-        );
+        assert!(read_project_config(repo.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains tracked source"));
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -4098,6 +4319,10 @@ mod tests {
         let builtins = "TIDEPOOL_PREPARED_BUILTIN_ENTRIES";
         for selected in [
             std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([(
+                "TAVILY_API_KEY".to_owned(),
+                "test-only-value".to_owned(),
+            )]),
             std::collections::BTreeMap::from([(deployment.to_owned(), "compiler.json".to_owned())]),
             std::collections::BTreeMap::from([(modules.to_owned(), "catalog.json".to_owned())]),
             std::collections::BTreeMap::from([(entry.to_owned(), "/bundle/root-entry".to_owned())]),
@@ -4120,7 +4345,11 @@ mod tests {
             let environment = pane_environment_from(|name| selected.get(name).cloned());
             assert_eq!(environment, selected);
             let unset = deployment_environment_unsets(&environment);
-            for name in [deployment, modules, assets, entry, builtins] {
+            for name in FORWARDED_ENV_NAMES
+                .iter()
+                .copied()
+                .chain([deployment, modules, assets, entry, builtins])
+            {
                 assert_eq!(unset.contains(name), !selected.contains_key(name));
             }
             assert!(unset.iter().all(|name| !environment.contains_key(name)));
@@ -4182,42 +4411,32 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--workers", "2"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--foreground-jobs", "8"])
-        );
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--foreground-jobs", "8"]));
         for setting in [
             "workers = 0",
             "rss_ceiling_mb = 0",
             "foreground_jobs = 0",
             "unknown = 2",
         ] {
-            assert!(
-                toml::from_str::<ExomonadConfig>(&format!(
-                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-                ))
-                .is_err()
-            );
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
         }
-        assert!(
-            !launch
-                .environment
-                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
-        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -4227,26 +4446,72 @@ mod tests {
     }
 
     #[test]
-    fn run_backend_is_immutable_across_host_resume() {
+    fn launch_coordinates_refuse_wrong_identity_and_legacy_runs() {
         let root = tempfile::tempdir().unwrap();
-        record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap();
-        verify_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap();
-        assert!(verify_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
-        assert!(verify_run_backend(root.path(), "run-2", ExomonadBackend::Embedded).is_err());
-        assert!(record_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
+        assert!(RunLaunchCoordinates::read(root.path(), "run").is_err());
+        let selected = RunLaunchCoordinates {
+            version: 1,
+            run_id: "run".into(),
+            workspace: PathBuf::from("/workspace"),
+            session: "session".into(),
+            agent: ExomonadAgentDefaults {
+                model: "test".into(),
+                effort: ExomonadEffort::Medium,
+            },
+        };
+        selected.publish(root.path()).unwrap();
+        assert_eq!(
+            RunLaunchCoordinates::read(root.path(), "run").unwrap(),
+            selected
+        );
+        assert!(RunLaunchCoordinates::read(root.path(), "different").is_err());
+        assert!(selected.publish(root.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn incomplete_launch_refuses_before_claiming_host_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let error = host(HostOptions {
+            run_id: "run".into(),
+            run_root: root.path().to_owned(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<HostBootRefusal>().is_some());
+        assert!(!root.path().join("host-incarnation.json").exists());
+    }
+
+    #[tokio::test]
+    async fn launch_admission_refuses_missing_products_without_publishing_coordinates() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinates = RunLaunchCoordinates {
+            version: 1,
+            run_id: "run".into(),
+            workspace: PathBuf::from("/workspace"),
+            session: "session".into(),
+            agent: ExomonadAgentDefaults {
+                model: "test".into(),
+                effort: ExomonadEffort::Medium,
+            },
+        };
+        assert!(admit_run_launch(root.path(), &coordinates, None)
+            .await
+            .is_err());
+        assert!(!root.path().join("launch.json").exists());
     }
 
     #[test]
-    fn retired_backend_refuses_execution_without_rewriting_history() {
+    fn retained_executable_validation_rejects_changed_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("backend.json");
-        let original = br#"{"version":1,"run_id":"run-1","backend":"codex"}"#;
-        std::fs::write(&path, original).unwrap();
-        let error =
-            verify_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap_err();
-        assert!(error.to_string().contains("Codex backend is retired"));
-        assert!(record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), original);
+        let source = root.path().join("source");
+        std::fs::write(&source, "first").unwrap();
+        let retained = retain_run_executable(root.path(), "exomonad", &source).unwrap();
+        assert_eq!(
+            verify_retained_executable(root.path(), "exomonad").unwrap(),
+            retained
+        );
+        std::fs::write(retained, "changed").unwrap();
+        assert!(verify_retained_executable(root.path(), "exomonad").is_err());
     }
 
     #[cfg(unix)]

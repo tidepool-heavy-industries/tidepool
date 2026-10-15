@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tidepool::exomonad::{ExomonadAgentDefaults, ExomonadEffort};
+use tidepool::exomonad::ExomonadEffort;
 
 #[derive(Debug, Parser)]
 #[command(name = "exomonad", about = "Run typed Tidepool actor ensembles")]
@@ -179,29 +179,18 @@ enum Command {
     Stop {
         #[arg(long)]
         run_id: String,
-        #[arg(long)]
-        session: String,
     },
-    /// Run the resident actor host inside an Exomonad tmux session.
+    /// Restart one admitted run using its retained products and current startup environment.
+    Restart {
+        #[arg(long)]
+        run_id: String,
+    },
+    /// Run an already admitted resident actor host.
     Host {
-        #[arg(long)]
-        workspace: PathBuf,
-        #[arg(long)]
-        session: String,
         #[arg(long)]
         run_id: String,
         #[arg(long)]
         run_root: PathBuf,
-        #[arg(long)]
-        status_path: PathBuf,
-        #[arg(long)]
-        root_binding_path: PathBuf,
-        #[arg(long)]
-        resume_root: bool,
-        #[arg(long, hide = true)]
-        model: String,
-        #[arg(long, value_enum, hide = true)]
-        effort: Effort,
     },
 }
 
@@ -281,7 +270,16 @@ impl From<Effort> for ExomonadEffort {
 fn main() {
     if let Err(error) = try_main() {
         eprintln!("Error: {error}");
-        std::process::exit(1);
+        std::process::exit(
+            if error
+                .downcast_ref::<tidepool::exomonad::HostBootRefusal>()
+                .is_some()
+            {
+                tidepool::exomonad::HOST_BOOT_REFUSAL_EXIT
+            } else {
+                1
+            },
+        );
     }
 }
 
@@ -548,43 +546,45 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             })
             .await
         }
-        Command::Stop { run_id, session } => tidepool::exomonad::stop(&run_id, &session).await,
-        Command::Host {
-            workspace,
-            session,
-            run_id,
-            run_root,
-            status_path,
-            root_binding_path,
-            resume_root,
-            model,
-            effort,
-        } => {
-            // `_trace_guard` must stay a named binding: dropping it closes the
-            // trace appender's flush channel and the JSONL file stops growing.
+        Command::Stop { run_id } => tidepool::exomonad::stop(&run_id).await,
+        Command::Restart { run_id } => tidepool::exomonad::restart(&run_id).await,
+        Command::Host { run_id, run_root } => {
             let (_log_path, _trace_guard) =
-                tidepool::exomonad::init_host_tracing(&workspace, &run_id)?;
-
-            tidepool::exomonad::host(tidepool::exomonad::HostOptions {
-                workspace,
-                session,
-                run_id,
-                run_root,
-                status_path,
-                root_binding_path,
-                resume_root,
-                agent: ExomonadAgentDefaults {
-                    model,
-                    effort: effort.into(),
-                },
-            })
-            .await
+                tidepool::exomonad::init_run_host_tracing(&run_root, &run_id)?;
+            tidepool::exomonad::host(tidepool::exomonad::HostOptions { run_id, run_root }).await
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_selects_existing_run_without_resume_or_configuration_overrides() {
+        let parsed = Cli::try_parse_from(["exomonad", "restart", "--run-id", "run"]).unwrap();
+        assert!(matches!(parsed.command, Command::Restart { run_id } if run_id == "run"));
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "host",
+            "--run-id",
+            "run",
+            "--run-root",
+            "/run",
+            "--resume-root"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "host",
+            "--run-id",
+            "run",
+            "--run-root",
+            "/run",
+            "--model",
+            "other"
+        ])
+        .is_err());
+    }
+
     #[test]
     fn native_chatgpt_login_cli_selects_private_record_and_loopback_port() {
         let cli = super::Cli::try_parse_from([
@@ -702,28 +702,24 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            Cli::try_parse_from([
-                "exomonad",
-                "run-map",
-                "/run",
-                "--since",
-                "15m",
-                "--from-unix-ms",
-                "1"
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "exomonad",
-                "run-map",
-                "/sanitized/run",
-                "--from-unix-ms",
-                "invalid"
-            ])
-            .is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "run-map",
+            "/run",
+            "--since",
+            "15m",
+            "--from-unix-ms",
+            "1"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "run-map",
+            "/sanitized/run",
+            "--from-unix-ms",
+            "invalid"
+        ])
+        .is_err());
     }
 
     #[test]

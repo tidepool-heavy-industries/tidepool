@@ -1,6 +1,6 @@
 //! Start or join the one per-user command resource service.
 use exomonad_node::command_resources::{
-    CommandResourceClient, CommandResourcePolicy, CommandResources,
+    CommandResourceClient, CommandResourcePolicy, CommandResources, CommandRunIdentity,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ const UNIT: &str = "exomonad-command-resources.service";
 /// Model-free recipe checks call this only when a command asks for a backend.
 pub(crate) async fn connect_existing(
     policy: CommandResourcePolicy,
-    run: &str,
+    run: CommandRunIdentity,
 ) -> Result<Arc<CommandResourceClient>> {
     policy.validate()?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -25,12 +25,25 @@ pub(crate) async fn connect_existing(
     if !socket.exists() {
         return Err("shared command resource service is unavailable for recipe commands".into());
     }
-    Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?)
+    Ok(CommandResourceClient::connect(socket, run, &policy)
+        .await
+        .map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::PermissionDenied
+            ) {
+                super::boot_stage_refusal("resource admission", error)
+            } else {
+                error.into()
+            }
+        })?)
 }
 
 pub(super) async fn connect(
     policy: CommandResourcePolicy,
-    run: &str,
+    run: CommandRunIdentity,
     slice: &exomonad_node::systemd_slice::SystemdSlice,
 ) -> Result<Arc<CommandResourceClient>> {
     policy.validate()?;
@@ -112,8 +125,18 @@ pub(super) async fn connect(
     loop {
         if socket.exists() {
             verify_service_slice(slice).await?;
-            match CommandResourceClient::connect(socket.clone(), run.into(), &policy).await {
+            match CommandResourceClient::connect(socket.clone(), run.clone(), &policy).await {
                 Ok(client) => return Ok(client),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidInput
+                            | std::io::ErrorKind::InvalidData
+                            | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    return Err(super::boot_stage_refusal("resource admission", error));
+                }
                 Err(error) => last_error = Some(error),
             }
         }

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProcessInvocation;
 
+/// EX_CONFIG: deterministic host admission refusal requires operator action.
+pub const HOST_BOOT_REFUSAL_EXIT: i32 = 78;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SystemdSlice(String);
@@ -171,6 +174,7 @@ impl SystemdSlice {
         unit: &str,
         command: ProcessInvocation,
         environment: &BTreeMap<String, String>,
+        unset_environment: &std::collections::BTreeSet<String>,
         filesystem: &HostFilesystemPolicy,
     ) -> ProcessInvocation {
         let mut args = vec![
@@ -184,11 +188,22 @@ impl SystemdSlice {
             "--property=Delegate=yes".into(),
             "--property=KillMode=process".into(),
             "--property=Restart=on-failure".into(),
+            format!("--property=RestartPreventExitStatus={HOST_BOOT_REFUSAL_EXIT}"),
             "--property=RestartSec=2s".into(),
             "--property=StartLimitIntervalSec=60s".into(),
             "--property=StartLimitBurst=5".into(),
             format!("--unit={unit}"),
         ];
+        if !unset_environment.is_empty() {
+            args.push(format!(
+                "--property=UnsetEnvironment={}",
+                unset_environment
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
         args.extend(filesystem.service_properties());
         args.extend(environment.keys().map(|name| format!("--setenv={name}")));
         args.extend(["--".into(), command.program]);
@@ -326,6 +341,7 @@ mod tests {
                 args: vec!["host".into(), "$HOME;literal".into()],
             },
             &environment,
+            &std::collections::BTreeSet::from(["TAVILY_API_KEY".into()]),
             &HostFilesystemPolicy::default(),
         );
         assert_eq!(wrapped.program, "systemd-run");
@@ -337,6 +353,12 @@ mod tests {
             .contains(&"--property=StartLimitBurst=5".into()));
         assert!(wrapped.args.contains(&"--wait".into()));
         assert!(wrapped.args.contains(&"--setenv=PATH".into()));
+        assert!(wrapped
+            .args
+            .contains(&"--property=UnsetEnvironment=TAVILY_API_KEY".into()));
+        assert!(wrapped
+            .args
+            .contains(&"--property=RestartPreventExitStatus=78".into()));
         assert_eq!(wrapped.args.last().unwrap(), "$HOME;literal");
     }
     #[test]
@@ -371,6 +393,7 @@ mod tests {
                     args: vec!["host".into()],
                 },
                 &BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
                 policy,
             )
         };

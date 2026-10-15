@@ -305,7 +305,7 @@ after the project, and prints where things are:
 log:     …/.exomonad/logs/<run>.jsonl
 status:  ~/.local/state/tidepool/exomonad/runs/<run>/status.json
 attach:  tmux attach -t exomonad-<project>
-stop:    exomonad stop --run-id <run> --session exomonad-<project>
+stop:    exomonad stop --run-id <run>
 ```
 
 `XDG_STATE_HOME` replaces `~/.local/state` when set. Its absolute directory must
@@ -377,7 +377,9 @@ full. `EXOMONAD_TRACE=info` leaves content out. The directory is ignored by Git.
 
 ## Stopping and cleaning up
 
-Use `exomonad stop --run-id <run> --session <session>` for intentional shutdown;
+Use `exomonad restart --run-id <run>` to reopen the same run with its retained source and products and the caller’s current startup environment. `init --recreate` creates a fresh run.
+
+Use `exomonad stop --run-id <run>` for intentional shutdown;
 stopping only tmux leaves the supervised host running. A host failure restarts
 with backoff and a finite retry limit. Embedded host recovery reopens the same
 run under its exclusive incarnation lock and follows the exact root startup

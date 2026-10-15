@@ -77,3 +77,20 @@ fn check_uses_embedded_sources_and_rejects_invalid_workspace_modules() {
         assert!(!authored.join(runtime).exists(), "check created {runtime}");
     }
 }
+
+#[test]
+fn host_cli_permanent_admission_refusal_does_not_allocate_an_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_exomonad"))
+        .args(["host", "--run-id", "invalid-run", "--run-root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(tidepool::exomonad::HOST_BOOT_REFUSAL_EXIT),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.path().join("host-incarnation.json").exists());
+}
