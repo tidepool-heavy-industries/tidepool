@@ -171,6 +171,32 @@ fn wire_groups(request: &ExactCompilationRequest) -> BTreeMap<String, Vec<u32>> 
         .collect()
 }
 
+fn wire_mode(request: &ExactCompilationRequest, module: &str) -> Value {
+    scope(request)[6]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.as_array().unwrap()[1] == text(module))
+        .unwrap()
+        .as_array()
+        .unwrap()[8]
+        .clone()
+}
+fn full_mode() -> Value {
+    Value::Array(vec![text("full-carrier")])
+}
+fn issued_mode(ordinals: &[u32]) -> Value {
+    Value::Array(vec![
+        text("issued-groups"),
+        Value::Array(
+            ordinals
+                .iter()
+                .map(|ordinal| Value::Integer((*ordinal).into()))
+                .collect(),
+        ),
+    ])
+}
+
 #[test]
 fn private_native_availability_preserves_partial_baseline_and_exact_advertised_closure() {
     let unused = product("UnusedNative", 40);
@@ -244,11 +270,21 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
                             .unwrap();
                         let rows = wire_groups(&request);
                         assert_eq!(rows["BaselineNative"], vec![7]);
-                        assert_eq!(rows["AddedNative"], vec![7, 9001]);
+                        assert!(rows["AddedNative"].is_empty());
+                        assert_eq!(wire_mode(&request, "BaselineNative"), issued_mode(&[7]));
+                        assert_eq!(wire_mode(&request, "AddedNative"), full_mode());
                         if explicit_required {
-                            assert_eq!(rows["RequiredNative"], vec![7, 9001]);
+                            assert_eq!(
+                                rows["RequiredNative"],
+                                selected.into_iter().collect::<Vec<_>>()
+                            );
+                            assert_eq!(wire_mode(&request, "RequiredNative"), full_mode());
                         } else {
                             assert_eq!(rows["RequiredNative"], vec![demanded]);
+                            assert_eq!(
+                                wire_mode(&request, "RequiredNative"),
+                                issued_mode(&[demanded])
+                            );
                         }
                         assert_eq!(rows.contains_key("ExtraNative"), unrelated);
                         assert!(!rows.contains_key("UnusedNative"));
@@ -303,8 +339,10 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
         .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
         .unwrap();
     let rows = wire_groups(&request);
-    assert_eq!(rows["BaselineNative"], vec![7, 9001]);
-    assert_eq!(rows["UnusedNative"], vec![7, 9001]);
+    assert_eq!(rows["BaselineNative"], vec![7]);
+    assert!(rows["UnusedNative"].is_empty());
+    assert_eq!(wire_mode(&request, "BaselineNative"), full_mode());
+    assert_eq!(wire_mode(&request, "UnusedNative"), full_mode());
     assert_eq!(context.as_ref(), &before);
     assert_eq!(
         request.compiler_inputs().metadata.selected_native_groups,
@@ -420,8 +458,38 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
         .unwrap();
     let rows = wire_groups(&request);
-    assert_eq!(rows[&module], vec![7, 9001]);
-    assert!(!rows.contains_key("TypeOnlyHelper"));
+    assert_eq!(rows[&module], Vec::<u32>::new());
+    assert_eq!(rows["TypeOnlyHelper"], Vec::<u32>::new());
+    let fields = scope(&request);
+    let native = fields[6].as_array().unwrap();
+    let mode = |module: &str| {
+        native
+            .iter()
+            .find(|row| row.as_array().unwrap()[1] == text(module))
+            .unwrap()
+            .as_array()
+            .unwrap()[8]
+            .clone()
+    };
+    assert_eq!(mode(&module), Value::Array(vec![text("full-carrier")]));
+    assert_eq!(
+        mode("TypeOnlyHelper"),
+        Value::Array(vec![
+            text("issued-groups"),
+            Value::Array(vec![Value::Integer(7.into())])
+        ])
+    );
+    assert!(
+        request
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "TypeOnlyHelper")
+            .unwrap()
+            .product
+            .is_none(),
+        "transport availability does not upgrade compiler roles"
+    );
+    assert!(!request.input_transport_files().is_empty());
     let retained = request
         .compiler_inputs()
         .native_original_requirements
@@ -549,15 +617,8 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
     let row = rows[0].as_array().unwrap();
     assert_eq!(row[2], text(hex(&native.owner().module_version.0)));
     assert_eq!(row[4], text(hex(&native.owner().product_sha256)));
-    assert_eq!(
-        row[6]
-            .as_array()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec![Value::Integer(7.into()), Value::Integer(9001.into())]
-    );
+    assert!(row[6].as_array().unwrap().is_empty());
+    assert_eq!(row[8], full_mode());
     assert!(request.groups.is_empty());
     assert_eq!(
         request.compiler_inputs().metadata.selected_native_groups,
@@ -1198,4 +1259,82 @@ pub(crate) fn assert_selected_authored_private_inputs(
             }),
         "the historical child must be a compiler-authenticated exact dependency"
     );
+}
+
+#[test]
+fn independent_original_without_issued_groups_keeps_empty_availability() {
+    let native = product("UnavailableOriginal", 83);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap());
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    assert!(artifacts.selected_native_groups().is_empty());
+    let context = Arc::new(ExactDeclarationContext {
+        producer: producer.sha256(),
+        inventory: artifacts,
+        compiler_projection: CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context)
+        .prepare_compilation(root.path(), PRODUCER)
+        .unwrap();
+    assert_eq!(wire_mode(&request, "UnavailableOriginal"), issued_mode(&[]));
+    assert!(wire_groups(&request)["UnavailableOriginal"].is_empty());
+    assert!(request.groups.is_empty());
+}
+
+#[test]
+fn dependency_execution_graph_roots_stay_private_and_malformed_roots_refuse() {
+    let native = product("DependencyGraph", 84);
+    let owner = native.owner();
+    let root = Value::Array(vec![
+        text(&owner.unit),
+        text(&owner.module),
+        text(hex(&owner.module_version.0)),
+        text(hex(&owner.skinny_iface_sha256)),
+        text(hex(&owner.product_sha256)),
+        text(hex(&[7; 32])),
+    ]);
+    let scope = Value::Array(vec![Value::Array(vec![]), Value::Array(vec![root.clone()])]);
+    let context = type_context(std::slice::from_ref(&native));
+    let metadata = context.compiler_metadata_snapshot().unwrap();
+    assert!(compiler_execution_scope(&scope, &metadata)
+        .unwrap()
+        .as_array()
+        .unwrap()[1]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap());
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry])
+        .unwrap();
+    assert_eq!(
+        compiler_execution_scope(&scope, &full.metadata_snapshot()).unwrap(),
+        scope
+    );
+    for malformed in [
+        Value::Array(vec![]),
+        Value::Array(vec![text("short")]),
+        Value::Array(vec![Value::Integer(1.into()); 6]),
+    ] {
+        let scope = Value::Array(vec![Value::Array(vec![]), Value::Array(vec![malformed])]);
+        assert!(compiler_execution_scope(&scope, &metadata).is_err());
+    }
+    let malformed = Value::Array(vec![
+        Value::Array(vec![text("not a graph row")]),
+        Value::Array(vec![root]),
+    ]);
+    assert!(compiler_execution_scope(&malformed, &metadata).is_err());
 }

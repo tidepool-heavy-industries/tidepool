@@ -460,9 +460,12 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             &[],
         )
         .unwrap();
+        let native_availability =
+            capture_native_availability(&projection, &artifacts, &requirements).unwrap();
         let private = OriginalCompilerInputs {
             projection,
             artifacts,
+            native_availability,
             native_original_requirements: requirements,
         };
         ProtectedScaffoldRequirements::default()

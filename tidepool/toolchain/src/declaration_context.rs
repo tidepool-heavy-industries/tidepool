@@ -274,6 +274,109 @@ pub(crate) struct OriginalCompilerInputs {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     native_original_requirements: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
+    native_availability: Vec<NativeCompilerAvailability>,
+}
+
+/// Availability is issued before independent input owners join their custody.
+/// A full census requires one complete carrier; group availability retains its
+/// exact issuer selection even when another input holds equal payload bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeCompilerAvailability {
+    Full(crate::artifact_inventory::NativeOriginalRequirement),
+    Issued {
+        original: ArtifactId,
+        proof: Option<crate::artifact_inventory::NativeOriginalRequirement>,
+    },
+}
+
+impl NativeCompilerAvailability {
+    fn original(&self) -> ArtifactId {
+        match self {
+            Self::Full(proof) => proof.original,
+            Self::Issued { original, .. } => *original,
+        }
+    }
+    fn proof(&self) -> Option<&crate::artifact_inventory::NativeOriginalRequirement> {
+        match self {
+            Self::Full(proof) => Some(proof),
+            Self::Issued { proof, .. } => proof.as_ref(),
+        }
+    }
+}
+
+fn capture_native_availability(
+    projection: &CompilerInputProjection,
+    artifacts: &ArtifactView,
+    preferred: &[crate::artifact_inventory::NativeOriginalRequirement],
+) -> Result<Vec<NativeCompilerAvailability>, CompileError> {
+    use crate::artifact_inventory::NativeOriginalRequirement;
+    let metadata = artifacts.metadata_snapshot();
+    let mut offers = Vec::new();
+    for role in projection.roles() {
+        let Some(original) = role.original() else {
+            continue;
+        };
+        if !metadata.artifacts.contains_key(&original) {
+            continue;
+        }
+        let mut choices = preferred
+            .iter()
+            .filter(|fact| fact.original == original)
+            .cloned()
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            if let Some(proof) = NativeOriginalRequirement::from_selected_view(original, artifacts)?
+            {
+                choices.push(proof);
+            }
+        }
+        let complete = NativeOriginalRequirement::from_issued_group_custody(
+            original,
+            role.interface(),
+            artifacts,
+        )?;
+        if choices.is_empty() {
+            offers.push(match complete {
+                Some(proof) => NativeCompilerAvailability::Full(proof),
+                None => NativeCompilerAvailability::Issued {
+                    original,
+                    proof: None,
+                },
+            });
+            continue;
+        }
+        for proof in choices {
+            let groups = proof.issued_groups(artifacts)?;
+            let root_groups = groups
+                .iter()
+                .filter(|group| group.binding.artifact == original)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let full = if let Some(complete) = &complete {
+                let qualified = complete
+                    .qualify_availability(artifacts)?
+                    .ok_or_else(|| failure("complete native availability lost its carrier"))?;
+                let full_roots = qualified
+                    .groups()
+                    .iter()
+                    .filter(|group| group.binding.artifact == original)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                root_groups == full_roots
+            } else {
+                false
+            };
+            offers.push(if full {
+                NativeCompilerAvailability::Full(complete.clone().unwrap())
+            } else {
+                NativeCompilerAvailability::Issued {
+                    original,
+                    proof: Some(proof),
+                }
+            });
+        }
+    }
+    Ok(offers)
 }
 
 /// Carry choices already issued by each input before their custody is merged.
@@ -419,10 +522,13 @@ impl OriginalCompilerInputs {
                 artifacts,
                 &preferred,
             )?;
+        let native_availability =
+            capture_native_availability(&projection, artifacts, &native_original_requirements)?;
         Ok(Self {
             projection,
             artifacts: artifacts.clone(),
             native_original_requirements,
+            native_availability,
         })
     }
 
@@ -493,12 +599,12 @@ impl OriginalCompilerInputs {
             capture_native_original_requirements(&projection, &context.inventory, &preferred)?;
         let effective = context.compiler_projection.merge(&projection)?;
         // Available code retains custody without selecting executable groups.
-        let artifacts = context
+        let mut artifacts = context
             .inventory
             .inventory()
             .admit_projected_with_native_requirements(
                 &context.inventory,
-                entries,
+                entries.clone(),
                 &effective,
                 &native_original_requirements,
             )?;
@@ -612,10 +718,54 @@ impl OriginalCompilerInputs {
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
+        let mut native_availability =
+            capture_native_availability(&projection, &artifacts, &native_original_requirements)?;
+        let unissued = entries
+            .iter()
+            .filter(|entry| {
+                !native_availability.iter().any(|offer| {
+                    offer.original() == entry.descriptor.id
+                        && matches!(offer, NativeCompilerAvailability::Full(_))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unissued.is_empty() {
+            // Explicit full offers have just passed complete dependency validation.
+            // Issue their exact graph once through the ordinary admission owner,
+            // then retain that proof privately without adding executable roots.
+            let issued = artifacts
+                .inventory()
+                .admit_shared(&artifacts, unissued.clone())?;
+            for entry in unissued {
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    unreachable!()
+                };
+                let canonical =
+                    ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                        .descriptor
+                        .id;
+                let proof = crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
+                    entry.descriptor.id, canonical, &issued,
+                )?.ok_or_else(|| failure("explicit native availability lacks its complete issued carrier"))?;
+                native_availability.retain(|offer| offer.original() != entry.descriptor.id);
+                native_availability.push(NativeCompilerAvailability::Full(proof));
+            }
+            artifacts = issued.retain_original_custody(&artifacts)?;
+        }
+        let mut native_original_requirements = native_original_requirements;
+        for availability in &native_availability {
+            if let Some(proof) = availability.proof() {
+                if !native_original_requirements.contains(proof) {
+                    native_original_requirements.push(proof.clone());
+                }
+            }
+        }
         Ok(Self {
             projection,
             artifacts,
             native_original_requirements,
+            native_availability,
         })
     }
 
@@ -650,10 +800,22 @@ impl OriginalCompilerInputs {
         projection.validate(support)?;
         let native_original_requirements =
             carry_native_original_requirements(&projection, &self.native_original_requirements);
+        let native_availability = self
+            .native_availability
+            .iter()
+            .filter(|offer| {
+                projection
+                    .roles()
+                    .iter()
+                    .any(|role| role.original() == Some(offer.original()))
+            })
+            .cloned()
+            .collect();
         Ok(Self {
             projection,
             artifacts: support.clone(),
             native_original_requirements,
+            native_availability,
         })
     }
 
@@ -665,10 +827,13 @@ impl OriginalCompilerInputs {
         preferred.extend(other.native_original_requirements.iter().cloned());
         let native_original_requirements =
             carry_native_original_requirements(&projection, &preferred);
+        let mut native_availability = self.native_availability.clone();
+        native_availability.extend(other.native_availability.iter().cloned());
         Ok(Self {
             projection,
             artifacts,
             native_original_requirements,
+            native_availability,
         })
     }
 }
@@ -679,8 +844,200 @@ pub(crate) struct RequestCompilerInputs {
     pub(crate) artifacts: ArtifactView,
     pub(crate) native_original_requirements:
         Vec<crate::artifact_inventory::NativeOriginalRequirement>,
+    native_transport: NativeCompilerTransport,
     declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
+}
+
+enum NativeTransportAvailability {
+    FullCarrier(ArtifactBinding),
+    IssuedGroups {
+        groups: BTreeSet<u32>,
+        carrier: Option<ArtifactBinding>,
+    },
+}
+
+#[derive(Default)]
+struct NativeTransportBuilder {
+    groups: BTreeSet<u32>,
+    carrier: Option<ArtifactBinding>,
+}
+
+/// Transport can own dependency bodies without issuing compiler namespace roles.
+/// All rows, aliases and arena images use this single request-local selection.
+struct NativeCompilerTransport {
+    metadata: ArtifactMetadataSnapshot,
+    availability: BTreeMap<ArtifactId, NativeTransportAvailability>,
+}
+
+impl NativeCompilerTransport {
+    fn issue(
+        projection: &ArtifactMetadataSnapshot,
+        artifacts: &ArtifactView,
+        offers: &[NativeCompilerAvailability],
+    ) -> Result<Self, CompileError> {
+        let mut metadata = artifacts.metadata_snapshot();
+        metadata.entries = projection.entries.clone();
+        metadata.ambiguous_native_owners = projection.ambiguous_native_owners.clone();
+        metadata.selected_native_groups = projection.selected_native_groups.clone();
+        let mut availability = BTreeMap::new();
+        for entry in projection
+            .entries
+            .values()
+            .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+        {
+            availability.insert(entry.descriptor.id, NativeTransportBuilder::default());
+        }
+        let mut bindings = BTreeMap::new();
+        let mut full = BTreeSet::new();
+        let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
+        for offer in offers
+            .iter()
+            .filter(|offer| offered_roots.contains(&offer.original()))
+        {
+            let groups = offer
+                .proof()
+                .map(|proof| proof.issued_group_carriers(artifacts))
+                .transpose()?
+                .unwrap_or_default();
+            for (group, carrier) in &groups {
+                if bindings
+                    .insert((group.binding.artifact, group.original_ordinal), *group)
+                    .is_some_and(|previous| previous != *group)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: group.binding.artifact,
+                        },
+                    ));
+                }
+                let entry = metadata
+                    .artifacts
+                    .get(&group.binding.artifact)
+                    .ok_or_else(|| failure("issued native dependency is outside request custody"))?
+                    .clone();
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(failure("issued native dependency is not an original"));
+                };
+                let owner = &entry.descriptor.owner;
+                if let Some(selected) = metadata.entries.get(owner) {
+                    if canonical_source_interface(selected) != product.module_interface()
+                        || (matches!(selected.payload, ArtifactPayload::Original(_))
+                            && selected.descriptor.id != entry.descriptor.id)
+                    {
+                        return Err(failure(
+                            "issued native dependency conflicts with request interface",
+                        ));
+                    }
+                }
+                metadata.ambiguous_native_owners.remove(owner);
+                metadata.entries.insert(owner.clone(), entry);
+                let available = availability
+                    .entry(group.binding.artifact)
+                    .or_insert_with(|| NativeTransportBuilder::default());
+                if available
+                    .carrier
+                    .replace(*carrier)
+                    .is_some_and(|previous| previous != *carrier)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: group.binding.artifact,
+                        },
+                    ));
+                }
+                available.groups.insert(group.original_ordinal);
+            }
+            if matches!(offer, NativeCompilerAvailability::Full(_)) {
+                full.insert(offer.original());
+            }
+        }
+        for selected in &metadata.selected_native_groups {
+            // Retained generations can independently demand historical owners
+            // which this request does not offer to the compiler.
+            if !projection
+                .entries
+                .values()
+                .any(|entry| entry.descriptor.id == selected.artifact)
+            {
+                continue;
+            }
+            let Some(offer) = availability.get(&selected.artifact) else {
+                continue;
+            };
+            if !full.contains(&selected.artifact)
+                && !offer.groups.contains(&selected.original_ordinal)
+            {
+                return Err(failure(
+                    "selected native group is outside issued availability",
+                ));
+            }
+        }
+        let availability = availability
+            .into_iter()
+            .map(|(id, offer)| {
+                let mode = if full.contains(&id) {
+                    NativeTransportAvailability::FullCarrier(
+                        offer
+                            .carrier
+                            .ok_or_else(|| failure("full native offer has no issued carrier"))?,
+                    )
+                } else {
+                    NativeTransportAvailability::IssuedGroups {
+                        groups: offer.groups,
+                        carrier: offer.carrier,
+                    }
+                };
+                Ok((id, mode))
+            })
+            .collect::<Result<_, CompileError>>()?;
+        Ok(Self {
+            metadata,
+            availability,
+        })
+    }
+}
+
+/// Materialization may privately contain execution graph bytes for dependency
+/// originals. Only the unchanged compiler roles issue their replay roots.
+fn compiler_execution_scope(
+    scope: &Value,
+    compiler: &ArtifactMetadataSnapshot,
+) -> Result<Value, CompileError> {
+    let fields = row(scope, 2)?;
+    for graph in list(&fields[0], 4096)? {
+        let graph = row(graph, 2)?;
+        string(&graph[0])?;
+        string(&graph[1])?;
+    }
+    let allowed = compiler
+        .entries
+        .values()
+        .filter_map(|entry| match &entry.payload {
+            ArtifactPayload::Original(product) => Some(product.owner()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut roots = Vec::new();
+    for root in list(&fields[1], 4096)? {
+        let fields = row(root, 6)?;
+        let unit = string(&fields[0])?;
+        let module = string(&fields[1])?;
+        let version = string(&fields[2])?;
+        let interface = string(&fields[3])?;
+        let product = string(&fields[4])?;
+        string(&fields[5])?;
+        if allowed.iter().any(|owner| {
+            owner.unit == unit
+                && owner.module == module
+                && hex(&owner.module_version.0) == version
+                && hex(&owner.skinny_iface_sha256) == interface
+                && hex(&owner.product_sha256) == product
+        }) {
+            roots.push(root.clone());
+        }
+    }
+    Ok(Value::Array(vec![fields[0].clone(), Value::Array(roots)]))
 }
 
 impl RequestCompilerInputs {
@@ -733,11 +1090,22 @@ impl ProtectedScaffoldRequirements {
             &native_original_requirements,
         )?;
         native_original_requirements.extend(scaffold_requirements);
+        let mut native_availability = capture_native_availability(
+            &context.compiler_projection,
+            context.artifact_view(),
+            &native_original_requirements,
+        )?;
+        native_availability.extend(capture_native_availability(
+            &self.projection,
+            context.artifact_view(),
+            &native_original_requirements,
+        )?);
         let (artifacts, metadata) = match private {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
                 native_original_requirements
                     .extend(private.native_original_requirements.iter().cloned());
+                native_availability.extend(private.native_availability.iter().cloned());
                 let artifacts = context.artifact_view().merge(&private.artifacts)?;
                 let metadata = artifacts.metadata_snapshot();
                 (artifacts, metadata)
@@ -747,13 +1115,23 @@ impl ProtectedScaffoldRequirements {
         drop(merge_span);
         let metadata = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.project")
             .in_scope(|| projection.project_metadata(metadata))?;
+        for availability in &native_availability {
+            if let Some(proof) = availability.proof() {
+                if !native_original_requirements.contains(proof) {
+                    native_original_requirements.push(proof.clone());
+                }
+            }
+        }
         let native_original_requirements =
             carry_native_original_requirements(&projection, &native_original_requirements);
+        let native_transport =
+            NativeCompilerTransport::issue(&metadata, &artifacts, &native_availability)?;
         Ok(RequestCompilerInputs {
             projection,
             metadata,
             artifacts,
             native_original_requirements,
+            native_transport,
             declaration_semantic_sha256,
             original_sources: Default::default(),
         })
@@ -979,7 +1357,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "14";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "15";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -3154,7 +3532,7 @@ impl ExactCompilationRequest {
         let Some(materialization) = &self.materialization else {
             return Vec::new();
         };
-        let metadata = &self.inputs.compiler.metadata;
+        let metadata = &self.inputs.compiler.native_transport.metadata;
         let mut files = BTreeMap::new();
         for row in materialization.selected_rows(metadata).into_values() {
             for slice in row.owned_inputs.values() {
@@ -6659,7 +7037,8 @@ impl ExactDeclarationContext {
         private: Option<OriginalCompilerInputs>,
         transport: RequestInputTransport,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let metadata = &inputs.metadata;
+        let metadata = &inputs.native_transport.metadata;
+        let compiler_metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
         let admitted_empty = authorization.is_some()
             && self.producer == [0; 32]
@@ -6685,7 +7064,7 @@ impl ExactDeclarationContext {
                 self.materialize_retained_artifacts(metadata, parents, directory)
             })?;
         let selected_rows = retained.selected_rows(metadata);
-        let artifacts = metadata
+        let transported_artifacts = metadata
             .entries
             .values()
             .map(|entry| selected_rows[&entry.descriptor.id].artifact())
@@ -6696,7 +7075,7 @@ impl ExactDeclarationContext {
                 .cloned()
                 .collect::<Vec<_>>()
                 .into();
-        let artifacts_by_owner = artifacts
+        let artifacts_by_owner = transported_artifacts
             .iter()
             .map(|artifact| {
                 (
@@ -6708,13 +7087,25 @@ impl ExactDeclarationContext {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let execution_scope = retained.execution_scope.clone();
-        let private_originals = private
+        let execution_scope = retained
+            .execution_scope
             .as_ref()
-            .into_iter()
-            .flat_map(|input| input.projection.roles())
-            .filter_map(|role| role.original())
-            .collect::<BTreeSet<_>>();
+            .map(|scope| compiler_execution_scope(scope, compiler_metadata))
+            .transpose()?;
+        let artifacts = transported_artifacts
+            .iter()
+            .filter_map(|artifact| {
+                let entry = compiler_metadata.entries.get(&identity(
+                    &artifact.interface.unit,
+                    &artifact.interface.module,
+                ))?;
+                let mut artifact = artifact.clone();
+                if !matches!(entry.payload, ArtifactPayload::Original(_)) {
+                    artifact.product = None;
+                }
+                Some(artifact)
+            })
+            .collect::<Vec<_>>();
         let fields = vec![
             text("TPEXACTSCOPE"),
             text(EXACT_SCOPE_SCHEMA_VERSION),
@@ -6724,7 +7115,7 @@ impl ExactDeclarationContext {
                     .hex(),
             ),
             Value::Array(
-                artifacts
+                transported_artifacts
                     .iter()
                     .map(|artifact| {
                         let iface = &artifact.interface;
@@ -6785,16 +7176,41 @@ impl ExactDeclarationContext {
                         let selected = metadata.entries[&identity(&owner.unit, &owner.module)]
                             .descriptor
                             .id;
-                        let census = if private_originals.contains(&selected) {
-                            crate::certified_products::original_available_groups(product)
-                                .map_err(compiler_evidence_failure)?
-                                .collect::<Vec<_>>()
-                        } else {
-                            groups
-                                .iter()
-                                .filter(|group| group.owner() == owner)
-                                .map(PendingCertifiedGroup::group)
-                                .collect()
+                        let independent = compiler_metadata
+                            .entries
+                            .get(&identity(&owner.unit, &owner.module))
+                            .is_some_and(|entry| entry.descriptor.id == selected);
+                        let census = groups
+                            .iter()
+                            .filter(|group| independent && group.owner() == owner)
+                            .map(PendingCertifiedGroup::group)
+                            .collect::<Vec<_>>();
+                        let availability = &inputs.native_transport.availability[&selected];
+                        let mode = match availability {
+                            NativeTransportAvailability::FullCarrier(carrier) => {
+                                if carrier.artifact != selected {
+                                    return Err(failure(
+                                        "full native offer carrier differs from payload",
+                                    ));
+                                }
+                                Value::Array(vec![text("full-carrier")])
+                            }
+                            NativeTransportAvailability::IssuedGroups { groups, carrier } => {
+                                if carrier.is_some_and(|carrier| carrier.artifact != selected) {
+                                    return Err(failure(
+                                        "issued native offer carrier differs from payload",
+                                    ));
+                                }
+                                Value::Array(vec![
+                                    text("issued-groups"),
+                                    Value::Array(
+                                        groups
+                                            .iter()
+                                            .map(|ordinal| Value::Integer((*ordinal).into()))
+                                            .collect(),
+                                    ),
+                                ])
+                            }
                         };
                         Ok(Value::Array(vec![
                             text(&owner.unit),
@@ -6813,6 +7229,7 @@ impl ExactDeclarationContext {
                                 .descriptor
                                 .id]
                                 .native_certification()?,
+                            mode,
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -15746,6 +16163,7 @@ mod tests {
                         path_value(&root.join(format!("{}.owners", owner.module))).unwrap(),
                         text(hex(&[1; 32])),
                     ]),
+                    Value::Array(vec![text("full-carrier")]),
                 ])
             })
             .collect();

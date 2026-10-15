@@ -448,6 +448,52 @@ impl QualifiedNativeAvailability {
 }
 
 impl NativeOriginalRequirement {
+    /// Observe only this issuer's authenticated group closure. A receiving
+    /// inventory cannot supply missing choices from its other retained views.
+    pub(crate) fn issued_groups(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+        Ok(self.issued_group_carriers(view)?.into_keys().collect())
+    }
+
+    pub(crate) fn issued_group_carriers(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let graph = self.selection.graph_selection();
+        validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
+        graph
+            .native_groups
+            .iter()
+            .map(|group| {
+                let mut carriers = state.outgoing(InventoryNodeKey::Group(*group)).filter_map(
+                    |(target, dependency)| match target {
+                        InventoryNodeKey::Artifact(carrier)
+                            if carrier.artifact == group.binding.artifact
+                                && *dependency == ArtifactDependency::Interface =>
+                        {
+                            Some(carrier)
+                        }
+                        _ => None,
+                    },
+                );
+                let carrier = carriers
+                    .next()
+                    .ok_or_else(|| failure("issued native group has no carrier"))?;
+                if carriers.next().is_some() {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: carrier.artifact,
+                        },
+                    ));
+                }
+                Ok((*group, carrier))
+            })
+            .collect()
+    }
+
     pub(crate) fn qualify_availability(
         &self,
         view: &ArtifactView,
