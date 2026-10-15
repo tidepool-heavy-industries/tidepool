@@ -26,7 +26,7 @@ _ <- do
   require (refused (Composed.replayBatch "changed-model" intent changed archive)) "changed model replay accepted"
   require (refused (Composed.replayBatch J.jevLatest "different intent" changed archive)) "changed evidence replay accepted"
   let differentQuestion = J.liftQuery (Composed.batchQuestionsWith "A changed question?" intent changed)
-  require (refused (J.replayProgram J.SkipUnused J.jevLatest differentQuestion (Recording.archiveRecords archive))) "changed question replay accepted"
+  require (refused (J.replayProgram J.BatchKnown J.jevLatest differentQuestion (Recording.archiveRecords archive))) "changed question replay accepted"
   (newAnswer, _) <- either (error . tshow) pure (J.result replayed)
   selection <- either (error . tshow) (pure . J.settledValue) (settleEvidence first newAnswer)
   result <- Composed.runSelection selection

@@ -11,6 +11,6 @@ let changedPayloads = [row { evidenceValue = pure "edited continuation" } | row 
 let payloadOnly = Composed.replayBatch J.jevLatest intent changedPayloads archive
 let changedEvidence = Composed.replayBatch J.jevLatest "different task evidence" changedPayloads archive
 let changedModel = Composed.replayBatch "different-model" intent changedPayloads archive
-let changedQuestion = J.replayProgram J.SkipUnused J.jevLatest (J.liftQuery (Composed.batchQuestionsWith "A different question?" intent changedPayloads)) (Recording.archiveRecords archive)
+let changedQuestion = J.replayProgram J.BatchKnown J.jevLatest (J.liftQuery (Composed.batchQuestionsWith "A different question?" intent changedPayloads)) (Recording.archiveRecords archive)
 display (payloadOnly, changedEvidence, changedModel, changedQuestion)
 replayed

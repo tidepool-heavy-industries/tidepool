@@ -113,7 +113,9 @@ loadRecordings path = do
 -- retained observations; the replay owner checks the request itself.
 replayBatch :: J.Model -> Text -> [Continuation effects] -> Recording.RecordingArchive
   -> J.Evaluation (BatchAnswer effects)
-replayBatch model intent rows archive = J.replayProgram J.SkipUnused model
+-- BatchKnown prepares the lifted independent query exactly as observeBatch's
+-- runQuery does. SkipUnused adds frontier scopes, changing its request paths.
+replayBatch model intent rows archive = J.replayProgram J.BatchKnown model
   (J.liftQuery (batchQuestions intent rows)) (Recording.archiveRecords archive)
 
 -- Capture owns ranking and bounded, exact view-fenced expansion. Reassessment

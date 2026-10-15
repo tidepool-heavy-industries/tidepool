@@ -16,6 +16,8 @@ import Tidepool.Effects.Core (Jev (..), JevCallError (..))
 import Tidepool.Inspection.Display (Display (..))
 import Tidepool.Inspection.Tree (DisplayTree (..))
 import qualified Jev.Operators as J
+import qualified Jev.Recording as Recording
+import Project.EvidencePattern (Evidence (..))
 -- Keep the response-retaining public API example in this suite's compile gate.
 import qualified Examples.JevPreparedWorkflow as Workflow
 import qualified Examples.JevComposedWorkflow as Composed
@@ -30,6 +32,7 @@ jevPreparedTests = testGroup "jev-prepared"
     : testCase "observation uses Jev alone and preserves the typed refusal" observeWithoutConsole
     : testCase "composed queries retain grouping and typed host failure" composedQueries
     : testCase "installed batch groups equal evidence and retains refusal" installedBatch
+    : testCase "installed batch recordings replay through the same independent query" installedBatchReplay
     : testCase "empty query uses no host effect" emptyQuery
     : testCase "usage display preserves unknown versus measured zero" usageDisplay
     : [testCase ("one host call retains " ++ show failure) (retainsFailure failure)
@@ -161,3 +164,25 @@ installedBatch = do
       case J.result observed of
         Left actual -> assertEqual "typed transport failure" (J.CallFailed (J.Transport JevTimeout)) actual
         Right _ -> error "refused request produced a selection"
+
+-- Use the actual public observer and its original recordings. A typed refusal
+-- exercises exact request identity without replacing native JSON intrinsics;
+-- successful decoding and the selected action have a native companion test.
+installedBatchReplay :: IO ()
+installedBatchReplay = do
+  let intent = "repair the E0061 call"
+      rows = Composed.sampleContinuations
+      (observed, calls) = run (runState (0 :: Int)
+        (interpret (reject JevTimeout) (Composed.observeBatch intent rows)))
+  assertEqual "one actual public observation" 1 calls
+  archive <- either (error . show) pure (Recording.archiveFromValue
+    (Recording.archiveValue (Recording.recordingArchive (J.recordings observed))))
+  let changed = [row { evidenceValue = error "replay demanded a continuation" } | row <- rows]
+  mapM_ (\payloads -> do
+    let replayed = Composed.replayBatch J.jevLatest intent payloads archive
+    case J.result replayed of
+      Left actual -> assertEqual "replay preserves the original typed refusal"
+        (J.CallFailed (J.Transport JevTimeout)) actual
+      Right _ -> error "refused observation replayed as a successful selection"
+    assertEqual "replay consumes the observer's exact original recordings"
+      (J.recordings observed) (J.recordings replayed)) [rows, changed]
