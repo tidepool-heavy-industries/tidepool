@@ -1,6 +1,7 @@
 module TypeEvidenceChecks
   ( runTypeEvidenceChecks, runTypeIdentityParityChecks ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (unless, forM_)
 import Control.Monad.State.Strict (runStateT, lift)
 import Data.IntMap.Strict qualified as IntMap
@@ -10,14 +11,15 @@ import Data.Text qualified as Text
 import GHC.Builtin.Types (boolTy, tupleTyCon)
 import GHC.Types.Basic (Boxity(Boxed))
 import GHC.Core.Coercion (mkNomReflCo)
-import GHC.Core.Type (typeKind, mkNumLitTy)
+import GHC.Core.Type (typeKind, mkNumLitTy, splitTyConApp_maybe)
 import GHC.Core.TyCo.Rep (Type(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
 import GHC.Core.DataCon (dataConName)
 import GHC.Core.TyCon (tyConDataCons, tyConName)
+import GHC.Types.Id (idType, idName)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.TypeEnv (typeEnvTyCons)
+import GHC.Types.TypeEnv (typeEnvTyCons, typeEnvIds)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -281,9 +283,25 @@ verifyHydratedSiteIdentities result wire = do
       types = reachableDeclarations (pmTypeGraph prepared) (psWireNode site : psInputNodes site)
   isolated <- freshExactState environment
   hydrated <- hydrateOriginalInterfaces isolated (map hm_iface infos)
+  hydratedInfo <- maybe (fail "identity parity lacks its hydrated defining details") pure
+    (lookupHpt (hsc_HPT hydrated) (moduleName (pmModule prepared)))
+  binding <- case [identifier | identifier <- typeEnvIds (md_types (hm_details hydratedInfo))
+    , occNameString (nameOccName (idName identifier)) == "nestedVersion"] of
+      [identifier] -> pure identifier
+      _ -> fail "identity parity lacks the actual hydrated nestedVersion binding"
+  answer <- case splitTyConApp_maybe (idType binding) of
+    Just (constructor, [reply]) | occNameString (nameOccName (tyConName constructor)) == "Maybe" -> pure reply
+    _ -> fail "hydrated nestedVersion no longer has its authored Maybe reply"
+  assert (null (psInputNodes site)) "hydrated fixture unexpectedly acquired site inputs"
+  (restoredRoot, builder) <- requireRight (runStateT (Policy.internType answer) Policy.emptyTypeGraphBuilder)
+  restoredGraph <- requireRight (Policy.finishTypeGraph builder)
+  let restoredTypes = reachableDeclarations restoredGraph [restoredRoot]
+  -- Interface details are lazy. Demand the actual hydrated reply graph before
+  -- freezing the selected package interfaces used to issue its identities.
+  _ <- evaluate (length restoredTypes)
   hydratedResolver <- captureIdentityResolver hydrated Nothing
   source <- mapM (requireRight . resolveTypeIdentity (pmIdentityResolver prepared)) types
-  restored <- mapM (requireRight . resolveTypeIdentity hydratedResolver) types
+  restored <- mapM (requireRight . resolveTypeIdentity hydratedResolver) restoredTypes
   let inventory identities = Map.fromList [(typeSymbol identity, identity) | identity <- identities]
   assert (not (null source) && inventory source == siteIdentities wire)
     "projected reachable nominal identities differ from their issuing prepared resolver"
