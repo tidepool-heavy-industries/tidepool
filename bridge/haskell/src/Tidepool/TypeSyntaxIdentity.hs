@@ -127,4 +127,3 @@ encodeTypeSyntaxIdentity resolver graph roots = do
           { syntaxNodes = IntMap.insert (fromIntegral selected) bytes (syntaxNodes state)
           , syntaxBytes = total })
         pure selected
-
