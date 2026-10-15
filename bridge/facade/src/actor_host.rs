@@ -138,6 +138,8 @@ mod invocation_lifetime_tests;
 #[cfg(test)]
 mod jev_tests;
 #[cfg(test)]
+mod jev_recording_reload_tests;
+#[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
 mod researcher_acceptance_tests;
