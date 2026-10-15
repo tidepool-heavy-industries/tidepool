@@ -174,7 +174,7 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
                 .chain(
                     DEFAULT_ACTOR_EFFECTS
                         .iter()
-                        .map(|key| key.haskell_constructor().unwrap().to_owned()),
+                        .map(|key| key.wire_name().to_owned()),
                 )
                 .collect(),
         ),

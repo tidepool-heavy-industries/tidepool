@@ -13,14 +13,14 @@
 -- | Notebook effect profiles. Invocation-only effects have tool witnesses,
 -- while the actor row's witnesses continue to describe delegable effects.
 module Tidepool.Agent.ToolEffects
-  ( SyncEffects, KnownToolEffects, toolEffectNames, AsyncEffects, Subset
+  ( SyncEffects, raiseSync, KnownToolEffects, toolEffectNames, AsyncEffects, Subset
   , ToolSchedule (..), KnownToolSchedule (toolSchedule), SupportedEffects, ValidToolProfile
   ) where
 
 import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import Tidepool.Internal.ActorProfiles (AsyncEffects, SyncEffects)
+import Tidepool.Internal.ActorProfiles (AsyncEffects, SyncEffects, raiseSync)
 import qualified Tidepool.Internal.ActorProfiles as Catalogue
 import Tidepool.Effects.Row (Subset)
 

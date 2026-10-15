@@ -543,7 +543,7 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         "-- ",
         "Nominal effect identities and profiles",
     ));
-    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName), AsyncEffects, SyncEffects ) where\n\nimport Data.Kind (Constraint, Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport GHC.TypeLits (ErrorMessage (..), TypeError)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
+    hs.push_str("module Tidepool.Internal.ActorProfiles\n  ( ActorEffects, CatalogueEffects, CatalogueToolEffects, ToolEffectKey (..), actorEffectName, toolEffectName\n  , KnownToolEffect (knownToolEffectName), AsyncEffects, SyncEffects, raiseSync ) where\n\nimport Control.Monad.Freer (Eff, raise)\nimport Data.Kind (Constraint, Type)\nimport Data.Proxy (Proxy (..))\nimport Data.Text (Text)\nimport GHC.TypeLits (ErrorMessage (..), TypeError)\nimport Tidepool.Effects.Core (ActorEffectKey (..))\nimport Tidepool.Effects.Row (KnownEffect, KnownEffects (knownEffects), effectKeys)\n");
     hs.push_str(&imports(effects));
     hs.push_str("\n\ntype ActorEffects =\n  '[");
     hs.push_str(
@@ -596,6 +596,9 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         hs.push_str(&format!("{} ': ", effect.identity.haskell_name));
     }
     hs.push_str("effects\n");
+    hs.push_str("\nraiseSync :: Eff effects a -> Eff (SyncEffects effects) a\nraiseSync = ");
+    for _ in &invocation { hs.push_str("raise . "); }
+    hs.push_str("id\n");
     hs.push_str("\ntype family AsyncEffects (effects :: [Type -> Type]) :: Constraint where\n  AsyncEffects '[] = ()\n");
     for effect in &invocation {
         hs.push_str(&format!("  AsyncEffects ({} ': effects) =\n    TypeError ('Text \"{} cannot be used by an asynchronous tool, model callback, or hook.\")\n", effect.identity.haskell_name, effect.identity.haskell_name));

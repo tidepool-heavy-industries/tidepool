@@ -20,7 +20,7 @@ import Tidepool.Aeson.FromJSON (FromJSON (..), withObject, (.:?), (.!=))
 import Tidepool.Aeson.Value (Value (..), ToJSON (..), object, (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Agent.ToolEffects (SyncEffects)
-import Tidepool.Effects.Core (Reload, ReloadError (..), ReloadOutcome (..), ReloadOptions (..), ReloadPolicy (..), ReloadSurfaceDiff (..), ReloadRefusal (..), ReloadRefusalCategory (..), reloadSourceWith)
+import Tidepool.Effects.Core (Reload, ReloadError (..), ReloadOutcome (..), ReloadOptions (..), ReloadPolicy (..), ReloadSurfaceDiff (..), ReloadRefusal (..), ReloadRefusalCategory (..), SourceRevision (..), reloadSourceWith)
 
 -- | Optional hosted reload arguments. Omitted values preserve the tool surface.
 data ReloadInput = ReloadInput
@@ -55,5 +55,20 @@ reloadHandler (ReloadInput checks accept) = reloadSourceWith
   (ReloadOptions checks (if accept then AcceptCacheInvalidation else CompatibleOnly))
 
 reloadPresenter :: Either ReloadError ReloadOutcome -> Text
-reloadPresenter = T.pack . show
+reloadPresenter result = case result of
+  Left (ReloadUnavailable detail) -> "Reload unavailable: " <> detail
+  Left (ReloadUnreadable detail) -> "Reload unreadable: " <> detail
+  Right outcome -> case outcome of
+    ReloadUnchanged _ -> "Configuration unchanged; notebook bindings preserved."
+    ReloadPublished _ (SourceRevision identity _ _) _ diff -> "Published source " <> identity <> surfaceSummary diff
+    ReloadRejected _ _ diagnostics -> "Preparation rejected: " <> diagnostics
+    ReloadRefused _ _ (ReloadRefusal category detail diff) -> "Reload refused (" <> T.pack (show category) <> "): " <> detail <> surfaceSummary diff
+    ReloadCancelled _ -> "Reload cancelled before publication."
+    ReloadPublishedWithWarnings _ (SourceRevision identity _ _) _ warnings diff ->
+      "Published source " <> identity <> surfaceSummary diff <> " Warnings: " <> T.pack (show warnings)
+    ReloadPublicationUnconfirmed _ detail -> "Publication unconfirmed; reconcile before retry: " <> detail
+  where
+    surfaceSummary (ReloadSurfaceDiff added removed changed) =
+      " (tools added " <> count added <> ", removed " <> count removed <> ", changed " <> count changed <> ")."
+    count = T.pack . show . length
 

@@ -549,7 +549,7 @@ class LiftTool policy source target where
   liftTool :: Proxy policy -> source value -> target value
 
 instance LiftTool InRow m m where liftTool _ = id
-instance LiftTool (Installed base) (Eff base) (Eff (SyncEffects base)) where liftTool _ = raise
+instance LiftTool (Installed base) (Eff base) (Eff (SyncEffects base)) where liftTool _ = raiseSync
 
 class GCompileTools policy (f :: Type -> Type) m result where
   gCompileEntries :: Proxy policy -> f a -> [ToolEntry m result]
@@ -1168,7 +1168,7 @@ installSpec spec = case compileInstalledTools (specTools spec) of
         case fromJSON payload of
           Error message -> error ("initial-context slot input: " ++ message)
           Success startup -> do
-            seed <- raise (raise (slot startup))
+            seed <- raise (raiseSync (slot startup))
             pure (encodeValue (object
               ["status" .= ("success" :: Text), "output" .= seed, "presentation" .= ("" :: Text)]))
 
@@ -1191,7 +1191,7 @@ installSpec spec = case compileInstalledTools (specTools spec) of
           Error message ->
             pure (renderAnnotation (Abstained (T.pack ("after-tool slot input: " ++ message))))
           Success (AfterToolInput call result) ->
-            renderAnnotation <$> raise (raise (slot call result))
+            renderAnnotation <$> raise (raiseSync (slot call result))
 
 -- The runtime boundary keeps typed refusal distinct from authored output.
 toolDispatchReply :: Either ToolDispatchError ToolDispatchSuccess -> Value
