@@ -25,6 +25,30 @@
       "source": "checks/file-snapshot-example.hs",
       "prerequisites": [],
       "requirements": "Requires FsRead, FsWrite and Console. Uses and replaces the named scratch note. Read contents and version together, commit to that captured destination, and observe stale-write refusal. Only filesystem-effect writers participate in the shared advisory lock; external writers are outside the guarantee."
+    },
+    {
+      "module": "Tidepool.Lookup.Navigation",
+      "name": "lookupIndex",
+      "namespace": "value",
+      "source": "Project/RetainedLookupExample.hs",
+      "prerequisites": [],
+      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
+    },
+    {
+      "module": "Tidepool.Lookup.Navigation",
+      "name": "selectLookup",
+      "namespace": "value",
+      "source": "Project/RetainedLookupExample.hs",
+      "prerequisites": [],
+      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
+    },
+    {
+      "module": "Tidepool.Lookup.Navigation",
+      "name": "selectLookupMany",
+      "namespace": "value",
+      "source": "Project/RetainedLookupExample.hs",
+      "prerequisites": [],
+      "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
     }
   ]
 }

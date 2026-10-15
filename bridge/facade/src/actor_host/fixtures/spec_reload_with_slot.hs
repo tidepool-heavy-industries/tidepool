@@ -7,7 +7,7 @@ import Control.Monad.Freer (Member)
 import Tidepool.Agent.Contract
 import qualified Project.Tools as Tools
 import Tidepool.Agent.Reply (Replies)
-import Tidepool.Effects.Core (ActorContext, BoundWorktree, Commands, Jev, Lookup, Notifications, Reflect)
+import Tidepool.Effects.Core (ActorContext, BoundWorktree, Commands, Jev, Lookup, Console, Notifications, Reflect)
 import qualified Project.Watchdog as Watchdog
 
 -- Children do not have Journal in their effect row, so the project's
@@ -15,7 +15,7 @@ import qualified Project.Watchdog as Watchdog
 -- watchdog baseline until the runtime can supply that effect.
 agentSpec ::
   ( KnownToolEffects effects, AsyncEffects effects
-  , Member Commands effects, Member Lookup effects, Member Jev effects
+  , Member Commands effects, Member Lookup effects, Member Console effects, Member Jev effects
   , Member ActorContext effects, Member Notifications effects, Member Reflect effects
   , Member Replies effects, Member BoundWorktree effects
   ) =>

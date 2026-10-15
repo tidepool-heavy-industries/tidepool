@@ -33,6 +33,32 @@ impl ConsoleHandler {
         ))
     }
 
+    pub(crate) fn display_selectable_with(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        view: ((i64, i64, i64), String, Vec<(i64, String)>, bool),
+        continuation: tidepool_bridge::HaskellValue,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        self.display_with(cx, view, continuation)
+    }
+
+    pub(crate) fn display_select_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+        _selection: ((i64, i64, i64), String),
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "display selection requires an actor resource owner".into(),
+        ))
+    }
+
+    pub(crate) fn display_navigation_input_with(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        self.display_expansion_input_with(cx)
+    }
+
     pub(crate) fn display_expand_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,

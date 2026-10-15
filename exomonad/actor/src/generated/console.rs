@@ -27,7 +27,13 @@ pub enum ConsoleReq {
         ((i64, i64, i64), String, Vec<(i64, String)>, bool),
         tidepool_bridge::HaskellValue,
     ),
+    DisplaySelectableWith(
+        ((i64, i64, i64), String, Vec<(i64, String)>, bool),
+        tidepool_bridge::HaskellValue,
+    ),
     DisplayExpandWith(((i64, i64, i64), i64)),
+    DisplaySelectWith(((i64, i64, i64), String)),
+    DisplayNavigationInputWith,
     DisplayAllowanceWith,
     DisplayExpansionInputWith,
 }

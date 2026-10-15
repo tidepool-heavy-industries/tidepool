@@ -1245,6 +1245,7 @@ def facade_test_cases(binary):
     }
     host_paths = {
         **process_paths,
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
@@ -1263,6 +1264,7 @@ def facade_test_cases(binary):
     }
     process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle"]
     host_resources = process_resources + [
+        "toolchains//:ghc",
         "//bridge/testing:haskell_test_fixtures",
         "toolchains//:exomonad_runtime_tools",
         "//web:dist",

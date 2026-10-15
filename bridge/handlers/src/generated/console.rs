@@ -13,7 +13,13 @@ pub enum ConsoleReq {
         ((i64, i64, i64), String, Vec<(i64, String)>, bool),
         tidepool_bridge::HaskellValue,
     ),
+    DisplaySelectableWith(
+        ((i64, i64, i64), String, Vec<(i64, String)>, bool),
+        tidepool_bridge::HaskellValue,
+    ),
     DisplayExpandWith(((i64, i64, i64), i64)),
+    DisplaySelectWith(((i64, i64, i64), String)),
+    DisplayNavigationInputWith,
     DisplayAllowanceWith,
     DisplayExpansionInputWith,
 }
@@ -38,7 +44,12 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             ConsoleReq::DisplayWith(view, continuation) => {
                 self.display_with(cx, view, continuation)
             }
+            ConsoleReq::DisplaySelectableWith(view, continuation) => {
+                self.display_selectable_with(cx, view, continuation)
+            }
             ConsoleReq::DisplayExpandWith(selection) => self.display_expand_with(cx, selection),
+            ConsoleReq::DisplaySelectWith(selection) => self.display_select_with(cx, selection),
+            ConsoleReq::DisplayNavigationInputWith => self.display_navigation_input_with(cx),
             ConsoleReq::DisplayAllowanceWith => self.display_allowance_with(cx),
             ConsoleReq::DisplayExpansionInputWith => self.display_expansion_input_with(cx),
         }

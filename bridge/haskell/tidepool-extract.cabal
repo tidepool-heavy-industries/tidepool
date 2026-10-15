@@ -270,6 +270,7 @@ test-suite display-tree-test
   hs-source-dirs:   lib test-display-tree
   other-modules:
     FormViewTest
+    Tidepool.Text.Navigation
     Tidepool.Inspection.Tree
     Tidepool.Source
     Tidepool.Inspection.Display
@@ -871,6 +872,8 @@ test-suite model-turn-test
     Tidepool.File
     Tidepool.Inspection
     Tidepool.Lookup
+    Tidepool.Text.Navigation
+    Tidepool.Lookup.Navigation
     Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
@@ -1030,6 +1033,8 @@ test-suite automation-helper-contract
     Tidepool.FilePath
     Tidepool.Inspection
     Tidepool.Lookup
+    Tidepool.Text.Navigation
+    Tidepool.Lookup.Navigation
     Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
@@ -1099,6 +1104,8 @@ test-suite browser-scenario-contract
     Tidepool.FilePath
     Tidepool.Inspection
     Tidepool.Lookup
+    Tidepool.Text.Navigation
+    Tidepool.Lookup.Navigation
     Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
@@ -1165,6 +1172,8 @@ test-suite command-tools-contract
     Tidepool.FilePath
     Tidepool.Inspection
     Tidepool.Lookup
+    Tidepool.Text.Navigation
+    Tidepool.Lookup.Navigation
     Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
@@ -1193,13 +1202,15 @@ test-suite tool-profiles-contract
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ToolProfiles.hs
-  hs-source-dirs:   test-check generated/effects generated/protocol lib actors
+  hs-source-dirs:   test-check generated/effects generated/protocol lib actors ../../exomonad/examples/workspace/.exomonad
   other-modules:
     QuantitiesContract
     Tidepool.Actor
     Tidepool.Actors.Spawn
     Tidepool.Actors.Internal.Agent
     Tidepool.Agent.Session
+    LookupNavigationTest
+    Project.RetainedLookupExample
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1233,6 +1244,9 @@ test-suite tool-profiles-contract
     Tidepool.FilePath
     Tidepool.Inspection
     Tidepool.Lookup
+    Tidepool.Text.Navigation
+    Tidepool.Lookup.Navigation
+    Tidepool.Lookup.Tools
     Tidepool.Lookup.Render
     Tidepool.View.Wire
     Tidepool.Inspection.Display
@@ -1252,6 +1266,6 @@ test-suite tool-profiles-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, safe, errors, witherable, directory, process
+  build-depends:    base >= 4.20 && < 5, bytestring, freer-simple, text, containers, lens, safe, errors, witherable, directory, process, tasty-quickcheck, QuickCheck
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints

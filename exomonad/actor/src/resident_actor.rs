@@ -684,6 +684,7 @@ struct ActorDisplays {
 }
 
 struct DisplaySlot {
+    selectable: bool,
     execution: Option<crate::request::sources::CallbackExecution>,
     callback: Option<Arc<RootCustody>>,
     keys: Vec<(i64, String)>,
@@ -694,6 +695,7 @@ struct DisplaySlot {
 }
 
 struct StagedDisplayPublication {
+    selectable: bool,
     execution: Option<crate::request::sources::CallbackExecution>,
     request: Arc<DisplayPublication>,
     callback: Option<Arc<RootCustody>>,
@@ -771,6 +773,7 @@ impl ActorDisplays {
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
         execution: Option<crate::request::sources::CallbackExecution>,
+        selectable: bool,
     ) -> Result<
         (
             Arc<DisplayPublication>,
@@ -829,7 +832,12 @@ impl ActorDisplays {
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol("display page ordinal exhausted".into())
             })?;
-        let callback = if output.expansions.is_empty() {
+        let selectable = if update {
+            self.slots.get(&slot).is_some_and(|slot| slot.selectable)
+        } else {
+            selectable
+        };
+        let callback = if output.expansions.is_empty() && !selectable {
             None
         } else {
             Some(Arc::new(callback.ok_or_else(|| {
@@ -843,6 +851,7 @@ impl ActorDisplays {
             self.slots.insert(
                 slot,
                 DisplaySlot {
+                    selectable,
                     execution: None,
                     callback: None,
                     keys: Vec::new(),
@@ -856,6 +865,7 @@ impl ActorDisplays {
         let owned = self.slots.get_mut(&slot).expect("issued display slot");
         let (request, answer) = DisplayPublication::channel(actor, ordinal, operation, output);
         owned.pending = Some(StagedDisplayPublication {
+            selectable,
             execution: if callback.is_some() { execution } else { None },
             request: request.clone(),
             callback,
@@ -876,6 +886,7 @@ impl ActorDisplays {
             {
                 let pending = owned.pending.take().expect("acknowledged publication");
                 if !self.retired {
+                    owned.selectable = pending.selectable;
                     owned.execution = pending.execution;
                     owned.callback = pending.callback;
                     owned.keys = pending.request.page.expansions.clone();
@@ -905,11 +916,28 @@ impl ActorDisplays {
         }
     }
 
+    #[cfg(test)]
     fn select(
         &mut self,
         actor: ActorRef,
         identity: (i64, i64, i64),
         key: i64,
+    ) -> Result<
+        (
+            Arc<RootCustody>,
+            crate::request::sources::CallbackExecution,
+            u64,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        self.select_mode(actor, identity, Some(key))
+    }
+
+    fn select_mode(
+        &mut self,
+        actor: ActorRef,
+        identity: (i64, i64, i64),
+        key: Option<i64>,
     ) -> Result<
         (
             Arc<RootCustody>,
@@ -931,7 +959,10 @@ impl ActorDisplays {
             .filter(|slot| {
                 slot.pending.is_none()
                     && slot.expanding.is_none()
-                    && slot.keys.iter().any(|(available, _)| *available == key)
+                    && match key {
+                        Some(key) => slot.keys.iter().any(|(available, _)| *available == key),
+                        None => slot.selectable,
+                    }
             })
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
@@ -957,6 +988,76 @@ impl ActorDisplays {
         selected.expanding = Some(generation);
         Ok((callback, execution, generation))
     }
+}
+
+// Exercise the existing publication owner using a callback compiled by the real
+// resident fixture. This does not manufacture runtime or compiler authority.
+#[cfg(test)]
+pub(crate) fn assert_selectable_display_lifetime(
+    callback: RootCustody,
+    execution: crate::request::sources::CallbackExecution,
+) {
+    let actor = execution.context.actor;
+    let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+    let (publication, _answer) = displays
+        .lock()
+        .stage(
+            actor,
+            WorkbenchDisplayPage {
+                identity: (0, 0, 0),
+                text: "complete index".into(),
+                expansions: vec![],
+                unavailable: false,
+            },
+            Some(callback),
+            false,
+            8192,
+            None,
+            Some(execution),
+            true,
+        )
+        .unwrap();
+    let identity = publication.page.identity;
+    assert!(
+        displays.lock().select_mode(actor, identity, None).is_err(),
+        "unpublished callbacks are not selectable"
+    );
+    assert!(publication.answer(DisplayPublicationOutcome::Published(
+        tidepool_runtime::session::ActorOutputReference {
+            run: "fixture-run".into(),
+            sequence: 1
+        }
+    )));
+    displays.lock().reconcile(identity.2).unwrap();
+    assert!(
+        displays.lock().slots[&identity.2].callback.is_some(),
+        "complete selectable page retains callback"
+    );
+    for _ in 0..2 {
+        let (_, _, generation) = displays.lock().select_mode(actor, identity, None).unwrap();
+        let lease = DisplayExpansionLease {
+            displays: displays.clone(),
+            slot: identity.2,
+            generation,
+        };
+        assert!(
+            displays.lock().select_mode(actor, identity, None).is_err(),
+            "concurrent selection is fenced"
+        );
+        drop(lease);
+    }
+    assert!(
+        displays.lock().select(actor, identity, 1).is_err(),
+        "selection does not issue numeric expansion keys"
+    );
+    let foreign = (identity.0 + 1, identity.1, identity.2);
+    assert!(displays.lock().select_mode(actor, foreign, None).is_err());
+    displays.lock().retire();
+    assert!(displays.lock().select_mode(actor, identity, None).is_err());
+    assert!(
+        displays.lock().slots.is_empty(),
+        "retirement releases the captured callback"
+    );
 }
 
 struct DisplayPublicationLease {
@@ -1114,7 +1215,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None, false)
                 .unwrap();
             let slot = request.page.identity.2;
             let entered = Arc::new(std::sync::Barrier::new(2));
@@ -1182,7 +1283,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None, false)
                 .unwrap();
             let slot = request.page.identity.2;
             let lease = DisplayPublicationLease {
@@ -1259,7 +1360,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .unwrap();
         let slot = request.page.identity.2;
         assert_eq!(request.page_ordinal, 1);
@@ -1289,7 +1390,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .unwrap();
         let slot = request.page.identity.2;
         let frozen = DisplayPublicationHostContext {
@@ -1349,7 +1450,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .unwrap();
         drop(answer);
         let slot = request.page.identity.2;
@@ -1365,7 +1466,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert_eq!(owner.slots[&slot].page_ordinal, 0);
         let (next, _) = owner
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .unwrap();
         assert_ne!(next.page.identity, request.page.identity);
     }
@@ -1376,7 +1477,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .unwrap();
         let slot = request.page.identity.2;
         drop(answer);
@@ -1400,7 +1501,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
         assert!(owner
-            .stage(actor, terminal_page(), None, false, 8192, None, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None, false)
             .is_err());
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
@@ -1501,6 +1602,7 @@ fn stage_actor_display<H, O>(
     update: bool,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
+    selectable: bool,
 ) -> Result<DisplayPublicationSubmission, ResidentActorWorkbenchError> {
     let records = environment.actors.lock();
     let record = records
@@ -1518,6 +1620,7 @@ fn stage_actor_display<H, O>(
         allowance,
         operation,
         Some(execution),
+        selectable,
     )?;
     Ok(DisplayPublicationSubmission::new(displays, request, answer))
 }
@@ -1532,6 +1635,7 @@ async fn publish_actor_display<H, O>(
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
     mut receipt: Option<DisplayReceiptSubmission<'_>>,
+    selectable: bool,
 ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -1547,6 +1651,7 @@ where
             update,
             allowance,
             operation,
+            selectable,
         )
     };
     let submission = match &mut receipt {
@@ -1563,12 +1668,47 @@ async fn expand_actor_display<H, O>(
     key: i64,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
+    receipt: Option<DisplayReceiptSubmission<'_>>,
+) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    navigate_actor_display(
+        environment,
+        context,
+        identity,
+        key,
+        None,
+        allowance,
+        operation,
+        receipt,
+    )
+    .await
+}
+
+async fn navigate_actor_display<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    context: &ActorSessionContext,
+    identity: (i64, i64, i64),
+    key: i64,
+    selection: Option<String>,
+    allowance: i64,
+    operation: Option<WorkbenchOperationId>,
     mut receipt: Option<DisplayReceiptSubmission<'_>>,
 ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    if selection
+        .as_ref()
+        .is_some_and(|value| value.len() > DISPLAY_METADATA_BYTE_LIMIT)
+    {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display selection exceeds its input budget".into(),
+        ));
+    }
     let displays = {
         let records = environment.actors.lock();
         records
@@ -1628,7 +1768,11 @@ where
             "display publication is still pending".into(),
         ));
     }
-    let (callback, execution, generation) = displays.lock().select(context.actor, identity, key)?;
+    let (callback, execution, generation) = displays.lock().select_mode(
+        context.actor,
+        identity,
+        if selection.is_some() { None } else { Some(key) },
+    )?;
     let lease = DisplayExpansionLease {
         displays,
         slot: identity.2,
@@ -1636,11 +1780,12 @@ where
     };
     let (page, callback) = environment
         .runner
-        .expand_display(
+        .navigate_display(
             execution.context.clone(),
             callback,
             identity,
             key,
+            selection,
             allowance,
         )
         .await?;
@@ -1654,6 +1799,7 @@ where
         allowance,
         operation,
         receipt,
+        false,
     )
     .await;
     drop(lease);
@@ -1685,6 +1831,7 @@ where
             continuation,
             output,
             callback,
+            selectable,
         } => {
             let output = publish_actor_display(
                 environment,
@@ -1696,12 +1843,37 @@ where
                 allowance,
                 operation,
                 receipt,
+                selectable,
             )
             .await?;
             Ok((
                 ResidentActorBoundary::DisplayPublished {
                     continuation,
                     identity: output.identity,
+                },
+                Some(output),
+            ))
+        }
+        ResidentActorBoundary::DisplaySelect {
+            continuation,
+            identity,
+            selection,
+        } => {
+            let output = navigate_actor_display(
+                environment,
+                context,
+                identity,
+                0,
+                Some(selection),
+                allowance,
+                operation,
+                receipt,
+            )
+            .await?;
+            Ok((
+                ResidentActorBoundary::DisplayExpanded {
+                    continuation,
+                    keys: output.expansions.clone(),
                 },
                 Some(output),
             ))
@@ -9409,6 +9581,7 @@ where
                         let display_settlement = if matches!(
                             &boundary,
                             ResidentActorBoundary::DisplayPublish { .. }
+                                | ResidentActorBoundary::DisplaySelect { .. }
                                 | ResidentActorBoundary::DisplayExpand { .. }
                         ) {
                             unit.execution.map(|execution| {
@@ -9471,6 +9644,7 @@ where
                             && matches!(
                                 &boundary,
                                 ResidentActorBoundary::DisplayPublish { .. }
+                                    | ResidentActorBoundary::DisplaySelect { .. }
                                     | ResidentActorBoundary::DisplayExpand { .. }
                             )
                         {

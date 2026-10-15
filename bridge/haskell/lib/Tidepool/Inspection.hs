@@ -19,6 +19,7 @@ module Tidepool.Inspection
     DisplayHandle,
     ExpansionKey,
     expansions,
+    displayIdentity, displaySelectable, selectDisplay,
     WorkbenchDisplay (..),
     GDisplay,
     Rep,
@@ -51,14 +52,14 @@ import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Records (WriteOutcome(..), FsError(..))
 import Tidepool.Lookup (LookupBatch(..), LookupResult(..))
-import Tidepool.Lookup.Render (renderBatch)
+import Tidepool.Lookup.Navigation
 import Tidepool.Source (SourceWindow (..), sourceLines)
 import Tidepool.Inspection.Display
 import Tidepool.View.Types (View(..), viewTree)
 import Tidepool.View.Wire (encodeView)
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith, DisplaySelectableWith, DisplaySelectWith, DisplayNavigationInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -88,6 +89,40 @@ display value = do
     view -> do
       displayViewRaw (encodeView budget view)
       pure (DisplayHandle (0, 0, 0) [])
+
+-- | Identity is checked against the current actor incarnation by the host.
+displayIdentity :: DisplayHandle value -> (Int, Int, Int)
+displayIdentity (DisplayHandle identity _) = identity
+
+-- | Retain a pure selector in the existing actor display slot. Selection text is
+-- an application-owned codec payload, not an instruction to perform effects.
+displaySelectable :: Member Console effects => DisplayTree -> (Text -> DisplayTree) -> Eff effects (DisplayHandle ())
+displaySelectable initial select = do
+  allowance <- send DisplayAllowanceWith
+  let state = newDisplayStateWithNotice (displayBudget allowance) initial
+  identity <- publishSelectable (0, 0, 0) state select
+  pure (DisplayHandle identity (displayStateKeys state))
+
+selectDisplay :: Member Console effects => (Int, Int, Int) -> Text -> Eff effects (DisplayHandle ())
+selectDisplay identity request = do
+  keys <- send (DisplaySelectWith (identity, request))
+  pure (DisplayHandle identity [(expansionKeyFromNumber number, label) | (number, label) <- keys])
+
+publishSelectable :: forall effects. Member Console effects => (Int, Int, Int) -> DisplayState -> (Text -> DisplayTree) -> Eff effects (Int, Int, Int)
+publishSelectable identity state select =
+  send (DisplaySelectableWith (identity, displayStateText state,
+    [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state], displayStateUnavailable state)
+    ((\(_ :: Int) -> do
+      (issued, request, selected, allowance) <- send DisplayNavigationInputWith
+      let granted = displayBudget allowance
+          next = case request of
+            Just payload -> Just (newDisplayStateWithNotice granted (select payload))
+            Nothing -> expandDisplayStateWithNotice granted (expansionKeyFromNumber selected) state
+      case next of
+        Nothing -> error "display expansion key is unavailable"
+        Just detail -> do
+          _ <- publishSelectable issued detail select
+          pure ()) :: Int -> Eff effects ()))
 
 -- | The key must come from this handle's current expansion description.
 -- The host applies the retained callback directly, without compiling a cell.
@@ -127,9 +162,15 @@ instance Display FsError where
 
 instance Display LookupBatch where
   displayTree batch = Constructor "LookupBatch"
-    ([(lookupQuery result, TextLeaf (renderBatch (batch { lookupResults = [result], lookupIssue = Nothing })))
-      | result <- lookupResults batch]
-      ++ [("issue", displayTree (lookupIssue batch)) | lookupIssue batch /= Nothing])
+    [("batch", displayTree (lookupIdentity batch)), ("view", displayTree (lookupView batch)),
+     ("index", TextLeaf (renderLookupIndex batch)),
+     ("hits", Sequence "[" "]" [Constructor (hitQuery hit)
+        (case hitEntry hit of
+          Nothing -> [("outcome", displayTree (selectLookup batch (LookupSelection (LookupAddress (hitResult hit) 1 Signature) Nothing)))]
+          Just ordinal -> [(Text.pack (show part), displayTree (selectLookup batch (LookupSelection (LookupAddress (hitResult hit) ordinal part) Nothing)))
+                          | part <- hitSections hit])
+       | hit <- lookupIndex batch]),
+     ("issue", displayTree (lookupIssue batch))]
 
 instance Display WriteOutcome where
   displayTree (Written f c) = displayRecord 0 "Written" [("file", displayTree f), ("checks", displayTree c)]

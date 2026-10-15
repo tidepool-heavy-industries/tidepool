@@ -305,15 +305,28 @@ fn lookup_tool_policy_matches_native_ghc_oracle() {
         tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_policy_oracle.hs"),
     )
     .unwrap();
-    let mut command = std::process::Command::new("runghc");
+    let executable = directory.path().join("lookup-policy-oracle");
+    let mut command = std::process::Command::new(
+        std::env::var_os("TIDEPOOL_GHC")
+            .expect("TIDEPOOL_GHC must name the declared pinned compiler"),
+    );
+    command.arg("-v0").arg("-outputdir").arg(directory.path());
     for path in effects.include_paths() {
         command.arg(format!("-i{}", path.display()));
     }
-    let output = command
+    let compiled = command
         .arg(format!("-i{}", library.display()))
         .arg(&oracle)
+        .arg("-o")
+        .arg(&executable)
         .output()
-        .expect("run through just with the pinned GHC toolchain");
+        .expect("launch the declared pinned GHC compiler");
+    assert!(
+        compiled.status.success(),
+        "native oracle compilation failed:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let output = std::process::Command::new(executable).output().unwrap();
     assert!(
         output.status.success(),
         "native oracle failed:\n{}",

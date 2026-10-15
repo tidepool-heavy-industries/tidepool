@@ -1440,7 +1440,10 @@ mod tests {
                 "Print :: Text -> Console ()",
                 "DisplayViewWith :: Value -> Console ()",
                 "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)",
+                "DisplaySelectableWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)",
                 "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
+                "DisplaySelectWith :: ((Int, Int, Int), Text) -> Console [(Int, Text)]",
+                "DisplayNavigationInputWith :: Console ((Int, Int, Int), Maybe Text, Int, Int)",
                 "DisplayAllowanceWith :: Console Int",
                 "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int, Int)",
             ]

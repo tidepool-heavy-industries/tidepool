@@ -440,7 +440,16 @@ mod tests {
             };
             let (request, answer) = displays
                 .lock()
-                .stage(actor, page, None, false, 8192, Some(id.clone()), None)
+                .stage(
+                    actor,
+                    page,
+                    None,
+                    false,
+                    8192,
+                    Some(id.clone()),
+                    None,
+                    false,
+                )
                 .unwrap();
             settlement.admit(&request);
             let submission =
@@ -640,6 +649,7 @@ mod tests {
                     8192,
                     Some(operation),
                     None,
+                    false,
                 )
                 .unwrap();
             settlement.admit(&request);
@@ -762,6 +772,7 @@ mod tests {
                         8192,
                         Some(operation),
                         None,
+                        false,
                     )?;
                     Ok(DisplayPublicationSubmission::new(
                         displays.clone(),
@@ -826,6 +837,7 @@ mod tests {
                         8192,
                         Some(operation),
                         None,
+                        false,
                     )?;
                     let submission =
                         DisplayPublicationSubmission::new(displays, request.clone(), answer);
@@ -945,6 +957,7 @@ mod tests {
                 8192,
                 Some(operation),
                 None,
+                false,
             )?;
             Ok(DisplayPublicationSubmission::new(
                 displays.clone(),
@@ -992,6 +1005,7 @@ mod tests {
                 8192,
                 Some(operation),
                 None,
+                false,
             )
             .unwrap();
         settlement.admit(&request);

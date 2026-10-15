@@ -48,7 +48,8 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
 async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixture {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
-    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec());
+    let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+        .with_imports("qualified Tidepool.Lookup.Navigation as Nav\nqualified Tidepool.Aeson.FromJSON as Json\nTidepool.Inspection (displaySelectable, DisplayTree(..), displayTree)");
     let root = tempfile::tempdir().unwrap();
     let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_247);
     let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
@@ -151,6 +152,7 @@ async fn prepare_callback_fixture(cell: String, private: bool) -> CallbackFixtur
         continuation,
         callback,
         output: initial,
+        ..
     } = boundary
     else {
         panic!("raw DisplayWith must retain the original callback");
@@ -297,7 +299,7 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
             .initial
             .expansions
             .iter()
-            .any(|(_, label)| label == "retained-query"));
+            .any(|(_, label)| label == "index" || label == "hits"));
         assert!(!fixture.initial.unavailable);
         assert!(!fixture.initial.expansions.is_empty());
         let mut pending = fixture.initial.expansions.clone();
@@ -329,7 +331,7 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
             "end-of-retained-query",
             "second-query",
             "missing-api",
-            "Contract: retained contract hash token",
+            "retained contract hash token",
         ] {
             assert!(rendered.contains(name), "missing {name}: {rendered}");
         }
@@ -360,4 +362,87 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
         assert!(errors.initial.text.contains("Right (Left"));
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_lookup_selection_revisits_and_expands_without_lookup_or_effects() {
+    with_test_compiler_owner(retained_lookup_selection_with_compiler_owner()).await;
+}
+
+async fn retained_lookup_selection_with_compiler_owner() {
+    let fixture = prepare_callback_fixture(
+        tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_lookup_navigation.hs",
+        ),
+        false,
+    )
+    .await;
+    assert!(fixture.initial.text.contains("original-capture"));
+    let selection = |section: serde_json::Value| {
+        serde_json::json!({
+            "address":{"resultOrdinal":1,"entryOrdinal":1,"section":section},"lineWindow":null
+        })
+    };
+    let request = serde_json::json!([
+        selection(serde_json::json!({"tag":"Contract"})),
+        selection(serde_json::json!({"tag":"Setup","contents":1})),
+        selection(serde_json::json!({"tag":"Example"}))
+    ])
+    .to_string();
+    let identity = (1, 1, 1);
+    let mut callback = fixture.callback.clone();
+    for _ in 0..2 {
+        let (page, retained) = fixture
+            .runner
+            .navigate_display(
+                fixture.execution.context.clone(),
+                callback,
+                identity,
+                0,
+                Some(request.clone()),
+                8192,
+            )
+            .await
+            .unwrap();
+        assert!(!page.unavailable);
+        let mut text = page.text;
+        let mut keys = page.expansions;
+        callback = Arc::new(retained);
+        for _ in 0..128 {
+            let Some((key, _)) = keys.first() else {
+                break;
+            };
+            let (page, retained) = fixture
+                .runner
+                .expand_display(
+                    fixture.execution.context.clone(),
+                    callback,
+                    identity,
+                    *key,
+                    8192,
+                )
+                .await
+                .unwrap();
+            assert!(!page.unavailable);
+            text.push_str(&page.text);
+            keys = page.expansions;
+            callback = Arc::new(retained);
+        }
+        assert!(keys.is_empty());
+        for marker in [
+            "original-capture",
+            "main-digest",
+            "exact-owner-contract-marker",
+            "complete-setup-marker",
+            "last-main-marker",
+        ] {
+            assert!(text.contains(marker), "missing {marker}: {text}");
+        }
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    assert!(fixture.output.snapshot().is_empty());
+    crate::resident_actor::assert_selectable_display_lifetime(
+        Arc::try_unwrap(callback).expect("last returned callback has one native owner"),
+        fixture.execution,
+    );
 }

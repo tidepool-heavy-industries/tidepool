@@ -6,7 +6,7 @@ module AgentSpec (agentSpec) where
 import Control.Monad.Freer (Member)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Lookup)
+import Tidepool.Effects.Core (Lookup, Console)
 import qualified Tidepool.Lookup.Tools as LookupTools
 
 data CampaignTools effects mode = CampaignTools
@@ -19,6 +19,7 @@ agentSpec ::
   ( KnownToolEffects effects
   , AsyncEffects effects
   , Member Lookup effects
+  , Member Console effects
   ) =>
   AgentSpec (CampaignTools effects) effects
 agentSpec = defaultSpec

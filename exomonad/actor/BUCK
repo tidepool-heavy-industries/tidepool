@@ -1461,6 +1461,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f6c6f6f6b75705f6e617669676174696f6e2e6873",
+    src = "src/resident_workbench/display_lookup_navigation.hs",
+    out = "display_lookup_navigation.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f7265706c6163656d656e745f696e707574732e6873",
     src = "src/resident_workbench/replacement_inputs.hs",
     out = "replacement_inputs.hs",

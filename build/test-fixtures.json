@@ -372,6 +372,7 @@
     "exomonad/actor/src/resident_workbench/display_callback_retained.hs",
     "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
     "exomonad/actor/src/resident_workbench/display_lookup_errors.hs",
+    "exomonad/actor/src/resident_workbench/display_lookup_navigation.hs",
     "exomonad/actor/src/resident_workbench/replacement_inputs.hs",
     "exomonad/actor/tests/profile_compile_failures/selected_fs_write.hs",
     "exomonad/actor/tests/profile_compile_failures/selected_valid.hs",

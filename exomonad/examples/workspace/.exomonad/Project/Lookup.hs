@@ -23,7 +23,7 @@ import qualified Tidepool.Lookup.Tools as Lookup
 resultTokens :: Int
 resultTokens = 2048
 
-tools :: (Member Lookup effects, Member Jev effects, Member Reflect effects)
+tools :: (Member Lookup effects, Member Console effects, Member Jev effects, Member Reflect effects)
   => Lookup.LookupTools (AsServerT (Eff effects))
 tools = Lookup.toolsWith select
 

@@ -82,6 +82,32 @@ pub fn console() -> Effect {
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
             },
             Verb {
+                ctor: "DisplaySelectableWith",
+                method: "display_selectable_with",
+                args: vec![
+                    Arg {
+                        name: "view",
+                        ty: HsType::Tuple(vec![
+                            display_id(),
+                            HsType::Text,
+                            expansion_keys(),
+                            HsType::Bool,
+                        ]),
+                        rust: RustBinding::Path(
+                            "((i64, i64, i64), String, Vec<(i64, String)>, bool)",
+                        ),
+                    },
+                    Arg {
+                        name: "continuation",
+                        ty: HsType::Var("payload"),
+                        rust: RustBinding::HaskellValue,
+                    },
+                ],
+                ret: display_id(),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+            },
+            Verb {
                 ctor: "DisplayExpandWith",
                 method: "display_expand_with",
                 args: vec![Arg {
@@ -90,6 +116,31 @@ pub fn console() -> Effect {
                     rust: RustBinding::Path("((i64, i64, i64), i64)"),
                 }],
                 ret: expansion_keys(),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+            },
+            Verb {
+                ctor: "DisplaySelectWith",
+                method: "display_select_with",
+                args: vec![Arg {
+                    name: "selection",
+                    ty: HsType::Tuple(vec![display_id(), HsType::Text]),
+                    rust: RustBinding::Path("((i64, i64, i64), String)"),
+                }],
+                ret: expansion_keys(),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+            },
+            Verb {
+                ctor: "DisplayNavigationInputWith",
+                method: "display_navigation_input_with",
+                args: vec![],
+                ret: HsType::Tuple(vec![
+                    display_id(),
+                    HsType::maybe(HsType::Text),
+                    HsType::Int,
+                    HsType::Int,
+                ]),
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
             },

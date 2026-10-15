@@ -8,6 +8,7 @@ module Main where
 
 import Test.Tasty.QuickCheck (testProperty, NonNegative(..))
 import Tidepool.Source
+import Tidepool.Text.Navigation
 import FormViewTest (formViewTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
@@ -24,7 +25,9 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "display-tree"
-  [ testProperty "source windows agree with independent String line addresses" sourceWindowProperty
+  [ testProperty "retained literal locations agree with independent String suffix oracle" literalSearchProperty
+  , testCase "retainedTextPreservesNewlinesAndBoundsHugeLine" retainedTextPreservesNewlinesAndBoundsHugeLine
+  , testProperty "source windows agree with independent String line addresses" sourceWindowProperty
   , testCase "sourceWindowsRetainRevisionAndLineAddresses" sourceWindowsRetainRevisionAndLineAddresses
   , testCase "noticedDisplaysStayBoundedAndRetainDetail" noticedDisplaysStayBoundedAndRetainDetail
   , formViewTests
@@ -454,3 +457,38 @@ sourceWindowProperty source (NonNegative startInput) (NonNegative countInput) =
       expected = take count (drop (start - 1) (zip [1..] (lines source)))
       SourceWindow revision actual = sourceLines start count ("original", Text.pack source)
   in revision == "original" && [(number, Text.unpack body) | (number, body) <- actual] == expected
+
+
+literalSearchProperty :: String -> NonNegative Int -> Bool
+literalSearchProperty raw (NonNegative radius) =
+  let source = Text.pack raw
+      needle = Text.pack (take 3 raw)
+      suffixes [] = [[]]
+      suffixes xs@(_:rest) = xs : suffixes rest
+      begins [] _ = True
+      begins _ [] = False
+      begins (a:as) (b:bs) = a == b && begins as bs
+      expected = [(n, n + length (Text.unpack needle)) | (n, rest) <- zip [0..] (suffixes (Text.unpack source)), begins (Text.unpack needle) rest]
+  in case literalSearch "captured" (radius `mod` 16) needle source of
+       Left EmptyNeedle -> Text.null needle
+       Left _ -> False
+       Right matches -> occurrenceLocations matches == expected
+         && occurrenceCount matches == length expected
+         && all (\slice -> sliceIdentity slice == "captured"
+           && sliceText slice == Text.take (sliceEnd slice - sliceStart slice) (Text.drop (sliceStart slice) source)
+           && Text.length (sliceText slice) <= Text.length needle + 2 * (radius `mod` 16)) (occurrenceContexts matches)
+
+retainedTextPreservesNewlinesAndBoundsHugeLine :: IO ()
+retainedTextPreservesNewlinesAndBoundsHugeLine = do
+  let source = "α\r\n\n🙂last\n"
+  assertEqual "line concatenation preserves exact text" source (Text.concat (retainedLines source))
+  assertEqual "CRLF retained" (Right (TextSlice "id" 0 3 "α\r\n" False True)) (retainedWindow "id" 1 1 source)
+  assertEqual "invalid windows refuse" (Left InvalidLineWindow) (retainedWindow "id" 0 1 source)
+  assertEqual "out of range refuses" (Left LineOutsideCapture) (retainedWindow "id" 4 4 source)
+  assertEqual "empty needle refuses" (Left EmptyNeedle) (literalSearch "id" 5 "" source)
+  let huge = Text.replicate 100000 "x" <> "🙂🙂🙂" <> Text.replicate 100000 "x"
+  case literalSearch "huge" 2 "🙂🙂" huge of
+    Left issue -> fail (show issue)
+    Right matches -> do
+      assertEqual "overlapping unicode matches" [(100000,100002),(100001,100003)] (occurrenceLocations matches)
+      assertTrue "contexts bounded independently of line size" (all ((<= 6) . Text.length . sliceText) (occurrenceContexts matches))

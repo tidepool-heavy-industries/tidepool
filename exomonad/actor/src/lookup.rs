@@ -85,6 +85,7 @@ pub(crate) struct LookupBatch {
     pub candidates: Vec<LookupCandidate>,
     pub view: String,
     pub issue: Option<String>,
+    pub identity: String,
 }
 #[derive(ToHaskell)]
 #[haskell(module = "Tidepool.Effects.Core", name = "LookupResult")]
@@ -451,6 +452,7 @@ pub(crate) fn execute(
     mut inspect: impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> LookupBatch {
     let mut batch = LookupBatch {
+        identity: uuid::Uuid::new_v4().to_string(),
         results: vec![],
         candidates: vec![],
         view,
@@ -1740,6 +1742,7 @@ mod tests {
     #[test]
     fn note_request_only_bindings_hints_a_miss_on_a_request_only_name() {
         let mut batch = LookupBatch {
+            identity: uuid::Uuid::new_v4().to_string(),
             results: vec![missing("respond"), missing("otherName")],
             candidates: vec![],
             view: "view".into(),
@@ -1764,6 +1767,7 @@ mod tests {
     #[test]
     fn note_request_only_bindings_leaves_a_found_request_only_name_alone() {
         let mut batch = LookupBatch {
+            identity: uuid::Uuid::new_v4().to_string(),
             results: vec![LookupResult {
                 query: "respond".into(),
                 outcome: LookupOutcome::Found(vec![], false),

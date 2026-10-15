@@ -9,7 +9,7 @@ import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
   ( AsServerT, HaskellTools, haskellTools, KnownToolEffects, AsyncEffects
   , type (:-), Sync, Call, ReloadInput, ReloadError, ReloadOutcome, standardReload )
-import Tidepool.Effects.Core (BoundWorktree, Commands, Lookup, Jev, Reflect)
+import Tidepool.Effects.Core (BoundWorktree, Commands, Lookup, Console, Jev, Reflect)
 import Tidepool.Agent.Reply (Replies)
 import qualified Tidepool.Command.Tools as Command
 import qualified Project.Shell as Shell
@@ -28,7 +28,7 @@ data WorkspaceTools effects mode = WorkspaceTools
 
 tools ::
   ( KnownToolEffects effects, AsyncEffects effects
-  , Member Commands effects, Member Lookup effects, Member Jev effects, Member Reflect effects
+  , Member Commands effects, Member Lookup effects, Member Console effects, Member Jev effects, Member Reflect effects
   , Member Replies effects, Member BoundWorktree effects
   ) =>
   WorkspaceTools effects (AsServerT (Eff effects))

@@ -10,6 +10,7 @@ import Data.List (isInfixOf)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import QuantitiesContract (quantitiesTests)
+import LookupNavigationTest (lookupNavigationTests)
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -328,6 +329,7 @@ tests :: TestTree
 tests = testGroup "tool profile contract" $
   [ testCase "prepared spec metadata does not execute handlers or slots and refusal cannot launch" preparedSpecContracts
   , testCase "concrete spec preparation requires an input schema dictionary" $ compileProfile "PreparedSpecMissingSchema" (Rejected ["JsonSchema Input"])
+  , lookupNavigationTests
   , testCase "receipt projections distinguish terminal failure from observation rejection" receiptFailureProjection
   , testCase "compiled installation dispatch scheduling presentation and actor profiles" installedToolContracts
   , testCase "nested bounded and installed handlers preserve semantic presentation" presentedCompositionContracts

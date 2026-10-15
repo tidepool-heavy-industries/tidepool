@@ -12,6 +12,19 @@ pub(crate) struct LookupExample {
     pub(crate) requirements: String,
     pub(crate) prerequisites: Vec<String>,
     pub(crate) source: String,
+    pub(crate) source_identity: Option<String>,
+    pub(crate) source_issue: Option<String>,
+    pub(crate) setup: Vec<LookupSource>,
+}
+
+/// Immutable source captured by the usage inventory owner, never by navigation.
+#[derive(Clone, Debug, PartialEq, Eq, ToHaskell)]
+#[haskell(module = "Tidepool.Effects.Core", name = "LookupSource")]
+pub(crate) struct LookupSource {
+    pub(crate) locator: String,
+    pub(crate) identity: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) issue: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize)]
@@ -61,8 +74,22 @@ impl UsagePointerTable {
         collect_sources(&root.join("skills"), &root, prefix, &mut sources)?;
         sources.sort_by(|left, right| left.0.cmp(&right.0));
         let mut index = BTreeMap::new();
+        let mut captured = BTreeMap::new();
+        let canonical_root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self {
+                workspace: Arc::new(workspace.to_path_buf()),
+                ..Self::default()
+            }),
+            Err(error) => return Err(error),
+        };
         for (locator, path) in sources {
-            let source = std::fs::read_to_string(path)?;
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(&canonical_root) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)?;
+            captured.insert(path, Ok(source.clone()));
             for token in raw_tokens(&source) {
                 let token = token.trim_matches('.');
                 let Some((_, identifier)) = super::lookup_tool::qualifier_and_identifier(token)
@@ -74,7 +101,7 @@ impl UsagePointerTable {
                     .or_insert_with(|| locator.clone());
             }
         }
-        let examples = match load_examples(&root, prefix) {
+        let examples = match load_examples(&root, prefix, &mut captured) {
             Ok(examples) => examples,
             Err(error) => {
                 eprintln!("lookup examples unavailable: {error}");
@@ -92,6 +119,7 @@ impl UsagePointerTable {
 fn load_examples(
     root: &Path,
     prefix: &str,
+    captured: &mut BTreeMap<PathBuf, Result<String, String>>,
 ) -> Result<BTreeMap<(String, String, ExampleNamespace), LookupExample>, String> {
     let manifest_path = root.join("checks/usage-examples.json");
     let manifest = match std::fs::read_to_string(&manifest_path) {
@@ -112,14 +140,39 @@ fn load_examples(
         {
             return Err("example identity or requirements invalid".into());
         }
-        let source = checked_source(root, &canonical_root, &registration.source)?;
-        let prerequisites = registration
+        // Invalid paths remain invalid registrations. Missing/inaccessible UTF-8
+        // files retain the registration and explicit capture failure instead.
+        validate_example_path(&registration.source)?;
+        let (source, source_identity, source_issue) =
+            match capture_source(root, &canonical_root, &registration.source, captured) {
+                Ok(source) => {
+                    let identity = blake3::hash(source.as_bytes()).to_hex().to_string();
+                    (source, Some(identity), None)
+                }
+                Err(issue) => (String::new(), None, Some(issue)),
+            };
+        let setup: Vec<_> = registration
             .prerequisites
             .iter()
             .map(|path| {
-                checked_source(root, &canonical_root, path).map(|_| format!("{prefix}/{path}"))
+                let locator = format!("{prefix}/{path}");
+                match capture_source(root, &canonical_root, path, captured) {
+                    Ok(text) => LookupSource {
+                        locator,
+                        identity: Some(blake3::hash(text.as_bytes()).to_hex().to_string()),
+                        text: Some(text),
+                        issue: None,
+                    },
+                    Err(issue) => LookupSource {
+                        locator,
+                        identity: None,
+                        text: None,
+                        issue: Some(issue),
+                    },
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
+        let prerequisites = setup.iter().map(|source| source.locator.clone()).collect();
         let key = (
             registration.module,
             registration.name,
@@ -129,7 +182,10 @@ fn load_examples(
             locator: format!("{prefix}/{}", registration.source),
             requirements: registration.requirements,
             prerequisites,
+            source_identity,
+            source_issue,
             source,
+            setup,
         };
         // Reserve 256 bytes for the Haskell renderer's labels and omission
         // sentence; this owner only limits data, never duplicates presentation.
@@ -147,7 +203,7 @@ fn load_examples(
     Ok(examples)
 }
 
-fn checked_source(root: &Path, canonical_root: &Path, relative: &str) -> Result<String, String> {
+fn validate_example_path(relative: &str) -> Result<(), String> {
     let path = Path::new(relative);
     if path.as_os_str().is_empty()
         || relative.len() > 256
@@ -158,6 +214,27 @@ fn checked_source(root: &Path, canonical_root: &Path, relative: &str) -> Result<
     {
         return Err(format!("invalid example path: {relative}"));
     }
+    Ok(())
+}
+
+// One acquisition per file in this inventory construction, including failures.
+// The temporary map is discarded after indexing and examples share its captures.
+fn capture_source(
+    root: &Path,
+    canonical_root: &Path,
+    relative: &str,
+    captured: &mut BTreeMap<PathBuf, Result<String, String>>,
+) -> Result<String, String> {
+    validate_example_path(relative)?;
+    captured
+        .entry(root.join(relative))
+        .or_insert_with(|| checked_source(root, canonical_root, relative))
+        .clone()
+}
+
+fn checked_source(root: &Path, canonical_root: &Path, relative: &str) -> Result<String, String> {
+    validate_example_path(relative)?;
+    let path = Path::new(relative);
     let full = root.join(path);
     let canonical = full
         .canonicalize()
@@ -324,7 +401,7 @@ mod tests {
             ExampleNamespace::Value
         )
         .is_none());
-        for source in ["../example.hs", "checks/missing.hs", "/tmp/example.hs"] {
+        for source in ["../example.hs", "/tmp/example.hs"] {
             std::fs::write(
                 root.join("checks/usage-examples.json"),
                 format!(
@@ -343,6 +420,56 @@ mod tests {
                 Some(".exomonad/workspace/checks/example.hs".into())
             );
         }
+    }
+
+    #[test]
+    fn captured_example_and_setup_survive_source_mutation_and_missing_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(root.join("checks")).unwrap();
+        std::fs::write(root.join("checks/main.hs"), "main = pure ()\r\n").unwrap();
+        std::fs::write(root.join("checks/setup.hs"), "setup = \"α\"\n").unwrap();
+        let manifest = serde_json::json!({"examples":[{
+            "module":"Owner", "name":"operation", "namespace":"value",
+            "source":"checks/main.hs", "prerequisites":["checks/setup.hs", "checks/missing.hs"],
+            "requirements":"network credentials at runtime"
+        }]});
+        std::fs::write(
+            root.join("checks/usage-examples.json"),
+            manifest.to_string(),
+        )
+        .unwrap();
+        let table = UsagePointerTable::discover(workspace.path()).unwrap();
+        let captured = example_for(&table, "Owner", "operation", ExampleNamespace::Value).unwrap();
+        assert_eq!(captured.source, "main = pure ()\r\n");
+        assert_eq!(
+            captured.source_identity.as_deref(),
+            Some(blake3::hash(captured.source.as_bytes()).to_hex().as_str())
+        );
+        assert_eq!(captured.setup[0].text.as_deref(), Some("setup = \"α\"\n"));
+        assert!(captured.setup[1].text.is_none());
+        assert!(captured.setup[1].issue.is_some());
+        assert_eq!(captured.requirements, "network credentials at runtime");
+        std::fs::write(root.join("checks/main.hs"), "changed").unwrap();
+        std::fs::remove_file(root.join("checks/setup.hs")).unwrap();
+        std::fs::write(root.join("checks/missing.hs"), "now exists").unwrap();
+        assert_eq!(
+            example_for(&table, "Owner", "operation", ExampleNamespace::Value),
+            Some(captured)
+        );
+    }
+
+    #[test]
+    fn missing_main_example_is_explicit_capture_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(root.join("checks")).unwrap();
+        std::fs::write(root.join("checks/usage-examples.json"),r#"{"examples":[{"module":"Owner","name":"operation","namespace":"value","source":"checks/missing.hs","prerequisites":[],"requirements":"runtime"}]}"#).unwrap();
+        let table = UsagePointerTable::discover(workspace.path()).unwrap();
+        let example = example_for(&table, "Owner", "operation", ExampleNamespace::Value).unwrap();
+        assert!(example.source.is_empty());
+        assert!(example.source_identity.is_none());
+        assert!(example.source_issue.is_some());
     }
 
     #[test]
