@@ -322,6 +322,7 @@ mod tests {
 
     fn binding() -> EmbeddedContextBinding {
         EmbeddedContextBinding {
+            request_reply: None,
             invocation: ToolInvocationContext {
                 origin: ToolInvocationOrigin::Model(OriginalOperation {
                     origin: ConversationOrigin::External {

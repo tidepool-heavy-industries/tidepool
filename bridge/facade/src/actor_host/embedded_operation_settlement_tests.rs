@@ -261,6 +261,7 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
     ));
     let projection = project_tools(policy.tools()).unwrap();
     let snapshot = EmbeddedPolicySnapshot {
+        request_activation: None,
         actor: actor.identity(),
         policy: policy.clone(),
         manifest: projection.manifest,
@@ -338,6 +339,7 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
     ));
     let projection = project_tools(policy.tools()).unwrap();
     let snapshot = EmbeddedPolicySnapshot {
+        request_activation: None,
         actor: actor.identity(),
         policy: policy.clone(),
         manifest: projection.manifest,
