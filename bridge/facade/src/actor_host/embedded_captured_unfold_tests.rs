@@ -2027,7 +2027,7 @@ fn assert_preflight_rejection(response: &Value) {
 
 enum PreflightStep {
     Cell { call: String, source: String },
-    InterruptStream,
+    IncompleteResponse,
     Finish,
 }
 
@@ -2096,10 +2096,19 @@ impl ResponsesTransport for PreflightTransport {
                 self.changed.send_modify(|revision| *revision += 1);
                 vec![haskell_call(&call, &source, ToolExecution::Synchronous)]
             }
-            PreflightStep::InterruptStream => {
-                return Err(TransportError::IncompleteResponse(
-                    harness::transport::StreamInterruption::MissingCompletion,
-                ));
+            PreflightStep::IncompleteResponse => {
+                return harness::transport::sse::ResponseAssembly::default()
+                    .accept(
+                        &json!({
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "preflight-incomplete",
+                                "incomplete_details": {"reason": "content_filter"},
+                            },
+                        })
+                        .to_string(),
+                    )
+                    .map(|_| unreachable!("response.incomplete must return its typed error"));
             }
             PreflightStep::Finish => vec![harness::item::Item(json!({
                 "type":"message", "role":"assistant", "phase":"final_answer",
@@ -2358,11 +2367,11 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .iter()
                 .all(|claim| claim.state == harness::store::ClaimState::Settled));
 
-            // The interrupted stream retains a durable block. Queued input becomes
-            // eligible only after the browser owner explicitly authorizes recovery.
+            // A nonretryable incomplete response retains a durable block until
+            // ordinary input requests exact continuation through the browser owner.
             transport
                 .sender
-                .send(PreflightStep::InterruptStream)
+                .send(PreflightStep::IncompleteResponse)
                 .unwrap();
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -2399,6 +2408,21 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             )
             .await;
             assert!(waiting.active_round.is_none());
+            let harness::embedding::HostInferenceState::Blocked { block } = host
+                .runtime
+                .store()
+                .embedded_inference_state(&target)
+                .unwrap()
+            else {
+                panic!("the explicit incomplete response must retain its exact block");
+            };
+            assert!(matches!(
+                &block.reason,
+                harness::embedding::InferenceBlockReason::ResponseIncomplete {
+                    reason: Some(harness::transport::IncompleteReason::ContentFilter),
+                    ..
+                }
+            ));
             assert!(
                 host.runtime.store().unread("/root").unwrap().is_empty(),
                 "the interrupted round must await explicit input"
@@ -2406,12 +2430,13 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             let requests_before = transport.requests.lock().len();
             let compiler_before = tidepool_extract_cmd::extract_spawn_count();
             let mut changed = transport.changed.subscribe();
+            let input_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
             let wake = client
                 .post(format!("{api}/commands"))
                 .header("Origin", &origin)
                 .header(reqwest::header::COOKIE, &cookie)
                 .json(&harness::server::ClientCommand::Host {
-                    operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                    operation_id: input_operation,
                     command: harness::server::HostCommand::Input {
                         target: target.clone(),
                         text: "retry retained preflight rejection".into(),
@@ -2421,15 +2446,22 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .await
                 .unwrap();
             assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
-            assert_eq!(transport.requests.lock().len(), requests_before);
-            assert!(matches!(
-                host.runtime
-                    .store()
-                    .embedded_inference_state(&target)
-                    .unwrap(),
-                harness::embedding::HostInferenceState::Blocked { .. }
-            ));
-            host.http_recover_blocked(&target).await.unwrap();
+            let admission = host
+                .command_receipt(&target.run, input_operation)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &admission,
+                    harness::server::CommandReceiptOutcome::Admitted {
+                        target: Some(admitted_target),
+                        continuation: Some(harness::embedding::InputContinuation::Granted { block: granted }),
+                        wake_error: None,
+                        ..
+                    } if admitted_target == &target && granted == &block
+                ),
+                "{admission:?}"
+            );
             let recovered = host
                 .context
                 .while_root_live(
@@ -2448,10 +2480,15 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .await
                 .unwrap_or_else(|error| panic!("{error}"))
                 .expect("real recovery provider request");
-            assert!(recovered
-                .input
-                .iter()
-                .any(|item| { item.0["content"] == "retry retained preflight rejection" }));
+            assert_eq!(transport.requests.lock().len(), requests_before + 1);
+            assert_eq!(
+                recovered
+                    .input
+                    .iter()
+                    .filter(|item| item.0["content"] == "retry retained preflight rejection")
+                    .count(),
+                1
+            );
             let returned = recovered
                 .input
                 .iter()
