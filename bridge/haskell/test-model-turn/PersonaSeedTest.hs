@@ -7,6 +7,7 @@ import Prelude
 import Data.Text (Text)
 import Data.Proxy (Proxy(..))
 import Tidepool.Agent.ToolEffects (toolEffectNames)
+import Tidepool.Effects.Row (effectKeys, knownEffects)
 import qualified Data.Map.Strict as Map
 import Control.Monad.Freer (Eff, interpret, run)
 import Control.Monad.Freer.State (State, get, modify, runState)
@@ -14,7 +15,7 @@ import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Test.Tasty.HUnit (assertEqual, assertBool)
 import Tidepool.Aeson
 import Tidepool.Effects.Core (FsWrite(..), Web(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
-import Tidepool.Internal.ActorProfiles (ActorEffects)
+import Tidepool.Internal.ActorProfiles (ActorEffects, actorEffectName)
 import Tidepool.Form.Wire (prepareForm, decodeSubmission)
 import qualified Tidepool.Form as F
 import qualified Tidepool.View as V
@@ -109,8 +110,10 @@ personaSeedTests = testGroup "persona seed"
           "[recent conversation unavailable: ReflectUnbound]" (W.contextUsed selection)
         Left err -> fail (show err)
   , testCase "companion and helper profiles enable composition without raw transport or commands" $ do
-      let companion = toolEffectNames (Proxy @Spec.PersonaEffects)
-          helper = toolEffectNames (Proxy @Spec.HelperEffects)
+      let companion = toolEffectNames (Proxy @(Contract.SyncEffects Spec.PersonaEffects))
+          helper = toolEffectNames (Proxy @(Contract.SyncEffects Spec.HelperEffects))
+          companionBase = toolEffectNames (Proxy @Spec.PersonaEffects)
+          helperBase = toolEffectNames (Proxy @Spec.HelperEffects)
       mapM_ (\effect -> assertBool ("companion: " ++ show effect) (effect `elem` companion))
         ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser"]
       mapM_ (\effect -> assertBool ("helper: " ++ show effect) (effect `elem` helper))
@@ -119,7 +122,13 @@ personaSeedTests = testGroup "persona seed"
         ["Commands", "Http"]
       assertBool "default helper returns findings rather than writing shared memory or mounting human forms"
         ("FsWrite" `notElem` helper && "AskUser" `notElem` helper)
-      Spec.agentSpec @ActorEffects `seq` Spec.helperSpec @ActorEffects `seq` pure ()
+      mapM_ (\effect -> assertBool ("invocation-only: " ++ show effect)
+        (effect `notElem` companionBase && effect `notElem` helperBase))
+        ["ContextReadWrite", "Reload"]
+      assertEqual "helper grant witnesses match its exact base profile" helperBase
+        (map actorEffectName (effectKeys (knownEffects @Spec.HelperEffects)))
+      Spec.agentSpec @ActorEffects `seq`
+        Contract.installSpec @Spec.HelperEffects Spec.helperSpec `seq` pure ()
   , testCase "startup seeds preserve authored order and distinguish absent from empty caller input" $ do
       let first = Contract.contextSection "first" (Just "memory/a.md") "A"
           second = Contract.contextSection "second" Nothing "B"

@@ -10,22 +10,22 @@ import Control.Monad.Freer (Members)
 import Tidepool.Agent.Contract
 import Tidepool.Effects.Core
   ( AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
-  , ContextReadWrite, Actor, ActorContext, AgentLaunch, AgentInspection
+  , Actor, ActorContext, AgentLaunch, AgentInspection
   , AgentControl, Notifications, ResourceScopes, BoundWorktree )
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
 import qualified Persona.Orientation as Orientation
 
--- Context edits settle before the next inference. Background work uses the
--- existing actor and request owners, with explicit lifetimes.
+-- These base rows are delegable. Sync supplies invocation-only context editing
+-- and reload; child grants retain only the effects listed here.
 type PersonaEffects =
   '[AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
-   , ContextReadWrite, Actor, ActorContext, AgentLaunch, AgentInspection
+   , Actor, ActorContext, AgentLaunch, AgentInspection
    , AgentControl, Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Helpers can explore, compose and curate their own context. Findings return
 -- to the companion, which owns human-facing forms and durable memory edits.
 type HelperEffects =
-  '[Console, FsRead, Jev, Lookup, Reflect, Source, Web, ContextReadWrite
+  '[Console, FsRead, Jev, Lookup, Reflect, Source, Web
    , Actor, ActorContext, AgentLaunch, AgentInspection, AgentControl
    , Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 data PersonaTools mode = PersonaTools
