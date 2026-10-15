@@ -66,6 +66,7 @@
     "bridge/facade/src/actor_host/embedded_shutdown_gate_setup.hs",
     "bridge/facade/src/actor_host/embedded_shutdown_parent_join.hs",
     "bridge/facade/src/actor_host/embedded_shutdown_parked_child.hs",
+    "bridge/facade/src/actor_host/fixtures/agent_spec_coding_child.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/command.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
     "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",

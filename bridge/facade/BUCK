@@ -1026,6 +1026,7 @@ rust_filegroup(
         "src/actor_host/embedded_restart_driver_tests.rs": "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/embedded_shutdown_tests.rs": "bridge/facade/src/actor_host/embedded_shutdown_tests.rs",
+        "src/actor_host/fixtures/agent_spec_coding_child.hs": "bridge/facade/src/actor_host/fixtures/agent_spec_coding_child.hs",
         "src/actor_host/fixtures/api-guide/command.hs": "bridge/facade/src/actor_host/fixtures/api-guide/command.hs",
         "src/actor_host/fixtures/api-guide/human-forms.hs": "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
         "src/actor_host/fixtures/api-guide/lookup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",
@@ -2831,6 +2832,7 @@ filegroup(
         "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs": "src/actor_host/embedded_restart_driver_tests.rs",
         "bridge/facade/src/actor_host/embedded_service.rs": "src/actor_host/embedded_service.rs",
         "bridge/facade/src/actor_host/embedded_shutdown_tests.rs": "src/actor_host/embedded_shutdown_tests.rs",
+        "bridge/facade/src/actor_host/fixtures/agent_spec_coding_child.hs": "src/actor_host/fixtures/agent_spec_coding_child.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/command.hs": "src/actor_host/fixtures/api-guide/command.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs": "src/actor_host/fixtures/api-guide/human-forms.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs": "src/actor_host/fixtures/api-guide/lookup.hs",
@@ -3439,6 +3441,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f656d6265646465645f73687574646f776e5f7061726b65645f6368696c642e6873",
     src = "src/actor_host/embedded_shutdown_parked_child.hs",
     out = "embedded_shutdown_parked_child.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6167656e745f737065635f636f64696e675f6368696c642e6873",
+    src = "src/actor_host/fixtures/agent_spec_coding_child.hs",
+    out = "agent_spec_coding_child.hs",
     visibility = ["PUBLIC"],
 )
 

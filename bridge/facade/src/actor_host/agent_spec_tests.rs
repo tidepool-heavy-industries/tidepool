@@ -384,7 +384,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
             // The authored spec shadows a pinned shared package on a second
             // source root. The shared tool record still uses Project.Shell
             // after the root spec drops its Watchdog import.
-            let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.exomonad/workspace");
+            let shared = super::test_campaign::declared_workspace_package().join(".exomonad");
             fn copy_haskell_sources(source: &Path, destination: &Path) {
                 std::fs::create_dir_all(destination).unwrap();
                 for entry in std::fs::read_dir(source).unwrap() {
@@ -719,8 +719,9 @@ async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
                 )
                 .unwrap();
                 let receipt = reload(policy).await;
-                assert_reload_outcome(&receipt, "ReloadRefused");
-                assert_eq!(receipt["items"][0]["value"]["Right"]["contents"][2]["refusalCategory"], "PreparationFailed");
+                assert_eq!(receipt["status"], "committed", "{receipt}");
+                assert_eq!(receipt["items"][0]["value"]["Left"]["tag"], "ReloadUnreadable", "{receipt}");
+                assert!(receipt["items"][0]["value"]["Left"]["detail"].as_str().unwrap().contains("installer refused"), "{receipt}");
                 assert_eq!(source_layer.read_active().unwrap(), before_source);
                 assert!(probe(policy).await.contains("one"));
                 let cell = dispatch_haskell_script(
@@ -819,14 +820,24 @@ async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
 
-                let launch = {
+                let mut launch = {
                     let root = root.clone();
                     tokio::spawn(async move {
-                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
+                        super::test_campaign::dispatch_haskell_script_response(
+                            root.as_ref(),
+                            CODING_CHILD,
+                        )
+                        .await
                     })
                 };
-                let child = next_child(campaign).await;
-                assert_eq!(launch.await.unwrap()["status"], "committed");
+                let child = next_child(campaign, &mut launch).await;
+                let response = launch
+                    .await
+                    .expect("child launch task joins")
+                    .expect("the exact child launch operation succeeds")
+                    .into_json()
+                    .unwrap();
+                assert_eq!(response["status"], "committed", "{response}");
 
                 let checkout = campaign
                     .worktrees
@@ -895,14 +906,24 @@ async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
 
-                let launch = {
+                let mut launch = {
                     let root = root.clone();
                     tokio::spawn(async move {
-                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
+                        super::test_campaign::dispatch_haskell_script_response(
+                            root.as_ref(),
+                            CODING_CHILD,
+                        )
+                        .await
                     })
                 };
-                let child = next_child(campaign).await;
-                assert_eq!(launch.await.unwrap()["status"], "committed");
+                let child = next_child(campaign, &mut launch).await;
+                let response = launch
+                    .await
+                    .expect("child launch task joins")
+                    .expect("the exact child launch operation succeeds")
+                    .into_json()
+                    .unwrap();
+                assert_eq!(response["status"], "committed", "{response}");
 
                 let checkout = campaign
                     .worktrees
@@ -1371,7 +1392,7 @@ async fn status_bypasses_presentation_and_cells_reach_the_slot_unmatched() {
                     "{status_before_cell}"
                 );
 
-                let cell = dispatch_haskell_script(policy, "1 + 1 :: Int").await;
+                let cell = dispatch_haskell_script(policy, "display (1 + 1 :: Int)").await;
                 assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
                 // The cell's receipt still reached the slot — as `haskell`, which this
@@ -1484,17 +1505,7 @@ async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
 // its checkout to have a layer of its own.
 // ---------------------------------------------------------------------------
 
-const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
-     import Tidepool.Actors.Exomonad\n\
-     import Tidepool.Effects.Core (Commands, Lookup)\n\
-     import qualified AgentSpec as Spec\n\
-     import qualified Project.Tools as Tools\n\
-     Right seed <- checkpoint \"agent-spec child context\"\n\
-     Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-       ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec (Tools.SpecTools '[Replies, Commands, Lookup, BoundWorktree]) '[Replies, Commands, Lookup, BoundWorktree]))\n\
-         { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
-         , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
-     Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
+const CODING_CHILD: &str = include_str!("fixtures/agent_spec_coding_child.hs");
 
 fn commit(workspace: &Path, message: &str) {
     let git = |args: &[&str]| {
@@ -1518,8 +1529,15 @@ fn commit(workspace: &Path, message: &str) {
     ]);
 }
 
-async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResidentInstallation {
-    let child = campaign
+async fn next_child(
+    campaign: &mut TestCampaign,
+    launch: &mut tokio::task::JoinHandle<
+        Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError>,
+    >,
+) -> exomonad_actor::LocalResidentInstallation {
+    let child = tokio::select! {
+        biased;
+        child = campaign
         .next_deployment(
             "child admission",
             Duration::from_secs(180),
@@ -1530,8 +1548,9 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
                 }
                 other => Err(other),
             },
-        )
-        .await;
+        ) => child,
+        result = launch => panic!("the exact child launch settled before admission: {result:?}"),
+    };
     campaign.authority.install_grant(
         child.actor.identity().into(),
         ActorWorktreeGrant::Bound {
