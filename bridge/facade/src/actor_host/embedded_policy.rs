@@ -836,7 +836,7 @@ mod tests {
                         proptest::prop_assert_eq!(&result["marker"], &json!(marker));
                         proptest::prop_assert_eq!(&result["arguments"]["structured"]["value"], &value);
                         let wrong = if *integer { json!("wrong") } else { json!(17) };
-                        proptest::prop_assert!(runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":wrong})), context(), None, None)).is_err());
+                        proptest::prop_assert!(runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":wrong})), context(), None, None)).is_err(), "the issued schema must refuse the other generation input type");
                     }
                 }
             }
