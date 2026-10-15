@@ -204,24 +204,27 @@ pub enum HostedInvocationRole {
     Settlement,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum HostedInvocationState {
     Queued,
     Running,
     Unconfirmed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostedPendingInvocation {
+    #[serde(flatten)]
     pub invocation: exomonad_tool::ToolInvocationContext,
     pub name: String,
     pub state: HostedInvocationState,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
+#[serde(tag = "kind", content = "detail", rename_all = "camelCase")]
 pub enum RequestReplyAdmissionError {
     #[error(
-        "request-owned operations remain pending: {0:?}; inspect status and use yield before retrying reply"
+        "request-owned operations remain pending; inspect retained operation identities and use yield before retrying reply"
     )]
     Pending(Vec<HostedPendingInvocation>),
     #[error("reply rejected: {0:?}")]

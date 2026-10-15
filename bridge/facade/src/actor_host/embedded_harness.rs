@@ -1280,6 +1280,14 @@ fn write_invocation_summary(
     use std::fmt::Write;
 
     match failure {
+        Failure::RequestReplyRefused {
+            request,
+            refusal,
+            source,
+        } => {
+            write!(out, "request {request:?} reply refused: {refusal}; ")?;
+            write_invocation_summary(out, source)
+        }
         Failure::ActorExited(actor) => write!(out, "actor {actor} has exited"),
         Failure::Cancelled { actor } => write!(out, "actor {actor} invocation was cancelled"),
         Failure::Rejected { actor, detail, .. } => {
@@ -1536,6 +1544,7 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
         })
         .unwrap_or_else(|| json!({}));
     if let Some(invocation) = invocation {
+        add_request_reply_refusal(&mut metadata, invocation);
         metadata["publication"] = bounded_failure_metadata(&invocation.publication())
             .unwrap_or_else(|| reduced_publication_metadata(invocation.publication()));
         metadata["items"] = if receipt_values_fit_projection(invocation.receipts()) {
@@ -1590,6 +1599,9 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
                     metadata["class"] = json!(diagnostic.class);
                     metadata["phase"] = json!(diagnostic.phase);
                 }
+                if invocation.is_some_and(|failure| failure.request_reply_refusal().is_some()) {
+                    metadata["requestReplyRefusalOmitted"] = json!(true);
+                }
                 add_failure_recovery(&mut metadata, operation);
                 ToolFailure::with_metadata(message, metadata)
             }
@@ -1598,6 +1610,26 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
         ToolFailure::with_metadata(message, metadata)
     };
     ProviderError::Tool(failure)
+}
+
+/// Failure metadata is observation only; the native request owner already made
+/// the admission decision. Keep omission explicit when operation identities
+/// exceed the provider's bounded failure receipt.
+fn add_request_reply_refusal(
+    metadata: &mut Value,
+    failure: &exomonad_actor::KernelInvocationFailure,
+) {
+    if let Some((request, refusal)) = failure.request_reply_refusal() {
+        #[derive(serde::Serialize)]
+        struct Receipt<'a> {
+            request: exomonad_actor::RequestId,
+            refusal: &'a exomonad_actor::RequestReplyAdmissionError,
+        }
+        match bounded_failure_metadata(&Receipt { request, refusal }) {
+            Some(value) => metadata["requestReplyRefusal"] = value,
+            None => metadata["requestReplyRefusalOmitted"] = json!(true),
+        }
+    }
 }
 
 fn workbench_publication_context(
@@ -2399,6 +2431,64 @@ mod round_control_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reply_refusal_metadata_retains_exact_pending_identities_and_explicit_omission() {
+        use exomonad_actor::{
+            HostedInvocationState, HostedPendingInvocation, KernelInvocationFailure,
+            RequestReplyAdmissionError,
+        };
+        let pending = [
+            HostedInvocationState::Queued,
+            HostedInvocationState::Running,
+            HostedInvocationState::Unconfirmed,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| HostedPendingInvocation {
+            invocation: ToolInvocationContext::original(exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "run".into(),
+                    actor: "/child".into(),
+                    incarnation: "epoch".into(),
+                },
+                request_id: "provider-request".into(),
+                call_id: format!("domain-{index}"),
+            }),
+            name: format!("work-{index}"),
+            state,
+        })
+        .collect::<Vec<_>>();
+        let make_error = |pending| {
+            ResidentToolError::Invocation(KernelInvocationFailure::RequestReplyRefused {
+                request: exomonad_actor::RequestId(17),
+                refusal: RequestReplyAdmissionError::Pending(pending),
+                source: Box::new(KernelInvocationFailure::Rejected {
+                    actor: ActorRef::first(exomonad_actor::ActorId(7)),
+                    detail: "reply refused".into(),
+                    receipts: vec![],
+                    diagnostic: None,
+                }),
+            })
+        };
+        let failure = provider_tool_error(make_error(pending.clone()), None).into_tool_failure();
+        let metadata = failure.metadata().expect("bounded typed refusal");
+        assert!(failure.metadata_omitted().is_none());
+        assert_eq!(metadata["requestReplyRefusal"]["request"], 17);
+        let refusal: RequestReplyAdmissionError =
+            serde_json::from_value(metadata["requestReplyRefusal"]["refusal"].clone()).unwrap();
+        assert_eq!(
+            refusal,
+            RequestReplyAdmissionError::Pending(pending.clone())
+        );
+        assert!(metadata.get("requestReplyRefusalOmitted").is_none());
+        let mut oversized = pending;
+        oversized[0].name = "large".repeat(20_000);
+        let failure = provider_tool_error(make_error(oversized), None).into_tool_failure();
+        let metadata = failure.metadata().expect("explicit omission fits");
+        assert_eq!(metadata["requestReplyRefusalOmitted"], true);
+        assert!(metadata.get("requestReplyRefusal").is_none());
+    }
+
     #[test]
     fn surface_version_tracks_generation_even_when_sequence_and_actor_are_unchanged() {
         let identity = harness::embedding::HostIdentity {

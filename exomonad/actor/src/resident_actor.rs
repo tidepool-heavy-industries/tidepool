@@ -3137,6 +3137,16 @@ where
             tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
         }
     }
+    // Retain the typed claim refusal even when checkpoint cleanup adds a failure.
+    let reply_refusal = result
+        .as_ref()
+        .err()
+        .and_then(|failure| match &failure.source {
+            ResidentActorWorkbenchError::RequestReplyRefused { request, refusal } => {
+                Some((*request, refusal.clone()))
+            }
+            _ => None,
+        });
     let result = match (result, checkpoint_cleanup_failure) {
         (result, None) => result,
         (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
@@ -3185,6 +3195,14 @@ where
             diagnostic: source.failure_diagnostic(),
             detail: source.to_string(),
         })
+    });
+    let result = result.map_err(|source| match reply_refusal {
+        Some((request, refusal)) => KernelInvocationFailure::RequestReplyRefused {
+            request,
+            refusal,
+            source: Box::new(source),
+        },
+        None => source,
     });
     WorkbenchFinalizationResult {
         result,
@@ -4303,9 +4321,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             return Ok(Err(crate::ReplyError::Unauthorized));
         }
         let binding = effect_owner.context_binding().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "reply tool requires its exact hosted request admission".into(),
-            )
+            ResidentActorWorkbenchError::RequestReplyRefused {
+                request,
+                refusal: crate::RequestReplyAdmissionError::Unavailable(
+                    "reply tool requires its exact hosted request admission".into(),
+                ),
+            }
         })?;
         match activation.begin_reply(&self.environment.requests, binding.as_ref(), |invocation| {
             self.workbench_executions
@@ -4313,10 +4334,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .invocation_is_terminal(invocation)
         }) {
             Ok(claim) => Ok(Ok(claim)),
-            Err(crate::RequestReplyAdmissionError::Refused(error)) => Ok(Err(error)),
-            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(
-                error.to_string(),
-            )),
+            Err(refusal) => {
+                Err(ResidentActorWorkbenchError::RequestReplyRefused { request, refusal })
+            }
         }
     }
 
@@ -7286,21 +7306,20 @@ where
             } => Box::pin(async move {
                 let support = self.environment.intrinsic_effect_support();
                 let outcome = crate::request_reply_tool::ReplyToolDefinition::prepare(
-                    installation, session, installer, &support,
+                    installation,
+                    session,
+                    installer,
+                    &support,
                 )
-                        .map_err(|error| {
-                            crate::request_effect::RequestError::RequestReplyToolInvalid(
-                                error.to_string(),
-                            )
-                        })
-                        .and_then(|definition| {
-                            self.environment
-                                .requests
-                                .register_reply_tool(context.actor, request, Arc::new(definition))
-                                .map_err(
-                                    crate::request_effect::RequestError::RequestSubmissionRejected,
-                                )
-                        });
+                .map_err(|error| {
+                    crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string())
+                })
+                .and_then(|definition| {
+                    self.environment
+                        .requests
+                        .register_reply_tool(context.actor, request, Arc::new(definition))
+                        .map_err(crate::request_effect::RequestError::RequestSubmissionRejected)
+                });
                 self.environment
                     .runner
                     .resume_value(context.clone(), continuation, outcome)

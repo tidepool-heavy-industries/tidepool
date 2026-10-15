@@ -139,6 +139,12 @@ pub type KernelCallReply = Result<MailboxValue, KernelCallFailure>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KernelInvocationFailure {
+    #[error("request {request:?} reply refused: {refusal}; {source}")]
+    RequestReplyRefused {
+        request: crate::RequestId,
+        refusal: crate::RequestReplyAdmissionError,
+        source: Box<KernelInvocationFailure>,
+    },
     #[error("actor {0} has exited")]
     ActorExited(ActorRef),
     #[error("actor {actor} invocation was cancelled")]
@@ -177,13 +183,25 @@ pub enum KernelInvocationFailure {
 }
 
 impl KernelInvocationFailure {
+    pub fn request_reply_refusal(
+        &self,
+    ) -> Option<(crate::RequestId, &crate::RequestReplyAdmissionError)> {
+        match self {
+            Self::RequestReplyRefused {
+                request, refusal, ..
+            } => Some((*request, refusal)),
+            Self::TerminalTransferFailed { source, .. } => source.request_reply_refusal(),
+            _ => None,
+        }
+    }
     pub fn failure_diagnostic(&self) -> Option<&tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
             Self::Failed { diagnostic, .. } | Self::Rejected { diagnostic, .. } => {
                 diagnostic.as_ref()
             }
             Self::Workbench(failure) => failure.diagnostic.as_ref(),
-            Self::TerminalTransferFailed { source, .. } => source.failure_diagnostic(),
+            Self::TerminalTransferFailed { source, .. }
+            | Self::RequestReplyRefused { source, .. } => source.failure_diagnostic(),
             _ => None,
         }
     }
@@ -199,7 +217,8 @@ impl KernelInvocationFailure {
             Self::Rejected { receipts, .. }
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => receipts,
-            Self::TerminalTransferFailed { source, .. } => source.receipts(),
+            Self::TerminalTransferFailed { source, .. }
+            | Self::RequestReplyRefused { source, .. } => source.receipts(),
             Self::ActorExited(_) | Self::Cancelled { .. } => &[],
         }
     }
@@ -209,7 +228,8 @@ impl KernelInvocationFailure {
         match self {
             Self::Workbench(failure) => failure.publication.as_ref(),
             Self::CleanupUnconfirmed { publication, .. } => publication.as_ref(),
-            Self::TerminalTransferFailed { source, .. } => source.publication(),
+            Self::TerminalTransferFailed { source, .. }
+            | Self::RequestReplyRefused { source, .. } => source.publication(),
             _ => None,
         }
     }
@@ -222,7 +242,8 @@ impl KernelInvocationFailure {
             Self::Rejected { receipts, .. }
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => Some(receipts),
-            Self::TerminalTransferFailed { source, .. } => source.receipts_mut(),
+            Self::TerminalTransferFailed { source, .. }
+            | Self::RequestReplyRefused { source, .. } => source.receipts_mut(),
             Self::ActorExited(_) | Self::Cancelled { .. } => None,
         }
     }

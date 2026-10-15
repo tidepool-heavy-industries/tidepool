@@ -5040,6 +5040,11 @@ fn admit_explicit_effects(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("request {request:?} reply refused: {refusal}")]
+    RequestReplyRefused {
+        request: crate::RequestId,
+        refusal: crate::RequestReplyAdmissionError,
+    },
     #[error("unsupported tool surface: {detail}")]
     UnsupportedToolSurface {
         detail: String,

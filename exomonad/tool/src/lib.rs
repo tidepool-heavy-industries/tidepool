@@ -453,8 +453,9 @@ pub enum ToolInvocationOrigin {
 }
 
 /// Original operation and nested invocation identity are retained separately.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ToolInvocationContext {
+    #[serde(flatten)]
     pub origin: ToolInvocationOrigin,
     pub call_id: String,
     pub namespace: Option<String>,
