@@ -14,9 +14,6 @@ use tidepool_handlers::{WebError, WebOperation, WebTextResponse, WebTransport};
 
 const PAGE: &str = "https://example.org/moss";
 const BODY: &str = "Moss retains water.\nIts leaves absorb moisture. λ\n";
-const TUTORIAL: &str = include_str!(
-    "../../../../exomonad/examples/workspace/.exomonad/checks/researcher-two-replies.hs"
-);
 
 #[derive(Default)]
 struct ResearchWeb(Mutex<Vec<(WebOperation, Value)>>);
@@ -42,12 +39,16 @@ fn configure_research(config: &mut super::ActorHostConfig) {
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(
         authored.join("Project/Researcher.hs"),
-        include_str!("../../../../exomonad/examples/workspace/.exomonad/Project/Researcher.hs"),
+        tidepool_testing::fixture_source(
+            "exomonad/examples/workspace/.exomonad/Project/Researcher.hs",
+        ),
     )
     .unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("fixtures/researcher_agent_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/researcher_agent_spec.hs",
+        ),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -101,17 +102,20 @@ async fn research_history(child_machines: HostedChildMachines) {
         let initial = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         let actors_before = host.context.forest.inspect_host_graph().await.unwrap().into_iter().map(|node| node.actor).collect::<Vec<_>>();
         let preflight = initial.operation("refuse-scalar");
-        initial.call("refuse-scalar", include_str!("fixtures/researcher_preflight.hs"));
+        initial.call("refuse-scalar", &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/researcher_preflight.hs"));
         let initial = host.while_operation_succeeds(&preflight,
             next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
-        initial.assert_authored_value(&host.runtime.store(),
-            &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()),
-            "refuse-scalar", "True");
+        let preflight_output = initial.settled_output("refuse-scalar");
+        let diagnostic_pages = super::test_campaign::retained_committed_display_texts(
+            &host.runtime.store(), &super::test_campaign::actor_output_origin(
+                host.runtime.run_identity(), host.context.actor.identity()), &preflight_output);
+        assert_eq!(diagnostic_pages.last().map(String::as_str), Some("True"),
+            "exact typed scalar refusal required; diagnostics: {diagnostic_pages:?}; {preflight_output}");
         let actors_after = host.context.forest.inspect_host_graph().await.unwrap().into_iter().map(|node| node.actor).collect::<Vec<_>>();
         assert_eq!(actors_after, actors_before, "typed preflight refusal leaves actor inventory unchanged");
         assert!(web.0.lock().unwrap().is_empty(), "preflight invokes no Web handlers");
         let tutorial = initial.operation("researcher-tutorial");
-        initial.call("researcher-tutorial", TUTORIAL);
+        initial.call("researcher-tutorial", &tidepool_testing::fixture_source("exomonad/examples/workspace/.exomonad/checks/researcher-two-replies.hs"));
         let first = host.while_operation_succeeds(&tutorial,
             select_hosted_script_round(&mut requests, &mut pending, HostedScriptSelection::OtherThan(&root))).await.unwrap();
         let child = first.host_identity();
