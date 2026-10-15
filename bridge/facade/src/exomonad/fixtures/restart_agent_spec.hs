@@ -14,7 +14,7 @@ agentSpec
   :: forall effects.
      ( KnownToolEffects effects, AsyncEffects effects
      , Subset effects (SyncEffects effects), Members '[FsRead, FsWrite, Sleep] effects)
-  => AgentSpec (HaskellTools effects) effects
+  => AgentSpec (WorkbenchTools effects) effects
 agentSpec = (defaultWorkbenchSpec @effects)
   { initialContext = Just (\_ -> do
       before <- Files.readFile "initializer-count.txt" >>= either (error . show) pure
