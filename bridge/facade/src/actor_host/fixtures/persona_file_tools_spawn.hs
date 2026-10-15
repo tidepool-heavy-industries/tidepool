@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
+import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
 import Tidepool.Agent.Contract
 import Tidepool.Inspection (display)
@@ -7,7 +8,7 @@ import qualified Persona.Spec as Persona
 Right fileCompanion <- do
   checked <- validateAgentSpec (Persona.agentSpec @Persona.PersonaEffects)
   case checked of
-    Left failure -> error (show failure)
+    Left failure -> error (Text.pack (show failure))
     Right approved -> do
       display (case validationReceipt (validatedAgentSpecReport approved) of
         SpecValidationReceipt names effects _ SpecProviderChecked ->
