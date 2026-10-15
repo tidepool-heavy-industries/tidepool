@@ -946,3 +946,36 @@ async fn closed_transaction_refusal_cannot_release_another_issued_provider_turn(
     );
     assert!(fixture.actor.lifecycle().run_finalized());
 }
+
+#[tokio::test]
+async fn startup_generation_distinguishes_public_bootstrap_from_selected_notebook() {
+    let fixture = NativeFixture::start().await;
+    let snapshot = fixture.admission.lifecycle.resident_snapshot().unwrap();
+    let workbench = fixture.forest.environment.runner.application_workbench();
+    // Native admission has published the public owner, but no notebook
+    // generation has been committed. A manifest predecessor is not issuance.
+    let before = workbench
+        .startup_generation(
+            snapshot.context.clone(),
+            snapshot.descriptor.clone(),
+            Some(fixture.actor.identity()),
+        )
+        .await
+        .unwrap();
+    assert!(before.is_none());
+    fixture.publish_next_native_generation().await;
+    let issued = workbench
+        .startup_generation(
+            snapshot.context,
+            snapshot.descriptor,
+            Some(fixture.actor.identity()),
+        )
+        .await
+        .unwrap()
+        .expect("actual native generation publication selects recovery");
+    assert_eq!(
+        issued.generation(),
+        tidepool_runtime::session::NotebookGenerationId::INITIAL
+    );
+    fixture.forest.shutdown().await;
+}

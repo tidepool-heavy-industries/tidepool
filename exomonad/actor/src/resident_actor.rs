@@ -7850,11 +7850,9 @@ where
             .startup_generation(context.clone(), self.descriptor.clone(), predecessor)
             .await?;
         let Some(head) = head else {
-            if predecessor.is_some() && self.environment.source_layers.is_some() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "source-backed recovery has no durable notebook generation; legacy source-backed runs require an explicit migration".into(),
-                ));
-            }
+            // Public manifests precede notebook initialization. Only the
+            // generation owner's selection proves a generation was issued;
+            // its missing or corrupt selected evidence remains an error above.
             self.initial_configuration = InitialActorConfiguration::Fresh {
                 source: self.capture_boot_source(context.actor)?,
             };
