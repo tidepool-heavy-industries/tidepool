@@ -127,7 +127,8 @@ async fn receive<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std
     if count == 0 || count as u64 == MAX_FRAME || !frame.ends_with('\n') {
         return Err(invalid_response("invalid resource service frame"));
     }
-    serde_json::from_str(&frame).map_err(|error| io_error(error.to_string()))
+    serde_json::from_str(&frame)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 async fn send<T: Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let mut frame = serde_json::to_vec(value).map_err(|error| io_error(error.to_string()))?;
