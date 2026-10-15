@@ -145,3 +145,14 @@ that the entire decoded response was read through EOF; it does not establish
 upstream semantic completeness. Identity covers those retained UTF-8 bytes
 after ureq's HTTP content decoding, not compressed wire bytes or URL identity.
 Pure text navigation uses that captured identity and text without refetching.
+
+## Conditional file publication
+
+`FsWriteCas` is the single staged conditional writer. Its receipt issues the
+resolved destination and Blake3 identity of the bytes that publication wrote,
+with either durable or visible-but-durability-unconfirmed status. A receipt is
+not a later observation of the current file. Preserve known-visible publication
+as a committed effect; never retry its rename. `writeCheckedIf` projects this
+same operation into its legacy `WriteOutcome`/`FsDurabilityUnknown` interface.
+`Tidepool.File` exposes the receipt and serializable path/version preconditions;
+those values do not issue filesystem grants or certify an actor's read history.

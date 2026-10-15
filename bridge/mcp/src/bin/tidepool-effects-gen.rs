@@ -3,10 +3,14 @@ use std::{collections::BTreeSet, path::PathBuf, process::ExitCode};
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut root = None;
+    let mut stable = None;
     let mut expected = BTreeSet::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--output-root" if root.is_none() => root = args.next().map(PathBuf::from),
+            "--stable-records-output" if stable.is_none() => {
+                stable = args.next().map(PathBuf::from)
+            }
             "--expect-output" => match args.next() {
                 Some(path) => {
                     expected.insert(path);
@@ -16,8 +20,22 @@ fn main() -> ExitCode {
             _ => return ExitCode::FAILURE,
         }
     }
+    if let Some(path) = stable {
+        if root.is_some() || !expected.is_empty() {
+            return ExitCode::FAILURE;
+        }
+        return match std::fs::write(&path, tidepool_mcp::stable_records_module()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("could not materialize {}: {error}", path.display());
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some(root) = root else {
-        eprintln!("usage: tidepool-effects-gen --output-root DIRECTORY");
+        eprintln!(
+            "usage: tidepool-effects-gen --output-root DIRECTORY | --stable-records-output FILE"
+        );
         return ExitCode::FAILURE;
     };
     let files = [

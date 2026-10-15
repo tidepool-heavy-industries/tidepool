@@ -8,9 +8,10 @@
 module Tidepool.Records.Stable
   ( FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..) ) where
 
-import Prelude (Either(..), Eq, Int, Show)
+import Prelude (Either(..), Eq, Int, Show, Maybe(..), Bool(..))
 import Data.Text (Text)
-import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
+import Tidepool.Aeson.Value (ToJSON(..), Value(..), object, (.=))
+import Tidepool.Aeson.Schema (JsonSchema(..), objectSchema)
 
 data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text | FsDurabilityUnknown Text | FsNonUtf8Path Text deriving (Show, Eq)
 instance ToJSON FsError where
@@ -22,6 +23,9 @@ instance ToJSON FsError where
     FsIo detail -> object ["tag" .= ("FsIo" :: Text), "detail" .= detail]
     FsDurabilityUnknown detail -> object ["tag" .= ("FsDurabilityUnknown" :: Text), "detail" .= detail]
     FsNonUtf8Path path -> object ["tag" .= ("FsNonUtf8Path" :: Text), "path" .= path]
+
+instance JsonSchema FsError where
+  jsonSchema _ = object [("oneOf", Array [objectSchema (Just "FsNotFound") [("path", object [("type", String "string")], True)], objectSchema (Just "FsNotUtf8") [("path", object [("type", String "string")], True)], objectSchema (Just "FsSandbox") [("detail", object [("type", String "string")], True)], objectSchema (Just "FsBadRegex") [("detail", object [("type", String "string")], True)], objectSchema (Just "FsIo") [("detail", object [("type", String "string")], True)], objectSchema (Just "FsDurabilityUnknown") [("detail", object [("type", String "string")], True)], objectSchema (Just "FsNonUtf8Path") [("path", object [("type", String "string")], True)]])]
 
 
 data GitError = GitBadRevspec Text | GitFailed Int Text | GitMalformedOutput Text | GitNonUtf8Path Text deriving (Show, Eq)

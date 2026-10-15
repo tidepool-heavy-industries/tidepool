@@ -21,8 +21,10 @@
 /// `FsError`'s Haskell decl + `ToJSON` instance. MUST stay in sync with
 /// `fs_effect_def!`'s `errors FsError [...]` block (effect_defs.rs) — the
 /// `stable_records` test catches drift between them.
-pub const FS_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
-    FsError,
+use crate::effect_defs::error_decl_text;
+
+macro_rules! fs_error_variants {
+    ($project:ident) => { $project!(FsError,
     { ctor FsNotFound, fields { path: "Text" as String },   doc "path does not exist" },
     { ctor FsNotUtf8,  fields { path: "Text" as String },   doc "file is not valid UTF-8" },
     { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
@@ -30,7 +32,39 @@ pub const FS_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
     { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
     { ctor FsDurabilityUnknown, fields { detail: "Text" as String }, doc "the write is visible but storage durability could not be confirmed" },
     { ctor FsNonUtf8Path, fields { path: "Text" as String }, doc "path is not valid UTF-8 (lossy rendering shown for diagnostics)" },
-);
+) };
+}
+pub const FS_ERROR_STABLE_DECL: &str = fs_error_variants!(error_decl_text);
+
+macro_rules! error_schema_variants {
+    ($name:ident, $({ ctor $ctor:ident, fields { $($field:ident: $hs:literal as $rust:ty),* $(,)? }, doc $doc:literal }),* $(,)?) => {
+        &[$((stringify!($ctor), &[$((stringify!($field), $hs)),*][..])),*][..]
+    };
+}
+
+/// Schema for the same tagged-object encoding as this owner's ToJSON instance.
+fn fs_error_schema_decl() -> String {
+    let variants: &[(&str, &[(&str, &str)])] = fs_error_variants!(error_schema_variants);
+    let alternatives = variants
+        .iter()
+        .map(|(ctor, fields)| {
+            let fields = fields
+                .iter()
+                .map(|(name, ty)| {
+                    assert_eq!(
+                        *ty, "Text",
+                        "extend the schema projection when adding a non-text FsError field"
+                    );
+                    format!("(\"{name}\", object [(\"type\", String \"string\")], True)")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("objectSchema (Just \"{ctor}\") [{fields}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("instance JsonSchema FsError where\n  jsonSchema _ = object [(\"oneOf\", Array [{alternatives}])]\n")
+}
 
 /// `GitError`'s Haskell decl + `ToJSON` instance. MUST stay in sync with
 /// `git_effect_def!`'s `errors GitError [...]` block (effect_defs.rs).
@@ -88,10 +122,12 @@ pub fn stable_records_module() -> String {
         "-- test (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).\n",
     );
     out.push_str("module Tidepool.Records.Stable\n  ( FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..) ) where\n\n");
-    out.push_str("import Prelude (Either(..), Eq, Int, Show)\n");
+    out.push_str("import Prelude (Either(..), Eq, Int, Show, Maybe(..), Bool(..))\n");
     out.push_str("import Data.Text (Text)\n");
-    out.push_str("import Tidepool.Aeson.Value (ToJSON(..), object, (.=))\n\n");
+    out.push_str("import Tidepool.Aeson.Value (ToJSON(..), Value(..), object, (.=))\nimport Tidepool.Aeson.Schema (JsonSchema(..), objectSchema)\n\n");
     out.push_str(FS_ERROR_STABLE_DECL);
+    out.push('\n');
+    out.push_str(&fs_error_schema_decl());
     out.push_str("\n\n");
     out.push_str(GIT_ERROR_STABLE_DECL);
     out.push_str("\n\n");

@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -11,15 +12,28 @@ module Tidepool.File
   , snapshotText
   , snapshotVersion
   , writeSnapshot
+  , FileReference(..)
+  , Publication(..)
+  , CommitOutcome(..)
+  , snapshotReference
+  , contentVersionText
+  , writeSnapshotReceipt
+  , createFile
+  , replaceFile
   ) where
 
 import Prelude hiding (FilePath)
-import Control.Monad.Freer (Eff, Member)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import Tidepool.FilePath (FilePath)
 import Tidepool.Effects.Authored
-  ( FsRead, FsWrite, FsSnapshot(..), readSnapshotRaw, writeCheckedIf )
+  ( FsRead, FsWrite(..), FsSnapshot(..), FsWriteReceipt(..), FsPublication(..), readSnapshotRaw, writeCheckedIf )
 import Tidepool.Records (FsError, WriteOutcome)
+import GHC.Generics (Generic)
+import Data.Proxy (Proxy(..))
+import qualified Tidepool.Data.Text as T
+import Tidepool.Aeson
+import Tidepool.Aeson.Schema (JsonSchema(..), objectSchema)
 import Tidepool.Inspection.Display (Display(..), displayRecord)
 
 -- | Content identity, not a monotonic revision. Restoring identical contents
@@ -70,3 +84,61 @@ writeSnapshot :: Member FsWrite effects
   => FileSnapshot -> Text -> Eff effects (Either FsError WriteOutcome)
 writeSnapshot (FileSnapshot target _ (ContentVersion version)) =
   writeCheckedIf (Just version) target
+
+-- | A serializable content precondition, not a filesystem grant or read-history
+-- certificate. The path is the resolved destination returned by readSnapshot.
+data FileReference = FileReference { referencePath :: FilePath, referenceVersion :: ContentVersion }
+  deriving (Eq, Show, Generic)
+instance ToJSON FileReference where
+  toJSON (FileReference path version) = object ["path" .= path, "version" .= version]
+instance FromJSON FileReference where
+  parseJSON = withObject "FileReference" $ \o -> FileReference <$> o .: "path" <*> o .: "version"
+instance JsonSchema FileReference where
+  jsonSchema _ = objectSchema Nothing [("path", jsonSchema (Proxy :: Proxy Text), True), ("version", jsonSchema (Proxy :: Proxy ContentVersion), True)]
+
+contentVersionText :: ContentVersion -> Text
+contentVersionText (ContentVersion version) = version
+instance ToJSON ContentVersion where toJSON = toJSON . contentVersionText
+instance FromJSON ContentVersion where
+  parseJSON = withText "ContentVersion" $ \text ->
+    if T.length text == 64 && T.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) text
+      then pure (ContentVersion text)
+      else Error "ContentVersion must be a 64-character lowercase hexadecimal Blake3 digest"
+instance JsonSchema ContentVersion where
+  jsonSchema _ = object [("type", String "string"), ("pattern", String "^[0-9a-f]{64}$")]
+
+snapshotReference :: FileSnapshot -> FileReference
+snapshotReference snapshot = FileReference (snapshotPath snapshot) (snapshotVersion snapshot)
+
+data Publication = Durable | VisibleDurabilityUnconfirmed Text deriving (Eq, Show, Generic)
+instance ToJSON Publication
+instance JsonSchema Publication
+
+-- Conflict retains the requested target text; only Published issues a resolved path.
+data CommitOutcome
+  = Published { writtenFile :: FileReference, publication :: Publication }
+  | Conflict { requestedPath :: FilePath, expectedVersion :: Maybe ContentVersion, actualVersion :: Maybe ContentVersion }
+  deriving (Eq, Show, Generic)
+instance ToJSON CommitOutcome
+instance JsonSchema CommitOutcome
+
+-- | The receipt names this publication, not the file's state after return.
+-- VisibleDurabilityUnconfirmed is a committed effect: never replay that write.
+writeSnapshotReceipt :: Member FsWrite effects => FileSnapshot -> Text -> Eff effects (Either FsError CommitOutcome)
+writeSnapshotReceipt snapshot = replaceFile (snapshotReference snapshot)
+
+createFile :: Member FsWrite effects => FilePath -> Text -> Eff effects (Either FsError CommitOutcome)
+createFile = writeReceipt Nothing
+
+replaceFile :: Member FsWrite effects => FileReference -> Text -> Eff effects (Either FsError CommitOutcome)
+replaceFile (FileReference path version) = writeReceipt (Just version) path
+
+writeReceipt :: Member FsWrite effects => Maybe ContentVersion -> FilePath -> Text -> Eff effects (Either FsError CommitOutcome)
+writeReceipt expected path contents = do
+  result <- send (FsWriteCas path (contentVersionText <$> expected) contents)
+  pure $ case result of
+    Left err -> Left err
+    Right (Left actual) -> Right (Conflict path expected (ContentVersion <$> actual))
+    Right (Right (FsWriteReceipt target digest state)) -> Right (Published
+      (FileReference target (ContentVersion digest))
+      (case state of FsDurable -> Durable; FsVisibleDurabilityUnconfirmed detail -> VisibleDurabilityUnconfirmed detail))

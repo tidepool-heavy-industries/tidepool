@@ -1154,7 +1154,7 @@ macro_rules! fs_write_effect_def {
             req FsWriteReq,
             decl_fn fs_write_decl,
             description ["Mutate files (sandboxed to server working directory)."],
-            type_defs [],
+            type_defs ["data FsPublication = FsDurable | FsVisibleDurabilityUnconfirmed Text deriving (Show, Eq, Generic)\ninstance ToJSON FsPublication\ninstance JsonSchema FsPublication", "data FsWriteReceipt = FsWriteReceipt { fsWrittenPath :: Text, fsWrittenHash :: Text, fsPublication :: FsPublication } deriving (Show, Eq, Generic)\ninstance ToJSON FsWriteReceipt\ninstance JsonSchema FsWriteReceipt"],
             errors FsError [
                 { ctor FsNotFound, fields { path: "Text" as String },   doc "path does not exist" },
                 { ctor FsNotUtf8,  fields { path: "Text" as String },   doc "file is not valid UTF-8" },
@@ -1171,7 +1171,7 @@ macro_rules! fs_write_effect_def {
                   ret "()", errors FsError },
                 { ctor FsWriteCas, method fs_write_cas,
                   args { path: "Text" as String, expected: "Maybe Text" as Option<String>, content: "Text" as String },
-                  ret "(Either (Maybe Text) ())", errors FsError },
+                  ret "(Either (Maybe Text) FsWriteReceipt)", errors FsError },
             ],
             helpers [
                 { name writeFile, raw ["-- | Write CONTENT directly to PATH, creating missing parent directories.\n-- Sandbox and I/O failures are Left FsError. An I/O failure can leave a\n-- truncated or partially written file; success does not confirm durability.\n-- This write does not take the compare-and-swap directory lock. Use\n-- writeCheckedIf for a hash precondition and staged durable publication.\nwriteFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
@@ -1181,7 +1181,7 @@ macro_rules! fs_write_effect_def {
                 { name updateJ, raw ["-- | Decode {file, old, new} and call update.\n-- Missing or non-string fields return UpdateOneRejected without writing.\n-- Read failures and match-count rejections follow update; storage write\n-- failures abort through liftEither and can leave partial contents.\nupdateJ :: forall effs. Members '[FsRead, FsWrite] effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
                 { name insertAfter, raw ["-- | Insert a block after the unique line containing ANCHOR.\n-- A read failure or a match count other than one returns\n-- InsertAfterRejected without writing. Success returns InsertAfterApplied.\n-- A direct-write failure aborts through liftEither and can leave partial\n-- contents. This read/write sequence does not serialize competing writers.\ninsertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let ls = lines src\n          n = length (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> T.pack (show n) <> \" lines in \" <> path) (Just n))"] },
                 { name writeChecked, raw ["-- | Write only if every supplied Boolean check is True.\n-- A failed check returns WriteBlocked without writing. Otherwise a\n-- successful direct write returns Written; storage failures abort through\n-- liftEither and can leave partial contents. The supplied checks are\n-- already computed and do not serialize competing writers.\nwriteChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
-                { name writeCheckedIf, raw ["-- | Write CONTENT only if the current Blake3 hash equals EXPECTED.\n-- Get EXPECTED from fileHash, never from file contents. Nothing expects\n-- absence (create-only). Writers taking the same parent-directory advisory\n-- lock serialize the comparison and staged publication; writers ignoring\n-- that lock can race. A hash mismatch returns Right (WriteConflict path\n-- expected actual) without writing. Success returns Right (Written path 1).\n-- Sandbox and storage failures return Left FsError. FsIo occurs before\n-- publication; FsDurabilityUnknown means the new contents are visible but\n-- durability is unconfirmed, so never blindly retry it. On WriteConflict,\n-- re-read the file and hash, recompute the edit, then retry.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs (Either FsError WriteOutcome)\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Left err -> Left err\n    Right (Right ()) -> Right (Written path 1)\n    Right (Left actual) -> Right (WriteConflict path expected actual)"] },
+                { name writeCheckedIf, raw ["-- | Write CONTENT only if the current Blake3 hash equals EXPECTED.\n-- Get EXPECTED from fileHash, never from file contents. Nothing expects\n-- absence (create-only). Writers taking the same parent-directory advisory\n-- lock serialize the comparison and staged publication; writers ignoring\n-- that lock can race. A hash mismatch returns Right (WriteConflict path\n-- expected actual) without writing. Success returns Right (Written path 1).\n-- Sandbox and storage failures return Left FsError. FsIo occurs before\n-- publication; FsDurabilityUnknown means the new contents are visible but\n-- durability is unconfirmed, so never blindly retry it. On WriteConflict,\n-- re-read the file and hash, recompute the edit, then retry.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs (Either FsError WriteOutcome)\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Left err -> Left err\n    Right (Right receipt) -> case fsPublication receipt of\n      FsDurable -> Right (Written path 1)\n      FsVisibleDurabilityUnconfirmed detail -> Left (FsDurabilityUnknown detail)\n    Right (Left actual) -> Right (WriteConflict path expected actual)"] },
             ],
         }
     };
@@ -1345,14 +1345,20 @@ mod tests {
             write.constructors,
             &[
                 "FsWrite :: Text -> Text -> FsWrite (Either FsError ())",
-                "FsWriteCas :: Text -> Maybe Text -> Text -> FsWrite (Either FsError (Either (Maybe Text) ()))",
+                "FsWriteCas :: Text -> Maybe Text -> Text -> FsWrite (Either FsError (Either (Maybe Text) FsWriteReceipt))",
             ]
         );
         assert!(!write.constructors.iter().any(|c| c.contains("FsRead ::")));
 
         // `stable_errors true`: type_defs carries neither decl inline.
-        assert!(read.type_defs.is_empty());
-        assert!(write.type_defs.is_empty());
+        assert!(!read
+            .type_defs
+            .iter()
+            .any(|definition| definition.starts_with("data FsError")));
+        assert!(!write
+            .type_defs
+            .iter()
+            .any(|definition| definition.starts_with("data FsError")));
     }
 
     /// Every Git verb threads `Either GitError`. `stable_errors

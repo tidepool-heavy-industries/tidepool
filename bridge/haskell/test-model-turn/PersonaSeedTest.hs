@@ -14,7 +14,7 @@ import Control.Monad.Freer.State (State, get, modify, runState)
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Test.Tasty.HUnit (assertEqual, assertBool)
 import Tidepool.Aeson
-import Tidepool.Effects.Core (FsWrite(..), Web(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
+import Tidepool.Effects.Core (FsWrite(..), FsWriteReceipt(..), FsPublication(..), Web(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
 import Tidepool.Internal.ActorProfiles (ActorEffects, actorEffectName)
 import Tidepool.Form.Wire (prepareForm, decodeSubmission)
 import qualified Tidepool.Form as F
@@ -29,7 +29,7 @@ writeHost (FsWrite file body) = modify (Map.insert file body) >> pure (Right ())
 writeHost (FsWriteCas file expected body) = do
   files <- get @(Map.Map Text Text)
   case (Map.lookup file files, expected) of
-    (Nothing, Nothing) -> modify (Map.insert file body) >> pure (Right (Right ()))
+    (Nothing, Nothing) -> modify (Map.insert file body) >> pure (Right (Right (FsWriteReceipt file "published-version" FsDurable)))
     _ -> pure (Right (Left (Just "existing-file-hash")))
 
 jevUnavailable :: Jev a -> Eff '[] a

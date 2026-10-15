@@ -8,6 +8,8 @@ import qualified Tidepool.Effects.Core as Core
 import qualified Tidepool.Effects.Authored as Authored
 import qualified Tidepool.Worktree as Worktree
 import qualified Tidepool.Event as Event
+import qualified Tidepool.File as File
+import Tidepool.Records (FsError)
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Contract (AgentSpec, NoTools, defaultSpec)
 import qualified Tidepool.Model as Model
@@ -92,3 +94,6 @@ faithfulWebText = Core.webFetchTextRaw
 
 retainedWebBody :: Core.WebText -> (Text, Text, Core.WebBodyCompleteness)
 retainedWebBody body = (Core.webBodyIdentity body, Core.webText body, Core.webCompleteness body)
+
+fileReceipt :: Member Core.FsWrite effects => File.FileReference -> Text -> Eff effects (Either FsError File.CommitOutcome)
+fileReceipt = File.replaceFile

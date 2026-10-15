@@ -56,6 +56,57 @@ struct FsSnapshot {
     hash: String,
 }
 
+/// Facts issued by the conditional publication owner, not a later observation.
+#[derive(
+    tidepool_bridge_derive::ToHaskell,
+    tidepool_bridge_derive::FromHaskell,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+struct FsWriteReceipt {
+    path: String,
+    hash: String,
+    publication: FsPublication,
+}
+#[derive(
+    tidepool_bridge_derive::ToHaskell,
+    tidepool_bridge_derive::FromHaskell,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+enum FsPublication {
+    FsDurable,
+    FsVisibleDurabilityUnconfirmed(String),
+}
+
+impl FsWriteReceipt {
+    fn published(
+        path: String,
+        contents: &[u8],
+        result: Result<tidepool_atomic_write::PublishedWrite, tidepool_atomic_write::PublishError>,
+    ) -> Result<Self, FsError> {
+        let publication = match result {
+            Ok(_) => FsPublication::FsDurable,
+            Err(tidepool_atomic_write::PublishError::BeforeRename(error)) => {
+                return Err(FsError::FsIo(error.to_string()))
+            }
+            Err(tidepool_atomic_write::PublishError::PublishedDurabilityUnconfirmed {
+                source,
+                ..
+            }) => FsPublication::FsVisibleDurabilityUnconfirmed(source.to_string()),
+        };
+        Ok(Self {
+            path,
+            hash: blake3_hex(contents),
+            publication,
+        })
+    }
+}
+
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
 
 pub fn pattern_mentions(pattern: &str, dir: &str) -> bool {
@@ -598,8 +649,12 @@ impl FsBackend {
         path: String,
         expected: Option<String>,
         contents: String,
-    ) -> Result<Result<(), Option<String>>, FsError> {
+    ) -> Result<Result<FsWriteReceipt, Option<String>>, FsError> {
         let resolved = self.resolve(&path)?;
+        let receipt_path = resolved
+            .to_str()
+            .ok_or_else(|| FsError::FsNonUtf8Path(resolved.to_string_lossy().into_owned()))?
+            .to_owned();
         let parent = resolved
             .parent()
             .map(Path::to_path_buf)
@@ -623,16 +678,11 @@ impl FsBackend {
 
             let staged = tidepool_atomic_write::stage_durable(&resolved, contents.as_bytes())
                 .map_err(|error| FsError::FsIo(error.to_string()))?;
-            staged.publish().map_err(|error| match error {
-                tidepool_atomic_write::PublishError::BeforeRename(error) => {
-                    FsError::FsIo(error.to_string())
-                }
-                tidepool_atomic_write::PublishError::PublishedDurabilityUnconfirmed {
-                    source,
-                    ..
-                } => FsError::FsDurabilityUnknown(source.to_string()),
-            })?;
-            Ok(Ok(()))
+            Ok(Ok(FsWriteReceipt::published(
+                receipt_path,
+                contents.as_bytes(),
+                staged.publish(),
+            )?))
         })
         .map_err(|error| FsError::FsIo(error.to_string()))?
     }
@@ -722,6 +772,86 @@ mod tests {
     use tidepool_repr::DataConTable;
 
     #[test]
+    fn publication_receipt_retains_exact_identity_after_later_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = FsBackend::new(dir.path().to_owned());
+        let receipt = owner
+            .fs_write_cas("file".into(), None, "published λ\n".into())
+            .unwrap()
+            .unwrap();
+        owner.fs_write("file".into(), "later".into()).unwrap();
+        assert_eq!(receipt.hash, blake3_hex("published λ\n".as_bytes()));
+        assert_eq!(receipt.path, dir.path().join("file").to_str().unwrap());
+        assert_ne!(receipt.hash, owner.fs_hash("file".into()).unwrap().unwrap());
+    }
+
+    #[test]
+    fn publication_receipt_preserves_visible_durability_uncertainty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let body = "visible λ\r\n";
+        let publication = tidepool_atomic_write::stage_durable(&path, body.as_bytes())
+            .unwrap()
+            .publish()
+            .unwrap();
+        // Inject the typed post-publication fault at the real receipt boundary.
+        let receipt = FsWriteReceipt::published(
+            path.to_str().unwrap().into(),
+            body.as_bytes(),
+            Err(
+                tidepool_atomic_write::PublishError::PublishedDurabilityUnconfirmed {
+                    publication,
+                    source: tidepool_atomic_write::WriteError {
+                        path: dir.path().into(),
+                        source: std::io::Error::other("controlled directory sync fault"),
+                    },
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(receipt.path, path.to_str().unwrap());
+        assert_eq!(receipt.hash, blake3_hex(body.as_bytes()));
+        assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes());
+        assert!(matches!(
+            receipt.publication,
+            FsPublication::FsVisibleDurabilityUnconfirmed(_)
+        ));
+    }
+
+    #[test]
+    fn competing_creates_issue_one_publication_and_one_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers = ["one", "two"].map(|body| {
+            let root = dir.path().to_owned();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut owner = FsBackend::new(root);
+                barrier.wait();
+                (
+                    body,
+                    owner
+                        .fs_write_cas("file".into(), None, body.into())
+                        .unwrap(),
+                )
+            })
+        });
+        let outcomes = workers.map(|worker| worker.join().unwrap());
+        let winners = outcomes.iter().filter(|(_, result)| result.is_ok()).count();
+        assert_eq!(winners, 1);
+        let current = std::fs::read(dir.path().join("file")).unwrap();
+        for (body, outcome) in outcomes {
+            match outcome {
+                Ok(receipt) => {
+                    assert_eq!(current, body.as_bytes());
+                    assert_eq!(receipt.hash, blake3_hex(body.as_bytes()));
+                }
+                Err(actual) => assert_eq!(actual, Some(blake3_hex(&current))),
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_binds_resolved_path_utf8_bytes_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let mut handler = FsBackend::new(dir.path().to_owned());
@@ -762,8 +892,10 @@ mod tests {
                     Some(snapshot.hash.clone()),
                     "next".into()
                 )
-                .unwrap(),
-            Ok(())
+                .unwrap()
+                .unwrap()
+                .publication,
+            FsPublication::FsDurable
         );
         assert_eq!(
             handler
@@ -785,8 +917,10 @@ mod tests {
         assert_eq!(
             handler
                 .fs_write_cas(snapshot.path, Some(snapshot.hash), "restored".into())
-                .unwrap(),
-            Ok(())
+                .unwrap()
+                .unwrap()
+                .publication,
+            FsPublication::FsDurable
         );
     }
 
@@ -854,8 +988,10 @@ mod tests {
         assert_eq!(
             handler
                 .fs_write_cas(snapshot.path, Some(snapshot.hash), "changed".into())
-                .unwrap(),
-            Ok(())
+                .unwrap()
+                .unwrap()
+                .publication,
+            FsPublication::FsDurable
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("original")).unwrap(),
@@ -940,6 +1076,11 @@ mod tests {
                         let expected_success = current.as_ref() == Some(&snapshot.contents);
                         let result = handler.fs_write_cas(snapshot.path.clone(), Some(snapshot.hash.clone()), body.clone()).unwrap();
                         prop_assert_eq!(result.is_ok(), expected_success);
+                        if let Ok(receipt) = &result {
+                            prop_assert_eq!(&receipt.hash, &blake3_hex(body.as_bytes()));
+                            prop_assert_eq!(&receipt.publication, &FsPublication::FsDurable);
+                            prop_assert_eq!(&receipt.path, &snapshot.path);
+                        }
                         if expected_success { current = Some(body); }
                     },
                     _ => {
@@ -1316,13 +1457,21 @@ mod tests {
 
         let decode = |r: tidepool_effect::Response,
                       t: &DataConTable|
-         -> Result<Result<(), Option<String>>, FsError> {
+         -> Result<Result<FsWriteReceipt, Option<String>>, FsError> {
             FromHaskell::from_value(&response_value(r, t), t).unwrap()
         };
 
         // create-only (expected = None): file absent → writes.
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), None, "v1".to_string());
-        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(Ok(())));
+        let receipt = decode(writer.handle(req, &cx).unwrap(), &table)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.path, root.join("f.txt").to_str().unwrap());
+        assert_eq!(
+            receipt.hash,
+            blake3_hex(std::fs::read(root.join("f.txt")).unwrap().as_slice())
+        );
+        assert_eq!(receipt.publication, FsPublication::FsDurable);
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v1");
 
         // fileHash (FsHash): current digest of an existing file. Now errors-
@@ -1341,7 +1490,15 @@ mod tests {
 
         // CAS HIT: expected == current hash → writes v2.
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
-        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(Ok(())));
+        let receipt = decode(writer.handle(req, &cx).unwrap(), &table)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.path, root.join("f.txt").to_str().unwrap());
+        assert_eq!(
+            receipt.hash,
+            blake3_hex(std::fs::read(root.join("f.txt")).unwrap().as_slice())
+        );
+        assert_eq!(receipt.publication, FsPublication::FsDurable);
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v2");
 
         // CAS MISS: stale expected hash (of v1) → Left(actual = hash of v2), no write.
@@ -1420,7 +1577,7 @@ mod tests {
                 &cx,
             )
             .unwrap();
-        let decoded: Result<Result<(), Option<String>>, FsError> =
+        let decoded: Result<Result<FsWriteReceipt, Option<String>>, FsError> =
             FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
         assert!(matches!(decoded, Err(FsError::FsIo(_))));
 
@@ -1430,7 +1587,7 @@ mod tests {
                 &cx,
             )
             .unwrap();
-        let decoded: Result<Result<(), Option<String>>, FsError> =
+        let decoded: Result<Result<FsWriteReceipt, Option<String>>, FsError> =
             FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
         assert!(matches!(decoded, Err(FsError::FsSandbox(_))));
     }

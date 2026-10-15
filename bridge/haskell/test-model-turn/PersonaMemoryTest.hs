@@ -17,7 +17,7 @@ import Test.Tasty.HUnit (assertBool, assertEqual)
 import Test.Tasty.QuickCheck (testProperty, (===))
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Tidepool.Agent.Contract (StartupInput(..), ContextSeed(..), ContextSection(..))
-import Tidepool.Effects.Core (FsRead(..), FsWrite(..), FsSnapshot(..), ContextReadWrite(..), ContextDocument(..), ContextReference(..))
+import Tidepool.Effects.Core (FsRead(..), FsWrite(..), FsWriteReceipt(..), FsPublication(..), FsSnapshot(..), ContextReadWrite(..), ContextDocument(..), ContextReference(..))
 import Tidepool.Records (FsError(..))
 import qualified Tidepool.Agent.Context as C
 import qualified Persona.Memory as Memory
@@ -34,7 +34,7 @@ writeHost :: Member (State Files) effects => FsWrite a -> Eff effects a
 writeHost (FsWriteCas file Nothing body) = do
   files <- get @Files
   if Map.member file files then pure (Right (Left (Just "existing")))
-  else modify @Files (Map.insert file (Right body)) >> pure (Right (Right ()))
+  else modify @Files (Map.insert file (Right body)) >> pure (Right (Right (FsWriteReceipt file "published-version" FsDurable)))
 writeHost _ = error "startup must only create missing seeds"
 render :: Files -> Either FsError Text
 render files = fst $ run $ runState files $ interpret readHost O.renderMemory
@@ -89,7 +89,7 @@ personaMemoryTests = testGroup "persona memory"
           writer :: FsWrite a -> Eff '[State Int] a
           writer (FsWriteCas file expected body)
             | file == "memory" && expected == Just "observed-version" && body == "oldnew" =
-                modify @Int (+1) >> pure (Left (FsDurabilityUnknown "visible; sync unconfirmed"))
+                modify @Int (+1) >> pure (Right (Right (FsWriteReceipt file "published-version" (FsVisibleDurabilityUnconfirmed "visible; sync unconfirmed"))))
           writer _ = error "revision changed its captured destination, version or proposal"
           (result, attempts) = run $ runState (0 :: Int) $
             interpret writer (interpret reader (Memory.reviseAt "memory" (<> "new")))
