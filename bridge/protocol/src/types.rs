@@ -28,7 +28,7 @@ use crate::hs::HsType;
 /// One supporting type declaration in an effect's contract.
 ///
 /// A `TypeDef` is the single source for up to four artifacts: the Haskell `data`
-/// declaration, its `ToJSON` instance, the Rust wire struct/enum in
+/// declaration, its JSON instances, the Rust wire struct/enum in
 /// `tidepool-bridge-effects`, and the mechanical domain↔wire adapters in
 /// `tidepool-handlers`.
 #[derive(Clone, Debug)]
@@ -48,7 +48,7 @@ pub struct TypeDef {
     pub haskell_module: Option<&'static str>,
     /// What kind of declaration this is.
     pub shape: TypeShape,
-    /// Which `ToJSON` instance to emit, if any.
+    /// Which JSON instances to emit, if any.
     pub json: JsonInstance,
     /// The derive set on the Rust wire type.
     pub derives: WireDerives,
@@ -149,7 +149,7 @@ impl TypeDef {
         format!("data {name} = {body} deriving ({derives})")
     }
 
-    /// The `instance ToJSON …` declaration, or `None` for
+    /// The JSON instance declarations, or `None` for
     /// [`JsonInstance::None`].
     ///
     /// # Panics
@@ -163,7 +163,7 @@ impl TypeDef {
         match &self.json {
             JsonInstance::None => None,
             JsonInstance::Generic => Some(format!(
-                "instance ToJSON {name}\ninstance JsonSchema {name}"
+                "instance ToJSON {name}\ninstance FromJSON {name}\ninstance JsonSchema {name}"
             )),
             JsonInstance::Transparent => {
                 let TypeShape::Identity { hs_binder, .. } = &self.shape else {
@@ -509,16 +509,17 @@ fn validate_record_fields(
 // ToJSON
 // ---------------------------------------------------------------------------
 
-/// Which `ToJSON` instance a [`TypeDef`] emits.
+/// Which JSON instances a [`TypeDef`] emits.
 ///
 /// These instances are NEEDED: an effect's `errors` block templates a `ToJSON`
 /// for its error ADT, so every type reachable from an error field needs one, and
-/// the vendored generic default only covers single-constructor records. They
-/// were also the largest surviving raw-Haskell hatch in the registry. Four
-/// shapes cover every one of them, so they are policy rather than source.
+/// the matching generic decoder preserves typed fields when observations are
+/// retained as JSON. Custom representations remain explicit serialization
+/// policy, with no inferred inverse.
 #[derive(Clone, Debug)]
 pub enum JsonInstance {
-    /// Derive Generic and publish the matching structured JSON codec and schema.
+    /// Derive Generic and publish matching ToJSON, FromJSON and JsonSchema
+    /// instances for records, nullary sums and tagged payload sums.
     Generic,
     /// No instance emitted.
     None,

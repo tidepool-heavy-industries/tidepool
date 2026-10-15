@@ -16,8 +16,8 @@ pub fn web_decl() -> crate::EffectDecl {
         type_defs: &[
             "data WebBodyCompleteness = WebTransportEof deriving (Show, Eq, Generic)",
             "data WebText = WebText { webRequestedUrl :: Text, webFinalUrl :: Text, webStatus :: Int, webContentType :: Maybe Text, webText :: Text, webBodyIdentity :: Text, webRetainedBytes :: Int, webByteLimit :: Int, webCompleteness :: WebBodyCompleteness } deriving (Show, Eq, Generic)",
-            "instance ToJSON WebBodyCompleteness\ninstance JsonSchema WebBodyCompleteness",
-            "instance ToJSON WebText\ninstance JsonSchema WebText",
+            "instance ToJSON WebBodyCompleteness\ninstance FromJSON WebBodyCompleteness\ninstance JsonSchema WebBodyCompleteness",
+            "instance ToJSON WebText\ninstance FromJSON WebText\ninstance JsonSchema WebText",
             "data WebError = WebUnavailable Text | WebInvalidRequest Text | WebTransport Text | WebProvider Text | WebDecode Text | WebBudgetExceeded Text deriving (Show, Eq)\ninstance ToJSON WebError where\n  toJSON e = case e of\n    WebUnavailable detail -> object [\"tag\" .= (\"WebUnavailable\" :: Text), \"detail\" .= detail]\n    WebInvalidRequest detail -> object [\"tag\" .= (\"WebInvalidRequest\" :: Text), \"detail\" .= detail]\n    WebTransport detail -> object [\"tag\" .= (\"WebTransport\" :: Text), \"detail\" .= detail]\n    WebProvider detail -> object [\"tag\" .= (\"WebProvider\" :: Text), \"detail\" .= detail]\n    WebDecode detail -> object [\"tag\" .= (\"WebDecode\" :: Text), \"detail\" .= detail]\n    WebBudgetExceeded detail -> object [\"tag\" .= (\"WebBudgetExceeded\" :: Text), \"detail\" .= detail]\n",
         ],
         extra_imports: &[],

@@ -11,7 +11,8 @@ pub fn jev_decl() -> crate::EffectDecl {
             "JevAskWith :: Text -> Jev (Either JevCallError Text)",
         ],
         type_defs: &[
-            "data JevCallError = JevUnconfigured | JevCallCap | JevTransport Text | JevTimeout | JevHttp Int Text | JevCircuitOpen Int Int | JevClientSetup Text | JevBodyLimit | JevMalformed Text deriving (Show, Eq)",
+            "data JevCallError = JevUnconfigured | JevCallCap | JevTransport Text | JevTimeout | JevHttp Int Text | JevCircuitOpen Int Int | JevClientSetup Text | JevBodyLimit | JevMalformed Text deriving (Show, Eq, Generic)",
+            "instance ToJSON JevCallError\ninstance FromJSON JevCallError\ninstance JsonSchema JevCallError",
         ],
         extra_imports: &[],
         helpers: &[],

@@ -65,7 +65,7 @@ pub fn jev() -> Effect {
                     variant("JevMalformed", vec![HsType::Text]),
                 ],
             },
-            json: JsonInstance::None,
+            json: JsonInstance::Generic,
             derives: CALL_ERROR_DERIVES,
             domain: None,
             doc: &[],
