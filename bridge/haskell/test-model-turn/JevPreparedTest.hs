@@ -29,6 +29,7 @@ jevPreparedTests = testGroup "jev-prepared"
     : testCase "explicit retained executions each issue one request" explicitExecutions
     : testCase "observation uses Jev alone and preserves the typed refusal" observeWithoutConsole
     : testCase "composed queries retain grouping and typed host failure" composedQueries
+    : testCase "installed batch groups equal evidence and retains refusal" installedBatch
     : testCase "empty query uses no host effect" emptyQuery
     : testCase "usage display preserves unknown versus measured zero" usageDisplay
     : [testCase ("one host call retains " ++ show failure) (retainsFailure failure)
@@ -144,3 +145,19 @@ emptyQuery = do
   assertEqual "pure query result" (Right 17) (J.result observed)
   assertEqual "no fabricated provider response" 0 (length (J.observations observed))
   assertEqual "no host call" 0 calls
+
+installedBatch :: IO ()
+installedBatch = do
+  let query = Composed.batchQuestions "repair the E0061 call" Composed.sampleContinuations
+  case J.prepareQuery J.jevLatest query of
+    Left issue -> error (show issue)
+    Right ready -> do
+      assertEqual "independent questions share one evidence group" [2]
+        (map (length . J.groupOccurrences) (J.queryGroups ready))
+      let (observed, calls) = run (runState (0 :: Int)
+            (interpret (reject JevTimeout) (Composed.observeBatch "repair the E0061 call" Composed.sampleContinuations)))
+      assertEqual "one host attempt" 1 calls
+      assertEqual "the complete failed observation survives" 1 (length (J.observations observed))
+      case J.result observed of
+        Left actual -> assertEqual "typed transport failure" (J.CallFailed (J.Transport JevTimeout)) actual
+        Right _ -> error "refused request produced a selection"

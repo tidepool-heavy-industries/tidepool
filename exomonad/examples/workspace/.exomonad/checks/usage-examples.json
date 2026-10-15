@@ -59,6 +59,204 @@
         "Project/Researcher.hs"
       ],
       "requirements": "Run in a resident workbench with AgentLaunch, Replies, Watches and Console available and a configured Luna model. Project.Researcher must be on the selected source path. The child requires Web support and network access for search and open; the caller does not need Web. SameDir shares the writable selected workspace. Validates the child spec, awaits a sourced Report, then awaits a distinct FollowUp using the active reply tool for each request."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "runQuery",
+      "namespace": "value",
+      "source": "checks/jev-batch-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "question",
+      "namespace": "value",
+      "source": "checks/jev-batch-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "choiceWeights",
+      "namespace": "value",
+      "source": "checks/jev-batch-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "customPolicy",
+      "namespace": "value",
+      "source": "checks/jev-batch-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "settle",
+      "namespace": "value",
+      "source": "checks/jev-batch-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+    },
+    {
+      "module": "Examples.JevComposedWorkflow",
+      "name": "captureThenAssess",
+      "namespace": "value",
+      "source": "checks/jev-lookup-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "recordings",
+      "namespace": "value",
+      "source": "checks/jev-recording-save-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run save before replay. Requires Jev, FsWrite, Console and a configured Jev provider. Writes .exomonad/state/jev-example.json using ordinary filesystem effects; direct write success does not promise durability. Requires pinned Jev.Core sources and matched native JSON runtime. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "replayProgram",
+      "namespace": "value",
+      "source": "checks/jev-recording-replay-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs",
+        "checks/jev-recording-save-example.hs"
+      ],
+      "requirements": "First run checks/jev-recording-save-example.hs. Edit a continuation payload in Examples/JevComposedWorkflow.hs and publish changed source through ordinary source reload before reconstructing this program. Requires FsRead and Console, pinned Jev.Core source root and matched Tidepool native JSON runtime. Replay makes zero provider calls; no Jev credential is needed. Payload-only changes are accepted; changed question/evidence/model is refused. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Operators",
+      "name": "replayQuery",
+      "namespace": "value",
+      "source": "checks/jev-recording-replay-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs",
+        "checks/jev-recording-save-example.hs"
+      ],
+      "requirements": "First run checks/jev-recording-save-example.hs. Edit a continuation payload in Examples/JevComposedWorkflow.hs and publish changed source through ordinary source reload before reconstructing this program. Requires FsRead and Console, pinned Jev.Core source root and matched Tidepool native JSON runtime. Replay makes zero provider calls; no Jev credential is needed. Payload-only changes are accepted; changed question/evidence/model is refused. See checks/jev-composition.md."
+    },
+    {
+      "module": "Project.Lookup",
+      "name": "capture",
+      "namespace": "value",
+      "source": "checks/jev-lookup-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
+    },
+    {
+      "module": "Tidepool.Lookup.Tools",
+      "name": "captureWith",
+      "namespace": "value",
+      "source": "checks/jev-lookup-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Requires Lookup, Reflect, Jev and Console, the workspace pinned Jev.Core source root, matched Tidepool runtime, and configured Jev provider. Capture retains original candidates, ranking Evaluation and bounded exact view-fenced expansion; dependent reassessment includes bounded content/status with truncation flags. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Recording",
+      "name": "encodeArchive",
+      "namespace": "value",
+      "source": "checks/jev-recording-save-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs"
+      ],
+      "requirements": "Run save before replay. Requires Jev, FsWrite, Console and a configured Jev provider. Writes .exomonad/state/jev-example.json using ordinary filesystem effects; direct write success does not promise durability. Requires pinned Jev.Core sources and matched native JSON runtime. See checks/jev-composition.md."
+    },
+    {
+      "module": "Jev.Recording",
+      "name": "decodeArchive",
+      "namespace": "value",
+      "source": "checks/jev-recording-replay-example.hs",
+      "prerequisites": [
+        "Examples/JevComposedWorkflow.hs",
+        "Project/EvidencePattern.hs",
+        "Project/Lookup.hs",
+        "Project/ConversationContext.hs",
+        "Jev/Operators.hs",
+        "Jev/Recording.hs",
+        "checks/jev-recording-save-example.hs"
+      ],
+      "requirements": "First run checks/jev-recording-save-example.hs. Edit a continuation payload in Examples/JevComposedWorkflow.hs and publish changed source through ordinary source reload before reconstructing this program. Requires FsRead and Console, pinned Jev.Core source root and matched Tidepool native JSON runtime. Replay makes zero provider calls; no Jev credential is needed. Payload-only changes are accepted; changed question/evidence/model is refused. See checks/jev-composition.md."
     }
   ]
 }

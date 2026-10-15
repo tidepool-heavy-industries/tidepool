@@ -830,10 +830,19 @@ test-suite model-turn-test
     Persona.Orientation
     Tidepool.Agent.Context
     JevPreparedTest
+<<<<<<< HEAD
     JevRecordingTest
     Jev.Recording
+=======
+    LookupEvidenceTest
+>>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
     Examples.JevPreparedWorkflow
     Examples.JevComposedWorkflow
+    Project.EvidencePattern
+    Project.Lookup
+    Project.ConversationContext
+    Tidepool.Lookup.Tools
+    Jev.Recording
     Examples.JevFormWorkflow
     FormJevDialogueTest
     Jev.Core

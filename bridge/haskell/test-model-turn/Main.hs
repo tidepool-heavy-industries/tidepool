@@ -17,7 +17,11 @@ import FormJevDialogueTest (formJevDialogueTests)
 import FormLifecycleTest (formLifecycleTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import JevPreparedTest (jevPreparedTests)
+<<<<<<< HEAD
 import JevRecordingTest (jevRecordingTests)
+=======
+import LookupEvidenceTest (lookupEvidenceTests)
+>>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
 
 import Prelude
 import Control.Monad (unless)
@@ -65,7 +69,11 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
+<<<<<<< HEAD
   [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+=======
+  [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+>>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
 
 scenario :: IO ()
 scenario = do
