@@ -99,7 +99,8 @@ impl WorkbenchExecutions {
     ) -> bool {
         self.0
             .get(&WorkbenchReplayKey::Hosted(invocation.clone().into()))
-            .is_some_and(|record| matches!(record.state, WorkbenchExecutionState::Terminal { .. }))
+            .is_some_and(|record| matches!(record.state, WorkbenchExecutionState::Terminal { .. })
+                && record.cell_terminal.as_ref().is_some_and(|exit| exit.cleanup_confirmed))
     }
 
     pub(super) fn display_receipt_owner(

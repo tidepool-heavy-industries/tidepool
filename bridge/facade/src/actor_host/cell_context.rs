@@ -25,6 +25,14 @@ pub(super) struct EmbeddedContextBinding {
     model: ModelResolver,
     initial_context: InitialContextObserver,
     state: Arc<Mutex<DraftState>>,
+    request_reply: Option<EmbeddedRequestReply>,
+}
+
+struct EmbeddedRequestReply {
+    activation: Arc<exomonad_actor::RequestReplyActivation>,
+    admission: harness::provider::InvocationAdmission,
+    identity: harness::embedding::HostIdentity,
+    terminal: Mutex<Option<harness::provider::InvocationTerminal>>,
 }
 
 struct DraftState {
@@ -65,6 +73,7 @@ impl EmbeddedContextBinding {
             invocation,
             model,
             initial_context,
+            request_reply: None,
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
@@ -75,6 +84,26 @@ impl EmbeddedContextBinding {
                 changed: false,
             })),
         }
+    }
+
+    pub(super) fn with_request_reply(
+        mut self,
+        activation: Arc<exomonad_actor::RequestReplyActivation>,
+        admission: Option<harness::provider::InvocationAdmission>,
+        identity: harness::embedding::HostIdentity,
+    ) -> Result<Self, String> {
+        let admission = admission.ok_or("request-scoped call has no scheduler admission")?;
+        let scope = activation.host_attachment(harness::provider::RequestActivation::new)?;
+        if admission.activation() != scope.as_ref() {
+            return Err("call admission belongs to a different request activation".into());
+        }
+        self.request_reply = Some(EmbeddedRequestReply {
+            activation,
+            admission,
+            identity,
+            terminal: Mutex::new(None),
+        });
+        Ok(self)
     }
 
     #[cfg(test)]
@@ -117,6 +146,10 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
                 ContextDisposition::Unedited
             };
         Some(ProviderCompletion {
+            activation_terminal: self
+                .request_reply
+                .as_ref()
+                .and_then(|reply| reply.terminal.lock().clone()),
             output,
             full_success,
             context,
@@ -125,6 +158,60 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
 }
 
 impl HostedContextBinding for EmbeddedContextBinding {
+    fn admit_request_reply(
+        &self,
+        activation: &exomonad_actor::RequestReplyActivation,
+        claim: &mut dyn FnMut(
+            &[exomonad_actor::HostedPendingInvocation],
+        ) -> Result<(), exomonad_actor::RequestReplyAdmissionError>,
+    ) -> Result<(), exomonad_actor::RequestReplyAdmissionError> {
+        use exomonad_actor::{
+            HostedInvocationState as NativeState, HostedPendingInvocation,
+            RequestReplyAdmissionError as Error,
+        };
+        use harness::provider::{InvocationAdmissionError, InvocationState};
+        let reply = self.request_reply.as_ref().ok_or_else(|| {
+            Error::Unavailable("invocation has no request-bound scheduler admission".into())
+        })?;
+        if !std::ptr::eq(activation, reply.activation.as_ref()) {
+            return Err(Error::Refused(exomonad_actor::ReplyError::Stale));
+        }
+        match reply.admission.try_admit_terminal(|pending| {
+            let pending = pending
+                .iter()
+                .map(|operation| {
+                    let invocation = super::embedded_harness::embedded_invocation_context(
+                        &reply.identity,
+                        &operation.operation,
+                    )
+                    .map_err(|error| Error::Unavailable(error.to_string()))?;
+                    Ok(HostedPendingInvocation {
+                        invocation,
+                        name: operation.name.clone(),
+                        state: match operation.state {
+                            InvocationState::Queued => NativeState::Queued,
+                            InvocationState::Running => NativeState::Running,
+                            InvocationState::Unconfirmed => NativeState::Unconfirmed,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            claim(&pending)
+        }) {
+            Ok(((), terminal)) => {
+                *reply.terminal.lock() = Some(terminal);
+                Ok(())
+            }
+            Err(InvocationAdmissionError::Claim(error)) => Err(error),
+            Err(InvocationAdmissionError::AlreadyTerminated) => {
+                Err(Error::Refused(exomonad_actor::ReplyError::AlreadySettled))
+            }
+            Err(InvocationAdmissionError::ForeignInvocation) => Err(Error::Refused(exomonad_actor::ReplyError::Stale)),
+            Err(InvocationAdmissionError::NotSettlement) => Err(Error::Refused(exomonad_actor::ReplyError::Unauthorized)),
+            Err(InvocationAdmissionError::Unavailable) => Err(Error::Unavailable("scheduler admission is currently unavailable; retry without assuming an empty pending inventory".into())),
+        }
+    }
+
     fn admit(
         &self,
         execution: &WorkbenchExecutionId,
@@ -162,7 +249,7 @@ impl HostedContextBinding for EmbeddedContextBinding {
                 _ => {
                     return Err(EffectError::Handler(
                         "context authority is closed or belongs to another principal".into(),
-                    ))
+                    ));
                 }
             }
             match request {

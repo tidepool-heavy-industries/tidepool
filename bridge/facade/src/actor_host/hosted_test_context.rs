@@ -2432,6 +2432,7 @@ mod tests {
                 _: harness::provider::CallContext,
             ) -> harness::provider::ProviderCompletion {
                 harness::provider::ProviderCompletion {
+                    activation_terminal: None,
                     output: self.0.clone(),
                     full_success: false,
                     context: harness::provider::ContextDisposition::Unedited,

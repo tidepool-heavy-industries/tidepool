@@ -9,12 +9,12 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "71ba941911c787f2b48684bfce23e0fa98dd3936",
-    nar_hash = "sha256-aOCuTCvZqNAk9foD3DmN4g59VIfGCG+j89eH2tRuEQo=",
+    revision = "73b9c62226448862106f463c11bc3d83c3e96c82",
+    nar_hash = "sha256-lV24eQRwhvKgr7GoQhJ3P62nhYgNInmzl/E5tuY3Ez4=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
-    store_path = "/nix/store/6l81glsmwqdrgxxmlwvy6h8vlix7wg8b-tidepool-matched-harness-source",
+    store_path = "/nix/store/ip0dscb35lyvw1zyipannxsfx28ynnxy-source",
     visibility = [],
 )
 
@@ -6554,6 +6554,12 @@ tidepool_cargo_rust_library(
         ":serde-1",
         ":serde_json-1",
     ],
+)
+
+alias(
+    name = "harness-schema",
+    actual = ":harness-schema-0.1",
+    visibility = ["PUBLIC"],
 )
 
 tidepool_cargo_rust_library(

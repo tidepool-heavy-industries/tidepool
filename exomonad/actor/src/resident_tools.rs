@@ -940,8 +940,15 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     /// Exact activation retained by this provider snapshot, never current state.
-    fn request_reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> { None }
-    fn invocation_role(&self, _name: &str) -> crate::HostedInvocationRole { crate::HostedInvocationRole::Domain }
+    fn request_reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
+        None
+    }
+    fn argument_stage(&self, _name: &str) -> crate::HostedInputStage {
+        crate::HostedInputStage::HostArguments
+    }
+    fn invocation_role(&self, _name: &str) -> crate::HostedInvocationRole {
+        crate::HostedInvocationRole::Domain
+    }
 
     fn tools(&self) -> &[HostedTool];
     /// Immutable declaration metadata; retaining it does not retain execution authority.

@@ -1414,6 +1414,17 @@ impl InstalledToolSelection {
         self,
         arguments: exomonad_tool::ToolArguments,
     ) -> Result<AdmittedToolCall, crate::ResidentToolError> {
+        let arguments = match (&self.reply_activation, arguments) {
+            (Some(activation), exomonad_tool::ToolArguments::Structured(wire)) => {
+                activation.admit_wire_arguments(wire)?.into_arguments()
+            }
+            (Some(_), _) => {
+                return Err(crate::ResidentToolError::InvalidInvocation(
+                    "reply endpoint requires structured provider wire arguments".into(),
+                ))
+            }
+            (None, arguments) => arguments,
+        };
         let arguments = self.endpoint().plan().admit_arguments(arguments)?;
         Ok(AdmittedToolCall {
             selected: self,
@@ -6042,10 +6053,26 @@ where
         let support = self.access.source.installed_effect_support().to_vec();
         let expected = crate::tool_contract::admit_reply_spec_metadata(expected, &support)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        let tools = self.prepare_explicit_tools_for(context, request.0, vec![crate::ActorEffectKey::Replies], installer, ToolInstallationPurpose::RequestReplyTools).await?;
-        let expected = expected.plans.iter().map(|plan| plan.surface()).collect::<Vec<_>>();
-        if !exomonad_tool::surface::compare_surfaces(&expected, &tools.declaration_snapshot()).is_empty() {
-            return Err(ResidentActorWorkbenchError::ActorProtocol("reply installer differs from its issuer's prepared metadata".into()));
+        let tools = self
+            .prepare_explicit_tools_for(
+                context,
+                request.0,
+                vec![crate::ActorEffectKey::Replies],
+                installer,
+                ToolInstallationPurpose::RequestReplyTools,
+            )
+            .await?;
+        let expected = expected
+            .plans
+            .iter()
+            .map(|plan| plan.surface())
+            .collect::<Vec<_>>();
+        if !exomonad_tool::surface::compare_surfaces(&expected, &tools.declaration_snapshot())
+            .is_empty()
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "reply installer differs from its issuer's prepared metadata".into(),
+            ));
         }
         Ok(tools)
     }

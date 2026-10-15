@@ -100,6 +100,18 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     fn request_reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
         self.reply_activation.clone()
     }
+    fn argument_stage(&self, name: &str) -> crate::HostedInputStage {
+        if self
+            .reply_activation
+            .as_ref()
+            .and_then(|reply| reply.select(name))
+            .is_some()
+        {
+            crate::HostedInputStage::ProviderWire
+        } else {
+            crate::HostedInputStage::HostArguments
+        }
+    }
     fn invocation_role(&self, name: &str) -> crate::HostedInvocationRole {
         if self
             .reply_activation

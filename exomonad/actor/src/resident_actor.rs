@@ -3481,8 +3481,14 @@ impl CurrentEffectOwner<'_> {
     fn reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
         match self {
             Self::Scoped { base, .. } => base.reply_activation(),
-            Self::Workbench(execution) if !execution.after_tool_active && !execution.initial_context =>
-                execution.operation.selected().and_then(|call| call.selected().reply_activation.clone()),
+            Self::Workbench(execution)
+                if !execution.after_tool_active && !execution.initial_context =>
+            {
+                execution
+                    .operation
+                    .selected()
+                    .and_then(|call| call.selected().reply_activation.clone())
+            }
             _ => None,
         }
     }
@@ -4083,7 +4089,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             if endpoint.plan().effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
                     !self.descriptor.capabilities().effect_keys().contains(key)
-                        && !(call.selected().reply_activation.is_some() && *key == crate::ActorEffectKey::Replies)
+                        && !(call.selected().reply_activation.is_some()
+                            && *key == crate::ActorEffectKey::Replies)
                 }
                 exomonad_tool::ToolEffectKey::ContextReadWrite
                 | exomonad_tool::ToolEffectKey::Reload => false,
@@ -4134,11 +4141,22 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 Ok(None) => {}
             }
         }
-        if let Some(activation) = selected_tool.and_then(|call| call.selected().reply_activation.as_ref()) {
-            if activation.actor() != actor || activation.is_settled()
-                || self.outstanding_interactive.as_ref().is_none_or(|active| active.request != activation.request()) {
-                return Err(KernelInvocationFailure::Rejected { receipts: Vec::new(), actor,
-                    detail: "reply endpoint belongs to a stale or already-settled request".into(), diagnostic: None });
+        if let Some(activation) =
+            selected_tool.and_then(|call| call.selected().reply_activation.as_ref())
+        {
+            if activation.actor() != actor
+                || activation.is_settled()
+                || self
+                    .outstanding_interactive
+                    .as_ref()
+                    .is_none_or(|active| active.request != activation.request())
+            {
+                return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "reply endpoint belongs to a stale or already-settled request".into(),
+                    diagnostic: None,
+                });
             }
         }
         let admitted_source = if current_builtin {
@@ -4266,38 +4284,31 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         actor: ActorRef,
         request: crate::RequestId,
         effect_owner: &CurrentEffectOwner<'_>,
-    ) -> Result<Result<crate::request::RequestReplyClaim, crate::ReplyError>, ResidentActorWorkbenchError> {
+    ) -> Result<
+        Result<crate::request::RequestReplyClaim, crate::ReplyError>,
+        ResidentActorWorkbenchError,
+    > {
         let Some(activation) = effect_owner.reply_activation() else {
             return Ok(self.environment.requests.begin_reply(actor, request));
         };
         if activation.actor() != actor || activation.request() != request {
             return Ok(Err(crate::ReplyError::Unauthorized));
         }
-        let binding = effect_owner.context_binding().ok_or_else(||
-            ResidentActorWorkbenchError::ActorProtocol("reply tool requires its exact hosted request admission".into()))?;
-        let mut accepted = None;
-        let result = binding.admit_request_reply(&activation, &mut |pending| {
-            if activation.is_settled() {
-                return Err(crate::RequestReplyAdmissionError::Refused(crate::ReplyError::AlreadySettled));
-            }
-            let pending = {
-                let executions = self.workbench_executions.lock();
-                pending.iter().filter(|operation| !executions.invocation_is_terminal(&operation.invocation)).cloned().collect::<Vec<_>>()
-            };
-            if !pending.is_empty() {
-                return Err(crate::RequestReplyAdmissionError::Pending(pending));
-            }
-            let claim = self.environment.requests.begin_reply(actor, request)
-                .map_err(crate::RequestReplyAdmissionError::Refused)?;
-            activation.mark_settled();
-            accepted = Some(claim);
-            Ok(())
-        });
-        match result {
-            Ok(()) => accepted.map(|claim| Ok(Ok(claim))).unwrap_or_else(|| Err(
-                ResidentActorWorkbenchError::ActorProtocol("host accepted reply admission without claiming its request".into()))),
+        let binding = effect_owner.context_binding().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "reply tool requires its exact hosted request admission".into(),
+            )
+        })?;
+        match activation.begin_reply(&self.environment.requests, binding.as_ref(), |invocation| {
+            self.workbench_executions
+                .lock()
+                .invocation_is_terminal(invocation)
+        }) {
+            Ok(claim) => Ok(Ok(claim)),
             Err(crate::RequestReplyAdmissionError::Refused(error)) => Ok(Err(error)),
-            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(error.to_string())),
+            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(
+                error.to_string(),
+            )),
         }
     }
 
@@ -7258,15 +7269,37 @@ where
                     .resume_value(context.clone(), reservation.continuation, admitted)
                     .await
             }),
-            ResidentActorBoundary::RegisterReplyTool { continuation, request, definition } => Box::pin(async move {
+            ResidentActorBoundary::RegisterReplyTool {
+                continuation,
+                request,
+                definition,
+            } => Box::pin(async move {
                 let support = self.environment.intrinsic_effect_support();
-                let outcome = crate::tool_contract::decode_installation(definition.installation.clone())
-                    .and_then(|installation| crate::tool_contract::admit_reply_spec_metadata(installation, &support)
-                        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string())))
-                    .map_err(|error| crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string()))
-                    .and_then(|_| self.environment.requests.register_reply_tool(context.actor, request, definition)
-                        .map_err(crate::request_effect::RequestError::RequestSubmissionRejected));
-                self.environment.runner.resume_value(context.clone(), continuation, outcome).await
+                let outcome =
+                    crate::tool_contract::decode_installation(definition.installation.clone())
+                        .and_then(|installation| {
+                            crate::tool_contract::admit_reply_spec_metadata(installation, &support)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                                })
+                        })
+                        .map_err(|error| {
+                            crate::request_effect::RequestError::RequestReplyToolInvalid(
+                                error.to_string(),
+                            )
+                        })
+                        .and_then(|_| {
+                            self.environment
+                                .requests
+                                .register_reply_tool(context.actor, request, definition)
+                                .map_err(
+                                    crate::request_effect::RequestError::RequestSubmissionRejected,
+                                )
+                        });
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, outcome)
+                    .await
             }),
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
                 use crate::request_effect::RequestError;
@@ -7999,20 +8032,54 @@ where
         let input_preview = std::mem::take(&mut input.input_preview);
         let reply_preview = std::mem::take(&mut input.reply_preview);
         let result = async {
-            let reply_definition = self.environment.requests.reply_tool(context.actor, request.request)
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("reply tool request authority rejected: {error:?}")))?;
+            let reply_definition = self
+                .environment
+                .requests
+                .reply_tool(context.actor, request.request)
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "reply tool request authority rejected: {error:?}"
+                    ))
+                })?;
             let reply_activation = if let Some(definition) = reply_definition {
                 let installer = if definition.session == private_context.placement.session {
                     definition.installer.clone()
                 } else {
-                    Arc::new(self.environment.runner.import_shared_custody(definition.installer.clone(), definition.session,
-                        private_context.placement.session, private_context.placement.resource_scope).await?)
+                    Arc::new(
+                        self.environment
+                            .runner
+                            .import_shared_custody(
+                                definition.installer.clone(),
+                                definition.session,
+                                private_context.placement.session,
+                                private_context.placement.resource_scope,
+                            )
+                            .await?,
+                    )
                 };
-                let tools = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit())
-                    .scope(workbench.prepare_reply_tools(private_context.clone(), request.request, installer, definition.installation.clone())).await?;
-                let lease = crate::InstalledToolLease::new(context.actor, activation_source.clone(), Some(Arc::new(tools)));
-                Some(Arc::new(crate::RequestReplyActivation::new(context.actor, request.request, lease)))
-            } else { None };
+                let tools = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    kernel.retained_exit(),
+                )
+                .scope(workbench.prepare_reply_tools(
+                    private_context.clone(),
+                    request.request,
+                    installer,
+                    definition.installation.clone(),
+                ))
+                .await?;
+                let lease = crate::InstalledToolLease::new(
+                    context.actor,
+                    activation_source.clone(),
+                    Some(Arc::new(tools)),
+                );
+                Some(Arc::new(crate::RequestReplyActivation::new(
+                    context.actor,
+                    request.request,
+                    lease,
+                )?))
+            } else {
+                None
+            };
             let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
             let contract = crate::interactive_session::ActivationContract {
                 reply_tool: reply_activation.is_some(),
@@ -9730,7 +9797,8 @@ where
                         let mut boundary =
                             prepare_execution_effect(context, &effect_owner, boundary);
                         if let Some(activation) = effect_owner.reply_activation() {
-                            if !matches!(&boundary, ResidentActorBoundary::ReplyAttempt(attempt) if attempt.request == activation.request()) {
+                            if !matches!(&boundary, ResidentActorBoundary::ReplyAttempt(attempt) if attempt.request == activation.request())
+                            {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol("request reply decoder attempted an effect other than its own terminal reply".into()));
                             }
                         }
@@ -9885,8 +9953,11 @@ where
                         };
                         match boundary {
                             ResidentActorBoundary::ReplyAttempt(attempt) => match self
-                                .begin_reply_for_effect(context.actor, attempt.request, &effect_owner)?
-                            {
+                                .begin_reply_for_effect(
+                                    context.actor,
+                                    attempt.request,
+                                    &effect_owner,
+                                )? {
                                 Ok(claim) => {
                                     current.inflight_effect = None;
                                     record_workbench_operation(

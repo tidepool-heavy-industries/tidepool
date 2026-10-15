@@ -69,6 +69,15 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
+        let request_activation = policy
+            .request_reply_activation()
+            .map(|activation| {
+                activation
+                    .host_attachment(harness::provider::RequestActivation::new)
+                    .map(|scope| scope.as_ref().clone())
+                    .map_err(ResidentToolError::Unavailable)
+            })
+            .transpose()?;
         // Project only the declarations retained by this request's endpoint.
         // The cache contains metadata, never an execution-owning endpoint.
         let mut cached = self.projection.lock().unwrap();
@@ -97,6 +106,7 @@ impl EmbeddedPolicyInstallation {
             #[cfg(test)]
             actor: self.actor,
             policy,
+            request_activation,
             manifest: projection.manifest.clone(),
             schemas: projection.schemas.clone(),
         })
@@ -109,6 +119,7 @@ pub(super) struct EmbeddedPolicySnapshot {
     #[cfg(test)]
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
+    request_activation: Option<harness::provider::RequestActivation>,
     manifest: Arc<harness::embedding::EmbeddedToolManifest>,
     schemas: Arc<HashMap<String, FunctionToolSchema>>,
 }
@@ -124,6 +135,28 @@ struct EmbeddedToolProjection {
 }
 
 impl EmbeddedPolicySnapshot {
+    pub(super) fn request_reply_activation(
+        &self,
+    ) -> Option<Arc<exomonad_actor::RequestReplyActivation>> {
+        self.policy.request_reply_activation()
+    }
+    pub(super) fn request_activation(&self) -> Option<harness::provider::RequestActivation> {
+        self.request_activation.clone()
+    }
+    pub(super) fn invocation_role(&self, name: &str) -> harness::provider::InvocationRole {
+        match self.policy.invocation_role(name) {
+            exomonad_actor::HostedInvocationRole::Domain => {
+                harness::provider::InvocationRole::Domain
+            }
+            exomonad_actor::HostedInvocationRole::Observation => {
+                harness::provider::InvocationRole::Observation
+            }
+            exomonad_actor::HostedInvocationRole::Settlement => {
+                harness::provider::InvocationRole::Settlement
+            }
+        }
+    }
+
     pub(super) fn request_generation(
         &self,
     ) -> Option<tidepool_runtime::session::NotebookGenerationId> {
@@ -155,15 +188,16 @@ impl EmbeddedPolicySnapshot {
         checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn HostedContextBinding>>,
     ) -> ResidentToolFuture {
-        let validated = match arguments.clone() {
-            ToolArguments::Structured(value) => match self.schemas.get(&name) {
+        let validated = match (self.policy.argument_stage(&name), arguments.clone()) {
+            (exomonad_actor::HostedInputStage::ProviderWire, wire) => Ok(wire),
+            (_, ToolArguments::Structured(value)) => match self.schemas.get(&name) {
                 Some(schema) => schema
                     .decode_arguments(value)
                     .map(ToolArguments::Structured)
                     .map_err(|error| ResidentToolError::InvalidInvocation(error.to_string())),
                 None => Ok(ToolArguments::Structured(value)),
             },
-            raw => Ok(raw),
+            (_, raw) => Ok(raw),
         };
         let future = self.policy.dispatch_validated_with_context_boxed(
             ToolInvocation {

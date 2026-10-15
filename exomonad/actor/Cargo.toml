@@ -11,6 +11,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+harness-schema.workspace = true
 exomonad-model.workspace = true
 exomonad-worktree.workspace = true
 blake3.workspace = true

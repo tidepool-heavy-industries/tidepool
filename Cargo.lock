@@ -1185,6 +1185,7 @@ dependencies = [
  "exomonad-worktree",
  "frunk",
  "futures-util",
+ "harness-schema",
  "parking_lot",
  "proptest",
  "ractor",

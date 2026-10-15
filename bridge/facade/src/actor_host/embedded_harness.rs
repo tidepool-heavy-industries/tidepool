@@ -1183,7 +1183,7 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
     }
 }
 
-fn embedded_invocation_context(
+pub(super) fn embedded_invocation_context(
     identity: &HostIdentity,
     operation: &OperationId,
 ) -> Result<ToolInvocationContext, ProviderError> {
@@ -1621,6 +1621,13 @@ fn workbench_publication_context(
 
 #[async_trait::async_trait]
 impl Provider for EmbeddedDispatcher {
+    fn request_activation(&self) -> Option<harness::provider::RequestActivation> {
+        self.snapshot.request_activation()
+    }
+    fn invocation_role(&self, name: &str) -> harness::provider::InvocationRole {
+        self.snapshot.invocation_role(name)
+    }
+
     fn request_instructions(&self) -> Option<&str> {
         self.snapshot.request_instructions()
     }
@@ -1693,16 +1700,28 @@ impl Provider for EmbeddedDispatcher {
                                     context.operation.as_ref(),
                                 )
                                 .into_tool_failure(),
-                            )))
+                            )));
                         }
                     };
                 let initial_context = Arc::new(move || Ok(observed_initial_context.clone()));
-                let binding = Arc::new(EmbeddedContextBinding::new(
-                    invocation,
-                    snapshot,
-                    resolver,
-                    initial_context,
-                ));
+                let binding =
+                    EmbeddedContextBinding::new(invocation, snapshot, resolver, initial_context);
+                let binding = match self.snapshot.request_reply_activation() {
+                    Some(activation) => match binding.with_request_reply(
+                        activation,
+                        context.invocations.clone(),
+                        self.identity.clone(),
+                    ) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            return unavailable_context_completion(JobOutput::Completed(Err(
+                                error.into(),
+                            )));
+                        }
+                    },
+                    None => binding,
+                };
+                let binding = Arc::new(binding);
                 if let Err(error) = context.completion.register(operation, binding.clone()) {
                     return unavailable_context_completion(JobOutput::Completed(Err(error
                         .to_string()
@@ -1851,6 +1870,7 @@ struct UneditedInvocationCompletion;
 impl UneditedInvocationCompletion {
     fn project(output: JobOutput) -> ProviderCompletion {
         ProviderCompletion {
+            activation_terminal: None,
             full_success: matches!(&output, JobOutput::Completed(Ok(_))),
             output,
             context: harness::provider::ContextDisposition::Unedited,
@@ -1940,6 +1960,7 @@ impl CancellationOwner for EmbeddedCancellationOwner {
 
 fn unavailable_context_completion(output: JobOutput) -> ProviderCompletion {
     ProviderCompletion {
+        activation_terminal: None,
         output,
         full_success: false,
         context: harness::provider::ContextDisposition::Unavailable,

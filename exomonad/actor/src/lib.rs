@@ -59,7 +59,10 @@ pub use request::sources::SourceDelivery;
 mod recovery;
 mod request_effect;
 mod request_reply_tool;
-pub use request_reply_tool::{RequestReplyActivation, HostedInvocationRole, HostedInvocationState, HostedPendingInvocation, RequestReplyAdmissionError};
+pub use request_reply_tool::{
+    HostedInputStage, HostedInvocationRole, HostedInvocationState, HostedPendingInvocation,
+    RequestReplyActivation, RequestReplyAdmissionError,
+};
 mod resident_actor;
 mod resident_interactive;
 mod resident_tools;
@@ -170,8 +173,8 @@ pub use resident_tools::{
     HostedCheckpointContext, HostedOperationFinalization, HostedOperationSettlement,
     HostedOperationTerminal, ProviderFinalizationKind, ResidentToolDispatchFuture,
     ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolPolicy,
-    ResidentToolResponse, WorkbenchBoundaryReconciliation, WorkbenchCancellationOutcome,
-    WorkbenchCancellationCause, WorkbenchExecutionControl,
+    ResidentToolResponse, WorkbenchBoundaryReconciliation, WorkbenchCancellationCause,
+    WorkbenchCancellationOutcome, WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
     ActivationCompileStage, ActorInstallationRecoveryError, ActorMachineRegistry,
