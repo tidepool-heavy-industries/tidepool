@@ -1979,6 +1979,14 @@ struct SelectedOwners {
     interfaces: BTreeMap<ExactModuleIdentity, ArtifactId>,
     native: BTreeMap<NativeOwnerKey, ArtifactId>,
 }
+
+#[derive(Clone, Copy, Debug)]
+enum NativeClosureStage {
+    Admission,
+    AuthoredCustody,
+    AcceptedMerge,
+}
+
 impl SelectedOwners {
     fn new(
         state: &InventoryState,
@@ -2027,6 +2035,7 @@ impl SelectedOwners {
         state: &InventoryState,
         entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         groups: &BTreeSet<NativeGroupKey>,
+        stage: NativeClosureStage,
     ) -> Result<
         (
             BTreeMap<LogicalNodeKey, BTreeSet<(LogicalNodeKey, ArtifactDependency)>>,
@@ -2089,7 +2098,7 @@ impl SelectedOwners {
                         let matching = self.native.iter().filter(|(key, _)| key.owner == *owner);
                         let candidate_count = matching.clone().count();
                         let candidates = matching.take(16).collect::<Vec<_>>();
-                        tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?key, ?owner, ?dependency, ?wanted, ?candidates, candidate_count,
+                        tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?stage, ?key, ?owner, ?dependency, ?wanted, ?candidates, candidate_count,
                             "native dependency owner index refused");
                     }
                     admission_failure(ArtifactInventoryFailure::MissingDependency {
@@ -3399,8 +3408,12 @@ impl ArtifactInventory {
                         || required_groups.contains_key(group))
             });
         }
-        let (mut planned, closed_groups) =
-            owners.planned_edges(&state, &selected, &selected_groups)?;
+        let (mut planned, closed_groups) = owners.planned_edges(
+            &state,
+            &selected,
+            &selected_groups,
+            NativeClosureStage::Admission,
+        )?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
                 "recovered native group closure differs from certified demand",
@@ -4872,7 +4885,12 @@ impl ArtifactView {
             .collect();
         // The same owner/version/ordinal resolver used for executable admission
         // validates full-body dependencies, without installing its planned edges.
-        let (_, groups) = owners.planned_edges(&state, &entries, &roots)?;
+        let (_, groups) = owners.planned_edges(
+            &state,
+            &entries,
+            &roots,
+            NativeClosureStage::AuthoredCustody,
+        )?;
         let mut requirements = BTreeSet::new();
         for group in groups {
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
@@ -6085,7 +6103,55 @@ impl ArtifactView {
                 &state,
                 &entries,
                 &native_groups(&nodes),
-            )?;
+                NativeClosureStage::AcceptedMerge,
+            ).map_err(|error| {
+                if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG) {
+                    if let CompileError::ArtifactInventory(error) = &error {
+                        if let ArtifactInventoryFailure::MissingDependency {
+                            artifact, required,
+                            dependency: ArtifactDependency::NativeGroup { dependent_ordinal, required_ordinal },
+                            ..
+                        } = &error.failure {
+                            for (input, view) in [("left", self), ("right", other)] {
+                                let projection = view.read_projection(&state);
+                                let matching = || projection.nodes.iter().filter_map(|node| match node {
+                                    InventoryNodeKey::Group(group)
+                                        if group.binding.artifact == *artifact
+                                            && group.original_ordinal == *dependent_ordinal => Some(*group),
+                                    _ => None,
+                                });
+                                let group_count = matching().count();
+                                let groups = matching().take(16).map(|group| {
+                                    let node = InventoryNodeKey::Group(group);
+                                    let edge_count = state.outgoing(node).count();
+                                    let edges = state.outgoing(node).take(16).map(|(target, label)| {
+                                        let native = projection.entries.iter().find_map(|entry| match &entry.payload {
+                                            ArtifactPayload::Original(product) if entry.descriptor.id == target.artifact() =>
+                                                Some(NativeOwnerKey::from_owner(product.owner())),
+                                            _ => None,
+                                        });
+                                        (target, label.clone(), native)
+                                    }).collect::<Vec<_>>();
+                                    (group, edge_count, edges)
+                                }).collect::<Vec<_>>();
+                                let native_count = projection.entries.iter().filter(|entry|
+                                    entry.descriptor.owner == *required && matches!(entry.payload, ArtifactPayload::Original(_))
+                                ).count();
+                                let natives = projection.entries.iter().filter_map(|entry| match &entry.payload {
+                                    ArtifactPayload::Original(product) if entry.descriptor.owner == *required =>
+                                        Some((entry.descriptor.id, NativeOwnerKey::from_owner(product.owner()))),
+                                    _ => None,
+                                }).take(16).collect::<Vec<_>>();
+                                tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                                    input, ?artifact, ?dependent_ordinal, ?required, ?required_ordinal,
+                                    group_count, ?groups, native_count, ?natives,
+                                    "accepted merge retained native bindings before owner reconstruction");
+                            }
+                        }
+                    }
+                }
+                error
+            })?;
             let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
             let mut namespace = self.namespace();
             namespace.extend(other.namespace());
