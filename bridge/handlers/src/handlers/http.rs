@@ -128,6 +128,11 @@ impl HttpHandler {
         let url = url::Url::parse(url_str)
             .map_err(|e| HttpError::HttpInvalidUrl(format!("Invalid URL '{}': {}", url_str, e)))?;
 
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(HttpError::HttpInvalidUrl(
+                "URL credentials are not supported".into(),
+            ));
+        }
         if url.scheme() != "http" && url.scheme() != "https" {
             return Err(HttpError::HttpInvalidUrl(format!(
                 "Unsupported protocol '{}'. Only http/https allowed.",
@@ -221,6 +226,35 @@ impl HttpHandler {
         url_str: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<(url::Url, ureq::Response), HttpError> {
+        let (url, response) = Self::request_raw_with_agent(agent, url_str, body)?;
+        if response.status() >= 400 {
+            return Err(Self::map_ureq_err(
+                url.as_str(),
+                ureq::Error::Status(response.status(), response),
+            ));
+        }
+        Ok((url, response))
+    }
+
+    /// Read-only consumers share this owner's DNS pinning and redirect checks,
+    /// retaining HTTP error responses as observations instead of decoding JSON.
+    pub(crate) fn get_response(url: &str) -> Result<(url::Url, ureq::Response), HttpError> {
+        Self::request_raw_with_agent(&Self::agent(), url, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_response_with_agent(
+        agent: &ureq::Agent,
+        url: &str,
+    ) -> Result<(url::Url, ureq::Response), HttpError> {
+        Self::request_raw_with_agent(agent, url, None)
+    }
+
+    fn request_raw_with_agent(
+        agent: &ureq::Agent,
+        url_str: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(url::Url, ureq::Response), HttpError> {
         let mut url = Self::validate_url(url_str)?;
         let mut use_post = body.is_some();
         for hop in 0..=MAX_REDIRECTS {
@@ -234,10 +268,13 @@ impl HttpHandler {
                 (true, Some(b)) => req.send_json(b.clone()),
                 _ => req.call(),
             }
-            .map_err(|e| Self::map_ureq_err(url.as_str(), e))?;
+            .or_else(|error| match error {
+                ureq::Error::Status(_, response) => Ok(response),
+                error => Err(Self::map_ureq_err(url.as_str(), error)),
+            })?;
 
             let status = resp.status();
-            if !(300..400).contains(&status) {
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
                 return Ok((url, resp));
             }
             if hop == MAX_REDIRECTS {

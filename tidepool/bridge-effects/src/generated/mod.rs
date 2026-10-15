@@ -11,6 +11,7 @@ pub mod reload;
 pub mod repo_event;
 pub mod resource_scopes;
 pub mod source;
+pub mod web;
 pub mod worktree;
 
 pub use agent_launch::*;
@@ -24,4 +25,5 @@ pub use reload::*;
 pub use repo_event::*;
 pub use resource_scopes::*;
 pub use source::*;
+pub use web::*;
 pub use worktree::*;

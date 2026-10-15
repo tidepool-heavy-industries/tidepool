@@ -152,6 +152,7 @@ protocol_generated(
         "bridge/mcp/src/generated/journal.rs",
         "bridge/handlers/src/generated/journal.rs",
         "bridge/mcp/src/generated/web.rs",
+        "tidepool/bridge-effects/src/generated/web.rs",
         "bridge/handlers/src/generated/web.rs",
         "bridge/mcp/src/generated/worktree.rs",
         "tidepool/bridge-effects/src/generated/worktree.rs",

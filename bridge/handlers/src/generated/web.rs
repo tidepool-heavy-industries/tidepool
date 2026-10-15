@@ -27,6 +27,7 @@ pub enum WebError {
 #[allow(clippy::enum_variant_names)]
 #[derive(FromHaskell)]
 pub enum WebReq {
+    WebFetchText(String),
     WebFollow(String, String),
     WebSearch(String, i64, Vec<String>, Vec<String>),
     WebExtract(String),
@@ -47,6 +48,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
+            WebReq::WebFetchText(url) => cx.respond(self.web_fetch_text(url)),
             WebReq::WebFollow(base, target) => cx.respond(self.web_follow(base, target)),
             WebReq::WebSearch(query, limit, include_domains, exclude_domains) => {
                 cx.respond(self.web_search(query, limit, include_domains, exclude_domains))

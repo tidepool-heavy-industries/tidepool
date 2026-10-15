@@ -86,3 +86,9 @@ reflectRuntimeIdentity = Authored.turnIdentity
 
 configuredModels :: [Core.Model]
 configuredModels = [Core.Luna, Core.Sol, Core.Astra, Core.CustomAlias "local", Core.ProviderModel "provider-id"]
+
+faithfulWebText :: Member Core.Web effects => Text -> Eff effects (Either Core.WebError Core.WebText)
+faithfulWebText = Core.webFetchTextRaw
+
+retainedWebBody :: Core.WebText -> (Text, Text, Core.WebBodyCompleteness)
+retainedWebBody body = (Core.webBodyIdentity body, Core.webText body, Core.webCompleteness body)

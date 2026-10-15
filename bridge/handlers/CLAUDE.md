@@ -127,3 +127,21 @@ parent-directory advisory lock. A snapshot hashes the exact returned UTF-8 bytes
 and retains the canonical destination; it is a content observation, not an edit
 counter. External writers that bypass this lock are outside the coherence
 guarantee. A failed observation remains a typed `FsError`, never an empty file.
+
+## Web retrieval
+
+`Web` separates Tavily search/extraction from `webFetchTextRaw`, a direct GET
+through the HTTP owner's URL checks, DNS-pinned resolver and redirect loop.
+`WebTransport` is the ordinary handler dependency; hosted root and child actors
+must receive the same selected transport. Caller-selected headers, request
+bodies and credentials are absent from the Web surface.
+
+Direct text retains HTTP status (including non-2xx), final URL, content type and
+exact UTF-8 text. It neither parses JSON nor trims or rewrites markup. Declared
+non-UTF-8 charsets and invalid UTF-8 fail explicitly. The existing 16 MiB decoded
+body budget is enforced during reading: oversize reports the limit and observed
+lower bound, with no retained-prefix success. `WebTransportEof` witnesses only
+that the entire decoded response was read through EOF; it does not establish
+upstream semantic completeness. Identity covers those retained UTF-8 bytes
+after ureq's HTTP content decoding, not compressed wire bytes or URL identity.
+Pure text navigation uses that captured identity and text without refetching.
