@@ -513,6 +513,39 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
+The `response-continuation` cohort runs three real host histories from the
+frozen bundle: settled-history reopening, interrupted inference and exact
+continuation, and blocked retirement. The interruption history observes the
+second automatic retry in both Store and the authenticated browser projection,
+then checks exhausted-budget Send, completed-effect Send, and explicit Retry
+without new text. It preserves original operations, exact input multiplicity,
+refused stale tokens and effect-once execution. Each case requires confirmed
+host cleanup. The parser/Engine/Store and migration controls in Harness remain
+separate component evidence.
+
+The `outer-restart` cohort runs five process histories against the same frozen
+libtest, compiler, source, assets and sibling view helper. It covers graceful
+stop and process loss, accepted source and account retention, split binding
+admission, missing issued evidence, uncertain initialization and unresolved
+effects. Ordinary Send carries its exact continuation grant. Exact and
+visible-history recovery both refuse uncertain effects without issuing another
+provider request. The process-loss cases check actual process waits and retained
+claims rather than claiming graceful host cleanup.
+
+Both cohorts permit at most two test processes. The source checks observed a
+7.6 GiB outer process-tree peak; admit concurrency against current host and
+slice headroom. Their 900/1200-second per-case deadlines retain the existing
+native workflow budgets. Run the exact frozen owner with explicit admission:
+
+```sh
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort response-continuation --output "$CONTINUATION_EVIDENCE" --jobs 2 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort outer-restart --output "$OUTER_RESTART_EVIDENCE" --jobs 2 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
 The supplementary `harness-performance` cohort selects the one ignored
 eight-phase HTTP/Engine/Store/notebook workload. The separate
 `harness-performance-three-actor` cohort selects the scripted parent/two-child

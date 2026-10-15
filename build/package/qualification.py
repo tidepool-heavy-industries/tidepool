@@ -50,6 +50,18 @@ UNIFIED_REGRESSION_TESTS = [
     "actor_host::embedded_policy::operation_settlement_tests::acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
+RESPONSE_CONTINUATION_TESTS = [
+    "actor_host::embedded_service::restart_tests::driver_reopens_retained_final_without_provider_then_waits_for_explicit_input",
+    "actor_host::embedded_service::restart_tests::driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches_admitted_call",
+    "actor_host::embedded_service::restart_tests::blocked_actor_can_be_retired_through_its_browser_owner_without_inference",
+]
+OUTER_RESTART_TESTS = [
+    "exomonad::production_restart_acceptance_tests::outer_host_stop_and_crash_restore_accepted_source_and_selected_account_without_replay",
+    "exomonad::production_restart_acceptance_tests::outer_host_rolls_split_binding_admission_forward_and_refuses_missing_issued_evidence",
+    "exomonad::production_restart_acceptance_tests::outer_host_before_launch_admission_is_nonrunnable_without_allocating_an_epoch",
+    "exomonad::production_restart_acceptance_tests::outer_host_uncertain_initializer_refuses_before_successor_without_replaying_effects",
+    "exomonad::production_restart_acceptance_tests::outer_host_pending_effect_after_crash_remains_blocked_without_replay",
+]
 PERSONA_STARTUP_TESTS = [
     "actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment",
     "actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control",
@@ -186,6 +198,20 @@ def cohorts() -> dict:
                                     "compiler_mode": "owned-resident"},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900,
                    "compiler_mode": "owned-resident"},
+            "response-continuation": {
+                "tests": RESPONSE_CONTINUATION_TESTS, "expected_count": len(RESPONSE_CONTINUATION_TESTS),
+                "ignored": False, "timeout": 900, "compiler_mode": "owned-resident",
+                "max_jobs": 2, "retain_artifacts": True, "require_confirmed_cleanup": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
+            "outer-restart": {
+                "tests": OUTER_RESTART_TESTS, "expected_count": len(OUTER_RESTART_TESTS),
+                "ignored": True, "timeout": 1200, "compiler_mode": "owned-resident",
+                "max_jobs": 2, "retain_artifacts": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
             "result-delivery": {
                 "tests": list(RESULT_DELIVERY_CASES), "expected_count": len(RESULT_DELIVERY_CASES),
                 "ignored": False, "timeout": 1200, "compiler_mode": "owned-resident",
