@@ -81,16 +81,17 @@ memory organization, helpers and interfaces, with Git supplying inspectable
 history and restoration. The root model and effort remain human-selected.
 
 The seed can edit ordinary workspace files, including authored Haskell, prompts
-and memory, and inspect active source separately from drafts. Explicit `reload`
-publishes source, compatible handlers and workspace prompts together; Haskell
-`reloadSource []` uses the same owner. Changed configuration resets the notebook;
+and memory, and inspect active source separately from drafts. The authored
+synchronous `reload` tool publishes source, handlers and workspace prompts
+together; synchronous notebook `reloadSource []` uses the same owner. Changed configuration resets the notebook;
 unchanged configuration preserves bindings. Durable definitions belong in `.hs`
 files. Memory remains outside the reload key and needs explicit context refresh.
 Already-issued work and existing children retain their captured generation.
 
 Richer self-editing experiments should extend the existing source, context, Git
-and prompt-assembly owners. Registered tool and typed actor protocol compatibility
-still apply. Root launch configuration, external services, capabilities and
+and prompt-assembly owners. Tool surface changes refuse by default; the typed
+difference supports an explicit `accept_cache_invalidation` opt-in to supported
+changes. Typed actor protocol compatibility still applies. Root launch configuration, external services, capabilities and
 package pins stay fixed. Broader runtime changes need matching native/browser
 pins where relevant. These are optional directions to explore through actual use,
 not a standing implementation plan.
