@@ -29,9 +29,9 @@ data World = World { body :: Maybe Text, attempts :: Int, publications :: Int
 initial :: Maybe Text -> World
 initial text = World text 0 0 Nothing False
 fixtureBodies :: [Text]
-fixtureBodies = ["cat", "dog", "owl", "α\r\nβ\n", "cat cat", "aaa", "cat!", "new"]
+fixtureBodies = ["cat", "dog", "owl", "α\r\nβ\n", "cat cat", "aaa", "cat!", "new", ""]
 digest :: Text -> Text
-digest text = case lookup text (zip fixtureBodies ['1'..'8']) of
+digest text = case lookup text (zip fixtureBodies ['1'..'9']) of
   Just c -> T.replicate 63 "0" <> T.singleton c
   Nothing -> error ("undeclared controlled body: " ++ show text)
 reader :: FsRead a -> Eff '[FsWrite, State World] a
@@ -104,6 +104,13 @@ personaFileTests = testGroup "persona file tools"
             pure (invalid, missing)
       assertBool "invalid range" (case invalid of Left (Tools.InvalidRange _) -> True; _ -> False)
       assertBool "missing differs from empty contents" (case missing of Left (Tools.StorageFailure (FsNotFound _)) -> True; _ -> False)
+  , testCase "empty files have a version and an empty whole-file read" $ do
+      let ((whole, selected), _) = execute (initial (Just "")) $ do
+            whole <- Tools.readFileTool (Tools.ReadInput "/file" Nothing Nothing)
+            selected <- Tools.readFileTool (Tools.ReadInput "/file" Nothing (Just (Tools.LineRange 1 1)))
+            pure (whole, selected)
+      assertBool "empty is observed, not absent" (case whole of Right (Tools.ReadReceipt _ "" Nothing False False) -> True; _ -> False)
+      assertBool "empty has no first line" (case selected of Left (Tools.InvalidRange _) -> True; _ -> False)
   , testCase "change or delete after prepare conflicts without publication" $ do
       mapM_ (\replacement -> do
         let (result, after) = execute ((initial (Just "cat")) { race = Just replacement }) $ do
@@ -170,8 +177,10 @@ personaFileTests = testGroup "persona file tools"
                             observed <- reference; mapM_ (external . Just) prefix
                             Tools.editFileTool (Tools.EditInput observed [Patch.Replace (last ("cat":prefix)) "new"])
                        in if last ("cat":prefix) == "cat"
-                            then body after == Just "new" && publications after == 1
-                            else body after == Just (last prefix) && attempts after == 0
+                            then body after == Just "new" && publications after == 1 &&
+                                 (case result of Right (File.Published _ File.Durable) -> True; _ -> False)
+                            else body after == Just (last prefix) && attempts after == 0 &&
+                                 (case result of Left (Tools.PatchRejected (Patch.VersionMismatch _ _)) -> True; _ -> False)
                       | size <- [0..length values], let prefix = take size values]
       in counterexample (show values) (and histories === True)
   ]
