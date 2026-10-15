@@ -804,7 +804,7 @@ test-suite model-turn-test
   -- Buck compiles against the generated artifact providers. Local Cabal
   -- compatibility requires these explicit directories from the same outputs;
   -- missing generated modules are errors, never a skipped suite.
-  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
+  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib actors
   other-modules:
     PersonaSeedTest
     PersonaMemoryTest
@@ -814,6 +814,14 @@ test-suite model-turn-test
     Tidepool.Text.Navigation
     ResearcherSpecTest
     ReplyToolTest
+    Tidepool.Actors.Exomonad
+    Tidepool.Actors.Internal.Agent
+    Tidepool.Actors.Observe
+    Tidepool.Actors.Role
+    Tidepool.Actors.Spawn
+    Tidepool.Actors.Worktree
+    Tidepool.Agent.Session
+    Tidepool.Journal
     Project.Researcher
     Persona.Memory
     Persona.Web
