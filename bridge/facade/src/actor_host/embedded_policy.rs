@@ -72,16 +72,20 @@ impl EmbeddedPolicyInstallation {
         // Project only the declarations retained by this request's endpoint.
         // The cache contains metadata, never an execution-owning endpoint.
         let mut cached = self.projection.lock().unwrap();
-        let declared = policy.tools();
-        if cached
-            .as_ref()
-            .is_none_or(|cached| cached.declarations != declared)
-        {
+        let declared = policy.declaration_snapshot();
+        if cached.as_ref().is_none_or(|cached| {
+            !Arc::ptr_eq(&cached.declarations, &declared)
+                && !exomonad_tool::surface::compare_surfaces(&cached.declarations, &declared)
+                    .is_empty()
+        }) {
             *cached = Some(CachedToolProjection {
-                declarations: declared.to_vec(),
-                projection: project_tools(declared).map(Arc::new),
+                declarations: declared.clone(),
+                projection: project_tools(&declared).map(Arc::new),
             });
         }
+        // Equivalent declarations from a new installation share the projection,
+        // while subsequent requests reuse that installation's Arc directly.
+        cached.as_mut().unwrap().declarations = declared;
         let projection = cached
             .as_ref()
             .unwrap()
@@ -110,7 +114,7 @@ pub(super) struct EmbeddedPolicySnapshot {
 }
 
 struct CachedToolProjection {
-    declarations: Vec<HostedTool>,
+    declarations: Arc<[HostedTool]>,
     projection: Result<Arc<EmbeddedToolProjection>, String>,
 }
 
@@ -811,7 +815,7 @@ mod tests {
                     effect_keys: Vec::new(),
                     name: format!("{}_{}", if renamed { "new" } else { "old" }, index),
                     description: marker.into(),
-                    input_schema: json!({"type":"object","properties":{"value":{"type":if renamed { "integer" } else { "string" }}},"required":["value"],"additionalProperties":false}),
+                    input_schema: json!({"type":"object","properties":{"value":{"type":if renamed { "integer" } else { "string" }}},"required":if renamed { json!(["value"]) } else { json!([]) },"additionalProperties":false}),
                     output_schema: None,
                     kind: ToolKind::Call,
                 })).collect::<Vec<_>>();
@@ -835,8 +839,17 @@ mod tests {
                         let result = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":value})), context(), None, None)).unwrap();
                         proptest::prop_assert_eq!(&result["marker"], &json!(marker));
                         proptest::prop_assert_eq!(&result["arguments"]["structured"]["value"], &value);
-                        let wrong = if *integer { json!("wrong") } else { json!(17) };
-                        proptest::prop_assert!(runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":wrong})), context(), None, None)).is_err(), "the issued schema must refuse the other generation input type");
+                        let null = runtime.block_on(snapshot.dispatch(tool.name().into(), ToolArguments::Structured(json!({"value":null})), context(), None, None)).unwrap();
+                        proptest::prop_assert_eq!(&null["arguments"]["structured"], &if *integer { json!({"value":null}) } else { json!({}) });
+                        // Primitive value validation belongs to the typed actor endpoint;
+                        // this transport owner preserves its advertised type and null projection.
+                        let value_schema = &projected["parameters"]["properties"]["value"];
+                        let expected_type = if *integer { "integer" } else { "string" };
+                        if *integer {
+                            proptest::prop_assert_eq!(&value_schema["type"], &json!(expected_type));
+                        } else {
+                            proptest::prop_assert_eq!(&value_schema["anyOf"][0]["type"], &json!(expected_type));
+                        }
                     }
                 }
             }

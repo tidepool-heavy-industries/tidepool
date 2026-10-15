@@ -165,6 +165,10 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self.tools
     }
 
+    fn declaration_snapshot(&self) -> Arc<[HostedTool]> {
+        self.tools.clone()
+    }
+
     fn instructions(&self) -> Option<&str> {
         Some(haskell_tool_instructions())
     }

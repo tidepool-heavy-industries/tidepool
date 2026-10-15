@@ -7,9 +7,11 @@
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
+#[cfg(test)]
+use tidepool_runtime::session::WorkbenchRequest;
 use tidepool_runtime::session::{
     PublicationCancellation, PublicationDecision, PublicationPhase, ResidentHole,
-    WorkbenchExecutionId, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchExecutionId, WorkbenchResponse,
 };
 use tokio::sync::oneshot;
 
@@ -938,6 +940,10 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     fn tools(&self) -> &[HostedTool];
+    /// Immutable declaration metadata; retaining it does not retain execution authority.
+    fn declaration_snapshot(&self) -> Arc<[HostedTool]> {
+        self.tools().into()
+    }
     fn instructions(&self) -> Option<&str>;
     /// Exact composed instructions retained by this issued model request.
     fn request_instructions(&self) -> Option<&str> {
