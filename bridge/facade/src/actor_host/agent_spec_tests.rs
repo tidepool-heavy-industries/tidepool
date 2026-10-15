@@ -1292,7 +1292,7 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
                 .expect("the original operation remains owned");
             assert!(
                 matches!(
-                    completed.as_ref(),
+                    &completed,
                     harness::turn::JobOutput::Completed(Ok(_))
                 ),
                 "the exact operation must succeed after its hook: {completed:?}"
