@@ -20,7 +20,6 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.FromJSON (FromJSON (..), withObject, (.:?), (.!=))
 import Tidepool.Aeson.Value (Value (..), ToJSON (..), object, (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
-import Tidepool.Agent.ToolEffects (SyncEffects)
 import Tidepool.Effects.Core (Reload, ReloadError (..), ReloadOutcome (..), ReloadOptions (..), ReloadPolicy (..), ReloadSurfaceDiff (..), ReloadRefusal (..), ReloadRefusalCategory (..), SourceRevision (..), reloadSourceWith)
 
 -- | Optional hosted reload arguments. Omitted values preserve the tool surface.
@@ -52,7 +51,7 @@ instance JsonSchema ReloadError where
 reloadSource :: Member Reload effects => [Text] -> Eff effects (Either ReloadError ReloadOutcome)
 reloadSource checks = reloadSourceWith (ReloadOptions checks CompatibleOnly)
 
-reloadHandler :: ReloadInput -> Eff (SyncEffects effects) (Either ReloadError ReloadOutcome)
+reloadHandler :: Member Reload effects => ReloadInput -> Eff effects (Either ReloadError ReloadOutcome)
 reloadHandler (ReloadInput checks accept) = reloadSourceWith
   (ReloadOptions checks (if accept then AcceptCacheInvalidation else CompatibleOnly))
 

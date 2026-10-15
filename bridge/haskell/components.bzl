@@ -7491,6 +7491,7 @@ def declare_haskell_components():
         "Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
         "Tidepool/Effects.hs": "//bridge/mcp:effects_generated[Tidepool_Effects_hs]",
         "Tidepool/Effects/Authored.hs": "//bridge/mcp:effects_generated[Tidepool_Effects_Authored_hs]",
+        "Tidepool/Reload.hs": "lib/Tidepool/Reload.hs",
         "Tidepool/Effects/Core.hs": "//bridge/mcp:effects_generated[Tidepool_Effects_Core_hs]",
         "Tidepool/Effects/Row.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Effects_Row_hs]",
         "Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",

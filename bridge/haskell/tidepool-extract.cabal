@@ -1093,6 +1093,7 @@ test-suite browser-scenario-contract
     Tidepool.Duration
     Tidepool.Effects
     Tidepool.Effects.Authored
+    Tidepool.Reload
     Tidepool.Effects.Core
     Tidepool.Effects.Row
     Tidepool.FilePath
