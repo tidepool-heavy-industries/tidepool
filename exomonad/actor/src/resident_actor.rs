@@ -1929,6 +1929,24 @@ pub struct ActorProviderAdmission {
     owner: Arc<WorkbenchPublicOwner>,
 }
 
+/// The incarnation owner distinguishes retirement from failed validation.
+/// Only an observed admission close permits a provider to cancel its request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ActorPublicOwnerRefusal {
+    #[error("actor lifecycle admission is closed")]
+    Closed,
+    #[error("actor public-owner settlement remains unconfirmed: {0}")]
+    Unsettled(String),
+    #[error("public owner does not match its live exact admission")]
+    WrongOwner,
+    #[error("actor public owner is not ready for provider admission")]
+    NotReady,
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("native public-owner validation failed: {0}")]
+    Native(String),
+}
+
 /// Forest-issued custody for one already-admitted output. Completion may cross
 /// actor retirement; the capsule grants no new display or expansion authority.
 pub struct ActorDisplayAdmission {
@@ -1966,7 +1984,7 @@ impl ActorProviderAdmission {
             .public_owner(Some(self.owner.clone()), true)
             .await
             .map(|_| ())
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            .map_err(ResidentActorWorkbenchError::PublicOwner)
     }
 }
 
@@ -8384,7 +8402,7 @@ where
         lifecycle
             .public_owner(None, false)
             .await
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            .map_err(ResidentActorWorkbenchError::PublicOwner)
     }
 
     async fn bind_initial_generation(
@@ -14138,7 +14156,7 @@ where
         let owner = lifecycle
             .public_owner(None, true)
             .await
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            .map_err(ResidentActorWorkbenchError::PublicOwner)?;
         Ok(Arc::new(ActorProviderAdmission {
             issuer: self.directory.clone(),
             lifecycle,
@@ -14151,9 +14169,7 @@ where
         admission: &ActorProviderAdmission,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if !self.directory.same_owner(&admission.issuer) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "provider attachment belongs to another forest owner".into(),
-            ));
+            return Err(ActorPublicOwnerRefusal::WrongOwner.into());
         }
         admission.validate().await
     }

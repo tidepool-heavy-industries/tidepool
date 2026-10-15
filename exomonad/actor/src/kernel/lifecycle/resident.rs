@@ -4,7 +4,7 @@ mod provider_initial;
 
 use super::{LifecycleCommand, LifecycleHandle, LifecycleState};
 use crate::initial_context::InitialContextEvent;
-use crate::resident_actor::{ActorPublicOwnerPlane, WorkbenchPublicOwner};
+use crate::resident_actor::{ActorPublicOwnerPlane, ActorPublicOwnerRefusal, WorkbenchPublicOwner};
 use crate::{ActorDescriptor, ActorSessionContext, InitialContextObservation, RootStartupIntent};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -131,19 +131,30 @@ pub(super) struct ResidentState {
 }
 
 impl ResidentState {
-    fn admits_public_owner(&self, owner: &WorkbenchPublicOwner, provider: bool) -> bool {
+    fn validate_public_owner(
+        &self,
+        owner: &WorkbenchPublicOwner,
+        provider: bool,
+    ) -> Result<(), ActorPublicOwnerRefusal> {
         // Issued owners retain their notebook generation. Attachment authority
         // spans generations of the same actor incarnation and resource owner.
         let placement = owner.placement();
-        owner.actor() == self.current.context.actor
-            && placement.session == self.current.context.placement.session
-            && placement.resource_scope == self.current.context.placement.resource_scope
-            && (!provider
-                || (self.successor.is_none()
-                    && self
-                        .current
-                        .startup
-                        .is_none_or(|startup| startup == RootStartupState::Activated)))
+        if owner.actor() != self.current.context.actor
+            || placement.session != self.current.context.placement.session
+            || placement.resource_scope != self.current.context.placement.resource_scope
+        {
+            return Err(ActorPublicOwnerRefusal::WrongOwner);
+        }
+        if provider
+            && (self.successor.is_some()
+                || self
+                    .current
+                    .startup
+                    .is_some_and(|startup| startup != RootStartupState::Activated))
+        {
+            return Err(ActorPublicOwnerRefusal::NotReady);
+        }
+        Ok(())
     }
 
     pub(super) fn has_pending(&self) -> bool {
@@ -282,7 +293,7 @@ pub(super) enum Request {
     ObserveOwner {
         expected: Option<Arc<WorkbenchPublicOwner>>,
         provider: bool,
-        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, String>>,
+        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, ActorPublicOwnerRefusal>>,
     },
     Initial {
         event: InitialContextEvent,
@@ -326,7 +337,8 @@ enum Pending {
     ProviderInitial(provider_initial::Pending),
     OwnerObservation {
         owner: Arc<WorkbenchPublicOwner>,
-        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, String>>,
+        provider: bool,
+        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, ActorPublicOwnerRefusal>>,
     },
     Initial(RpcReplyPort<Result<InitialTransition, String>>),
     Owner(RpcReplyPort<Result<PublicManifestCommit, String>>),
@@ -430,16 +442,17 @@ impl LifecycleHandle {
         &self,
         expected: Option<Arc<WorkbenchPublicOwner>>,
         provider: bool,
-    ) -> Result<Arc<WorkbenchPublicOwner>, String> {
+    ) -> Result<Arc<WorkbenchPublicOwner>, ActorPublicOwnerRefusal> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.send_resident(Request::ObserveOwner {
             expected,
             provider,
             reply: reply.into(),
-        })?;
-        answer
-            .await
-            .map_err(|_| "public owner ended before observation".to_owned())?
+        })
+        .map_err(ActorPublicOwnerRefusal::Unavailable)?;
+        answer.await.map_err(|_| {
+            ActorPublicOwnerRefusal::Unavailable("public owner ended before observation".to_owned())
+        })?
     }
 
     pub(crate) async fn configure_resident(
@@ -699,6 +712,8 @@ pub(super) fn handle(
         }
         ResidentCommand::Request(request) => {
             let closed = state.is_closed();
+            let refusal = owner_observation_refusal(state);
+            let observing_owner = matches!(&request, Request::ObserveOwner { .. });
             if let Some(resident) = &mut state.resident {
                 let admitted_completion = match &request {
                     Request::Initial {
@@ -726,13 +741,26 @@ pub(super) fn handle(
                     }
                     _ => false,
                 };
-                if (!closed && resident.current.settlement.is_confirmed()) || admitted_completion {
+                let admitted = if observing_owner {
+                    refusal.is_none()
+                } else {
+                    !closed && resident.current.settlement.is_confirmed()
+                };
+                if admitted || admitted_completion {
                     resident.queued.push_back(request);
                 } else {
-                    refuse(request, "actor lifecycle admission is closed");
+                    refuse(
+                        request,
+                        refusal.expect("refused admission has an owner-issued reason"),
+                    );
                 }
             } else {
-                refuse(request, "resident lifecycle is not configured");
+                refuse(
+                    request,
+                    ActorPublicOwnerRefusal::Unavailable(
+                        "resident lifecycle is not configured".into(),
+                    ),
+                );
             }
         }
         ResidentCommand::Retire(terminal) => {
@@ -943,13 +971,34 @@ pub(super) fn handle(
     advance(state, address);
 }
 
-fn refuse(request: Request, detail: &str) {
+fn owner_observation_refusal(state: &LifecycleState) -> Option<ActorPublicOwnerRefusal> {
+    // Closing does not establish that previously owned work settled. Preserve
+    // uncertainty before classifying an otherwise confirmed retirement.
+    if let Some(detail) = &state.transfer.unconfirmed {
+        return Some(ActorPublicOwnerRefusal::Unsettled(detail.clone()));
+    }
+    if let super::NativeSettlement::NeedsAttention(detail) = &state.native_settlement {
+        return Some(ActorPublicOwnerRefusal::Unsettled(detail.clone()));
+    }
+    let Some(resident) = state.resident.as_ref() else {
+        return Some(ActorPublicOwnerRefusal::Unavailable(
+            "resident lifecycle is not configured".into(),
+        ));
+    };
+    if let ResidentSettlement::NeedsAttention(detail) = &resident.current.settlement {
+        return Some(ActorPublicOwnerRefusal::Unsettled(detail.clone()));
+    }
+    state.is_closed().then_some(ActorPublicOwnerRefusal::Closed)
+}
+
+fn refuse(request: Request, reason: ActorPublicOwnerRefusal) {
+    let detail = reason.to_string();
     match request {
         Request::ProviderInitial(request) => {
             let _ = request.reply.send(Err(detail.into()));
         }
         Request::ObserveOwner { reply, .. } => {
-            let _ = reply.send(Err(detail.into()));
+            let _ = reply.send(Err(reason));
         }
         Request::Initial { reply, .. } | Request::AcknowledgeInitial { reply, .. } => {
             let _ = reply.send(Err(detail.into()));
@@ -1004,12 +1053,27 @@ fn complete(
     let (_, pending) = resident.pending.take().expect("matched resident operation");
     state.tasks.remove(&sequence);
     match (pending, outcome) {
-        (Pending::OwnerObservation { owner, reply }, Completion::OwnerObservation(result)) => {
-            let result = if state.is_closed() {
-                Err("public-owner observation closed during native validation".into())
-            } else {
-                result.map(|()| owner)
-            };
+        (
+            Pending::OwnerObservation {
+                owner,
+                provider,
+                reply,
+            },
+            Completion::OwnerObservation(result),
+        ) => {
+            let result = result
+                .map_err(ActorPublicOwnerRefusal::Native)
+                .and_then(|()| {
+                    if let Some(refusal) = owner_observation_refusal(state) {
+                        return Err(refusal);
+                    }
+                    state
+                        .resident
+                        .as_ref()
+                        .expect("configured resident")
+                        .validate_public_owner(&owner, provider)?;
+                    Ok(owner)
+                });
             state.publish();
             let _ = reply.send(result);
         }
@@ -1154,10 +1218,28 @@ fn complete(
 fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
     loop {
         let closed = state.is_closed();
+        let refusal = owner_observation_refusal(state);
         let Some(resident) = state.resident.as_mut() else {
             return;
         };
-        if resident.pending.is_some() || !resident.current.settlement.is_confirmed() {
+        if resident.pending.is_some() {
+            return;
+        }
+        if !resident.current.settlement.is_confirmed() {
+            // Observations queued behind failed publication must receive that
+            // failure; they cannot wait for a generation that will not settle.
+            let mut retained = VecDeque::new();
+            while let Some(request) = resident.queued.pop_front() {
+                if matches!(&request, Request::ObserveOwner { .. }) {
+                    refuse(
+                        request,
+                        refusal.clone().expect("unconfirmed resident has a refusal"),
+                    );
+                } else {
+                    retained.push_back(request);
+                }
+            }
+            resident.queued = retained;
             return;
         }
         let Some(request) = resident.queued.pop_front() else {
@@ -1205,7 +1287,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                 Request::PublishOwner { .. } | Request::ReleaseStartup { .. }
             )
         {
-            refuse(request, "actor closed before external publication started");
+            refuse(request, ActorPublicOwnerRefusal::Closed);
             continue;
         }
         let current = resident.current.clone();
@@ -1227,25 +1309,34 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
             } => {
                 // Provider attachment is stable actor authority. Issued owners
                 // may name an earlier notebook generation retained by live work.
-                let owner = expected.or_else(|| current.public_owner.ready().cloned());
-                if closed
-                    || owner.as_ref().is_none_or(|owner| {
-                        !state
-                            .resident
-                            .as_ref()
-                            .unwrap()
-                            .admits_public_owner(owner, provider)
-                    })
-                {
-                    let _ = reply.send(Err(
-                        "public owner does not match its live exact admission".into()
-                    ));
-                    continue;
-                }
-                let owner = owner.unwrap();
+                let validation = (|| {
+                    if let Some(refusal) = refusal {
+                        return Err(refusal);
+                    }
+                    let owner = expected
+                        .or_else(|| current.public_owner.ready().cloned())
+                        .ok_or(ActorPublicOwnerRefusal::NotReady)?;
+                    state
+                        .resident
+                        .as_ref()
+                        .expect("configured resident")
+                        .validate_public_owner(&owner, provider)?;
+                    Ok(owner)
+                })();
+                let owner = match validation {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
                 let native = owner.native_readiness();
                 (
-                    Pending::OwnerObservation { owner, reply },
+                    Pending::OwnerObservation {
+                        owner,
+                        provider,
+                        reply,
+                    },
                     Box::pin(async move {
                         Completion::OwnerObservation(match native {
                             Some(native) => native

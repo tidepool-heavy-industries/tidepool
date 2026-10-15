@@ -701,7 +701,10 @@ async fn owned_observation_worker_panic_settles_only_its_readonly_request() {
     )
     .await
     .expect("read-only worker panic replies instead of stranding the owner");
-    assert!(answer.is_err());
+    assert!(matches!(
+        answer,
+        Err(crate::ActorPublicOwnerRefusal::Native(_))
+    ));
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         fixture.admission.lifecycle.wait_transactions(),

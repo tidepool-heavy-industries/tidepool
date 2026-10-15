@@ -179,6 +179,11 @@ async fn resident_retirement_source_lifetime(case: RetirementSourceCase) {
         drop(issued);
     }
     if matches!(case, RetirementSourceCase::Failure) {
+        let refusal = owner.public_owner(None, true).await;
+        assert!(
+            matches!(refusal, Err(crate::ActorPublicOwnerRefusal::Unsettled(_))),
+            "closed lifecycle must preserve the failed native retirement"
+        );
         let retained = native_value
             .upgrade()
             .expect("unconfirmed retirement keeps current source");
@@ -574,4 +579,125 @@ async fn startup_source_snapshot_keeps_fifo_and_releases_on_failed_readiness() {
         }
         lifecycle.address.stop(None);
     }
+}
+
+/// A real lifecycle worker whose externally owned publication fails only after
+/// a provider observation has queued behind it.
+struct FailedOwnerPublisher {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl resident::PublicOwnerPublisher for FailedOwnerPublisher {
+    fn initialize(
+        &self,
+        _: crate::ActorSessionContext,
+        _: tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<tidepool_runtime::session::DurablePublicOwnerPublication, String>,
+    > {
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            Err("publication settlement witness".into())
+        })
+    }
+
+    fn transfer(
+        &self,
+        _: crate::ActorSessionContext,
+        _: tidepool_runtime::session::RecoveryPublicOwner,
+        _: tidepool_runtime::session::RecoveryPublicOwner,
+        _: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<tidepool_runtime::session::DurablePublicOwnerPublication, String>,
+    > {
+        Box::pin(async { panic!("this history issues initialization, never transfer") })
+    }
+}
+
+#[tokio::test]
+async fn queued_owner_observation_preserves_publication_uncertainty_through_close() {
+    let (owner, executor) = opened().await;
+    let placement = crate::ActorPlacement {
+        session: tidepool_runtime::session::fresh_session_id(),
+        resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+        lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+    };
+    let descriptor = crate::ActorDescriptor::new("failed publication", placement)
+        .with_actor_path(crate::ActorPath::parse("root").unwrap())
+        .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    owner
+        .configure_resident(
+            descriptor.session_context(owner.identity()),
+            descriptor,
+            None,
+            Arc::new(FailedOwnerPublisher {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let publishing = {
+        let owner = owner.clone();
+        tokio::spawn(async move { owner.publish_public_owner(None).await })
+    };
+    entered.notified().await;
+    let (reply, queued) = tokio::sync::oneshot::channel();
+    owner
+        .address
+        .cast(LifecycleCommand::Resident(Box::new(
+            resident::ResidentCommand::Request(resident::Request::ObserveOwner {
+                expected: None,
+                provider: true,
+                reply: reply.into(),
+            }),
+        )))
+        .unwrap();
+    // The close acknowledgement is a mailbox barrier after the queued request.
+    owner.close().await.unwrap();
+    release.notify_one();
+    let publication = publishing.await.unwrap();
+    assert!(matches!(publication, Err(ref detail) if detail == "publication settlement witness"));
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+        .await
+        .expect("failed publication must settle the queued observation")
+        .unwrap();
+    let later = owner.public_owner(None, true).await;
+    for refusal in [queued, later] {
+        assert!(
+            matches!(refusal, Err(crate::ActorPublicOwnerRefusal::Unsettled(ref detail))
+            if detail == "publication settlement witness"),
+            "closing must not erase the publication failure"
+        );
+    }
+    executor.stop(None);
+    executor
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    owner.address.stop(None);
+    owner
+        .address
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            owner.public_owner(None, true).await,
+            Err(crate::ActorPublicOwnerRefusal::Unavailable(_))
+        ),
+        "a lost lifecycle is unavailable, not an authoritative close"
+    );
 }

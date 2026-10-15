@@ -5149,6 +5149,8 @@ pub enum ResidentActorWorkbenchError {
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
     #[error(transparent)]
+    PublicOwner(#[from] crate::ActorPublicOwnerRefusal),
+    #[error(transparent)]
     Kernel(#[from] crate::KernelBehaviorError),
     #[error(transparent)]
     ToolDeclaration(#[from] exomonad_tool::ToolDeclarationError),

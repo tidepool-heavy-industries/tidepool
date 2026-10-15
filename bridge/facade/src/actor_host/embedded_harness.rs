@@ -931,7 +931,12 @@ impl HostActor for EmbeddedHostActor {
         self.attachment
             .validate()
             .await
-            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
+            .map_err(|error| match error {
+                exomonad_actor::ResidentActorWorkbenchError::PublicOwner(
+                    exomonad_actor::ActorPublicOwnerRefusal::Closed,
+                ) => EmbeddedError::AdmissionClosed,
+                error => EmbeddedError::Host(error.to_string()),
+            })?;
         self.actor
             .admit_transaction()
             .await

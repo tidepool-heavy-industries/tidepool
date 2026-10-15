@@ -139,10 +139,12 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     let fixture = TestForest::new().await;
     let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
-    assert!(forest
-        .authorize_provider_attachment(actor.identity())
-        .await
-        .is_err());
+    assert!(matches!(
+        forest.authorize_provider_attachment(actor.identity()).await,
+        Err(ResidentActorWorkbenchError::PublicOwner(
+            ActorPublicOwnerRefusal::NotReady
+        ))
+    ));
     // The fixture intentionally has no configured durable run owner. Refusal
     // must preserve Pending rather than admitting an ephemeral replacement.
     assert!(forest
@@ -198,10 +200,12 @@ async fn provider_admission_is_bound_to_the_original_forest_owner() {
         .validate_provider_attachment(&admission)
         .await
         .expect("same owner");
-    assert!(forest_b
-        .validate_provider_attachment(&admission)
-        .await
-        .is_err());
+    assert!(matches!(
+        forest_b.validate_provider_attachment(&admission).await,
+        Err(ResidentActorWorkbenchError::PublicOwner(
+            ActorPublicOwnerRefusal::WrongOwner
+        ))
+    ));
     let other = forest_b
         .authorize_provider_attachment(actor_b.identity())
         .await
@@ -253,10 +257,12 @@ async fn requested_retirement_refuses_provider_before_terminal_publication() {
         actor.terminal().get().is_none(),
         "intent precedes terminal cleanup"
     );
-    assert!(forest
-        .validate_provider_attachment(&admission)
-        .await
-        .is_err());
+    assert!(matches!(
+        forest.validate_provider_attachment(&admission).await,
+        Err(ResidentActorWorkbenchError::PublicOwner(
+            ActorPublicOwnerRefusal::Closed
+        ))
+    ));
     assert!(forest
         .authorize_provider_attachment(actor.identity())
         .await
