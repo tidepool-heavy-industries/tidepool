@@ -12605,6 +12605,12 @@ mod tests {
                 .all(|edge| merged.binding_dependencies().contains(edge)));
             let projection = CompilerInputProjection::from_issued_entries(&[
                 inspection.clone(),
+                Arc::new(ArtifactEntry::canonical(match &wire.payload {
+                    ArtifactPayload::Original(product) => {
+                        product.module_interface().unwrap().clone()
+                    }
+                    _ => unreachable!(),
+                })),
                 Arc::new(entry("Unrelated", &[])),
             ])
             .unwrap();
