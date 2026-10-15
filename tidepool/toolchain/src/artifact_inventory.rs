@@ -3352,13 +3352,34 @@ impl ArtifactInventory {
                 .collect::<BTreeSet<_>>();
             pending.extend(children.into_iter().map(|node| (node, demanding)));
         }
-        let required_artifact_ids = required_nodes
+        let mut required_artifact_ids = required_nodes
             .keys()
             .filter_map(|node| match node {
                 InventoryNodeKey::Artifact(binding) => Some(binding.artifact),
                 InventoryNodeKey::Group(_) => None,
             })
             .collect::<BTreeSet<_>>();
+        if let Some(ids) = &namespace_ids {
+            // Retained groups keep their issuer-bound dependency custody even
+            // when their original carrier is the only projected native role.
+            // These exact parent edges grant no new roots or group demand.
+            let inherited = admitted_closure(
+                &state,
+                parent_nodes.iter().copied().filter(|node| match node {
+                    InventoryNodeKey::Group(group) => {
+                        let key = NativeGroupKey {
+                            artifact: group.binding.artifact,
+                            original_ordinal: group.original_ordinal,
+                        };
+                        ids.contains(&key.artifact)
+                            || groups.contains(&key)
+                            || required_groups.contains_key(&key)
+                    }
+                    _ => false,
+                }),
+            );
+            required_artifact_ids.extend(artifact_ids(&inherited));
+        }
         if let Some(ids) = &namespace_ids {
             let interfaces = ids
                 .iter()
