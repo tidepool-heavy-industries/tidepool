@@ -126,3 +126,121 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
         assert_eq!(std::fs::read(path).unwrap(), original_archive, "reload and replay do not overwrite retained evidence");
     })).await;
 }
+
+#[derive(Default)]
+struct BatchBackend {
+    calls: AtomicUsize,
+}
+
+impl exomonad_actor::JevBackend for BatchBackend {
+    fn ask(
+        &self,
+        body: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
+        let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(request["model"], "jev-latest");
+        assert_eq!(request["state"]["intent"], "repair the E0061 call");
+        let questions = request["questions"].as_object().unwrap();
+        assert_eq!(
+            questions.len(),
+            2,
+            "independent questions share one request"
+        );
+        let answers: serde_json::Map<String, serde_json::Value> = questions
+            .iter()
+            .map(|(key, question)| {
+                let answer = match question["type"].as_str().unwrap() {
+                    "choice" => {
+                        let criteria = question["criteria"].as_object().unwrap();
+                        assert_eq!(criteria.len(), 4);
+                        let winner = criteria.keys().find(|key| key.contains("call")).unwrap();
+                        let masses: serde_json::Map<String, serde_json::Value> = criteria
+                            .keys()
+                            .map(|key| {
+                                let mass = if key == winner {
+                                    0.7
+                                } else if key.contains("other") {
+                                    0.0
+                                } else if key == "insufficient" {
+                                    0.2
+                                } else {
+                                    0.1
+                                };
+                                (key.clone(), serde_json::json!(mass))
+                            })
+                            .collect();
+                        serde_json::json!({"type":"choice","choice":winner,"confidence":0.8,"probabilities":masses})
+                    }
+                    "noul" => serde_json::json!({"type":"noul","noul":0.9}),
+                    other => panic!("unexpected installed example question {other}"),
+                };
+                (key.clone(), answer)
+            })
+            .collect();
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let response = serde_json::json!({
+            "answers": answers, "model": "installed-batch-fixture",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        });
+        Box::pin(async move { Ok(response.to_string()) })
+    }
+}
+
+#[tokio::test]
+async fn installed_batch_notebook_example_executes_against_mocked_provider() {
+    let source = std::fs::read_to_string(
+        test_campaign::declared_workspace_package().join(".exomonad/checks/jev-batch-example.hs"),
+    )
+    .expect("canonical installed batch notebook source");
+    let backend = Arc::new(BatchBackend::default());
+    let owned_backend = Arc::clone(&backend);
+    let campaign = TestCampaign::start_with_conversation(
+        |admission| admission,
+        |config| {
+            config.jev = Some(owned_backend as exomonad_actor::JevBackendHandle);
+            test_campaign::pinned_jev_workspace(config);
+        },
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
+    )
+    .await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let endpoint = Arc::clone(&campaign.root_installation.policy);
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let origin = test_campaign::actor_output_origin(
+                    &super::runtime_namespace(campaign.session_root.path()),
+                    campaign.actor.identity(),
+                );
+                let receipt = campaign
+                    .drive_actor_output(&store, async {
+                        test_campaign::dispatch_haskell_script_named(
+                            endpoint.as_ref(),
+                            "haskell_sync",
+                            &source,
+                        )
+                        .await
+                    })
+                    .await;
+                let displays =
+                    test_campaign::retained_committed_display_texts(&store, &origin, &receipt);
+                assert_eq!(displays.len(), 4, "{receipt}");
+                assert!(displays[0].contains("Evaluation"), "{displays:?}");
+                assert!(
+                    displays[1].contains("call") && displays[1].contains("other"),
+                    "{displays:?}"
+                );
+                assert!(displays[2].contains("Doubt"), "{displays:?}");
+                assert!(
+                    displays[3].contains("Inspect the original call at src/main.rs:83."),
+                    "explicit selected continuation result: {displays:?}"
+                );
+                assert!(!displays[3].contains("original match"), "{displays:?}");
+                assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+            })
+        })
+        .await;
+}

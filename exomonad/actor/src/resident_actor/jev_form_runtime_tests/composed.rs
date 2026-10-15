@@ -67,21 +67,6 @@ async fn installed_composition_retains_full_distribution_replays_and_runs_only_e
     fixture.finish().await;
 }
 
-#[tokio::test]
-async fn installed_batch_notebook_example_executes_against_mocked_provider() {
-    let mut fixture = Fixture::new(783, false).await;
-    let backend = Arc::new(BatchBackend::default());
-    fixture.forest.set_jev_backend(backend.clone());
-    let workspace =
-        std::env::var_os("TIDEPOOL_JEV_WORKSPACE_DIR").expect("declared workspace input");
-    let source =
-        std::fs::read_to_string(PathBuf::from(workspace).join("checks/jev-batch-example.hs"))
-            .unwrap();
-    fixture.execute(&format!("{source}\nsay \"True\"\n")).await;
-    assert_eq!(backend.0.lock().len(), 1);
-    fixture.finish().await;
-}
-
 #[derive(Default)]
 struct UnavailableBackend(Mutex<usize>);
 
