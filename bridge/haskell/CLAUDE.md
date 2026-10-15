@@ -40,6 +40,11 @@ dispatcher together; a mutable raw spec must not carry an independently cached
 validation result. A validation report records current checks, not future grants
 or a source identity reconstructed from a module name.
 
+Retained live installers use unary `Int -> Eff effects ()` entry functions.
+Constrain that shape at the capture-facing Haskell constructor and helper, and
+test the borrowed entry invocation; metadata inspection alone does not establish
+that an installer can execute.
+
 ## Build the compiler worker
 
 From the repository root, after materializing and configuring pinned tools:

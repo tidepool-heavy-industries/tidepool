@@ -450,6 +450,33 @@ pub(crate) fn admit_reply_tool_request(
         .live_payload_handle_owned_by(registration.cont_id(), RealmId::ROOT)
         .unwrap()
         .expect("registration retains the compiled installer");
+    // Exercise the production ExplicitLive ABI, rather than only retaining
+    // an opaque payload that the recipient cannot subsequently invoke.
+    let (installation, payload) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.run_rooted_entry_borrowed(
+                "request_reply_installer",
+                &installer,
+                0,
+                RealmId::ROOT,
+                None,
+                settlement,
+            )
+        })
+        .expect("request reply installer must implement the borrowed-entry function ABI"),
+    );
+    assert!(
+        matches!(
+            crate::generated::agent_tools::AgentToolsReq::from_value(
+                &payload,
+                fixture.resident.data_con_table(),
+            )
+            .unwrap(),
+            crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(..)
+        ),
+        "the borrowed installer must enter the ordinary tool installation owner"
+    );
+    fixture.abort_submission(&installation, "borrowed reply installer observed");
     // Hosted invocation context is a source interpreter, composed alongside
     // the environment-owned actor primitives by the production facade.
     let mut support = crate::resident_workbench::intrinsic_effect_families();

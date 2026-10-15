@@ -339,7 +339,7 @@ data Replies a where
   CurrentRequestWith :: RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Replies (RequestScope input result)
   ReserveRequestWith :: Maybe Text -> (Int, Int) -> Bool -> WorkerLifetime -> Replies (Either RequestError Int)
   SubmitRequestWith :: Int -> RequestSite (input ': extra) result -> request -> (Int, Int) -> Maybe Duration -> Replies (Either RequestError ())
-  RegisterReplyToolWith :: Value -> installer -> Int -> Replies (Either RequestError ())
+  RegisterReplyToolWith :: Value -> (Int -> Eff installerEffects ()) -> Int -> Replies (Either RequestError ())
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
   -- 'replyPreviewCharBudget'), carried alongside the live value so the
   -- settlement notice the reply produces can show readable text -- 'Text'
@@ -421,7 +421,7 @@ newRequestHandles :: RequestId -> AgentRef -> (Request result, Reply result)
 newRequestHandles request actor = (Request request actor, Reply request)
 
 -- | Retain the compiled decoder before publishing its exact request.
-registerReplyTool :: Member Replies effs => Int -> Value -> installer -> Eff effs (Either RequestError ())
+registerReplyTool :: Member Replies effs => Int -> Value -> (Int -> Eff installerEffects ()) -> Eff effs (Either RequestError ())
 registerReplyTool request metadata installer = send (RegisterReplyToolWith metadata installer request)
 
 responseRequestId :: Request result -> RequestId

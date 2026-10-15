@@ -41,7 +41,7 @@ replyToolInstaller
   :: forall result
    . (FromJSON result, JsonSchema result, WorkbenchDisplay result)
   => Replies.Reply result
-  -> Either Text (Value, Eff (AgentTools ': SyncEffects '[Replies.Replies]) ())
+  -> Either Text (Value, Int -> Eff (AgentTools ': SyncEffects '[Replies.Replies]) ())
 replyToolInstaller handle =
   case prepareAgentSpec $ defaultSpec
         { specTools = ReplyTools $ presentWith (const "Reply accepted.") $
@@ -50,4 +50,4 @@ replyToolInstaller handle =
         }
    of
     Left problem -> Left (renderToolCompileError problem)
-    Right prepared -> Right (preparedAgentSpecMetadata prepared, installPreparedSpec prepared)
+    Right prepared -> Right (preparedAgentSpecMetadata prepared, \_ -> installPreparedSpec prepared)
