@@ -49,6 +49,16 @@
       "source": "Project/RetainedLookupExample.hs",
       "prerequisites": [],
       "requirements": "Import Project.RetainedLookupExample and call capture with Lookup available. Display lookupIndex of the returned batch, then sections or firstSignatureLine. Navigation is pure over that exact batch; missing examples/source are explicit, and no discovered runtime authority or upstream completeness is implied."
+    },
+    {
+      "module": "Tidepool.Actors.Internal.Agent",
+      "name": "requestWithReplyTool",
+      "namespace": "value",
+      "source": "checks/researcher-two-replies.hs",
+      "prerequisites": [
+        "Project/Researcher.hs"
+      ],
+      "requirements": "Run in a resident workbench with AgentLaunch, Replies, Watches and Console available and a configured Luna model. Project.Researcher must be on the selected source path. The child requires Web support and network access for search and open; the caller does not need Web. SameDir shares the writable selected workspace. Validates the child spec, awaits a sourced Report, then awaits a distinct FollowUp using the active reply tool for each request."
     }
   ]
 }
