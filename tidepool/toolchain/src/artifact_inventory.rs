@@ -2086,8 +2086,10 @@ impl SelectedOwners {
                 .ok_or_else(|| {
                     if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG) {
                         let wanted = entry.native_owners.get(owner);
-                        let candidates = self.native.iter().filter(|(key, _)| key.owner == *owner).collect::<Vec<_>>();
-                        tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?key, ?owner, ?dependency, ?wanted, ?candidates,
+                        let matching = self.native.iter().filter(|(key, _)| key.owner == *owner);
+                        let candidate_count = matching.clone().count();
+                        let candidates = matching.take(16).collect::<Vec<_>>();
+                        tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?key, ?owner, ?dependency, ?wanted, ?candidates, candidate_count,
                             "native dependency owner index refused");
                     }
                     admission_failure(ArtifactInventoryFailure::MissingDependency {
