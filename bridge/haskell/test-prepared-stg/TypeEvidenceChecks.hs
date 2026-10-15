@@ -332,6 +332,33 @@ verifyHydratedSiteIdentities result wire = do
   restoredSyntax <- requireRight (Policy.encodeTypeSyntaxIdentity hydratedResolver restoredGraph [restoredRoot])
   assert (sourceSyntax == restoredSyntax)
     "site syntax identity changed with source/interface hydration or unrelated arena indices"
+  -- This is a structural encoder input only: the genuine TyCons and resolver
+  -- stay fixed, and no modified PreparedModule or admission evidence is issued.
+  -- Full graph admission must still refuse a same-ABI schema disagreement;
+  -- changing these fields must not conceal it behind a newly salted site ID.
+  let changeForm node = case node of
+        TypeDeclaration constructor flags _ restriction ->
+          TypeDeclaration constructor flags (OpaqueDeclaration NominalConstructor "schema control") restriction
+        other -> other
+      changeRestriction node = case node of
+        TypeDeclaration constructor flags form restriction -> TypeDeclaration constructor flags form
+          (case restriction of UnrestrictedSyntax -> EffectHead; EffectHead -> UnrestrictedSyntax)
+        other -> other
+      changeField (TypeField ordinal rep, target) = (TypeField (ordinal + 1) rep, target)
+      changeField other = other
+      variants =
+        [ ("declaration form", restoredGraph { typeGraphNodes = fmap changeForm (typeGraphNodes restoredGraph) })
+        , ("syntax restriction", restoredGraph { typeGraphNodes = fmap changeRestriction (typeGraphNodes restoredGraph) })
+        , ("constructor field roles", restoredGraph { typeGraphEdges = fmap (map changeField) (typeGraphEdges restoredGraph) })
+        ]
+  assert (any (\node -> case node of TypeDeclaration _ _ DataDeclaration _ -> True; _ -> False)
+      (IntMap.elems (typeGraphNodes restoredGraph))
+      && any (\(role, _) -> case role of TypeField{} -> True; _ -> False)
+        (concat (IntMap.elems (typeGraphEdges restoredGraph))))
+    "nonidentity controls lack a real data declaration and constructor field template"
+  forM_ variants $ \(label, structuralGraph) -> do
+    syntax <- requireRight (Policy.encodeTypeSyntaxIdentity hydratedResolver structuralGraph [restoredRoot])
+    assert (syntax == restoredSyntax) (label ++ " unexpectedly salted the typed site identity")
   let inventory identities = Map.fromList [(typeSymbol identity, identity) | identity <- identities]
   assert (not (null source) && inventory source == siteIdentities wire)
     "projected reachable nominal identities differ from their issuing prepared resolver"
