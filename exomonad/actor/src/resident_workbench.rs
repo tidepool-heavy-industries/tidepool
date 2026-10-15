@@ -4872,6 +4872,12 @@ impl<H, O> ResidentActorRunner<H, O> {
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
+    pub(crate) fn boundary_runner(&self) -> ResidentActorRunner<H, O> {
+        ResidentActorRunner {
+            access: self.access.sharing(),
+        }
+    }
+
     pub(crate) fn shared_for_command_binding(&self) -> Self {
         Self {
             access: self.access.sharing(),

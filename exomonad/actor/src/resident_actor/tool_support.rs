@@ -10,6 +10,10 @@ impl<H, O> ResidentEnvironment<H, O> {
             .with_intrinsic_effect_support(self.intrinsic_effect_support())
     }
 
+    pub(super) fn boundary_runner(&self) -> crate::ResidentActorRunner<H, O> {
+        self.application_workbench().boundary_runner()
+    }
+
     pub(super) fn intrinsic_effect_support(&self) -> Vec<ToolEffectKey> {
         crate::resident_workbench::intrinsic_effect_families()
             .into_iter()

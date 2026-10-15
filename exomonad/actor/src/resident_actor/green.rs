@@ -290,11 +290,11 @@ where
         realm: RealmId,
     ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
         self.invocation
-            .drive(
-                self.environment
-                    .runner
-                    .capture_boundary(self.context.clone(), outcome, realm),
-            )
+            .drive(self.environment.boundary_runner().capture_boundary(
+                self.context.clone(),
+                outcome,
+                realm,
+            ))
             .await
     }
     pub(super) async fn resume_unit(
@@ -389,7 +389,7 @@ where
         self.invocation
             .drive(owned_workbench::advance_fragment(
                 workbench,
-                &self.environment.runner,
+                &self.environment.boundary_runner(),
                 self.context.clone(),
                 request,
             ))

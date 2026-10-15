@@ -7610,7 +7610,7 @@ where
         loop {
             match self
                 .environment
-                .runner
+                .boundary_runner()
                 .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
                 .await?
             {
@@ -8698,7 +8698,7 @@ where
                 .await?;
             let boundary = self
                 .environment
-                .runner
+                .boundary_runner()
                 .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
                 .await?;
             let ResidentActorBoundary::Receive(receiver) = boundary else {
@@ -9010,7 +9010,7 @@ where
             {
                 let boundary = self
                     .environment
-                    .runner
+                    .boundary_runner()
                     .capture_boundary(context.clone(), outcome, handler_realm)
                     .await?;
                 outcome = self
@@ -9199,7 +9199,7 @@ where
             }
             let boundary = self
                 .environment
-                .runner
+                .boundary_runner()
                 .capture_boundary(context.clone(), outcome, suspended.handler_realm)
                 .await?;
             match boundary {
@@ -12758,7 +12758,7 @@ where
                         loop {
                             let boundary = self
                                 .environment
-                                .runner
+                                .boundary_runner()
                                 .capture_boundary(
                                     context.clone(),
                                     outcome,

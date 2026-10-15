@@ -260,7 +260,7 @@ where
                 let boundary = match next {
                     Ok(outcome) => {
                         self.environment
-                            .runner
+                            .boundary_runner()
                             .capture_boundary(context.clone(), outcome, frame.realm)
                             .await
                     }
