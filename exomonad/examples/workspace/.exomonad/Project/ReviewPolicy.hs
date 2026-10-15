@@ -21,7 +21,7 @@ import Tidepool.Agent.Contract (AgentSpec)
 import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
 import Tidepool.Aeson.Value (object, (.=))
-import Tidepool.Effects.Core (GitRef (..), Jev, Commands, Lookup)
+import Tidepool.Effects.Core (GitRef (..), Jev, Commands, Lookup, Console)
 import Tidepool.Worktree (renderGitOid)
 import Exomonad.Contrib.Types
 import Project.Work
@@ -30,7 +30,7 @@ import Exomonad.Contrib.ReviewFlow
 
 -- The flow grants this reviewer the effects needed by its actual tool record.
 -- Broader project operations remain with the owner that coordinates delivery.
-type ReviewerEffects = '[Replies, BoundWorktree, Commands, Lookup, Jev, Reflect, ActorContext]
+type ReviewerEffects = '[Replies, BoundWorktree, Commands, Lookup, Console, Jev, Reflect, ActorContext]
 
 reviewerSpec :: AgentSpec (Tools.WorkspaceTools ReviewerEffects) ReviewerEffects
 reviewerSpec = Installed.agentSpec
