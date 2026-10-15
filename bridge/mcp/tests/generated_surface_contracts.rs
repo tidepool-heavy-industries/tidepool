@@ -165,6 +165,19 @@ fn compiled_default_actor_row_matches_generated_rust_order() {
             tools.iter().map(|key| key.wire_name().to_owned()).collect(),
         ),
         named("ToolNominals", tools.iter().copied().map(nominal).collect()),
+        named(
+            "SyncEffects",
+            tools
+                .iter()
+                .filter(|key| key.is_invocation_only())
+                .map(|key| key.wire_name().to_owned())
+                .chain(
+                    DEFAULT_ACTOR_EFFECTS
+                        .iter()
+                        .map(|key| key.haskell_constructor().unwrap().to_owned()),
+                )
+                .collect(),
+        ),
     ];
     assert_eq!(
         reflected, expected,

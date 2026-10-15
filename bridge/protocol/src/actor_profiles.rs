@@ -741,13 +741,26 @@ mod tests {
             wire_name: "InvocationProbeWire",
             scope: EffectScope::InvocationOnly,
             default_order: None,
-            rust_order: 30,
-            bridge_order: 29,
+            rust_order: EFFECTS
+                .iter()
+                .map(|effect| effect.rust_order)
+                .max()
+                .unwrap()
+                + 1,
+            bridge_order: EFFECTS
+                .iter()
+                .map(|effect| effect.bridge_order)
+                .max()
+                .unwrap()
+                + 1,
         });
         assert!(validate(&changed).is_ok());
         for file in render(&changed) {
             if file.path.ends_with("ActorProfiles.hs") {
                 assert!(file.contents.contains("KnownToolEffect InvocationProbe"));
+                assert!(file
+                    .contents
+                    .contains("ContextReadWrite ': Reload ': InvocationProbe ': effects"));
                 assert!(file
                     .contents
                     .contains("AsyncEffects (InvocationProbe ': effects)"));
@@ -796,8 +809,18 @@ mod tests {
             wire_name: "ProbeWire",
             scope: EffectScope::Delegable,
             default_order: Some(defaults(EFFECTS).len()),
-            rust_order: 30,
-            bridge_order: 29,
+            rust_order: EFFECTS
+                .iter()
+                .map(|effect| effect.rust_order)
+                .max()
+                .unwrap()
+                + 1,
+            bridge_order: EFFECTS
+                .iter()
+                .map(|effect| effect.bridge_order)
+                .max()
+                .unwrap()
+                + 1,
         };
         let mut changed = EFFECTS.to_vec();
         changed.push(added);

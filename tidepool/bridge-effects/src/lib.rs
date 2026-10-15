@@ -252,6 +252,76 @@ mod context_constructor_tests {
     }
 
     #[test]
+    fn reload_options_and_typed_receipts_roundtrip_and_reject_wrong_arity() {
+        use super::{
+            RlOptions, RlPolicy, RlRefusal, RlRefusalCategory, RlSurfaceDiff, SrReloadOutcome,
+            SrRevision,
+        };
+        let mut table = DataConTable::new();
+        table
+            .extend_checked([
+                row(1, "Tidepool.Effects.Core", "ReloadOptions", 2),
+                row(2, "Tidepool.Effects.Core", "CompatibleOnly", 0),
+                row(3, "Tidepool.Effects.Core", "AcceptCacheInvalidation", 0),
+                row(4, "Tidepool.Effects.Core", "ReloadSurfaceDiff", 3),
+                row(5, "Tidepool.Effects.Core", "ReloadRefusal", 3),
+                row(6, "Tidepool.Effects.Core", "SurfaceIncompatible", 0),
+                row(7, "Tidepool.Effects.Core", "SourceRevision", 3),
+                row(8, "Tidepool.Effects.Core", "ReloadPublished", 4),
+                row(9, "Tidepool.Effects.Core", "ReloadRefused", 3),
+                row(10, "GHC.Types", "[]", 0),
+                row(11, "GHC.Types", ":", 2),
+                row(12, "Data.Text", "Text", 3),
+            ])
+            .unwrap();
+        for policy in [RlPolicy::CompatibleOnly, RlPolicy::AcceptCacheInvalidation] {
+            let options = RlOptions {
+                also_check: vec!["Additional".into()],
+                policy,
+            };
+            let encoded = options.to_value(&table).unwrap();
+            assert_eq!(RlOptions::from_value(&encoded, &table).unwrap(), options);
+        }
+        let revision = SrRevision {
+            identity: "exact-content".into(),
+            generation: 0,
+            modules: vec![],
+        };
+        let diff = RlSurfaceDiff {
+            added: vec!["new".into()],
+            removed: vec![],
+            changed: vec!["changed".into()],
+        };
+        for receipt in [
+            SrReloadOutcome::ReloadPublished(
+                revision.clone(),
+                revision.clone(),
+                vec![],
+                diff.clone(),
+            ),
+            SrReloadOutcome::ReloadRefused(
+                revision.clone(),
+                revision,
+                RlRefusal {
+                    category: RlRefusalCategory::SurfaceIncompatible,
+                    detail: "supported surface changed".into(),
+                    surface: diff,
+                },
+            ),
+        ] {
+            let encoded = receipt.to_value(&table).unwrap();
+            assert_eq!(
+                SrReloadOutcome::from_value(&encoded, &table).unwrap(),
+                receipt
+            );
+        }
+        assert!(RlOptions::from_value(&HaskellValue::Con(DataConId(1), vec![]), &table).is_err());
+        assert!(
+            SrReloadOutcome::from_value(&HaskellValue::Con(DataConId(8), vec![]), &table).is_err()
+        );
+    }
+
+    #[test]
     fn model_selectors_roundtrip_preserves_tiers_custom_alias_and_provider_identity() {
         let mut table = DataConTable::new();
         table

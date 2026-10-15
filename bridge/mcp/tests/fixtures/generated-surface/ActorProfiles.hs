@@ -11,7 +11,7 @@ import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (unpack)
 import Data.Typeable (Typeable, typeRep, typeRepTyCon, tyConModule, tyConName)
-import Tidepool.Agent.ToolEffects (toolEffectNames)
+import Tidepool.Agent.ToolEffects (toolEffectNames, SyncEffects)
 import Tidepool.Effects.Row (effectKeys, knownEffects)
 import Tidepool.Internal.ActorProfiles (ActorEffects, CatalogueEffects, CatalogueToolEffects, actorEffectName)
 
@@ -33,4 +33,5 @@ main = print
   , "Nominals" : nominals (Proxy @CatalogueEffects)
   , "ToolEffects" : map unpack (toolEffectNames (Proxy @CatalogueToolEffects))
   , "ToolNominals" : nominals (Proxy @CatalogueToolEffects)
+  , "SyncEffects" : map unpack (toolEffectNames (Proxy @(SyncEffects ActorEffects)))
   ]
