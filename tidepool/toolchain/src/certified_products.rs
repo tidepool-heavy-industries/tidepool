@@ -11664,6 +11664,159 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exact_request_bounds_authentic_target_native_groups_before_admission() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+            NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
+        let producer_bytes = b"request-native-availability-consumer";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let product = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "BoundedHelper",
+                vec![(7, vec![]), (9001, vec![])],
+                71,
+                &BTreeMap::new(),
+                b"bounded helper".to_vec(),
+            ),
+            producer.sha256(),
+        )])
+        .remove(0)
+        .product;
+        let entry = Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
+        let mut unexpected = Vec::new();
+        let mut observed = 0;
+        for mode in ["canonical", "issued", "full"] {
+            let inventory = ArtifactInventory::default();
+            let view = if mode == "full" {
+                inventory
+                    .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                    .unwrap()
+            } else {
+                inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        &BTreeSet::from([NativeGroupKey {
+                            artifact: entry.descriptor.id,
+                            original_ordinal: 7,
+                        }]),
+                    )
+                    .unwrap()
+            };
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+            let projection = if mode == "canonical" {
+                projection.interface_only()
+            } else {
+                projection
+            };
+            let owner = entry.descriptor.owner.clone();
+            let context = ExactDeclarationContext::from_authenticated_execution(
+                producer.sha256(),
+                &view,
+                projection,
+                vec![crate::declaration_join::ExactLexicalNode {
+                    owner: owner.clone(),
+                    imports: vec![],
+                }],
+                owner,
+                &[],
+            )
+            .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(Arc::new(context))
+                .prepare_compilation(root.path(), producer_bytes)
+                .unwrap();
+            let scope: Value =
+                ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                    .unwrap();
+            let native = scope.as_array().unwrap()[6].as_array().unwrap();
+            if mode == "canonical" {
+                assert!(native.is_empty());
+            } else {
+                assert_eq!(native.len(), 1);
+                let expected = if mode == "full" {
+                    value_array([value_text("full-carrier")])
+                } else {
+                    value_array([
+                        value_text("issued-groups"),
+                        value_array([Value::Integer(7.into())]),
+                    ])
+                };
+                assert_eq!(native[0].as_array().unwrap()[8], expected);
+            }
+            let mut validation = PackageInterfaceValidation::default();
+            let selection = CertifiedSourceSelection::from_compiler_inputs(
+                request.compiler_inputs(),
+                &request.compiler_inputs().metadata,
+                &validation.inventory,
+            )
+            .unwrap();
+            let membership = request
+                .compiler_inputs()
+                .available_original_sources(std::slice::from_ref(&product), &validation.inventory)
+                .unwrap();
+            for ordinal in [7, 9001] {
+                observed += 1;
+                let binder = testing::identity("BoundedHelper", &format!("entry_{ordinal}"));
+                let mut wire = testing::wire_program();
+                wire.globals = vec![GlobalDecl {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: None,
+                }];
+                let target = testing::prepare(wire).unwrap();
+                let accepted = vec![AcceptedGlobal {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    owner: ReceiptImportOwner::Source {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                        module_version: Some(product.owner().module_version.clone()),
+                        original_ordinal: ordinal,
+                        binder,
+                    },
+                }];
+                let imported = certify_target_available_owners_from_membership_with_validation(
+                    &target,
+                    &accepted,
+                    &membership,
+                    &request.groups,
+                    &selection,
+                    &BTreeMap::new(),
+                    &mut validation,
+                );
+                let outcome = imported
+                    .map_err(|error| format!("certification: {error:?}"))
+                    .and_then(|imports| {
+                        inventory
+                            .admit_certified_with_demand(
+                                &view,
+                                vec![],
+                                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                                &selection,
+                            )
+                            .map(|selected| selected.selected_native_groups())
+                            .map_err(|error| format!("admission: {error:?}"))
+                    });
+                let expected = mode == "full" || (mode == "issued" && ordinal == 7);
+                if outcome.is_ok() != expected {
+                    unexpected.push(format!("mode={mode} ordinal={ordinal} expected_accept={expected} actual={outcome:?}"));
+                }
+                eprintln!("native_availability_consumer mode={mode} ordinal={ordinal} expected_accept={expected} actual={outcome:?}");
+            }
+        }
+        assert_eq!(observed, 6);
+        assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    }
+
+    #[test]
     fn ordinary_target_selects_old_full_carrier_transitively_without_new_native() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
