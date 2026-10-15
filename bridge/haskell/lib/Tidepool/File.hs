@@ -105,7 +105,8 @@ instance FromJSON ContentVersion where
       then pure (ContentVersion text)
       else Error "ContentVersion must be a 64-character lowercase hexadecimal Blake3 digest"
 instance JsonSchema ContentVersion where
-  jsonSchema _ = object [("type", String "string"), ("pattern", String "^[0-9a-f]{64}$")]
+  -- Provider schemas support the string shape; the decoder owns digest validation.
+  jsonSchema _ = jsonSchema (Proxy :: Proxy Text)
 
 snapshotReference :: FileSnapshot -> FileReference
 snapshotReference snapshot = FileReference (snapshotPath snapshot) (snapshotVersion snapshot)

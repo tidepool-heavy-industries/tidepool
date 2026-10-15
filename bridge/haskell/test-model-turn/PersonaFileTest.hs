@@ -160,6 +160,7 @@ personaFileTests = testGroup "persona file tools"
       assertEqual "one publication, no replay" 1 (publications after)
       assertEqual "one attempt" 1 (attempts after)
   , testCase "version codec and FsError schema match their public encodings" $ do
+      assertEqual "provider-supported version schema" (object [("type", String "string")]) (jsonSchema (Proxy @File.ContentVersion))
       let valid = T.replicate 64 "a"
       case fromJSON (String valid) :: Result File.ContentVersion of
         Success version -> assertEqual "exact round trip" (String valid) (toJSON version)
