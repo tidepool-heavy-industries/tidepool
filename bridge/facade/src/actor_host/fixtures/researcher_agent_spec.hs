@@ -7,7 +7,7 @@ import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
 import Tidepool.Actors.Exomonad (ActorEffects)
 import Tidepool.Effects.Core (Web)
-agentSpec :: AgentSpec WorkbenchTools ActorEffects
+agentSpec :: AgentSpec (WorkbenchTools ActorEffects) ActorEffects
 agentSpec = defaultWorkbenchSpec
 
 data ScalarTools mode = ScalarTools
