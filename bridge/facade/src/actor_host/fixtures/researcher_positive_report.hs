@@ -6,7 +6,7 @@ import Data.Proxy (Proxy(..))
 import Project.Researcher (Report(..))
 import Tidepool.Aeson (FromJSON(..), Result(..), object, (.=))
 import Tidepool.Aeson.Schema (JsonSchema(..))
-import Tidepool.Inspection.Display (WorkbenchDisplay(..))
+import Tidepool.Inspection.Display (Display(..), WorkbenchDisplay(..))
 
 -- Same schema as Report, with a semantic check owned by FromJSON. This
 -- distinguishes structural validation from the compiled Haskell decoder.
@@ -21,6 +21,8 @@ instance FromJSON PositiveReport where
       else pure (PositiveReport report)
 instance WorkbenchDisplay PositiveReport where
   workbenchDisplay (PositiveReport report) = workbenchDisplay report
+instance Display PositiveReport where
+  displayView (PositiveReport report) = displayView report
 
 -- The ordinary result decoder is valid; only its authored schema is unsupported.
 newtype UnsupportedReport = UnsupportedReport Report

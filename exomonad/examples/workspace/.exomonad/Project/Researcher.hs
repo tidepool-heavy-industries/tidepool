@@ -29,7 +29,7 @@ import Tidepool.Agent.Contract
   , defaultSpec, presentJson, presentWith, syncTool
   )
 import Tidepool.Effects.Core (Web, WebError, webSearchRaw, webExtractRaw)
-import Tidepool.Inspection.Display (Display, WorkbenchDisplay (..))
+import Tidepool.Inspection.Display (Display (..), WorkbenchDisplay (..))
 
 type ResearchEffects = '[Web]
 
@@ -48,9 +48,12 @@ data Report = Report { question :: Text, summary :: Text, sources :: [Citation] 
 data FollowUp = FollowUp { answer :: Text, citations :: [Text] }
   deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
 
-instance Display Citation
-instance Display Report
-instance Display FollowUp
+instance Display Citation where
+  displayView = displayView . presentJson
+instance Display Report where
+  displayView = displayView . presentJson
+instance Display FollowUp where
+  displayView = displayView . presentJson
 instance WorkbenchDisplay Report where
   workbenchDisplay report = (presentJson report, False)
 instance WorkbenchDisplay FollowUp where

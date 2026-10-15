@@ -13,9 +13,10 @@ import Data.Text (Text)
 import Test.Tasty.HUnit (assertEqual, assertBool, assertFailure)
 import Tidepool.Test.Runner (TestTree, testCase, testGroup)
 import Tidepool.Aeson
-import Tidepool.Agent.Contract (JsonSchema (..), prepareAgentSpec, preparedAgentSpecMetadata)
+import Tidepool.Agent.Contract (JsonSchema (..), prepareAgentSpec, preparedAgentSpecMetadata, presentJson)
 import Tidepool.Agent.ToolEffects (toolEffectNames)
 import Tidepool.Effects.Core (Web (..), WebError (..))
+import Tidepool.Inspection.Display (Display (..), WorkbenchDisplay (..))
 import qualified Project.Researcher as Researcher
 
 field :: Text -> Value -> Value
@@ -57,6 +58,14 @@ researcherSpecTests = testGroup "researcher example"
         (keys (field "properties" (jsonSchema (Proxy @Researcher.Report))))
       assertEqual "second schema fields" ["answer", "citations"]
         (keys (field "properties" (jsonSchema (Proxy @Researcher.FollowUp))))
+  , testCase "explicit and reply displays preserve complete report JSON" $ do
+      let report = Researcher.Report "What grows?" "moss λ"
+            [Researcher.Citation "https://example.org/moss" "page-reference"]
+          followUp = Researcher.FollowUp "It is green." ["https://example.org/moss"]
+      assertEqual "explicit report" (presentJson report, False) (displayWith 10000 report)
+      assertEqual "reply report" (presentJson report, False) (workbenchDisplay report)
+      assertEqual "explicit follow-up" (presentJson followUp, False) (displayWith 10000 followUp)
+      assertEqual "reply follow-up" (presentJson followUp, False) (workbenchDisplay followUp)
   , testCase "domain handlers preserve Web request arguments and typed failures" $ do
       assertEqual "search domain arguments" (Right (Array []))
         (run (interpret webHost (Researcher.searchHandler (Researcher.SearchInput "moss" 3))))
