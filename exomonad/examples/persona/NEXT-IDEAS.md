@@ -133,6 +133,18 @@ not a standing implementation plan.
 
 ## Evidence to return to
 
+### Pinned package discovery index
+
+An optional follow-up is a read-only discovery index built with the exact
+installed package revision, starting with Jev. Evaluate existing Hoogle and
+Haddock outputs before designing a custom index. Names, signatures and authored
+documentation could then be searched without a compiler request; live notebook
+bindings and exact source availability would remain with their current owners.
+Measure lookup latency, compiler requests avoided, index size and useful result
+coverage. Index identity must include its package inputs, and indexed matches
+must not imply runtime authorization or replace exact-reference admission.
+This is a substrate experiment, not a task assigned to the companion.
+
 The [design sources](PROVENANCE.md) distinguish author rationale, inspected code
 and practitioner accounts. Letta's public material does not establish a best
 prompt for open-ended growth, and its stock personas make choices this seed
