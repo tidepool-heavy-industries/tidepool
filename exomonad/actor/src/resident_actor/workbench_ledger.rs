@@ -99,8 +99,13 @@ impl WorkbenchExecutions {
     ) -> bool {
         self.0
             .get(&WorkbenchReplayKey::Hosted(invocation.clone().into()))
-            .is_some_and(|record| matches!(record.state, WorkbenchExecutionState::Terminal { .. })
-                && record.cell_terminal.as_ref().is_some_and(|exit| exit.cleanup_confirmed))
+            .is_some_and(|record| {
+                matches!(record.state, WorkbenchExecutionState::Terminal { .. })
+                    && record
+                        .cell_terminal
+                        .as_ref()
+                        .is_some_and(|exit| exit.cleanup_confirmed)
+            })
     }
 
     pub(super) fn display_receipt_owner(
@@ -907,32 +912,26 @@ mod tests {
                         .pending_provider_boundaries(),
                     vec![boundary.clone()]
                 );
-                assert!(
-                    fixture
-                        .native
-                        .kernel
-                        .forget_terminal_actor(children[1].identity())
-                        .await
-                        .expect("terminal forget acknowledgement")
-                );
-                assert!(
-                    fixture
-                        .native
-                        .kernel
-                        .resolve(children[1].identity())
-                        .await
-                        .expect("directory actor observation")
-                        .is_none()
-                );
+                assert!(fixture
+                    .native
+                    .kernel
+                    .forget_terminal_actor(children[1].identity())
+                    .await
+                    .expect("terminal forget acknowledgement"));
+                assert!(fixture
+                    .native
+                    .kernel
+                    .resolve(children[1].identity())
+                    .await
+                    .expect("directory actor observation")
+                    .is_none());
                 // The scope's retained LocalActorRef, not a fresh directory
                 // lookup, carries the same failed cleanup across retries.
-                assert!(
-                    fixture
-                        .behavior
-                        .tool_aborted(&fixture.native.kernel, boundary.clone())
-                        .await
-                        .is_err()
-                );
+                assert!(fixture
+                    .behavior
+                    .tool_aborted(&fixture.native.kernel, boundary.clone())
+                    .await
+                    .is_err());
                 assert!(owner.acknowledge().await.is_err());
                 assert!(scope.owns_worker(children[1].identity()));
                 // An erroneous success caller also cannot overwrite the
@@ -960,27 +959,23 @@ mod tests {
                     crate::ProviderFinalizationKind::Completed
                 );
                 assert!(owner.control().is_none());
-                assert!(
-                    fixture
-                        .behavior
-                        .workbench_executions
-                        .lock()
-                        .pending_provider_boundaries()
-                        .is_empty()
-                );
+                assert!(fixture
+                    .behavior
+                    .workbench_executions
+                    .lock()
+                    .pending_provider_boundaries()
+                    .is_empty());
             }
             let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "turn".into(),
                 "other".into(),
             );
-            assert!(
-                fixture
-                    .behavior
-                    .settle_provider_resources(&fixture.native.kernel, &other)
-                    .await
-                    .is_err()
-            );
+            assert!(fixture
+                .behavior
+                .settle_provider_resources(&fixture.native.kernel, &other)
+                .await
+                .is_err());
             fixture.native.finish().await;
         }
     }
@@ -1177,12 +1172,11 @@ mod tests {
         let retry = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
         slot.publish_provider_transport(actor, retry.clone());
         slot.accept(&retry);
-        assert!(
-            slot.retained_operation(key)
-                .unwrap()
-                .unwrap()
-                .same_owner(&original)
-        );
+        assert!(slot
+            .retained_operation(key)
+            .unwrap()
+            .unwrap()
+            .same_owner(&original));
         let wrong = WorkbenchRequest::from_cell_input("different effects")
             .with_execution_id(execution.clone())
             .with_checkpoint_boundary(boundary.clone());
@@ -1250,11 +1244,10 @@ mod tests {
         );
         late.settle(reply);
         slot.complete(&late);
-        assert!(
-            slot.retained_boundary(&boundary)
-                .unwrap()
-                .same_owner(&original)
-        );
+        assert!(slot
+            .retained_boundary(&boundary)
+            .unwrap()
+            .same_owner(&original));
         assert_eq!(
             slot.retained_boundary(&boundary)
                 .unwrap()
@@ -1481,6 +1474,84 @@ mod tests {
             completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request, None),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn reply_pending_refinement_requires_exact_terminal_and_confirmed_cleanup() {
+        for terminal_first in [false, true] {
+            for confirmed in [false, true] {
+                let invocation = exomonad_tool::ToolInvocationContext::external(
+                    "thread".into(),
+                    "turn".into(),
+                    "domain".into(),
+                    Some("domain".into()),
+                    None,
+                );
+                let sibling = exomonad_tool::ToolInvocationContext::external(
+                    "thread".into(),
+                    "turn".into(),
+                    "sibling".into(),
+                    Some("sibling".into()),
+                    None,
+                );
+                let key = crate::resident_tools::WorkbenchCallKey::from(invocation.clone());
+                let execution = WorkbenchExecutionId::from_digest([37; 16]);
+                let request = WorkbenchRequest::from_cell_input("pure ()")
+                    .with_execution_id(execution.clone());
+                let mut journal = WorkbenchExecutions::default();
+                journal.begin(&execution, request.clone(), Some(&key));
+                assert!(!journal.invocation_is_terminal(&invocation));
+                let result = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                    publication: None,
+                    status: WorkbenchRunStatus::Committed,
+                    summary: None,
+                    items: Vec::new(),
+                    next_index: 1,
+                    total: 1,
+                }));
+                let control = crate::WorkbenchExecutionControl::untracked();
+                let exit = control.finish_cell(execution.clone(), &result, confirmed);
+                let record = |journal: &mut WorkbenchExecutions| {
+                    journal.record(
+                        execution.clone(),
+                        request.clone(),
+                        Ok(WorkbenchResponse {
+                            publication: None,
+                            status: WorkbenchRunStatus::Committed,
+                            summary: None,
+                            items: Vec::new(),
+                            next_index: 1,
+                            total: 1,
+                        }),
+                        crate::WorkbenchCancellationOutcome::NotSleeping {
+                            execution: execution.clone(),
+                        },
+                        Some(&key),
+                    )
+                };
+                if terminal_first {
+                    record(&mut journal);
+                    assert!(!journal.invocation_is_terminal(&invocation));
+                }
+                journal.retain_cell_terminal(&execution, Some(&key), exit);
+                assert_eq!(
+                    journal.invocation_is_terminal(&invocation),
+                    terminal_first && confirmed
+                );
+                if !terminal_first {
+                    record(&mut journal);
+                }
+                assert_eq!(journal.invocation_is_terminal(&invocation), confirmed);
+                assert!(!journal.invocation_is_terminal(&sibling));
+                // Reading retained outcomes is not part of completion: an
+                // unread, confirmed result is already safe for reply admission.
+                assert!(journal
+                    .lookup(&execution, &request, Some(&key))
+                    .unwrap()
+                    .is_some());
+                assert_eq!(journal.invocation_is_terminal(&invocation), confirmed);
+            }
+        }
     }
 
     #[test]
@@ -1733,28 +1804,24 @@ mod tests {
             journal.at_boundary(&tidepool_runtime::session::ContextCheckpointBoundary::external("thread".into(), "turn".into(), "outer".into())),
             Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
         ));
-        assert!(
-            journal
-                .at_boundary(
-                    &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                        "thread".into(),
-                        "turn".into(),
-                        "other".into()
-                    )
+        assert!(journal
+            .at_boundary(
+                &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                    "thread".into(),
+                    "turn".into(),
+                    "other".into()
                 )
-                .is_none()
-        );
-        assert!(
-            journal
-                .at_boundary(
-                    &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                        "thread".into(),
-                        "later-turn".into(),
-                        "outer".into()
-                    )
+            )
+            .is_none());
+        assert!(journal
+            .at_boundary(
+                &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                    "thread".into(),
+                    "later-turn".into(),
+                    "outer".into()
                 )
-                .is_none()
-        );
+            )
+            .is_none());
     }
 
     #[test]

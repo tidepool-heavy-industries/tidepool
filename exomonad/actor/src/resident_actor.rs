@@ -4144,12 +4144,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         if let Some(activation) =
             selected_tool.and_then(|call| call.selected().reply_activation.as_ref())
         {
+            let current_request = self
+                .outstanding_interactive
+                .as_ref()
+                .map(|active| active.request);
+            // A closed capability may decode a distinct duplicate so the exact
+            // settlement owner can return AlreadySettled. It cannot enter a
+            // successor activation, even when their schemas happen to match.
             if activation.actor() != actor
-                || activation.is_settled()
-                || self
-                    .outstanding_interactive
-                    .as_ref()
-                    .is_none_or(|active| active.request != activation.request())
+                || current_request.is_some_and(|request| request != activation.request())
+                || (!activation.is_settled() && current_request != Some(activation.request()))
             {
                 return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
