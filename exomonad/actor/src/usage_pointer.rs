@@ -77,10 +77,12 @@ impl UsagePointerTable {
         let mut captured = BTreeMap::new();
         let canonical_root = match root.canonicalize() {
             Ok(root) => root,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self {
-                workspace: Arc::new(workspace.to_path_buf()),
-                ..Self::default()
-            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    workspace: Arc::new(workspace.to_path_buf()),
+                    ..Self::default()
+                })
+            }
             Err(error) => return Err(error),
         };
         for (locator, path) in sources {
@@ -132,17 +134,49 @@ fn load_examples(
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
     let mut examples = BTreeMap::new();
     for registration in parsed.examples {
+        let identity = format!(
+            "{}.{} ({:?})",
+            registration.module, registration.name, registration.namespace
+        );
+        let refusal =
+            |reason: String| format!("{}: example {identity}: {reason}", manifest_path.display());
         if registration.module.is_empty()
             || registration.name.is_empty()
             || registration.requirements.trim().is_empty()
             || registration.requirements.len() > 1024
-            || registration.prerequisites.len() > 4
         {
-            return Err("example identity or requirements invalid".into());
+            return Err(refusal(format!(
+                "invalid identity or requirements ({} bytes; limit 1024)",
+                registration.requirements.len()
+            )));
         }
-        // Invalid paths remain invalid registrations. Missing/inaccessible UTF-8
-        // files retain the registration and explicit capture failure instead.
-        validate_example_path(&registration.source)?;
+        // Invalid main paths reject the registration. A valid main path that
+        // cannot be captured retains an explicit source failure. Prerequisite
+        // capture failures, including invalid paths, remain per-setup issues.
+        validate_example_path(&registration.source).map_err(&refusal)?;
+        // This is a rendered metadata budget, not a prerequisite cardinality
+        // limit. Check it before reading any example or setup source bodies.
+        let locator_bytes = |path: &str| prefix.len().saturating_add(1).saturating_add(path.len());
+        let metadata_bytes = registration
+            .prerequisites
+            .iter()
+            .fold(
+                locator_bytes(&registration.source).saturating_add(registration.requirements.len()),
+                |bytes, path| bytes.saturating_add(locator_bytes(path)),
+            )
+            .saturating_add(
+                registration
+                    .prerequisites
+                    .len()
+                    .saturating_sub(1)
+                    .saturating_mul(2),
+            );
+        // Reserve 256 bytes for renderer labels within its 2 KiB metadata allowance.
+        if metadata_bytes > 1792 {
+            return Err(refusal(format!(
+                "metadata {metadata_bytes} bytes exceeds 1792-byte allowance"
+            )));
+        }
         let (source, source_identity, source_issue) =
             match capture_source(root, &canonical_root, &registration.source, captured) {
                 Ok(source) => {
@@ -187,17 +221,8 @@ fn load_examples(
             source,
             setup,
         };
-        // Reserve 256 bytes for the Haskell renderer's labels and omission
-        // sentence; this owner only limits data, never duplicates presentation.
-        let metadata_bytes = example.locator.len()
-            + example.requirements.len()
-            + example.prerequisites.iter().map(String::len).sum::<usize>()
-            + example.prerequisites.len().saturating_sub(1) * 2;
-        if metadata_bytes > 1792 {
-            return Err("example metadata exceeds 2 KiB allowance".into());
-        }
         if examples.insert(key, example).is_some() {
-            return Err("duplicate example declaration identity".into());
+            return Err(refusal("duplicate example declaration identity".into()));
         }
     }
     Ok(examples)
@@ -420,6 +445,114 @@ mod tests {
                 Some(".exomonad/workspace/checks/example.hs".into())
             );
         }
+    }
+
+    #[test]
+    fn more_than_four_prerequisites_retain_exact_sources_and_identity_links() {
+        for package in [".exomonad/workspace", ".exomonad"] {
+            let workspace = tempfile::tempdir().unwrap();
+            let root = workspace.path().join(package);
+            std::fs::create_dir_all(root.join("checks")).unwrap();
+            std::fs::create_dir_all(root.join("Project")).unwrap();
+            let main = "-- exact main\r\nmain = \"λ\"\n";
+            std::fs::write(root.join("checks/example.hs"), main).unwrap();
+            let setup: Vec<_> = (0..7)
+                .map(|index| {
+                    let path = format!("Project/Setup{index}.hs");
+                    let text = format!("-- setup {index}\r\nvalue{index} = \"λ{index}\"\n");
+                    std::fs::write(root.join(&path), &text).unwrap();
+                    (path, text)
+                })
+                .collect();
+            let rows: Vec<_> = ["operation", "other"].into_iter().map(|name| serde_json::json!({
+                "module":"Owner", "name":name, "namespace":"value", "source":"checks/example.hs",
+                "prerequisites":setup.iter().map(|(path, _)| path).collect::<Vec<_>>(), "requirements":"runtime"
+            })).collect();
+            std::fs::write(
+                root.join("checks/usage-examples.json"),
+                serde_json::json!({"examples":rows}).to_string(),
+            )
+            .unwrap();
+            let table = UsagePointerTable::discover(workspace.path()).unwrap();
+            for name in ["operation", "other"] {
+                let example = example_for(&table, "Owner", name, ExampleNamespace::Value).unwrap();
+                assert_eq!(example.source, main);
+                assert_eq!(
+                    example.source_identity,
+                    Some(blake3::hash(main.as_bytes()).to_hex().to_string())
+                );
+                assert_eq!(example.source_issue, None);
+                assert_eq!(example.setup.len(), setup.len());
+                for (captured, (path, text)) in example.setup.iter().zip(&setup) {
+                    assert_eq!(captured.locator, format!("{package}/{path}"));
+                    assert_eq!(captured.text.as_ref(), Some(text));
+                    assert_eq!(
+                        captured.identity,
+                        Some(blake3::hash(text.as_bytes()).to_hex().to_string())
+                    );
+                    assert_eq!(captured.issue, None);
+                }
+                assert_eq!(
+                    example.prerequisites,
+                    setup
+                        .iter()
+                        .map(|(path, _)| format!("{package}/{path}"))
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert!(
+                example_for(&table, "OtherOwner", "operation", ExampleNamespace::Value).is_none()
+            );
+            assert!(example_for(&table, "Owner", "operation", ExampleNamespace::Type).is_none());
+        }
+    }
+
+    #[test]
+    fn registration_refusals_identify_owner_and_preflight_capture_budgets() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("checks")).unwrap();
+        let valid = serde_json::json!({"module":"Owner", "name":"operation", "namespace":"value",
+            "source":"checks/example.hs", "prerequisites":[], "requirements":"runtime"});
+        let mut metadata = valid.clone();
+        metadata["requirements"] = serde_json::json!("x".repeat(900));
+        metadata["prerequisites"] = serde_json::json!((0..7)
+            .map(|index| format!("Project/{}{index}.hs", "x".repeat(110)))
+            .collect::<Vec<_>>());
+        let mut path = valid.clone();
+        path["source"] = serde_json::json!("../outside.hs");
+        let mut requirements = valid.clone();
+        requirements["requirements"] = serde_json::json!("x".repeat(1025));
+        for (row, reason) in [
+            (metadata, "1792"),
+            (path, "../outside.hs"),
+            (requirements, "1025"),
+        ] {
+            std::fs::write(
+                root.join("checks/usage-examples.json"),
+                serde_json::json!({"examples":[row]}).to_string(),
+            )
+            .unwrap();
+            let mut captured = BTreeMap::new();
+            let issue = load_examples(root, ".exomonad/workspace", &mut captured).unwrap_err();
+            assert!(issue.contains("checks/usage-examples.json"), "{issue}");
+            assert!(issue.contains("Owner.operation"), "{issue}");
+            assert!(issue.contains(reason), "{issue}");
+            assert!(
+                captured.is_empty(),
+                "refused registration read source bodies"
+            );
+        }
+        std::fs::write(
+            root.join("checks/usage-examples.json"),
+            serde_json::json!({"examples":[valid.clone(),valid]}).to_string(),
+        )
+        .unwrap();
+        let issue = load_examples(root, ".exomonad/workspace", &mut BTreeMap::new()).unwrap_err();
+        assert!(
+            issue.contains("Owner.operation") && issue.contains("duplicate"),
+            "{issue}"
+        );
     }
 
     #[test]
