@@ -458,6 +458,7 @@ pub struct ActorWorkbenchSource {
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
+    tool_surface_validator: Option<Arc<dyn Fn(&[exomonad_tool::HostedTool]) -> Result<(), String> + Send + Sync>>,
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     toolset_support: Arc<[PathBuf]>,
@@ -956,6 +957,7 @@ impl ActorWorkbenchSource {
             spec: None,
             workspace_modules: Arc::from([]),
             installed_effect_support: Arc::from([]),
+            tool_surface_validator: None,
             request_evidence: None,
             request_helper_recipe: Default::default(),
             toolset_preparation: Default::default(),
@@ -993,6 +995,16 @@ impl ActorWorkbenchSource {
             }
         }
         self.installed_effect_support = installed.into();
+        self
+    }
+
+    /// Validate the admitted provider-neutral surface before its installation is published.
+    #[must_use]
+    pub fn with_tool_surface_validator(
+        mut self,
+        validator: Arc<dyn Fn(&[exomonad_tool::HostedTool]) -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        self.tool_surface_validator = Some(validator);
         self
     }
 
@@ -1063,6 +1075,7 @@ impl ActorWorkbenchSource {
 /// One installed spec: the surface it declares, the retained value every call
 /// and every slot is an application of, and the identity of this install.
 pub(crate) struct ResidentWorkbenchTools {
+    declarations: Arc<[exomonad_tool::HostedTool]>,
     pub(crate) endpoints: Vec<crate::tool_contract::AdmittedEndpoint>,
     pub(crate) dispatch: Arc<RootCustody>,
     /// Installer source roots belong to the installed implementation, not the
@@ -2114,11 +2127,12 @@ impl ResidentWorkbenchTools {
             .collect()
     }
 
+    pub(crate) fn declaration_snapshot(&self) -> Arc<[exomonad_tool::HostedTool]> {
+        Arc::clone(&self.declarations)
+    }
+
     pub(crate) fn surface(&self) -> Vec<exomonad_tool::HostedTool> {
-        self.endpoints
-            .iter()
-            .map(|endpoint| endpoint.plan().surface())
-            .collect()
+        self.declarations.to_vec()
     }
 
     /// The installer revision, not the revision of every reachable closure.
@@ -4959,6 +4973,8 @@ fn admit_explicit_effects(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("unsupported tool surface: {detail}")]
+    UnsupportedToolSurface { detail: String, surface: Arc<[exomonad_tool::HostedTool]> },
     #[error(transparent)]
     Directory(#[from] crate::local_actor::run_control::DirectoryError),
     #[error("compiler work requires an invocation or actor lifecycle cleanup owner")]
@@ -6087,6 +6103,7 @@ where
             Some(installation_scope.clone()),
         );
         let registration = abort_guard.registration();
+        let tool_surface_validator = self.access.source.tool_surface_validator.clone();
         let installed_effect_support = self.access.source.installed_effect_support().to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
         let (step, pending_originals, source_original) = registration
@@ -6211,6 +6228,10 @@ where
                         let admitted = crate::tool_contract::admit_installation(
                             installation, &admitted_base, &installed_effect_support, &dispatcher_effects,
                         )?;
+                        let declarations: Arc<[exomonad_tool::HostedTool]> = admitted.endpoints.iter().map(|endpoint| endpoint.plan().surface()).collect::<Vec<_>>().into();
+                        if let Some(validate) = &tool_surface_validator {
+                            validate(&declarations).map_err(|detail| ResidentActorWorkbenchError::UnsupportedToolSurface { detail, surface: Arc::clone(&declarations) })?;
+                        }
                         let dispatch = session
                             .live_payload_handle_owned_by(
                                 hole.cont_id(),
@@ -6221,9 +6242,9 @@ where
                                     "tool installer did not retain its dispatcher".into(),
                                 )
                             })?;
-                        Ok((admitted, dispatch))
+                        Ok((admitted, dispatch, declarations))
                     })();
-                    let (admitted, dispatch) = match publication {
+                    let (admitted, dispatch, declarations) = match publication {
                         Ok(publication) => publication,
                         Err(error) => {
                             match session.abort(hole.cont_id(), "tool publication rejected".into())
@@ -6277,6 +6298,7 @@ where
                     }
                     Ok(PreparedToolInstallation {
                         tools: ResidentWorkbenchTools {
+                            declarations,
                             endpoints: admitted.endpoints,
                             dispatch: Arc::new(dispatch),
                             _installation_scope: installation_scope,
