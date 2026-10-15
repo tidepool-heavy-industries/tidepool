@@ -327,7 +327,7 @@ protectedHelperDeclarations =
   , ProtectedDeclaration "Tidepool.Actor" "replaceActorWithSite" False
   ] ++ [ProtectedDeclaration (vsSitedModule spec) (vsSitedName spec) False
          | spec <- sitedVerbs, vsName spec `elem`
-           ["request", "requestWithProgress", "requestWithProgressInto", "pollResponse", "response", "settledResponse", "result", "settlement", "settlementSource"
+           ["request", "requestWithReplyTool", "requestWithProgress", "requestWithProgressInto", "pollResponse", "response", "settledResponse", "result", "settlement", "settlementSource"
            , "startActor", "replaceActor", "startUnitActor", "runActor", "awaitExit", "pollExit"
            , "start", "replace", "finish", "forwardResult", "progress"]]
 

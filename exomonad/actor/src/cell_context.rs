@@ -83,6 +83,18 @@ impl CellExit {
 /// context values and actor effect membership never supply this authority.
 /// Finalization records eligibility; publication remains the Engine/Store owner.
 pub trait HostedContextBinding: Send + Sync {
+    /// Holds the scheduler's existing registration/start mutex while `claim`
+    /// checks native terminal overrides and claims the exact request. Callback
+    /// refusal leaves admission open; success fences this activation's starts.
+    /// The callback must not await or reenter the scheduler.
+    fn admit_request_reply(
+        &self,
+        _activation: &crate::RequestReplyActivation,
+        _claim: &mut dyn FnMut(&[crate::HostedPendingInvocation]) -> Result<(), crate::RequestReplyAdmissionError>,
+    ) -> Result<(), crate::RequestReplyAdmissionError> {
+        Err(crate::RequestReplyAdmissionError::Unavailable("host has no request-operation admission authority".into()))
+    }
+
     fn admit(
         &self,
         execution: &WorkbenchExecutionId,

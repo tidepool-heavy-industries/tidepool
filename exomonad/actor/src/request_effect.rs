@@ -89,6 +89,8 @@ pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, i64, HaskellValue, (i64, i64), Option<RequestDuration>),
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
+    RegisterReplyToolWith(HaskellValue, HaskellValue, i64),
     // The `String` is the bounded reply preview `Tidepool.Agent.Reply.Internal.reply`/
     // `attemptReply` render on the Haskell side (`WorkbenchDisplay`), ahead
     // of the host's own line-boundary truncation in `stage_request_reply`.

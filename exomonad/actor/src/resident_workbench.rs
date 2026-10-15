@@ -1386,6 +1386,7 @@ pub struct InstalledToolLease {
 /// the original implementation even after the active installation is replaced.
 #[derive(Clone)]
 pub(crate) struct InstalledToolSelection {
+    pub(crate) reply_activation: Option<Arc<crate::RequestReplyActivation>>,
     snapshot: ActorRequestSnapshot,
     index: usize,
 }
@@ -1517,7 +1518,7 @@ impl InstalledToolLease {
         self.tools.clone()
     }
 
-    fn select(&self, name: &str) -> Option<InstalledToolSelection> {
+    pub(crate) fn select(&self, name: &str) -> Option<InstalledToolSelection> {
         let index = self
             .tools
             .as_ref()?
@@ -1525,6 +1526,7 @@ impl InstalledToolLease {
             .iter()
             .position(|endpoint| endpoint.plan().name() == name)?;
         Some(InstalledToolSelection {
+            reply_activation: None,
             snapshot: ActorRequestSnapshot::Bootstrap(self.clone()),
             index,
         })
@@ -1655,7 +1657,10 @@ impl ActorRequestSnapshot {
 /// The actor's single current installation. Requests clone an immutable lease;
 /// spec reload replaces the paired source and handlers at source visibility.
 #[derive(Default)]
-pub(crate) struct InstalledToolsState(Mutex<InstalledToolsAvailability>);
+pub(crate) struct InstalledToolsState(
+    Mutex<InstalledToolsAvailability>,
+    Mutex<Option<Arc<crate::RequestReplyActivation>>>,
+);
 
 #[derive(Default)]
 enum InstalledToolsAvailability {
@@ -1687,6 +1692,13 @@ impl InstalledToolsAvailability {
 }
 
 impl InstalledToolsState {
+    pub(crate) fn active_reply(&self) -> Option<Arc<crate::RequestReplyActivation>> {
+        self.1.lock().clone()
+    }
+    pub(crate) fn publish_reply(&self, reply: Option<Arc<crate::RequestReplyActivation>>) {
+        *self.1.lock() = reply;
+    }
+
     pub(crate) fn observe(&self) -> InstalledToolsObservation {
         match &*self.0.lock() {
             InstalledToolsAvailability::Empty => InstalledToolsObservation::Empty,
@@ -3730,6 +3742,11 @@ pub(crate) enum ResidentActorBoundary {
         site: Option<u64>,
     },
     RequestSubmission(RequestSubmission),
+    RegisterReplyTool {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+        definition: Arc<crate::request_reply_tool::ReplyToolDefinition>,
+    },
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
     ExitPublication {
@@ -3928,6 +3945,7 @@ impl ResidentActorBoundary {
             Self::AgentStop(_) => "stopAgent",
             Self::AgentRetention { .. } => "retainAgent",
             Self::RequestReservation(_) => "request",
+            Self::RegisterReplyTool { .. } => "request reply tool preparation",
             Self::RequestAdmissionRejected { .. } => "request admission rejected",
             Self::CurrentRequest { .. } => "currentRequest",
             Self::RequestSubmission(_) => "request",
@@ -4326,6 +4344,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
             Self::Replies(RepliesReq::CurrentRequestWith(..)) => "currentRequest",
             Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
+            Self::Replies(RepliesReq::RegisterReplyToolWith(..)) => "request reply tool preparation",
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
             Self::Replies(RepliesReq::PublishProgressWith(..)) => "reportProgress",
             Self::Replies(RepliesReq::ObserveProgressWith(..)) => "pollProgress",
@@ -9851,6 +9870,18 @@ where
                             site: u64::try_from(site).ok(),
                         }
                     ),
+                    ResidentRequest::Replies(RepliesReq::RegisterReplyToolWith(metadata, _, request_id)) => {
+                        let installation = tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0);
+                        let installer = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("reply tool registration suspended without its compiled installer".into()))?;
+                        Ok(ResidentActorBoundary::RegisterReplyTool {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                            definition: Arc::new(crate::request_reply_tool::ReplyToolDefinition {
+                                installation, installer: Arc::new(installer),
+                            }),
+                        })
+                    }
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
                         request_id,
                         site,

@@ -93,6 +93,11 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn invocation_is_terminal(&self, invocation: &exomonad_tool::ToolInvocationContext) -> bool {
+        self.0.get(&WorkbenchReplayKey::Hosted(invocation.clone().into()))
+            .is_some_and(|record| matches!(record.state, WorkbenchExecutionState::Terminal { .. }))
+    }
+
     pub(super) fn display_receipt_owner(
         &self,
         execution: &WorkbenchExecutionId,

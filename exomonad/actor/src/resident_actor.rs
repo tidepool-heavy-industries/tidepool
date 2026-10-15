@@ -3478,6 +3478,15 @@ impl CurrentEffectOwner<'_> {
         }
     }
 
+    fn reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
+        match self {
+            Self::Scoped { base, .. } => base.reply_activation(),
+            Self::Workbench(execution) if !execution.after_tool_active && !execution.initial_context =>
+                execution.operation.selected().and_then(|call| call.selected().reply_activation.clone()),
+            _ => None,
+        }
+    }
+
     fn admits_reload(&self, actor: ActorRef) -> bool {
         match self {
             Self::Scoped { base, .. } => base.admits_reload(actor),
@@ -4074,6 +4083,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             if endpoint.plan().effect_keys().iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
                     !self.descriptor.capabilities().effect_keys().contains(key)
+                        && !(call.selected().reply_activation.is_some() && *key == crate::ActorEffectKey::Replies)
                 }
                 exomonad_tool::ToolEffectKey::ContextReadWrite
                 | exomonad_tool::ToolEffectKey::Reload => false,
@@ -4122,6 +4132,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     return Ok(WorkbenchPreflight::Retained(reply));
                 }
                 Ok(None) => {}
+            }
+        }
+        if let Some(activation) = selected_tool.and_then(|call| call.selected().reply_activation.as_ref()) {
+            if activation.actor() != actor || activation.is_settled()
+                || self.outstanding_interactive.as_ref().is_none_or(|active| active.request != activation.request()) {
+                return Err(KernelInvocationFailure::Rejected { receipts: Vec::new(), actor,
+                    detail: "reply endpoint belongs to a stale or already-settled request".into(), diagnostic: None });
             }
         }
         let admitted_source = if current_builtin {
@@ -4241,6 +4258,46 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .and_then(|control| control.reservation_owner(actor))
                 .or_else(|| self.active_route_reservation_owner.clone()),
             control,
+        }
+    }
+
+    fn begin_reply_for_effect(
+        &self,
+        actor: ActorRef,
+        request: crate::RequestId,
+        effect_owner: &CurrentEffectOwner<'_>,
+    ) -> Result<Result<crate::request::RequestReplyClaim, crate::ReplyError>, ResidentActorWorkbenchError> {
+        let Some(activation) = effect_owner.reply_activation() else {
+            return Ok(self.environment.requests.begin_reply(actor, request));
+        };
+        if activation.actor() != actor || activation.request() != request {
+            return Ok(Err(crate::ReplyError::Unauthorized));
+        }
+        let binding = effect_owner.context_binding().ok_or_else(||
+            ResidentActorWorkbenchError::ActorProtocol("reply tool requires its exact hosted request admission".into()))?;
+        let mut accepted = None;
+        let result = binding.admit_request_reply(&activation, &mut |pending| {
+            if activation.is_settled() {
+                return Err(crate::RequestReplyAdmissionError::Refused(crate::ReplyError::AlreadySettled));
+            }
+            let pending = {
+                let executions = self.workbench_executions.lock();
+                pending.iter().filter(|operation| !executions.invocation_is_terminal(&operation.invocation)).cloned().collect::<Vec<_>>()
+            };
+            if !pending.is_empty() {
+                return Err(crate::RequestReplyAdmissionError::Pending(pending));
+            }
+            let claim = self.environment.requests.begin_reply(actor, request)
+                .map_err(crate::RequestReplyAdmissionError::Refused)?;
+            activation.mark_settled();
+            accepted = Some(claim);
+            Ok(())
+        });
+        match result {
+            Ok(()) => accepted.map(|claim| Ok(Ok(claim))).unwrap_or_else(|| Err(
+                ResidentActorWorkbenchError::ActorProtocol("host accepted reply admission without claiming its request".into()))),
+            Err(crate::RequestReplyAdmissionError::Refused(error)) => Ok(Err(error)),
+            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(error.to_string())),
         }
     }
 
@@ -7201,6 +7258,10 @@ where
                     .resume_value(context.clone(), reservation.continuation, admitted)
                     .await
             }),
+            ResidentActorBoundary::RegisterReplyTool { continuation, request, definition } => Box::pin(async move {
+                let outcome = self.environment.requests.register_reply_tool(context.actor, request, definition);
+                self.environment.runner.resume_value(context.clone(), continuation, outcome).await
+            }),
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
                 use crate::request_effect::RequestError;
                 if let Err(error) = self
@@ -9425,6 +9486,7 @@ where
                                     | ResidentActorBoundary::Replace { .. }
                                     | ResidentActorBoundary::Outbound(_)
                                     | ResidentActorBoundary::RequestReservation(_)
+                                    | ResidentActorBoundary::RegisterReplyTool { .. }
                                     | ResidentActorBoundary::RequestSubmission(_)
                                     | ResidentActorBoundary::AgentSession(_)
                                     | ResidentActorBoundary::AgentAttachment(_)
@@ -9645,6 +9707,12 @@ where
                         );
                         let mut boundary =
                             prepare_execution_effect(context, &effect_owner, boundary);
+                        if let Some(activation) = effect_owner.reply_activation() {
+                            if !matches!(&boundary, ResidentActorBoundary::ReplyAttempt(attempt) if attempt.request == activation.request()) {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol("request reply decoder attempted an effect other than its own terminal reply".into()));
+                            }
+                        }
+
                         match &mut boundary {
                             ResidentActorBoundary::Form { publication, .. }
                             | ResidentActorBoundary::RichView { publication, .. } => {
@@ -9795,9 +9863,7 @@ where
                         };
                         match boundary {
                             ResidentActorBoundary::ReplyAttempt(attempt) => match self
-                                .environment
-                                .requests
-                                .begin_reply(context.actor, attempt.request)
+                                .begin_reply_for_effect(context.actor, attempt.request, &effect_owner)?
                             {
                                 Ok(claim) => {
                                     current.inflight_effect = None;

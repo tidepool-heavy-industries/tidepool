@@ -443,6 +443,7 @@ impl From<Option<std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInput
 /// Observation and notification metadata shared by both kinds of request.
 struct RequestRecord {
     sources: Vec<sources::RequestSourceConnection>,
+    reply_tool: Option<Arc<crate::request_reply_tool::ReplyToolDefinition>>,
     owner: ActorRef,
     cleanup_owner: ResourceCleanupOwner,
     target: ActorRef,
@@ -818,6 +819,7 @@ impl RequestStateTable {
             id,
             RequestRecord {
                 sources: Vec::new(),
+                reply_tool: None,
                 owner,
                 cleanup_owner,
                 target,
@@ -1662,6 +1664,35 @@ impl RequestRegistry {
     #[cfg(test)]
     pub(crate) fn reserve_native(&self, owner: ActorRef, target: ActorRef) -> RequestId {
         self.reserve_native_labeled(owner, target, "request".into())
+    }
+
+    pub(crate) fn register_reply_tool(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+        definition: Arc<crate::request_reply_tool::ReplyToolDefinition>,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if record.target_state() != TargetState::Reserved || record.reply_tool.is_some() {
+            return Err(ReplyError::AlreadySettled);
+        }
+        record.operation()?;
+        record.reply_tool = Some(definition);
+        Ok(())
+    }
+
+    pub(crate) fn reply_tool(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+    ) -> Result<Option<Arc<crate::request_reply_tool::ReplyToolDefinition>>, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_target(record, target)?;
+        record.operation()?;
+        Ok(record.reply_tool.clone())
     }
 
     pub(crate) fn received_counts(&self, actor: ActorRef) -> (u64, u64) {

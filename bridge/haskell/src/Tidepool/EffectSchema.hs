@@ -119,6 +119,10 @@ sitedVerbs =
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
       DeliverExitCellFill SelectedAnswer)
       { vsDerivedInput = Just (0, ResponseResultEvidence) }
+  , (verb "requestWithReplyTool" "Tidepool.Actors.Internal.Agent"
+      "requestWithReplyToolSited" "Tidepool.Actors.Internal.Agent" False [1]
+      DeliverExitCellFill SelectedAnswer)
+      { vsDerivedInput = Just (0, ResponseResultEvidence) }
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
       DeliverExitCellFill SelectedAnswer)

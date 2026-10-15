@@ -58,6 +58,8 @@ mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;
 mod request_effect;
+mod request_reply_tool;
+pub use request_reply_tool::{RequestReplyActivation, HostedInvocationRole, HostedInvocationState, HostedPendingInvocation, RequestReplyAdmissionError};
 mod resident_actor;
 mod resident_interactive;
 mod resident_tools;

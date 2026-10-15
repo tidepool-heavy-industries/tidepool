@@ -104,6 +104,7 @@ module Tidepool.Actors.Exomonad
   , AgentForgetOutcome (..)
   , forgetAgent
   , request
+  , requestWithReplyTool
   , Duration
   , milliseconds
   , seconds

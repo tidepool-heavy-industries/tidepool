@@ -14,6 +14,8 @@ module Tidepool.Actors.Internal.Agent
   , Request
   , request
   , requestSited
+  , requestWithReplyTool
+  , requestWithReplyToolSited
   , requestWithProgress
   , requestWithProgressSited
   , requestWithProgressInto
@@ -42,13 +44,17 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply.Internal
   ( Request, RequestOptions (..), defaultRequestOptions, RequestError (..)
   , SettlementReporting (..), Progress (..), responseRequestId
-  , Replies, RequestId (..), newRequestHandles, reserveRequest
-  , replyRequestId, submitRequest, abandonResponse
+  , Replies, Reply, RequestId (..), requestIdNumber, newRequestHandles, reserveRequest
+  , replyRequestId, submitRequest, registerReplyTool, abandonResponse
   , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
   )
 import Tidepool.Agent.Ref.Internal
   ( AgentRef (..), AgentProtocol (..), AgentRequestEffects, agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
+import Tidepool.Agent.Reply.Tool (replyToolInstaller)
+import Tidepool.Aeson.FromJSON (FromJSON)
+import Tidepool.Aeson.Schema (JsonSchema)
+import Tidepool.Inspection.Display (WorkbenchDisplay)
 import Tidepool.Agent.Session (requestSessionSited, publishResponse, publishProgressResponse)
 import Tidepool.View.Types (View(..))
 import Tidepool.Inspection
@@ -216,7 +222,34 @@ requestSited
   => RequestSite '[input, ResponseResult result] result -> AgentRef -> input -> RequestOptions
   -> Eff effs (Either RequestError (Request result))
 requestSited site agent input options =
-  requestConfiguredSited site (\requestId -> publishResponse requestId site) agent input options (const (pure ()))
+  requestConfiguredSited site (\requestId -> publishResponse requestId site) agent input options (const (pure ())) (const (pure (Right ())))
+
+-- | A typed request with an activation-bound JSON reply endpoint. The ordinary
+-- request API remains unconstrained and can carry values without JSON codecs.
+{-# OPAQUE requestWithReplyTool #-}
+requestWithReplyTool
+  :: forall result input effs
+   . (Member Replies effs, FromJSON result, JsonSchema result, WorkbenchDisplay result)
+  => AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result))
+requestWithReplyTool = requestWithReplyToolSited
+  (error "requestWithReplyTool: extractor must assign a typed site")
+
+{-# OPAQUE requestWithReplyToolSited #-}
+requestWithReplyToolSited
+  :: forall result input effs
+   . (Member Replies effs, FromJSON result, JsonSchema result, WorkbenchDisplay result)
+  => RequestSite '[input, ResponseResult result] result
+  -> AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result))
+requestWithReplyToolSited site agent input options =
+  requestConfiguredSited site (\requestId -> publishResponse requestId site)
+    agent input options (const (pure ())) $ \replyHandle -> do
+      case replyToolInstaller replyHandle of
+        Left problem -> pure (Left (RequestReplyToolInvalid problem))
+        Right (metadata, installer) -> do
+          registered <- registerReplyTool (requestIdNumber (replyRequestId replyHandle)) metadata installer
+          pure (either (Left . RequestSubmissionRejected) Right registered)
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress
@@ -253,7 +286,7 @@ requestWithProgressIntoSited
   -> Eff effs (Either RequestError (Request result, Progress progress))
 requestWithProgressIntoSited site agent input options retain = do
   let handles response = (response, Progress (responseRequestId response))
-  submitted <- requestConfiguredSited site (\requestId -> publishProgressResponse requestId site) agent input options (retain . handles)
+  submitted <- requestConfiguredSited site (\requestId -> publishProgressResponse requestId site) agent input options (retain . handles) (const (pure (Right ())))
   pure (handles <$> submitted)
 
 requestConfiguredSited
@@ -262,8 +295,9 @@ requestConfiguredSited
   -> (Int -> ResponseResult result -> Eff AgentRequestEffects ())
   -> AgentRef -> input -> RequestOptions
   -> (Request result -> Eff effs ())
+  -> (Reply result -> Eff effs (Either RequestError ()))
   -> Eff effs (Either RequestError (Request result))
-requestConfiguredSited site publish agent@(AgentRef target targetWorktree) input options retain = do
+requestConfiguredSited site publish agent@(AgentRef target targetWorktree) input options retain prepare = do
   reserved <- reserveRequest (requestLabel options) (actorAddress target)
     (requestReporting options) (requestLifetime options)
   case reserved of
@@ -271,8 +305,11 @@ requestConfiguredSited site publish agent@(AgentRef target targetWorktree) input
     Right requestId -> do
       let (response, replyHandle) = newRequestHandles requestId agent
       retain response
-      admitted <- submitRequest requestId site (actorAddress target)
-        (RunRequest (runRequest targetWorktree replyHandle)) (requestDeadline options)
+      prepared <- prepare replyHandle
+      admitted <- case prepared of
+        Left failure -> pure (Left failure)
+        Right () -> submitRequest requestId site (actorAddress target)
+          (RunRequest (runRequest targetWorktree replyHandle)) (requestDeadline options)
       case admitted of
         Left failure -> do
           -- Submission refusal occurs before queue admission. Abandon eagerly;

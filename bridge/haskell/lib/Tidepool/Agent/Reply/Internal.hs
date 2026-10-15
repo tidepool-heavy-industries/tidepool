@@ -51,6 +51,7 @@ module Tidepool.Agent.Reply.Internal
   , RawResponseObservation (..)
   , reserveRequest
   , submitRequest
+  , registerReplyTool
   , newRequestHandles
   , responseRequestId
   , responseActor
@@ -70,6 +71,7 @@ module Tidepool.Agent.Reply.Internal
 
 import Control.Monad.Freer (Eff, Member, send)
 import Tidepool.Internal.RequestSite (RequestSite)
+import Tidepool.Aeson.Value (Value)
 import Data.Kind (Type)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -124,6 +126,7 @@ data RequestError
   = RequestReservationRejected ReplyError
   | RequestSubmissionRejected ReplyError
   | RequestInvalidDeadline Text
+  | RequestReplyToolInvalid Text
   deriving (Show, Eq)
 
 type role Reply nominal
@@ -335,6 +338,7 @@ data Replies a where
   CurrentRequestWith :: RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Replies (RequestScope input result)
   ReserveRequestWith :: Maybe Text -> (Int, Int) -> Bool -> WorkerLifetime -> Replies (Either RequestError Int)
   SubmitRequestWith :: Int -> RequestSite (input ': extra) result -> request -> (Int, Int) -> Maybe Duration -> Replies (Either RequestError ())
+  RegisterReplyToolWith :: Value -> installer -> Int -> Replies (Either ReplyError ())
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
   -- 'replyPreviewCharBudget'), carried alongside the live value so the
   -- settlement notice the reply produces can show readable text -- 'Text'
@@ -414,6 +418,10 @@ submitRequest (RequestId request) site target requestPayload deadline =
 
 newRequestHandles :: RequestId -> AgentRef -> (Request result, Reply result)
 newRequestHandles request actor = (Request request actor, Reply request)
+
+-- | Retain the compiled decoder before publishing its exact request.
+registerReplyTool :: Member Replies effs => Int -> Value -> installer -> Eff effs (Either ReplyError ())
+registerReplyTool request metadata installer = send (RegisterReplyToolWith metadata installer request)
 
 responseRequestId :: Request result -> RequestId
 responseRequestId (Request request _) = request
