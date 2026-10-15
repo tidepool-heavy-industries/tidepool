@@ -1134,6 +1134,7 @@ rust_filegroup(
         "src/actor_host/inherited_command_output_assertion.hs": "bridge/facade/src/actor_host/inherited_command_output_assertion.hs",
         "src/actor_host/inherited_response_released.hs": "bridge/facade/src/actor_host/inherited_response_released.hs",
         "src/actor_host/invocation_lifetime_tests.rs": "bridge/facade/src/actor_host/invocation_lifetime_tests.rs",
+        "src/actor_host/jev_recording_reload_tests.rs": "bridge/facade/src/actor_host/jev_recording_reload_tests.rs",
         "src/actor_host/jev_tests.rs": "bridge/facade/src/actor_host/jev_tests.rs",
         "src/actor_host/lookup_availability_tests.rs": "bridge/facade/src/actor_host/lookup_availability_tests.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -1285,6 +1286,7 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs",
+        "bridge/facade/src/actor_host/jev_recording_reload_tests.rs",
         "bridge/facade/src/actor_host/m1_cancel_performance.rs",
         "bridge/facade/src/actor_host/m1_chat_projection_tests.rs",
         "bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs",
@@ -1318,6 +1320,7 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/fixtures/coherent_reload_work_a.hs",
         "bridge/facade/src/actor_host/fixtures/coherent_reload_work_b.hs",
         "bridge/facade/src/actor_host/fixtures/coherent_reload_work_invalid.hs",
+        "bridge/facade/src/actor_host/fixtures/jev-recording-reload.hs",
         "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
         "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
@@ -3109,6 +3112,7 @@ filegroup(
         "bridge/facade/src/actor_host/inherited_command_output_assertion.hs": "src/actor_host/inherited_command_output_assertion.hs",
         "bridge/facade/src/actor_host/inherited_response_released.hs": "src/actor_host/inherited_response_released.hs",
         "bridge/facade/src/actor_host/invocation_lifetime_tests.rs": "src/actor_host/invocation_lifetime_tests.rs",
+        "bridge/facade/src/actor_host/jev_recording_reload_tests.rs": "src/actor_host/jev_recording_reload_tests.rs",
         "bridge/facade/src/actor_host/jev_tests.rs": "src/actor_host/jev_tests.rs",
         "bridge/facade/src/actor_host/lookup_availability_tests.rs": "src/actor_host/lookup_availability_tests.rs",
         "bridge/facade/src/actor_host/m1_browser_process.rs": "src/actor_host/m1_browser_process.rs",
@@ -4017,6 +4021,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f696e76616c69645f636f6e666967757265645f626f6f7473747261705f737065632e6873",
     src = "src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
     out = "invalid_configured_bootstrap_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6a65762d7265636f7264696e672d72656c6f61642e6873",
+    src = "src/actor_host/fixtures/jev-recording-reload.hs",
+    out = "jev-recording-reload.hs",
     visibility = ["PUBLIC"],
 )
 

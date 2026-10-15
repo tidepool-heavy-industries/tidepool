@@ -6181,12 +6181,8 @@ def declare_haskell_components():
         "Persona/Orientation.hs": "//exomonad/examples/persona:authored_haskell_Persona_Orientation_hs",
         "Tidepool/Agent/Context.hs": "lib/Tidepool/Agent/Context.hs",
         "JevPreparedTest.hs": "test-model-turn/JevPreparedTest.hs",
-<<<<<<< HEAD
         "JevRecordingTest.hs": "test-model-turn/JevRecordingTest.hs",
-        "Jev/Recording.hs": "//exomonad/examples/workspace:authored_haskell_Jev_Recording_hs",
-=======
         "LookupEvidenceTest.hs": "test-model-turn/LookupEvidenceTest.hs",
->>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
         "Examples/JevPreparedWorkflow.hs": "examples/model-turns/Examples/JevPreparedWorkflow.hs",
         "Examples/JevComposedWorkflow.hs": "//exomonad/examples/workspace:authored_haskell_Examples_JevComposedWorkflow_hs",
         "Project/EvidencePattern.hs": "//exomonad/examples/workspace:authored_haskell_Project_EvidencePattern_hs",
@@ -6607,11 +6603,8 @@ def declare_haskell_components():
         "test-model-turn/FormJevDialogueTest.hs": "test-model-turn/FormJevDialogueTest.hs",
         "test-model-turn/FormLifecycleTest.hs": "test-model-turn/FormLifecycleTest.hs",
         "test-model-turn/JevPreparedTest.hs": "test-model-turn/JevPreparedTest.hs",
-<<<<<<< HEAD
         "test-model-turn/JevRecordingTest.hs": "test-model-turn/JevRecordingTest.hs",
-=======
         "test-model-turn/LookupEvidenceTest.hs": "test-model-turn/LookupEvidenceTest.hs",
->>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
         "test-model-turn/Main.hs": "test-model-turn/Main.hs",
         "test-model-turn/PersonaFileTest.hs": "test-model-turn/PersonaFileTest.hs",
         "test-model-turn/PersonaMemoryTest.hs": "test-model-turn/PersonaMemoryTest.hs",

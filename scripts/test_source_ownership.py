@@ -35,6 +35,7 @@ TEST_ONLY_MODULES = {
         'bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs',
         'bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs',
         'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
+        'bridge/facade/src/actor_host/jev_recording_reload_tests.rs',
         'bridge/facade/src/actor_host/embedded_failure_projection_tests.rs',
         'bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs',
         'bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs',
@@ -66,6 +67,7 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/resident_actor/green_tests.rs',
         'exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs',
         'exomonad/actor/src/resident_actor/jev_form_runtime_tests/recording.rs',
+        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.rs',
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
         'exomonad/actor/src/resident_actor/replacement/refusal_tests.rs',
         'exomonad/actor/src/resident_actor/scope_runtime_tests.rs',
@@ -122,6 +124,7 @@ TEST_ONLY_FIXTURES = {
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/fixtures/saved-account-test.json',
+        'bridge/facade/src/actor_host/fixtures/jev-recording-reload.hs',
         'bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs',
         'bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs',
         'bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs',
@@ -183,6 +186,8 @@ TEST_ONLY_FIXTURES = {
     }),
     'exomonad-actor': frozenset({
         'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
+        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs',
+        'exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs',
         'exomonad/actor/src/fixtures/prepared-instance-provider.hs',
         'exomonad/actor/src/fixtures/request-alias-borrow.hs',
         'exomonad/actor/src/local_actor/failure_origin.hs',

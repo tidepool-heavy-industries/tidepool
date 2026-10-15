@@ -10,11 +10,8 @@ use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormTransit
 use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
-<<<<<<< HEAD
 mod recording;
-=======
 mod composed;
->>>>>>> 0f7d92e3a2 (Install editable Jev batch lookup and recording compositions)
 
 struct MountedForm {
     actor: ActorRef,

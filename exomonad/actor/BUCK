@@ -394,6 +394,7 @@ rust_filegroup(
         "src/resident_actor/jev_form_runtime_response.json": "exomonad/actor/src/resident_actor/jev_form_runtime_response.json",
         "src/resident_actor/jev_form_runtime_success.hs": "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs",
         "src/resident_actor/jev_form_runtime_tests.rs": "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs",
+        "src/resident_actor/jev_form_runtime_tests/composed.rs": "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.rs",
         "src/resident_actor/jev_form_runtime_tests/recording.rs": "exomonad/actor/src/resident_actor/jev_form_runtime_tests/recording.rs",
         "src/resident_actor/jev_response_semantics.hs": "exomonad/actor/src/resident_actor/jev_response_semantics.hs",
         "src/resident_actor/owned_workbench.rs": "exomonad/actor/src/resident_actor/owned_workbench.rs",
@@ -534,6 +535,7 @@ tidepool_rust_binary(
         "exomonad/actor/src/resident_actor/green_runtime_tests.rs",
         "exomonad/actor/src/resident_actor/green_tests.rs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.rs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests/recording.rs",
         "exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs",
         "exomonad/actor/src/resident_actor/replacement/refusal_tests.rs",
@@ -553,6 +555,8 @@ tidepool_rust_binary(
         "exomonad/actor/src/fixtures/request-alias-borrow.hs",
         "exomonad/actor/src/local_actor/failure_origin.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
         "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
     ],
     rustc_flags = ["--test"],
@@ -995,6 +999,7 @@ filegroup(
         "exomonad/actor/src/resident_actor/jev_form_runtime_response.json": "src/resident_actor/jev_form_runtime_response.json",
         "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs": "src/resident_actor/jev_form_runtime_success.hs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs": "src/resident_actor/jev_form_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.rs": "src/resident_actor/jev_form_runtime_tests/composed.rs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests/recording.rs": "src/resident_actor/jev_form_runtime_tests/recording.rs",
         "exomonad/actor/src/resident_actor/jev_response_semantics.hs": "src/resident_actor/jev_response_semantics.hs",
         "exomonad/actor/src/resident_actor/owned_workbench.rs": "src/resident_actor/owned_workbench.rs",
@@ -1376,6 +1381,20 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f737563636573732e6873",
     src = "src/resident_actor/jev_form_runtime_success.hs",
     out = "jev_form_runtime_success.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f74657374732f636f6d706f7365642e6873",
+    src = "src/resident_actor/jev_form_runtime_tests/composed.hs",
+    out = "composed.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f74657374732f636f6d706f7365645f6c6f6f6b75702e6873",
+    src = "src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
+    out = "composed_lookup.hs",
     visibility = ["PUBLIC"],
 )
 
