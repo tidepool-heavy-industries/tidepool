@@ -125,7 +125,9 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert!(
         matches!(
             scalar,
-            exomonad_actor::ResidentToolError::InvalidInvocation(_)
+            exomonad_actor::ResidentToolError::Declaration(
+                exomonad_tool::ToolDeclarationError::InvalidArguments { ref name }
+            ) if name == "repeat_text"
         ),
         "{scalar}"
     );
