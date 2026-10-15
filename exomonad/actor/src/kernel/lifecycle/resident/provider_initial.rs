@@ -79,7 +79,11 @@ pub(super) fn begin(
     let refuse = |detail: &str, request: Request| {
         let _ = request.reply.send(Err(detail.into()));
     };
-    if state.refusal().is_some() || !resident.admits_public_owner(&request.expected, true) {
+    if state.refusal().is_some()
+        || resident
+            .validate_public_owner(&request.expected, true)
+            .is_err()
+    {
         refuse(
             "provider initial context differs from its live exact admission",
             request,
