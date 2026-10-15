@@ -449,7 +449,14 @@ async fn read_lookup_capture(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     receipt: &HostedLookupCaptureReceipt,
     requested: serde_json::Value,
+    required: &[&str],
+    required_leaf: Option<(&str, &str)>,
 ) -> String {
+    assert!(
+        !required.is_empty(),
+        "lookup reader needs an evidence predicate"
+    );
+    let selection_trace = requested["tag"] == "LookupSelectionTrace";
     let mut reply = dispatch_structured_tool(
         policy,
         "read_lookup",
@@ -463,10 +470,13 @@ async fn read_lookup_capture(
     .await;
     let mut pages = Vec::new();
     let mut consumed = std::collections::HashSet::new();
-    // Bound this fixture's finite excerpts while reading ordinary retained
-    // display suffixes through the same owner as the named selection.
+    let mut selected_label = None::<String>;
+    let mut leaf_observed = false;
+    // A trace contains independent collapsed fields, not a single text suffix.
+    // Read only the evidence this assertion needs, within the existing bound.
     for _ in 0..128 {
         pages.push(lookup_presented_output(&reply));
+        let observed = pages.join("\n");
         let display = reply["items"]
             .as_array()
             .unwrap()
@@ -483,9 +493,49 @@ async fn read_lookup_capture(
                 receipt.lookup_capture_slot
             ])
         );
-        let Some(key) = display["expansions"].as_array().unwrap().first() else {
-            return pages.join("\n");
-        };
+        if selection_trace && pages.len() == 1 {
+            let root = super::test_campaign::explicit_display_text(&reply);
+            assert!(
+                root.starts_with("LookupCapture {"),
+                "selection trace root: {root}"
+            );
+            for field in required.iter().filter(|field| {
+                field.starts_with("selection = ") || field.starts_with("expansion = ")
+            }) {
+                assert!(
+                    root.contains(*field),
+                    "required root field {field:?}: {root}"
+                );
+            }
+        }
+        if let Some((label, expected)) = required_leaf {
+            if selected_label.as_deref() == Some(label) {
+                let shown = super::test_campaign::explicit_display_text(&reply);
+                let value = shown
+                    .strip_suffix("[truncated; expand handle key for retained detail]")
+                    .unwrap_or(shown);
+                leaf_observed |= value == expected;
+            }
+        }
+        if required.iter().all(|needle| observed.contains(*needle))
+            && (required_leaf.is_none() || leaf_observed)
+        {
+            return observed;
+        }
+        let remaining = display["expansions"].as_array().unwrap();
+        // Follow the typed refusal directly rather than expanding candidate
+        // bodies before discovering the judgment's actual cause.
+        let preferred = selection_trace
+            .then(|| {
+                ["evidence", "status", "cause", "failure"]
+                    .iter()
+                    .find_map(|label| remaining.iter().find(|entry| entry[1] == *label))
+            })
+            .flatten();
+        let key = preferred.or_else(|| remaining.first()).unwrap_or_else(|| {
+            panic!("retained lookup ended before evidence {required:?}; output: {observed}")
+        });
+        selected_label = Some(key[1].as_str().unwrap().to_owned());
         let key = key[0].as_i64().unwrap();
         assert!(
             consumed.insert(key),
@@ -503,7 +553,10 @@ async fn read_lookup_capture(
             .await
             .expect("retained selected display expansion");
     }
-    panic!("finite lookup fixture exceeded 128 retained display pages");
+    panic!(
+        "required lookup evidence {required:?} was not reached within 128 pages; consumed {} unique keys",
+        consumed.len()
+    );
 }
 
 #[tokio::test]
@@ -531,6 +584,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &retained,
                             serde_json::json!({"tag":"LookupIndex"}),
+                            &["relatedRoot"],
+                            None,
                         )
                         .await;
                         assert!(index.contains("relatedRoot"), "{index}");
@@ -539,6 +594,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                                 policy,
                                 &retained,
                                 lookup_signature_selection("RelatedLookup", ordinal),
+                                &["[Right LookupCaptureExcerpt", "part = RelatedLookup", "section = Signature", "extent = Complete"],
+                            None,
                             )
                             .await;
                             assert!(
@@ -553,6 +610,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &retained,
                             lookup_signature_selection("RelatedLookup", 5),
+                            &["InvalidResult"],
+                            None,
                         )
                         .await;
                         assert!(
@@ -563,6 +622,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &retained,
                             lookup_signature_selection("PrimaryLookup", 1),
+                            &["relatedRoot ::"],
+                            None,
                         )
                         .await;
                         assert!(primary.contains("relatedRoot ::"), "{primary}");
@@ -570,6 +631,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &retained,
                             serde_json::json!({"tag":"LookupReceipt"}),
+                            &[&retained.lookup_capture_view],
+                            None,
                         )
                         .await;
                         assert!(
@@ -579,12 +642,11 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                         let trace = read_lookup_capture(
                             policy, &retained,
                             serde_json::json!({"tag":"LookupSelectionTrace"}),
+                            &["selection = SelectionSucceeded", "expansion = ExpansionRequested"],
+                            None,
                         ).await;
-                        assert!(trace.contains("SelectionSucceeded")
-                            && trace.contains("Jev.Response")
-                            && trace.contains("jev-test")
-                            && trace.contains("CandidateScore")
-                            && trace.contains("ExpansionRequested"), "complete selection evidence: {trace}");
+                        assert!(trace.contains("selection = SelectionSucceeded")
+                            && trace.contains("expansion = ExpansionRequested"), "retained selection and expansion status: {trace}");
                         let scoring = backend.scoring_requests();
                         assert_eq!(
                             scoring.len(),
@@ -637,6 +699,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &missing,
                             lookup_signature_selection("PrimaryLookup", 1),
+                            &["ResultMissing"],
+                            None,
                         )
                         .await;
                         assert!(original_miss.contains("ResultMissing"), "{original_miss}");
@@ -644,6 +708,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &missing,
                             lookup_signature_selection("RelatedLookup", 1),
+                            &["alternativeRoot ::"],
+                            None,
                         )
                         .await;
                         assert!(alternative.contains("alternativeRoot ::"), "{alternative}");
@@ -664,16 +730,19 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &irrelevant,
                             lookup_signature_selection("RelatedLookup", 1),
+                            &["CaptureNotRetained"],
+                            None,
                         )
                         .await;
                         assert!(unavailable.contains("CaptureNotRetained"), "{unavailable}");
                         let empty_trace = read_lookup_capture(
                             policy, &irrelevant,
                             serde_json::json!({"tag":"LookupSelectionTrace"}),
+                            &["selection = SelectionSucceeded", "expansion = ExpansionNotRequested"],
+                            None,
                         ).await;
-                        assert!(empty_trace.contains("SelectionSucceeded")
-                            && empty_trace.contains("ExpansionNotRequested")
-                            && empty_trace.contains("CandidateScore"), "successful empty judgment: {empty_trace}");
+                        assert!(empty_trace.contains("selection = SelectionSucceeded")
+                            && empty_trace.contains("expansion = ExpansionNotRequested"), "successful empty judgment: {empty_trace}");
                         assert_eq!(backend.scoring_requests().len(), 1,
                             "retained reads must not repeat judgment");
 
@@ -692,6 +761,8 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &fallback,
                             lookup_signature_selection("PrimaryLookup", 1),
+                            &["relatedRoot ::"],
+                            None,
                         )
                         .await;
                         assert!(original.contains("relatedRoot ::"), "{original}");
@@ -699,16 +770,20 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
                             policy,
                             &fallback,
                             lookup_signature_selection("RelatedLookup", 1),
+                            &["CaptureNotRetained"],
+                            None,
                         )
                         .await;
                         assert!(absent.contains("CaptureNotRetained"), "{absent}");
                         let failed_trace = read_lookup_capture(
                             policy, &fallback,
                             serde_json::json!({"tag":"LookupSelectionTrace"}),
+                            &["selection = SelectionFailed", "CallFailed {cause = Transport", "expansion = ExpansionNotRequested"],
+                            Some(("failure", "JevUnconfigured")),
                         ).await;
-                        assert!(failed_trace.contains("SelectionFailed")
+                        assert!(failed_trace.contains("selection = SelectionFailed")
                             && failed_trace.contains("JevUnconfigured")
-                            && failed_trace.contains("ExpansionNotRequested"), "typed failed judgment: {failed_trace}");
+                            && failed_trace.contains("expansion = ExpansionNotRequested"), "typed failed judgment: {failed_trace}");
                         assert_eq!(backend.scoring_requests().len(), 1,
                             "retained failure reads must not repeat judgment");
                     })
