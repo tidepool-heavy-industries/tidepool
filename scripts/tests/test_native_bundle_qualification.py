@@ -540,9 +540,30 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertIn(qualification.M2_SHUTDOWN_TEST, cohorts['m2']['tests'])
         self.assertIn(qualification.M2_COORDINATOR_TEST, cohorts['m2']['tests'])
         regressions = cohorts['unified-regressions']
-        self.assertEqual(regressions['expected_count'], 5)
-        self.assertEqual(len(set(regressions['tests'])), 5)
+        self.assertEqual(regressions['expected_count'], 6)
+        self.assertEqual(len(set(regressions['tests'])), 6)
         self.assertFalse(regressions['ignored'])
+
+    def test_specialist_cohort_seals_real_harness_scenarios_and_cleanup(self):
+        specialist = qualification.cohorts()['persona-specialists']
+        self.assertEqual(specialist['tests'], [
+            'actor_host::researcher_acceptance_tests::source_backed_web_researcher_settles_two_typed_requests',
+            'actor_host::researcher_acceptance_tests::dedicated_web_researcher_uses_the_same_injected_transport',
+            'actor_host::researcher_acceptance_tests::source_backed_reply_refuses_invalid_and_queued_domain_then_settles_once',
+            'actor_host::persona_file_tools_acceptance_tests::installed_file_tools_repair_a_draft_after_notebook_refusal_without_compilation',
+        ])
+        self.assertEqual(specialist['expected_count'], 4)
+        self.assertFalse(specialist['ignored'])
+        self.assertEqual(specialist['compiler_mode'], 'owned-resident')
+        self.assertEqual(specialist['max_jobs'], 1)
+        self.assertTrue(specialist['retain_artifacts'])
+        self.assertTrue(specialist['require_confirmed_cleanup'])
+        self.assertEqual(specialist['required_startup_mode'], 'prepared')
+        self.assertEqual(specialist['required_stdlib_mode'], 'catalog-backed')
+        self.assertEqual(set(specialist['required_environment']), {
+            'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY',
+            'EXOMONAD_EMBEDDED_ASSET_ROOT', 'TIDEPOOL_TEST_FIXTURE_ROOT',
+        })
 
     def test_recursive_m3_seals_recursive_and_asynchronous_cases_with_existing_runtime_owner(self):
         recursive = qualification.cohorts()['m3-recursive']

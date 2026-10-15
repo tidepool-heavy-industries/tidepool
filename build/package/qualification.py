@@ -43,11 +43,18 @@ M2_TESTS = [
     M2_COORDINATOR_TEST,
 ]
 UNIFIED_REGRESSION_TESTS = [
+    "actor_host::jev_tests::template_lookup_batches_related_declarations_and_recovers_from_jev_failure",
     "actor_host::documentation_tests::published_lookup_and_reflect_examples_preserve_boundary_results",
     "actor_host::documentation_tests::published_human_form_example_handles_unbound_host",
     "actor_host::embedded_policy::operation_settlement_tests::schema_argument_and_selected_tool_refusals_acknowledge_only_issued_operations",
     "actor_host::embedded_policy::operation_settlement_tests::sealed_and_retired_mailboxes_keep_no_admission_acknowledgement",
     "actor_host::embedded_policy::operation_settlement_tests::acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request",
+]
+SPECIALIST_ACCEPTANCE_TESTS = [
+    "actor_host::researcher_acceptance_tests::source_backed_web_researcher_settles_two_typed_requests",
+    "actor_host::researcher_acceptance_tests::dedicated_web_researcher_uses_the_same_injected_transport",
+    "actor_host::researcher_acceptance_tests::source_backed_reply_refuses_invalid_and_queued_domain_then_settles_once",
+    "actor_host::persona_file_tools_acceptance_tests::installed_file_tools_repair_a_draft_after_notebook_refusal_without_compilation",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 RESPONSE_CONTINUATION_TESTS = [
@@ -192,6 +199,13 @@ def cohorts() -> dict:
                    "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900,
                                      M2_CHECKPOINT_RELEASE_TEST: 900,
                                      M2_SELECTED_CODING_TEST: 900}},
+            "persona-specialists": {
+                "tests": SPECIALIST_ACCEPTANCE_TESTS, "expected_count": len(SPECIALIST_ACCEPTANCE_TESTS),
+                "ignored": False, "timeout": 900, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True, "require_confirmed_cleanup": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
             "unified-regressions": {"tests": UNIFIED_REGRESSION_TESTS,
                                     "expected_count": len(UNIFIED_REGRESSION_TESTS),
                                     "ignored": False, "timeout": 600,
