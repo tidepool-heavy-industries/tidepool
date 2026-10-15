@@ -1233,7 +1233,7 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let operation = first.operation("delivery-probe");
             if asynchronous {
-                first.async_call("delivery-probe", "\"keptwhole\" :: Text");
+                first.async_call("delivery-probe", "display (\"keptwhole\" :: Text)");
             } else {
                 first.function(
                     "delivery-probe",
@@ -1243,11 +1243,14 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
             }
             let acknowledgement = if asynchronous {
                 let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-                assert!(!round
-                    .request
-                    .input
-                    .iter()
-                    .any(|item| item.0.to_string().contains("presentation-finished")));
+                assert!(
+                    host.runtime
+                        .store()
+                        .replay_tool_output_operation(&operation)
+                        .unwrap()
+                        .is_none(),
+                    "acknowledgement does not settle the original operation before its hook"
+                );
                 Some(round)
             } else {
                 None
@@ -1270,7 +1273,10 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
             .expect("actual hook command remains live")
             .expect("hook command reaches delivery gate");
             assert!(
-                requests.try_recv().is_err(),
+                matches!(
+                    requests.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ),
                 "no final-result inference before hook settlement"
             );
             let release = host.context.config.workspace.join("after-tool-release");
@@ -1278,47 +1284,59 @@ async fn provider_delivery_after_presentation(asynchronous: bool) {
                 .await
                 .unwrap()
                 .unwrap();
+            let scheduler = host.runtime.scheduler();
+            let completed = host
+                .while_host_running(scheduler.wait(&operation))
+                .await
+                .expect("the host remains live through the original operation")
+                .expect("the original operation remains owned");
+            assert!(
+                matches!(
+                    completed.as_ref(),
+                    harness::turn::JobOutput::Completed(Ok(_))
+                ),
+                "the exact operation must succeed after its hook: {completed:?}"
+            );
             if let Some(round) = acknowledgement {
-                round.function("delivery-yield-0", "yield", serde_json::json!({"until": 1}));
+                // The original operation is already complete. One event-based
+                // yield lets the Engine publish its retained output; no timed polling.
+                round.function("delivery-yield", "yield", serde_json::json!({"until":null}));
             }
-            let round = if asynchronous {
-                let mut waits = 1;
-                loop {
-                    let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-                    if round
-                        .request
-                        .input
-                        .iter()
-                        .any(|item| item.0.to_string().contains("presentation-finished"))
-                    {
-                        break round;
-                    }
-                    assert!(
-                        waits <= 5,
-                        "final async presentation never reached provider"
-                    );
-                    round.function(
-                        &format!("delivery-yield-{waits}"),
-                        "yield",
-                        serde_json::json!({"until": 1}),
-                    );
-                    waits += 1;
-                }
-            } else {
-                next_hosted_script_round(&mut requests, &mut pending, &root).await
-            };
-            let delivered = round
-                .request
-                .input
-                .iter()
-                .map(|item| item.0.to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(delivered.contains("keptwhole"), "{delivered}");
+            let round = host
+                .while_operation_succeeds(
+                    &operation,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let store = host.runtime.store();
+            let outcome = store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .expect("the actual next inference follows durable output settlement");
+            assert_eq!(outcome.terminal, harness::store::TerminalOutcome::Success);
+            let retained = store
+                .replay_output_operation(&operation)
+                .unwrap()
+                .expect("the original operation retains its model output");
             assert_eq!(
-                delivered.matches("presentation-finished").count(),
+                round
+                    .request
+                    .input
+                    .iter()
+                    .filter(|item| *item == &retained)
+                    .count(),
                 1,
-                "{delivered}"
+                "the next request contains the exact original output once"
+            );
+            let response: serde_json::Value =
+                serde_json::from_str(retained.0["output"].as_str().unwrap()).unwrap();
+            let presented = response["items"][0]["output"].as_str().unwrap();
+            assert!(presented.contains("keptwhole"), "{response}");
+            assert_eq!(
+                presented.matches("presentation-finished").count(),
+                1,
+                "{response}"
             );
             round.function(
                 "delivery-status",
