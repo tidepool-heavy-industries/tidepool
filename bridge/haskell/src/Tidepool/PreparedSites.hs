@@ -1,6 +1,5 @@
 module Tidepool.PreparedSites
-  ( buildYieldSite
-  , PreparedSite(..)
+  ( PreparedSite(..)
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment
   , preparedSiteRequestAuthority
   , PreparedSiteDependencies, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
@@ -22,7 +21,8 @@ import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
 import Codec.CBOR.Encoding qualified as CBOR
 import Codec.CBOR.Write (toStrictByteString)
-import Data.List (find, nub)
+import Data.Foldable (fold)
+import Data.List (find, nub, foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -559,7 +559,7 @@ completePreparedSites resolver (PreparedSiteAcquisition bindings pending graph f
     pure (placeholder, literal, site, PreparedSite owner site (vsDelivery spec) wire inputs)
   let free = unionVarSets [exprFreeVars rhs | binding <- bindings, rhs <- case binding of
         NonRec _ body -> [body]; Rec pairs -> map snd pairs]
-      substitution = foldl (\current (placeholder, literal, _, _) -> extendIdSubst current placeholder literal)
+      substitution = foldl' (\current (placeholder, literal, _, _) -> extendIdSubst current placeholder literal)
         (mkEmptySubst (mkInScopeSet free)) issued
       complete (NonRec binder rhs) = NonRec binder (substExpr substitution rhs)
       complete (Rec pairs) = Rec [(binder, substExpr substitution rhs) | (binder, rhs) <- pairs]

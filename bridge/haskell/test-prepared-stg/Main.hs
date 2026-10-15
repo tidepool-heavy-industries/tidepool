@@ -82,7 +82,7 @@ import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
 import Tidepool.PreparedSites
-  ( PreparedSite(..), SiteRejection(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
+  ( PreparedSite(..), SiteRejection(..), lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
 import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )

@@ -26,6 +26,7 @@ import Tidepool.ConstructorIdentity (IdentityResolver, TypeIdentityFailure, reso
 import Tidepool.ExecutionEncode (encodeTypeIdentity)
 import qualified Data.ByteString as BS
 import Data.Char (isDigit)
+import Data.Foldable (fold)
 import Data.List (elemIndex)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text.Encoding as TextEncoding
@@ -160,9 +161,22 @@ encodeTypeSyntaxIdentity :: IdentityResolver -> TypeGraph -> [TypeNodeId]
 encodeTypeSyntaxIdentity resolver graph roots = do
   (selected, final) <- runStateT (traverse visit roots)
     (SyntaxIdentityState Map.empty IntMap.empty 0 0)
-  pure (toStrictByteString (array
-    [list CBOR.encodeWord32 selected, list CBOR.encodeBytes (IntMap.elems (syntaxNodes final))]))
+  let nodes = IntMap.elems (syntaxNodes final)
+      encodedBytes = headerBytes 2 + headerBytes (length selected)
+        + sum (map (headerBytes . fromIntegral) selected) + headerBytes (length nodes)
+        + sum [headerBytes (BS.length bytes) + BS.length bytes | bytes <- nodes]
+  if encodedBytes > 16777216 then Left (TypeSyntaxGraphFailure TypeGraphByteLimit)
+    else pure (toStrictByteString (array
+      [list CBOR.encodeWord32 selected, list CBOR.encodeBytes nodes]))
  where
+  -- Definite CBOR array/byte-string lengths and unsigned indices share the
+  -- shortest primitive width. Include their framing before final allocation.
+  headerBytes value
+    | value < 24 = 1
+    | value < 256 = 2
+    | value < 65536 = 3
+    | toInteger value < 4294967296 = 5
+    | otherwise = 9
   array fields = CBOR.encodeListLen (fromIntegral (length fields)) <> fold fields
   list encode values = CBOR.encodeListLen (fromIntegral (length values)) <> foldMap encode values
   tag value = CBOR.encodeWord value
