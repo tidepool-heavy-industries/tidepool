@@ -355,7 +355,7 @@ impl CertifiedSegmentOriginals {
         include: &[PathBuf],
         candidates: Option<&CandidateSet>,
         exact: &crate::declaration_context::ExactProductAdmission<'_>,
-        selected_values: &[tidepool_repr::SessionModule],
+        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Self> {
@@ -519,7 +519,7 @@ impl CertifiedSegmentOriginals {
         &self,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
-        selected_values: &[tidepool_repr::SessionModule],
+        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
@@ -7241,7 +7241,7 @@ pub(crate) fn certify_products(
         include,
         exact,
         authored,
-        &[],
+        &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
         &mut PackageInterfaceValidation::with_inventory(fresh_products.operation().clone()),
     )
@@ -7260,7 +7260,7 @@ pub(crate) fn certify_products_with_validation(
     include: &[PathBuf],
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
-    selected_session_values: &[tidepool_repr::SessionModule],
+    selected_session_values: &crate::artifacts::SelectedSessionValueOwners,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
@@ -7888,7 +7888,7 @@ pub(crate) fn certify_products_with_validation(
         &receipt.finalization,
         captured_payload_root,
         producer_sha256,
-        selected_session_values,
+        selected_session_values.as_slice(),
         produced_types,
         &inherited_seals,
         validation,

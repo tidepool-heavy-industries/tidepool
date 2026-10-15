@@ -3107,27 +3107,31 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         command.bind().unwrap(),
     )
     .unwrap();
-    let offer = ModuleCandidateOffer::select_activation_preview(
-        &endpoint,
-        &fixture.recipe.include,
-        scratch.path(),
-        admission.original_display_context().unwrap().clone(),
-        admission.input_interface().prototype().clone(),
-        ActivationPreviewSpecification {
-            original_context_digest: admission.original_context_digest(),
-            budget: 512,
-            template_source: template.clone(),
-        },
-        admission.catalog_selection(),
-    )
-    .unwrap();
+    let make_offer = || {
+        ModuleCandidateOffer::select_activation_preview(
+            &endpoint,
+            &fixture.recipe.include,
+            scratch.path(),
+            admission.original_display_context().unwrap().clone(),
+            admission.input_interface().prototype().clone(),
+            ActivationPreviewSpecification {
+                original_context_digest: admission.original_context_digest(),
+                budget: 512,
+                template_source: template.clone(),
+            },
+            admission.catalog_selection(),
+        )
+        .unwrap()
+    };
+    let offer = make_offer();
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
     let submissions = tidepool_extract_cmd::extract_spawn_count();
-    offer
-        .apply_to(&mut command)
+    let offer = offer
+        .apply_to(command, scratch.path())
         .expect("genuine preview offer accepts its original retained context");
+    let mut command = offer.command().clone();
     assert!(
         tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
             .unwrap()
@@ -3148,7 +3152,9 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     );
     let refused_request = command.request_bytes();
     assert!(
-        offer.apply_to(&mut command).is_err(),
+        make_offer()
+            .apply_to(command.clone(), scratch.path())
+            .is_err(),
         "genuine preview offer refuses an explicit retained heap input"
     );
     assert_eq!(

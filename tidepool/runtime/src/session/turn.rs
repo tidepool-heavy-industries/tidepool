@@ -18,8 +18,8 @@ use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::artifacts::{
     compiler_scratch_directory, decode_turn_nominal_heads as decode_nominal_heads,
-    decode_turn_yield_sites as decode_asks, seal_turn_outputs, CompilerDiagnosticCapture,
-    ModuleCandidateOffer,
+    decode_turn_yield_sites as decode_asks, seal_turn_outputs, AppliedModuleCandidateOffer,
+    CompilerDiagnosticCapture, ModuleCandidateOffer, SelectedModuleCandidateOffer,
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 #[cfg(test)]
@@ -2706,8 +2706,9 @@ fn compile_activation_renderer_inner(
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
-    offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let offer = offer.apply_to(cmd, temp.path())?;
+    let cmd = offer.command();
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
         .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
@@ -2980,8 +2981,7 @@ pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
-    offer: ModuleCandidateOffer,
-    command: ExtractCmd,
+    offer: AppliedModuleCandidateOffer,
     root: Arc<tempfile::TempDir>,
     stderr: Vec<u8>,
 }
@@ -3053,8 +3053,12 @@ impl PreparedRuntimeCell {
         let program = cancellation
             .run_sync(|| self.program.seal(cancellation))
             .map_err(|error| {
-                self.offer
-                    .retain_failure(self.root.path(), &self.command, &self.stderr, error)
+                self.offer.retain_failure(
+                    self.root.path(),
+                    self.offer.command(),
+                    &self.stderr,
+                    error,
+                )
             })?;
         Ok((self.checked, program))
     }
@@ -3224,8 +3228,9 @@ fn prepare_cell_program_admitted_inner(
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
-    offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let offer = offer.apply_to(command, scratch.path())?;
+    let command = offer.command();
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
     drop(offer_span);
     let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
@@ -3278,7 +3283,6 @@ fn prepare_cell_program_admitted_inner(
         checked,
         program,
         offer,
-        command,
         root: scratch,
         stderr: run.output.stderr,
     })
@@ -3319,8 +3323,9 @@ fn check_cell_impl(
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
-    offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let offer = offer.apply_to(cmd, temp.path())?;
+    let cmd = offer.command();
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
         .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
@@ -3623,7 +3628,7 @@ fn observe_candidate_publication(
 
 #[cfg(test)]
 fn audit_compiler_publication_refusal(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     owner: &Arc<tempfile::TempDir>,
     cache: &Path,
 ) {
@@ -3690,7 +3695,7 @@ fn audit_compiler_publication_refusal(
 
 #[cfg(test)]
 fn audit_compiler_issued_item_receipts(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     root: &Path,
     test_name: &'static str,
 ) {
@@ -4381,9 +4386,14 @@ fn compile_turn(
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
-    offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let ordinary_admitted = req.exact_context.is_none();
+    let offer = if ordinary_admitted {
+        offer.prepare_admitted_turn(cmd, temp.path())?
+    } else {
+        offer.apply_to(cmd, temp.path())?
+    };
+    let cmd = offer.command();
     enum TurnCompilerOutput {
         Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
         Direct(tidepool_extract_cmd::ExtractRun),
@@ -4391,7 +4401,7 @@ fn compile_turn(
     let diagnostics =
         (!ordinary_admitted).then(|| CompilerDiagnosticCapture::start(temp.path(), &cmd));
     let run = if ordinary_admitted {
-        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd, settlement)?)
+        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, settlement)?)
     } else {
         TurnCompilerOutput::Direct(
             endpoint
@@ -4638,7 +4648,7 @@ fn compiled_native_output(
 /// `result.cbor`/`meta.cbor` off the SAME directory.
 fn decode_turn_output_dir(
     dir: &Path,
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
@@ -4695,7 +4705,7 @@ fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
     wrapped_source: &str,
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
     let meta_path = output_dir.join("meta.cbor");

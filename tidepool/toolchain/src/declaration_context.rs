@@ -14647,7 +14647,7 @@ mod tests {
         support: &str,
         request: ExactCompilationRequest,
         endpoint: tidepool_extract_cmd::CompilerEndpoint,
-        offer: &crate::artifacts::ModuleCandidateOffer,
+        offer: crate::artifacts::ModuleCandidateOffer,
     ) {
         let original_path = root.join(module.relative_hs_path());
         let support_path = root.join("PrefixSelectedSupport.hs");
@@ -14669,7 +14669,8 @@ mod tests {
             .inspect_out(&inspection_output)
             .inspection_strict()
             .output_dir(&output);
-        offer.apply_to(&mut command).unwrap();
+        let offer = offer.apply_to(command, &output).unwrap();
+        let command = offer.command();
         let request_bytes = command.request_bytes();
         let decoded = tidepool_extract_cmd::ExtractRequest::decode(&request_bytes).unwrap();
         assert!(decoded.target_names().is_empty());

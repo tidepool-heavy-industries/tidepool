@@ -725,7 +725,11 @@ pub fn load_selected_production_entry_with_catalog(
         checked_values: None,
         checked_projections: Vec::new(),
         checked: None,
-        selected_session_values: Default::default(),
+    };
+    let offer = SelectedModuleCandidateOffer {
+        offer,
+        selected_session_values: SelectedSessionValueOwners::capture(std::iter::empty())
+            .expect("validated retained-entry format has no session selections"),
     };
     let products = seal_turn_outputs_inner(
         &offer,

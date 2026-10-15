@@ -635,8 +635,9 @@ fn run_inspections_with_policy(
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
-    offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let offer = offer.apply_to(command, temp.path())?;
+    let command = offer.command();
     #[cfg(test)]
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
         if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {

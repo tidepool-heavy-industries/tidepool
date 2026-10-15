@@ -58,6 +58,8 @@ pub enum CompileError {
     /// Explicit immutable candidate configuration refused before compilation.
     #[error(transparent)]
     ModulePackage(#[from] crate::toolchain::ModulePackageError),
+    #[error(transparent)]
+    SessionValueSelection(#[from] crate::artifacts::SessionValueSelectionError),
     /// I/O error during file operations or process execution.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),

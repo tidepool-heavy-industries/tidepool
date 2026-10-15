@@ -90,6 +90,15 @@ Available module or site censuses cannot choose an item's execution context.
 The initial exact request and that item's selected closure retain that authority.
 Ordinary compilation uses the separate closed ordinary packet variant.
 
+Offer application consumes the prepared offer and final placed request, capturing
+its complete distinct nonzero Val-owner selection before execution. The applied
+owner keeps that immutable request and required selection through certification;
+program item derivatives retain the same original selection. Optional candidate
+search limits cannot truncate a complete selection. Retained original-entry
+certification obtains an explicit empty selection only from its validated format,
+which excludes resident injection. Preparation refusals retain request evidence
+without claiming compiler submission, stderr or a worker outcome.
+
 The physical cell request captures produced value interfaces once. Its private
 inventory may contain later outputs; item views select current and preceding type
 outputs by ordinal, while runtime value authority comes only from completed prior

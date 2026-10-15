@@ -130,8 +130,28 @@ pub struct CompilerDiagnosticCapture {
     directory: Option<PathBuf>,
 }
 
+enum DiagnosticStage<'a> {
+    Preparing,
+    Prepared,
+    Refused(&'a crate::CompileError),
+    Started,
+    Completed { success: bool, stderr: &'a [u8] },
+}
+
+impl DiagnosticStage<'_> {
+    fn phase(&self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Refused(_) => "preparation_refused",
+            Self::Started => "compiler_started",
+            Self::Completed { .. } => "compiler_completed",
+        }
+    }
+}
+
 impl CompilerDiagnosticCapture {
-    pub fn start(source: &Path, command: &ExtractCmd) -> Self {
+    fn new(source: &Path) -> Self {
         let directory = match diagnostic_root() {
             Ok(Some(root)) if source.starts_with(root.join("compiler-transactions")) => {
                 Some(source.to_path_buf())
@@ -142,20 +162,47 @@ impl CompilerDiagnosticCapture {
                 None
             }
         };
-        let capture = Self { directory };
-        capture.write(source, command, None);
+        Self { directory }
+    }
+
+    pub fn start(source: &Path, command: &ExtractCmd) -> Self {
+        let capture = Self::new(source);
+        capture.write(source, command, DiagnosticStage::Started);
         capture
     }
 
-    pub fn completed(&self, source: &Path, command: &ExtractCmd, success: bool, stderr: &[u8]) {
-        self.write(source, command, Some((success, stderr)));
+    pub fn preparing(source: &Path, command: &ExtractCmd) -> Self {
+        let capture = Self::new(source);
+        capture.write(source, command, DiagnosticStage::Preparing);
+        capture
     }
 
-    fn write(&self, source: &Path, command: &ExtractCmd, result: Option<(bool, &[u8])>) {
+    pub fn prepared(&self, source: &Path, command: &ExtractCmd) {
+        self.write(source, command, DiagnosticStage::Prepared);
+    }
+
+    pub fn admission_refused(
+        &self,
+        source: &Path,
+        command: &ExtractCmd,
+        error: &crate::CompileError,
+    ) {
+        self.write(source, command, DiagnosticStage::Refused(error));
+    }
+
+    pub fn completed(&self, source: &Path, command: &ExtractCmd, success: bool, stderr: &[u8]) {
+        self.write(
+            source,
+            command,
+            DiagnosticStage::Completed { success, stderr },
+        );
+    }
+
+    fn write(&self, source: &Path, command: &ExtractCmd, stage: DiagnosticStage<'_>) {
         let Some(directory) = &self.directory else {
             return;
         };
-        if let Err(error) = self.write_inner(directory, source, command, result) {
+        if let Err(error) = self.write_inner(directory, source, command, stage) {
             tracing::warn!(%error, path = %directory.display(), "compiler execution diagnostics are incomplete");
         }
     }
@@ -165,7 +212,7 @@ impl CompilerDiagnosticCapture {
         directory: &Path,
         source: &Path,
         command: &ExtractCmd,
-        result: Option<(bool, &[u8])>,
+        stage: DiagnosticStage<'_>,
     ) -> io::Result<()> {
         std::fs::write(
             directory.join("compiler-request.bin"),
@@ -184,7 +231,7 @@ impl CompilerDiagnosticCapture {
         if let Err(error) = snapshot.inspect(source, 0) {
             snapshot.issues.push(error.to_string());
         }
-        if let Some((_, stderr)) = result {
+        if let DiagnosticStage::Completed { stderr, .. } = &stage {
             let limit = 4 << 20;
             std::fs::write(
                 directory.join("compiler.stderr"),
@@ -203,8 +250,10 @@ impl CompilerDiagnosticCapture {
         }
         let report = serde_json::json!({
             "schema": 1, "kind": "compiler-execution-diagnostics", "authority": false,
-            "original_directory": source, "phase": if result.is_some() { "compiler_completed" } else { "compiler_started" },
-            "compiler_process_success": result.map(|(success, _)| success),
+            "original_directory": source, "phase": stage.phase(),
+            "submission": match stage { DiagnosticStage::Preparing | DiagnosticStage::Prepared | DiagnosticStage::Refused(_) => "not_attempted", DiagnosticStage::Started => "not_observed", DiagnosticStage::Completed { .. } => "observed" },
+            "primary_error": match stage { DiagnosticStage::Refused(error) => Some(error.to_string()), _ => None },
+            "compiler_process_success": match stage { DiagnosticStage::Completed { success, .. } => Some(success), _ => None },
             "artifact_byte_limit": BYTE_LIMIT, "artifact_entry_limit": ENTRY_LIMIT,
             "artifact_bytes": BYTE_LIMIT - snapshot.remaining, "files": snapshot.files,
             "issues": snapshot.issues,

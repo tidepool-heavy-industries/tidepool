@@ -4226,3 +4226,71 @@ fn assert_authentic_retained_link_rejects_wrong_generation(targets: &[Arc<Prepar
         "production consumer must retain a generation-stamped global import"
     );
 }
+
+#[test]
+fn later_cells_retain_more_than_128_distinct_value_owners() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1010),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    for (start, end, label) in [(0, 125, "first_125_owners"), (125, 129, "cross_128_owners")] {
+        // Every capture is its own item and therefore earns its own Val owner.
+        let source = (start..end)
+            .map(|index| format!("owner{index:03} <- pure ({index} :: Int)\n"))
+            .collect::<String>();
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            label,
+            &source,
+            0,
+            &ScalePublication::Ephemeral,
+        );
+        let owners = (0..end)
+            .map(|index| {
+                resident
+                    .current_binding_in(public, &format!("owner{index:03}"))
+                    .unwrap()
+                    .1
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            owners.len(),
+            end,
+            "bindings must belong to distinct compiler-issued Val owners"
+        );
+        let selected = resident
+            .compile_view_in(public)
+            .unwrap()
+            .injected_module_names();
+        assert_eq!(selected.len(), end);
+        assert_eq!(
+            selected.into_iter().collect::<HashSet<_>>(),
+            owners
+                .iter()
+                .map(tidepool_repr::SessionModule::module_name)
+                .collect()
+        );
+    }
+    execute_cell(&mut resident, public, &effects, &images, (0, 0), "read_after_129_owners",
+        "if owner000 + owner124 + owner125 + owner128 == (377 :: Int) then pure () else error \"lost selected value owner\"",
+        0, &ScalePublication::Ephemeral);
+    execute_cell(&mut resident, public, &effects, &images, (0, 0), "later_capture_after_129_owners",
+        "laterOwner <- pure (owner001 + owner128)\nif laterOwner == (129 :: Int) then pure () else error \"lost later capture\"",
+        0, &ScalePublication::Ephemeral);
+}

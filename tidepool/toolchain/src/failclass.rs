@@ -425,7 +425,8 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         }
         // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
         // malformed extractor artifact or impossible internal request shape.
-        CompileError::ExtractFailed(_)
+        CompileError::SessionValueSelection(_)
+        | CompileError::ExtractFailed(_)
         | CompileError::ArtifactInventory(_)
         | CompileError::CompileInput(_)
         | CompileError::ModulePackage(_) => {
@@ -530,7 +531,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::CompilerPreparationCloseUnconfirmed(_) => {
             CompileFailureCause::CompilerCloseUnconfirmed
         }
-        CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
+        CompileError::SessionValueSelection(_) | CompileError::ExtractFailed(_) => {
+            CompileFailureCause::ExtractorContract
+        }
         CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
             failure: error.as_ref().into(),
         },

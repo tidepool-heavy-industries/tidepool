@@ -38,6 +38,7 @@ mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
 mod production_entry;
+mod selected_session_values;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
@@ -46,6 +47,7 @@ pub use production_entry::{
     prepare_frozen_production_entry_with_catalog, FrozenEntrySources, ProductionEntryOutput,
     ProductionEntrySources,
 };
+pub use selected_session_values::{SelectedSessionValueOwners, SessionValueSelectionError};
 
 static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -156,10 +158,9 @@ pub fn check_source(
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let offer =
         ModuleCandidateOffer::select_admitted(&endpoint, request.include, directory.path())?;
-    if let Some(manifest) = offer.manifest_path() {
-        command.module_candidates(manifest);
-    }
-    let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &command);
+    let offer = offer.apply_to(command, directory.path())?;
+    let command = offer.command();
+    let diagnostics = CompilerDiagnosticCapture::start(directory.path(), command);
     let run = endpoint
         .execute_with_input_files(&command, offer.input_transport_files(), |close| {
             settlement(close)
@@ -616,7 +617,88 @@ pub struct ModuleCandidateOffer {
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     checked: Option<NativeCheckedOffer>,
-    selected_session_values: std::sync::OnceLock<Vec<tidepool_repr::SessionModule>>,
+}
+
+/// Required complete session-value selection for output certification.
+/// Construction is restricted to live request application and validated retained entries.
+pub struct SelectedModuleCandidateOffer {
+    offer: ModuleCandidateOffer,
+    selected_session_values: SelectedSessionValueOwners,
+}
+
+impl std::ops::Deref for SelectedModuleCandidateOffer {
+    type Target = ModuleCandidateOffer;
+    fn deref(&self) -> &Self::Target {
+        &self.offer
+    }
+}
+
+/// One final physical request and its required output-selection evidence.
+/// The request cannot be mutated after application.
+pub struct AppliedModuleCandidateOffer {
+    selected: SelectedModuleCandidateOffer,
+    command: ExtractCmd,
+    output_owner: Option<Arc<TempDir>>,
+}
+
+impl std::ops::Deref for AppliedModuleCandidateOffer {
+    type Target = SelectedModuleCandidateOffer;
+    fn deref(&self) -> &Self::Target {
+        &self.selected
+    }
+}
+
+impl AppliedModuleCandidateOffer {
+    pub fn command(&self) -> &ExtractCmd {
+        &self.command
+    }
+
+    pub fn execute_admitted_turn(
+        &self,
+        endpoint: crate::toolchain::AdmittedCompilerEndpoint,
+        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+    ) -> Result<AdmittedTurnOutput, CompileError> {
+        let directory = self.output_owner.clone().ok_or_else(|| {
+            CompileError::ExtractFailed("ordinary turn lacks its prepared output owner".into())
+        })?;
+        let request = tidepool_extract_cmd::ExtractRequest::decode(&self.command.request_bytes())
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        if self.producer != endpoint.identity().producer_bytes() {
+            return Err(CompileError::ExtractFailed(
+                "admitted turn endpoint differs from applied request".into(),
+            ));
+        }
+        let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &self.command);
+        let run = endpoint
+            .execute_with_input_files(&self.command, self.input_transport_files(), |close| {
+                settlement(close)
+            })
+            .map_err(|error| {
+                self.retain_execution_failure(directory.path(), &self.command, error)
+            })?;
+        diagnostics.completed(
+            directory.path(),
+            &self.command,
+            run.success(),
+            &run.output.stderr,
+        );
+        let (turn, native) = if run.success()
+            && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
+        {
+            self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
+                .map_err(|error| {
+                    self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
+                })?
+        } else {
+            (None, None)
+        };
+        Ok(AdmittedTurnOutput {
+            directory,
+            run,
+            turn,
+            native,
+        })
+    }
 }
 
 /// Compiler-authenticated physical outputs. This owner carries no endpoint;
@@ -631,7 +713,7 @@ pub struct PreparedCellProgram {
     outputs: BTreeMap<usize, ProgramNativeOutput>,
     prepared_items: BTreeMap<usize, crate::checked_cell::PreparedCheckedItemOutput>,
     pending_segments: Vec<(
-        ModuleCandidateOffer,
+        SelectedModuleCandidateOffer,
         crate::declaration_context::ExactProgramSegmentAdmission,
     )>,
     validation: crate::recovery_artifacts::PackageInterfaceValidation,
@@ -776,7 +858,7 @@ impl PreparedCellProgram {
 /// Fixed physical compiler authority and private output inventory for one
 /// segment. Item progress belongs exclusively to its mutable cursor.
 struct BoundSegment {
-    offer: ModuleCandidateOffer,
+    offer: SelectedModuleCandidateOffer,
     source: crate::declaration_context::ExactProgramSegmentAdmission,
     produced_types: crate::checked_cell::ProducedValueTypeInterfaces,
     artifacts: crate::artifact_inventory::BoundArtifactSelection,
@@ -874,28 +956,6 @@ impl ItemAdmission<'_> {
         self.cursor.next += 1;
         Ok(output)
     }
-}
-
-fn selected_session_value_modules(
-    command: &ExtractCmd,
-) -> Result<Vec<tidepool_repr::SessionModule>, CompileError> {
-    let mut selected = Vec::new();
-    for name in command.selected_session_values() {
-        let owner = name
-            .to_str()
-            .and_then(tidepool_repr::SessionModule::from_module_name)
-            .filter(|owner| owner.kind == tidepool_repr::SessionModuleKind::Val && owner.gen.0 != 0)
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("invalid selected session value owner".into())
-            })?;
-        if selected.contains(&owner) || selected.len() >= 128 {
-            return Err(CompileError::ExtractFailed(
-                "duplicate or excessive selected session values".into(),
-            ));
-        }
-        selected.push(owner);
-    }
-    Ok(selected)
 }
 
 enum NativeCheckedOffer {
@@ -1252,124 +1312,6 @@ impl ModuleCandidateOffer {
         )
     }
 
-    /// Execute an ordinary turn into fresh, privately owned outputs and seal
-    /// input continuity before returning those outputs to a consumer.
-    /// Keep the relocated command available for completed-response diagnostics.
-    pub fn execute_admitted_turn(
-        &self,
-        endpoint: crate::toolchain::AdmittedCompilerEndpoint,
-        command: &mut ExtractCmd,
-        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
-    ) -> Result<AdmittedTurnOutput, CompileError> {
-        let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        if self.exact.is_some()
-            || !request.is_turn()
-            || self.producer != endpoint.identity().producer_bytes()
-            || request.include_paths()
-                != self
-                    .include
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>()
-            || request
-                .target_names()
-                .iter()
-                .any(|target| target != "__prepared")
-        {
-            return Err(CompileError::ExtractFailed(
-                "admitted turn recipe differs from selected offer".into(),
-            ));
-        }
-        let directory = compiler_scratch_directory()?;
-        command.relocate_turn_outputs(directory.path());
-        let diagnostics = CompilerDiagnosticCapture::start(directory.path(), command);
-        let run = endpoint
-            .execute_with_input_files(command, self.input_transport_files(), |close| {
-                settlement(close)
-            })
-            .map_err(|error| self.retain_execution_failure(directory.path(), command, error))?;
-        diagnostics.completed(directory.path(), command, run.success(), &run.output.stderr);
-        let (turn, native) = if run.success()
-            && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
-        {
-            self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
-                .map_err(|error| {
-                    self.retain_failure(directory.path(), command, &run.output.stderr, error)
-                })?
-        } else {
-            (None, None)
-        };
-        Ok(AdmittedTurnOutput {
-            directory,
-            run,
-            turn,
-            native,
-        })
-    }
-
-    fn read_admitted_turn(
-        &self,
-        directory: &Path,
-        issue_identity: bool,
-    ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
-        let turn: Arc<[u8]> =
-            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
-        let value = crate::checked_cell::decode(&turn)?;
-        let row = crate::checked_cell::row(&value, 2)?;
-        let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
-            "Bind" => {
-                let fields = crate::checked_cell::row(&row[1], 5)?;
-                (crate::checked_cell::string(&fields[4])?, &fields[3])
-            }
-            "Expr" => {
-                let fields = crate::checked_cell::row(&row[1], 3)?;
-                (crate::checked_cell::string(&fields[2])?, &fields[1])
-            }
-            "Decl" => return Ok((Some(turn), None)),
-            _ => {
-                return Err(CompileError::ExtractFailed(
-                    "admitted turn result kind".into(),
-                ));
-            }
-        };
-        let sites = decode_turn_yield_sites(site_observations)?;
-        let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
-        let deserialize_start = Instant::now();
-        let (table, warnings) =
-            tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_CBOR_DESERIALIZE,
-            deserialize_start.elapsed(),
-            0,
-        );
-        let module = extract_module_name(source).ok_or_else(|| {
-            CompileError::ExtractFailed("admitted turn source module missing".into())
-        })?;
-        output.products = seal_turn_outputs_inner(
-            self,
-            directory,
-            &directory.join(format!("{module}.hs")),
-            source,
-            &output.target,
-            "__prepared",
-            issue_identity.then_some((&table, sites.as_slice())),
-            None,
-            OriginalOutputPublication::Transaction,
-        )?
-        .map(Arc::new);
-        Ok((
-            Some(turn),
-            Some(NativeTurnOutput {
-                output,
-                table,
-                warnings,
-            }),
-        ))
-    }
-
     pub fn select(
         producer: &[u8],
         include: &[PathBuf],
@@ -1402,7 +1344,6 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: None,
-            selected_session_values: Default::default(),
         })
     }
 
@@ -1474,7 +1415,6 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: None,
-            selected_session_values: Default::default(),
         })
     }
 
@@ -1624,7 +1564,6 @@ impl ModuleCandidateOffer {
             checked_values: Some(inputs),
             checked_projections: Vec::new(),
             checked: None,
-            selected_session_values: Default::default(),
         })
     }
 
@@ -1705,7 +1644,6 @@ impl ModuleCandidateOffer {
             checked_values: Some(checked_values),
             checked_projections,
             checked: None,
-            selected_session_values: Default::default(),
         })
     }
 
@@ -1826,7 +1764,6 @@ impl ModuleCandidateOffer {
             checked_values: Some(inputs),
             checked_projections,
             checked: None,
-            selected_session_values: Default::default(),
         })
     }
 
@@ -1931,7 +1868,6 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::Item(checked_item)),
-            selected_session_values: Default::default(),
         })
     }
 
@@ -2028,7 +1964,6 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
-            selected_session_values: Default::default(),
         })
     }
 
@@ -2074,7 +2009,7 @@ impl ModuleCandidateOffer {
         stderr: &[u8],
         error: CompileError,
     ) -> CompileError {
-        retain_compiler_failure_inner(directory, stderr, error, Some(self), command)
+        retain_compiler_failure_inner(directory, Some(stderr), error, Some(self), command)
     }
 
     /// Preserve the typed request and selected inputs when transport fails
@@ -2085,7 +2020,7 @@ impl ModuleCandidateOffer {
         command: &ExtractCmd,
         error: CompileError,
     ) -> CompileError {
-        retain_compiler_failure_inner(directory, &[], error, Some(self), command)
+        retain_compiler_failure_inner(directory, None, error, Some(self), command)
     }
 
     fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
@@ -2100,6 +2035,190 @@ impl ModuleCandidateOffer {
                 None => Ok(()),
             }
         }
+    }
+
+    /// Apply all offer-owned fields, capture the complete selection, and freeze
+    /// the physical request. Refusal diagnostics never claim worker execution.
+    pub fn apply_to(
+        self,
+        mut command: ExtractCmd,
+        preparation_directory: &Path,
+    ) -> Result<AppliedModuleCandidateOffer, CompileError> {
+        let capture = CompilerDiagnosticCapture::preparing(preparation_directory, &command);
+        let result = (|| {
+            if let Some(exact) = &self.exact {
+                let retained_policy = match &self.checked {
+                    Some(NativeCheckedOffer::ActivationPreview(_)) => crate::declaration_context::RetainedGenerationPolicy::PureActivationPreview,
+                    _ => crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,
+                };
+                exact.apply_to(&mut command, retained_policy)?;
+            }
+            if let Some(manifest) = self.manifest_path() {
+                command.module_candidates(manifest);
+            }
+            SelectedSessionValueOwners::from_command(&command).map_err(CompileError::from)
+        })();
+        match result {
+            Ok(selected_session_values) => {
+                capture.prepared(preparation_directory, &command);
+                Ok(AppliedModuleCandidateOffer {
+                    selected: SelectedModuleCandidateOffer {
+                        offer: self,
+                        selected_session_values,
+                    },
+                    command,
+                    output_owner: None,
+                })
+            }
+            Err(error) => {
+                capture.admission_refused(preparation_directory, &command, &error);
+                Err(self.retain_execution_failure(preparation_directory, &command, error))
+            }
+        }
+    }
+
+    /// Place ordinary-turn outputs before the final request is frozen.
+    pub fn prepare_admitted_turn(
+        self,
+        mut command: ExtractCmd,
+        preparation_directory: &Path,
+    ) -> Result<AppliedModuleCandidateOffer, CompileError> {
+        let capture = CompilerDiagnosticCapture::preparing(preparation_directory, &command);
+        let prepared = (|| -> Result<_, CompileError> {
+            let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            if self.exact.is_some()
+                || !request.is_turn()
+                || request.include_paths()
+                    != self
+                        .include
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>()
+                || request
+                    .target_names()
+                    .iter()
+                    .any(|target| target != "__prepared")
+            {
+                return Err(CompileError::ExtractFailed(
+                    "admitted turn recipe differs from selected offer".into(),
+                ));
+            }
+            let directory = Arc::new(compiler_scratch_directory()?);
+            command.relocate_turn_outputs(directory.path());
+            Ok(directory)
+        })();
+        let directory = match prepared {
+            Ok(directory) => directory,
+            Err(error) => {
+                capture.admission_refused(preparation_directory, &command, &error);
+                return Err(self.retain_execution_failure(preparation_directory, &command, error));
+            }
+        };
+        let mut applied = self.apply_to(command, preparation_directory)?;
+        applied.output_owner = Some(directory);
+        Ok(applied)
+    }
+
+    pub fn exact_scope_path(&self) -> Option<&Path> {
+        self.exact
+            .as_ref()
+            .map(|request| request.manifest.as_path())
+    }
+
+    /// Attach this offer's exact compiler inputs and original native demand
+    /// tags. Runtime live-value admission remains a separate authority.
+
+    /// Validate successful source transactions under one actual source parent.
+    /// A request using several source directories validates each directory.
+    pub fn validate_exact_outputs(
+        &self,
+        source_directory: &Path,
+    ) -> Result<Vec<crate::declaration_join::ExactSourceWitness>, CompileError> {
+        let request = self.exact.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("source-only offer cannot admit exact outputs".into())
+        })?;
+        Ok(request
+            .validate_outputs(source_directory)?
+            .into_iter()
+            .map(|source| source.witness)
+            .collect())
+    }
+
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.selected
+            .as_ref()
+            .map(|set| set.manifest_path.as_path())
+    }
+
+    pub fn has_candidates(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|set| !set.by_owner.is_empty())
+    }
+}
+
+impl SelectedModuleCandidateOffer {
+    fn read_admitted_turn(
+        &self,
+        directory: &Path,
+        issue_identity: bool,
+    ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
+        let turn: Arc<[u8]> =
+            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
+        let value = crate::checked_cell::decode(&turn)?;
+        let row = crate::checked_cell::row(&value, 2)?;
+        let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
+            "Bind" => {
+                let fields = crate::checked_cell::row(&row[1], 5)?;
+                (crate::checked_cell::string(&fields[4])?, &fields[3])
+            }
+            "Expr" => {
+                let fields = crate::checked_cell::row(&row[1], 3)?;
+                (crate::checked_cell::string(&fields[2])?, &fields[1])
+            }
+            "Decl" => return Ok((Some(turn), None)),
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "admitted turn result kind".into(),
+                ));
+            }
+        };
+        let sites = decode_turn_yield_sites(site_observations)?;
+        let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
+        let deserialize_start = Instant::now();
+        let (table, warnings) =
+            tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_CBOR_DESERIALIZE,
+            deserialize_start.elapsed(),
+            0,
+        );
+        let module = extract_module_name(source).ok_or_else(|| {
+            CompileError::ExtractFailed("admitted turn source module missing".into())
+        })?;
+        output.products = seal_turn_outputs_inner(
+            self,
+            directory,
+            &directory.join(format!("{module}.hs")),
+            source,
+            &output.target,
+            "__prepared",
+            issue_identity.then_some((&table, sites.as_slice())),
+            None,
+            OriginalOutputPublication::Transaction,
+        )?
+        .map(Arc::new);
+        Ok((
+            Some(turn),
+            Some(NativeTurnOutput {
+                output,
+                table,
+                warnings,
+            }),
+        ))
     }
 
     pub fn admit_checked_cell(
@@ -2485,15 +2604,17 @@ impl ModuleCandidateOffer {
 
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
         Self {
-            selected: self.selected.clone(),
-            producer: self.producer.clone(),
-            include: self.include.clone(),
-            exact: Some(exact.with_source_search_context(&self.include)),
-            checked_cell: None,
-            planned_cell: None,
-            checked_values: None,
-            checked_projections: Vec::new(),
-            checked: None,
+            offer: ModuleCandidateOffer {
+                selected: self.selected.clone(),
+                producer: self.producer.clone(),
+                include: self.include.clone(),
+                exact: Some(exact.with_source_search_context(&self.include)),
+                checked_cell: None,
+                planned_cell: None,
+                checked_values: None,
+                checked_projections: Vec::new(),
+                checked: None,
+            },
             selected_session_values: self.selected_session_values.clone(),
         }
     }
@@ -2554,9 +2675,7 @@ impl ModuleCandidateOffer {
             &self.include,
             self.selected.as_deref(),
             &exact,
-            self.selected_session_values
-                .get()
-                .map_or(&[], Vec::as_slice),
+            &self.selected_session_values,
             Some(produced),
             validation,
         )
@@ -2897,70 +3016,6 @@ impl ModuleCandidateOffer {
             )?,
         }))
     }
-
-    pub fn exact_scope_path(&self) -> Option<&Path> {
-        self.exact
-            .as_ref()
-            .map(|request| request.manifest.as_path())
-    }
-
-    /// Attach this offer's exact compiler inputs and original native demand
-    /// tags. Runtime live-value admission remains a separate authority.
-    pub fn apply_to(&self, command: &mut ExtractCmd) -> Result<(), CompileError> {
-        if let Some(exact) = &self.exact {
-            let retained_policy = match &self.checked {
-                Some(NativeCheckedOffer::ActivationPreview(_)) => {
-                    crate::declaration_context::RetainedGenerationPolicy::PureActivationPreview
-                }
-                _ => crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,
-            };
-            exact.apply_to(command, retained_policy)?;
-        }
-        if let Some(manifest) = self.manifest_path() {
-            command.module_candidates(manifest);
-        }
-        let selected = selected_session_value_modules(command)?;
-        if let Some(previous) = self.selected_session_values.get() {
-            if previous != &selected {
-                return Err(CompileError::ExtractFailed(
-                    "compiler offer session selection changed".into(),
-                ));
-            }
-        } else {
-            self.selected_session_values.set(selected).map_err(|_| {
-                CompileError::ExtractFailed("compiler offer session selection raced".into())
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Validate successful source transactions under one actual source parent.
-    /// A request using several source directories validates each directory.
-    pub fn validate_exact_outputs(
-        &self,
-        source_directory: &Path,
-    ) -> Result<Vec<crate::declaration_join::ExactSourceWitness>, CompileError> {
-        let request = self.exact.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("source-only offer cannot admit exact outputs".into())
-        })?;
-        Ok(request
-            .validate_outputs(source_directory)?
-            .into_iter()
-            .map(|source| source.witness)
-            .collect())
-    }
-
-    pub fn manifest_path(&self) -> Option<&Path> {
-        self.selected
-            .as_ref()
-            .map(|set| set.manifest_path.as_path())
-    }
-
-    pub fn has_candidates(&self) -> bool {
-        self.selected
-            .as_ref()
-            .is_some_and(|set| !set.by_owner.is_empty())
-    }
 }
 
 #[derive(Debug)]
@@ -3126,7 +3181,7 @@ fn ensure_no_uncertified_globals(artifacts: &CompiledArtifacts) -> Result<(), Co
 /// sealed before this owning directory became observable by the caller.
 #[derive(Debug)]
 pub struct AdmittedTurnOutput {
-    directory: TempDir,
+    directory: Arc<TempDir>,
     run: tidepool_extract_cmd::ExtractRun,
     turn: Option<Arc<[u8]>>,
     native: Option<NativeTurnOutput>,
@@ -3161,7 +3216,7 @@ impl AdmittedTurnOutput {
 /// resident turn. The runtime supplies the selected template's source path
 /// and the source text echoed by TurnOut, not the unspliced cell text.
 pub fn seal_turn_outputs(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     output_dir: &Path,
     source_path: &Path,
     source: &str,
@@ -3233,7 +3288,7 @@ fn compiler_evidence_failure(error: certified_products::CertificationError) -> C
 
 #[allow(clippy::too_many_arguments)]
 fn seal_turn_outputs_inner(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     output_dir: &Path,
     source_path: &Path,
     source: &str,
@@ -3271,7 +3326,7 @@ fn seal_turn_outputs_inner(
     fields(inclusive = true)
 )]
 fn seal_turn_outputs_with_validation(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     output_dir: &Path,
     source_path: &Path,
     source: &str,
@@ -3450,10 +3505,7 @@ fn seal_turn_outputs_with_validation(
                 .select_item(
                     item,
                     prepared,
-                    offer
-                        .selected_session_values
-                        .get()
-                        .map_or(&[], Vec::as_slice),
+                    &offer.selected_session_values,
                     Some(produced_types.ok_or_else(|| {
                         CompileError::ExtractFailed(
                             "segment item lacks its checked type selection".into(),
@@ -3489,10 +3541,7 @@ fn seal_turn_outputs_with_validation(
                 &offer.include,
                 exact.as_ref(),
                 authored,
-                offer
-                    .selected_session_values
-                    .get()
-                    .map_or(&[], Vec::as_slice),
+                &offer.selected_session_values,
                 produced_types,
                 validation,
             )
@@ -3879,7 +3928,7 @@ fn program_support_artifacts(
 }
 
 fn checked_output_context(
-    offer: &ModuleCandidateOffer,
+    offer: &SelectedModuleCandidateOffer,
     artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
@@ -4824,6 +4873,20 @@ fn compile_invocation_inner(
                 )
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
+            let preparation = CompilerDiagnosticCapture::preparing(output_owner.path(), &cmd);
+            let selected_session_values = SelectedSessionValueOwners::from_command(&cmd)
+                .map_err(CompileError::from)
+                .map_err(|error| {
+                    preparation.admission_refused(output_owner.path(), &cmd, &error);
+                    CompileAttemptError::Diagnostic(retain_compiler_failure_inner(
+                        output_owner.path(),
+                        None,
+                        error,
+                        None,
+                        &cmd,
+                    ))
+                })?;
+            preparation.prepared(output_owner.path(), &cmd);
             let diagnostics = CompilerDiagnosticCapture::start(output_owner.path(), &cmd);
             crate::host_work::checkpoint()
                 .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
@@ -4879,7 +4942,15 @@ fn compile_invocation_inner(
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
-                CompileAttempt::Executed((cmd, run, inv_key, producer, candidate_set, deployment))
+                CompileAttempt::Executed((
+                    cmd,
+                    selected_session_values,
+                    run,
+                    inv_key,
+                    producer,
+                    candidate_set,
+                    deployment,
+                ))
             })
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
@@ -4899,15 +4970,16 @@ fn compile_invocation_inner(
             return Err(error.into_compile_error());
         }
     };
-    let (cmd, run, inv_key, producer, candidate_set, deployment) = match attempt {
-        CompileAttempt::Cached(artifacts) => {
-            return Ok(CompilationOutput {
-                artifacts: *artifacts,
-                original_entry: None,
-            });
-        }
-        CompileAttempt::Executed(executed) => executed,
-    };
+    let (cmd, selected_session_values, run, inv_key, producer, candidate_set, deployment) =
+        match attempt {
+            CompileAttempt::Cached(artifacts) => {
+                return Ok(CompilationOutput {
+                    artifacts: *artifacts,
+                    original_entry: None,
+                });
+            }
+            CompileAttempt::Executed(executed) => executed,
+        };
 
     if let Some(request) = exact_request.as_ref() {
         let actual =
@@ -5138,7 +5210,7 @@ fn compile_invocation_inner(
                 inv.include,
                 exact.as_ref(),
                 authored,
-                &selected_session_value_modules(&cmd)?,
+                &selected_session_values,
                 None,
                 &mut validation,
             )
@@ -5482,12 +5554,12 @@ pub fn retain_compiler_failure(
     stderr: &[u8],
     error: CompileError,
 ) -> CompileError {
-    retain_compiler_failure_inner(directory, stderr, error, None, command)
+    retain_compiler_failure_inner(directory, Some(stderr), error, None, command)
 }
 
 fn retain_compiler_failure_inner(
     directory: &Path,
-    stderr: &[u8],
+    stderr: Option<&[u8]>,
     error: CompileError,
     offer: Option<&ModuleCandidateOffer>,
     command: &ExtractCmd,
@@ -5497,8 +5569,10 @@ fn retain_compiler_failure_inner(
     }
     match retain_failed_compiler_artifacts(directory, offer, command) {
         Ok(retained) => {
-            if let Err(failure) = std::fs::write(retained.join("compiler.stderr"), stderr) {
-                tracing::warn!(%failure, "could not retain compiler stderr");
+            if let Some(stderr) = stderr {
+                if let Err(failure) = std::fs::write(retained.join("compiler.stderr"), stderr) {
+                    tracing::warn!(%failure, "could not retain compiler stderr");
+                }
             }
             tracing::warn!(path = %retained.display(), "retained failed compiler artifacts");
             match error {
@@ -6740,6 +6814,181 @@ mod module_product_tests {
                 }
             }
         }
+    }
+
+    fn unexecuted_offer(scratch: &Path) -> ModuleCandidateOffer {
+        ModuleCandidateOffer::select_originals_with_catalog(
+            b"unexecuted preparation",
+            &[],
+            scratch,
+            &crate::toolchain::CatalogSelection::Acquired(None),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn applied_selection_refusals_retain_unsubmitted_requests_and_primary_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let _restore = RestoreEnvironment(
+            [
+                "TIDEPOOL_KEEP_TEST_LOGS",
+                "TIDEPOOL_TEST_ARTIFACT_ROOT",
+                "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
+            ]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
+        );
+        std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+        std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", root.path());
+        std::env::set_var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE", "1");
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        for (names, duplicate) in [
+            (
+                vec!["Tidepool.Session.Val.G1", "Tidepool.Session.Val.G01"],
+                true,
+            ),
+            (vec!["Tidepool.Session.Lib.G1"], false),
+        ] {
+            let scratch = compiler_scratch_directory().unwrap();
+            let mut command = ExtractCmd::with_bin(
+                tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("must-not-run"),
+            );
+            command.inject_vals(names);
+            let expected = command.request_bytes();
+            let error = unexecuted_offer(scratch.path())
+                .apply_to(command.clone(), scratch.path())
+                .err()
+                .unwrap();
+            assert!(
+                matches!(
+                    &error,
+                    CompileError::SessionValueSelection(
+                        SessionValueSelectionError::DuplicateOwner { .. }
+                    )
+                ) == duplicate
+            );
+            assert!(matches!(&error, CompileError::SessionValueSelection(_)));
+            let report: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(scratch.path().join("transaction.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(report["phase"], "preparation_refused");
+            assert_eq!(report["submission"], "not_attempted");
+            assert!(report["compiler_process_success"].is_null());
+            assert_eq!(
+                std::fs::read(scratch.path().join("compiler-request.bin")).unwrap(),
+                expected
+            );
+            assert!(!scratch.path().join("compiler.stderr").exists());
+            assert!(!scratch.path().join("compiler.stdout").exists());
+            // A diagnostic destination failure must not replace the typed refusal.
+            let unavailable = scratch.path().join("not-a-directory");
+            std::fs::write(&unavailable, b"blocked diagnostics").unwrap();
+            let retained = retain_compiler_failure_inner(&unavailable, None, error, None, &command);
+            assert!(matches!(retained, CompileError::SessionValueSelection(_)));
+        }
+        let scratch = compiler_scratch_directory().unwrap();
+        let command = ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("must-not-run"),
+        );
+        assert!(unexecuted_offer(scratch.path())
+            .prepare_admitted_turn(command.clone(), scratch.path())
+            .is_err());
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(scratch.path().join("transaction.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["phase"], "preparation_refused");
+        assert!(!scratch.path().join("compiler.stderr").exists());
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        for retained in std::fs::read_dir(root.path().join("compiler-failures")).unwrap() {
+            assert!(!retained.unwrap().path().join("compiler.stderr").exists());
+        }
+    }
+
+    #[test]
+    fn applied_ordinary_turn_freezes_selection_and_placed_output_lifetime() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut command = ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("must-not-run"),
+        );
+        command
+            .turn()
+            .target("__prepared")
+            .turn_out(scratch.path().join("old-turn.cbor"))
+            .output_dir(scratch.path())
+            .inject_val("Tidepool.Session.Val.G1");
+        let applied = unexecuted_offer(scratch.path())
+            .prepare_admitted_turn(command, scratch.path())
+            .unwrap();
+        let output = applied.output_owner.as_ref().unwrap().path().to_owned();
+        assert_ne!(output, scratch.path());
+        let argv = applied.command().argv();
+        assert!(argv
+            .windows(2)
+            .any(|pair| pair[0] == "--output-dir" && pair[1] == output));
+        let bytes = applied.command().request_bytes();
+        let mut derivative = applied.command().clone();
+        derivative
+            .inject_val("Tidepool.Session.Val.G2")
+            .output_dir(scratch.path());
+        assert_eq!(applied.command().request_bytes(), bytes);
+        assert_eq!(
+            applied.selected_session_values.as_slice(),
+            &[tidepool_repr::SessionModule::val(
+                tidepool_repr::Generation(1)
+            )]
+        );
+        drop(scratch);
+        assert!(
+            output.is_dir(),
+            "the frozen request retains its relocated output owner"
+        );
+        drop(applied);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn retained_entry_explicit_empty_selection_refuses_injected_format() {
+        use crate::toolchain::CompilerDeploymentConfiguration;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        let output = root.path().join("entry");
+        let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            root.path(),
+            &output,
+        )
+        .unwrap();
+        assert!(entry.products().original_compile_input.is_some());
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("requires matched compiler authority")
+        };
+        let selected = ProductionEntrySources::FrozenWorkspace(sources);
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        load_selected_production_entry(&output, &authority, &selected).unwrap();
+        let path = output.join("entry.json");
+        let original = std::fs::read(&path).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        manifest["selected_session_values"] = serde_json::json!(["Tidepool.Session.Val.G1"]);
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(load_selected_production_entry(&output, &authority, &selected).is_err());
+        std::fs::write(path, original).unwrap();
+        load_selected_production_entry(&output, &authority, &selected).unwrap();
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before,
+            "retained certification never executes source"
+        );
     }
 
     #[test]
@@ -8957,7 +9206,8 @@ mod completed_response_tests {
             .target("result")
             .includes(&fixture.include)
             .output_dir(&output);
-        offer.apply_to(&mut command).unwrap();
+        let offer = offer.apply_to(command, &output).unwrap();
+        let command = offer.command();
         let run = crate::artifacts::test_support::with_settlement(|recipient| {
             endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| {
                 recipient(close)
@@ -9375,7 +9625,7 @@ mod source_proof_pairing_tests {
                 .expect("inspection supplies its exact request")
                 .clone();
             crate::declaration_context::assert_source_selected_receipt_pairing(
-                root, module, original, support, request, endpoint, &offer,
+                root, module, original, support, request, endpoint, offer,
             );
         }));
         if let Err(panic) = result {
