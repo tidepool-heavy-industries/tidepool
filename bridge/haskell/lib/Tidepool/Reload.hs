@@ -72,4 +72,3 @@ reloadPresenter result = case result of
     surfaceSummary (ReloadSurfaceDiff added removed changed) =
       " (tools added " <> count added <> ", removed " <> count removed <> ", changed " <> count changed <> ")."
     count = T.pack . show . length
-
