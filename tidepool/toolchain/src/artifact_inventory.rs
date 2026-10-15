@@ -6388,8 +6388,28 @@ impl ArtifactView {
                     .ok_or_else(|| failure("type owner outside retained view"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let interface_nodes = admitted_closure(
+            &state,
+            roots
+                .iter()
+                .map(|id| {
+                    self.resolve_binding(*id, &projection.nodes)
+                        .map(InventoryNodeKey::Artifact)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter(),
+        );
+        let namespace = artifact_ids(&interface_nodes)
+            .into_iter()
+            .map(|id| {
+                self.resolve_binding(id, &interface_nodes)
+                    .map(|binding| (id, binding))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         drop(state);
-        self.select_roots(roots)
+        let mut retained = self.select_roots(roots)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
@@ -12749,7 +12769,10 @@ mod tests {
                     &projection,
                     &requirements,
                 )
-                .unwrap();
+                .unwrap_or_else(|error| panic!(
+                    "cross_inventory={cross_inventory}, late_before_merge={late_before_merge}, retained={:?}, roots={:?}, groups={:?}, requirements={}: {error:?}",
+                    merged.artifact_ids(), merged.roots(), merged.capture_graph_selection().native_groups, requirements.len(),
+                ));
             if let Some(exact_edge) = &exact_edge {
                 assert!(projected.binding_dependencies().contains(exact_edge));
             }
