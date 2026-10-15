@@ -288,7 +288,7 @@ reports evidence; it does not merge, prune, move branches or block pushes.
 | Exomonad CLI, actor launch composition, prompt assembly | `bridge/facade/src/exomonad.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
 | Shipped resident instructions and shared API guide | `exomonad/prompts/` |
 | Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.exomonad/skills/`, `.agents/skills/` |
-| Agent spec discovery, reload, and the after-tool hook | `exomonad/actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
+| Agent spec discovery, reload, and the after-tool hook | `exomonad/actor/src/{agent_spec,after_tool}.rs`, reload publication in `exomonad/actor/src/resident_actor/owned_workbench/reload.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Reload.hs` and `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
 | Comparing two declared tool surfaces | `exomonad/tool/src/surface.rs` |
 | Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/exomonad/source.rs` |
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |
