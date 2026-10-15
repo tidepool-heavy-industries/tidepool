@@ -390,6 +390,35 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
             ));
         }
     }
+    let target = {
+        let conversation = host
+            .context
+            .binding(host.context.actor.identity())
+            .unwrap()
+            .conversation()
+            .unwrap();
+        conversation.identity().clone()
+    };
+    let retirement = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+    host.http_command(
+        retirement,
+        harness::server::HostCommand::Retire {
+            target: target.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host.command_receipt(&target.run, retirement).await.unwrap(),
+        harness::server::CommandReceiptOutcome::ControlRequested {
+            target,
+            control: harness::server::CommandControl::Retire,
+        }
+    );
+    assert_eq!(
+        host.context.actor.terminal().get().unwrap().kind,
+        exomonad_actor::ActorExitKind::Cancelled
+    );
     let forest = Arc::downgrade(&host.context.forest);
     let stopped = host.stop().await;
     if stopped.is_err() {
