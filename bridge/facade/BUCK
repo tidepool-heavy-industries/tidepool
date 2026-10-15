@@ -3729,6 +3729,20 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f6e6f74655f72656d6f76652e6873",
+    src = "src/actor_host/fixtures/context_acceptance_note_remove.hs",
+    out = "context_acceptance_note_remove.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f6e6f74655f73657475702e6873",
+    src = "src/actor_host/fixtures/context_acceptance_note_setup.hs",
+    out = "context_acceptance_note_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f706172656e742e6873",
     src = "src/actor_host/fixtures/context_acceptance_parent.hs",
     out = "context_acceptance_parent.hs",

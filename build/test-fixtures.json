@@ -109,6 +109,8 @@
     "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_child.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_parent.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_setup.hs",
+    "bridge/facade/src/actor_host/fixtures/context_acceptance_note_remove.hs",
+    "bridge/facade/src/actor_host/fixtures/context_acceptance_note_setup.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_parent.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
     "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs",

@@ -863,6 +863,72 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
 }
 
 #[tokio::test]
+async fn resident_authored_note_removal_roundtrips_through_native_projection() {
+    const NOTE: &str = "[Agent-authored context note]\nindependent-note-roundtrip";
+    let (_files, fixture, mut rounds) = start().await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
+    setup.cell_with_reasoning(
+        "note-setup",
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_note_setup.hs",
+        ),
+    );
+    let remove = next_round(&mut rounds, &fixture.context).await;
+    successful_output(&remove.request, "note-setup");
+    let count = |request: &ResponsesRequest| {
+        request
+            .input
+            .iter()
+            .filter(|item| item.0["type"] == "message" && item.0["content"] == NOTE)
+            .count()
+    };
+    assert_eq!(count(&remove.request), 2);
+    let raw = raw_request_items(&fixture, &remove.request);
+    assert_native_exchange_preserved(&remove.request, &raw, "note-setup");
+    let native = raw
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some(
+                    "reasoning"
+                        | "custom_tool_call"
+                        | "function_call"
+                        | "custom_tool_call_output"
+                        | "function_call_output"
+                )
+            )
+        })
+        .collect::<Vec<_>>();
+    remove.cell_with_reasoning(
+        "note-remove",
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_note_remove.hs",
+        ),
+    );
+    let observed = next_round(&mut rounds, &fixture.context).await;
+    successful_output(&observed.request, "note-remove");
+    assert_eq!(
+        count(&observed.request),
+        1,
+        "only the selected equal-text occurrence is removed"
+    );
+    let raw = raw_request_items(&fixture, &observed.request);
+    assert_native_exchange_preserved(&observed.request, &raw, "note-setup");
+    assert_native_exchange_preserved(&observed.request, &raw, "note-remove");
+    let retained = raw
+        .into_iter()
+        .filter(|item| native.contains(item))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained, native,
+        "native bytes and relative order are unchanged"
+    );
+    observed.finish();
+    fixture.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn resident_sync_native_trim_commits_atomically_and_children_reuse_captured_bindings() {
     const TRIMMED: &str = "[Trimmed: repetitive build output]\nBuild succeeded.";
     let (_files, mut fixture, mut rounds) = start().await;
