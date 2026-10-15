@@ -87,7 +87,7 @@ import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
 import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
 import TypeEvidenceChecks
-  ( runTypeEvidenceChecks, runTypeIdentityParityChecks )
+  ( runTypeEvidenceChecks, runTypeIdentityParityChecks, runNestedTypeSiteIdentityCheck )
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 import Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..), resolveHostBindingAuthorities
@@ -865,6 +865,8 @@ tests = testGroup "prepared-stg-pipeline"
       withCaseScratch "constructor-reply-identity" runTypeEvidenceChecks
   , testCase "source and hydrated site nominal identities survive independent and body-only captures" $
       withCaseScratch "site-identity-parity" runTypeIdentityParityChecks
+  , testCase "changed nested nominal ABI issues a distinct typed site identity" $
+      withCaseScratch "nested-site-identity" runNestedTypeSiteIdentityCheck
   , testCase "recovered typed sites and intrinsic refusal" $
       withCaseScratch "recovered-typed-sites" verifyRecoveredTypedPreparation
   , testCase "prepared products reuse unchanged site dependencies across cells" $

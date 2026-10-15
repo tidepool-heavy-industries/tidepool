@@ -1,5 +1,5 @@
 module TypeEvidenceChecks
-  ( runTypeEvidenceChecks, runTypeIdentityParityChecks ) where
+  ( runTypeEvidenceChecks, runTypeIdentityParityChecks, runNestedTypeSiteIdentityCheck ) where
 
 import Control.Exception (evaluate)
 import Control.Monad (unless, forM_)
@@ -236,6 +236,31 @@ runTypeIdentityParityChecks directory = do
         ("identical capture or body-only edit changed reachable nominal evidence: "
           ++ show (siteIdentities first, siteIdentities wire))
     _ -> fail "identity parity control did not capture its three compiler results"
+
+runNestedTypeSiteIdentityCheck :: FilePath -> IO ()
+runNestedTypeSiteIdentityCheck directory = do
+  (target, fixture) <- writeTypeEvidenceFixture directory
+  original <- runPipelineSelected PreparedStg target [directory] >>= projectNestedSite
+  assert (length [() | line <- lines fixture, line == "data SameLayout = SameLayout Int"] == 1)
+    "nested ABI control must change exactly one actual declaration"
+  writeFile target (unlines [if line == "data SameLayout = SameLayout Int"
+    then "data SameLayout = SameLayout Bool" else line | line <- lines fixture])
+  changed <- runPipelineSelected PreparedStg target [directory] >>= projectNestedSite
+  let decision wire = case [identity | identity <- Map.elems (siteIdentities wire)
+        , symbolModule (typeSymbol identity) == "TypeEvidence"
+        , symbolOccurrence (typeSymbol identity) == "SameLayout"] of
+          [identity] -> identity
+          values -> error ("nested ABI control lost its exact declaration: " ++ show values)
+      outer wire = case nominal (programTypes wire)
+          (rootBody (programTypes wire) (siteWire (onlySite wire))) of
+        (identity, _, _) -> identity
+  assert (outer original == outer changed) "nested ABI control changed the outer type identity"
+  assert (typeSymbol (decision original) == typeSymbol (decision changed)
+      && typeVersion (decision original) /= typeVersion (decision changed))
+    "changed nested declaration did not issue a different ABI for the same nominal symbol"
+  assert (siteId (onlySite original) /= siteId (onlySite changed))
+    ("changed nested ABI reused one typed site identity: "
+      ++ show (siteId (onlySite original), decision original, decision changed))
 
 projectNestedSite :: PreparedPipelineResult -> IO WireProgram
 projectNestedSite result = do
