@@ -9,8 +9,15 @@
 use std::path::Path;
 
 use super::test_campaign::TestCampaign;
-use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
+use super::tests::dispatch_structured_tool;
 use super::*;
+
+async fn dispatch_haskell_script(
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    super::test_campaign::dispatch_haskell_script_named(policy, "haskell_sync", source).await
+}
 
 async fn committed(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,

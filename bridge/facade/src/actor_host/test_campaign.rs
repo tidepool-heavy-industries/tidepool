@@ -1427,6 +1427,27 @@ pub(super) async fn dispatch_haskell_script_response(
     endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
     script: &str,
 ) -> Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError> {
+    dispatch_haskell_script_response_named(endpoint, exomonad_actor::HASKELL_TOOL, script).await
+}
+
+/// Select the notebook declaration explicitly, retaining ordinary admission and completion.
+pub(super) async fn dispatch_haskell_script_named(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    name: &str,
+    script: &str,
+) -> serde_json::Value {
+    dispatch_haskell_script_response_named(endpoint, name, script)
+        .await
+        .unwrap_or_else(|error| panic!("{name} script failed:\n{script}\n\n{error}"))
+        .into_json()
+        .expect("encoded notebook result")
+}
+
+async fn dispatch_haskell_script_response_named(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    name: &str,
+    script: &str,
+) -> Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError> {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let (invocation, completion) = original_tool_call(OriginalOperation {
         origin: ConversationOrigin::External {
@@ -1438,7 +1459,7 @@ pub(super) async fn dispatch_haskell_script_response(
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
             context: Some(invocation),
-            name: exomonad_actor::HASKELL_TOOL.into(),
+            name: name.into(),
             arguments: ToolArguments::Raw(script.into()),
         })
         .await;
