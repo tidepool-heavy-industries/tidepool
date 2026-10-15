@@ -797,7 +797,7 @@ mod tests {
         #![proptest_config(proptest::test_runner::Config::with_cases(64))]
         #[test]
         fn issued_surface_histories_keep_schema_schedule_prompt_and_dispatch_together(
-            history in proptest::collection::vec((1usize..6, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY), 2..12)
+            history in proptest::collection::vec((1usize..6, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY), 2..12)
         ) {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let current = Arc::new(PromptOnlyReload {
@@ -807,15 +807,15 @@ mod tests {
             let installation = EmbeddedPolicyInstallation::new(
                 exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)), current.clone());
             let mut issued = Vec::new();
-            for (count, renamed, reverse, synchronous) in history {
-                let marker = if synchronous { "sync" } else { "async" };
+            for (generation, (count, renamed, reverse, synchronous, integer)) in history.into_iter().enumerate() {
+                let marker = if generation % 2 == 0 { "even" } else { "odd" };
                 let mut tools = (0..count).map(|index| HostedTool::Function(ToolDeclaration {
                     schedule: if synchronous { exomonad_tool::ToolScheduling::BeforeNextInference } else { exomonad_tool::ToolScheduling::Async },
                     implementation: Default::default(),
                     effect_keys: Vec::new(),
                     name: format!("{}_{}", if renamed { "new" } else { "old" }, index),
-                    description: marker.into(),
-                    input_schema: json!({"type":"object","properties":{"value":{"type":if renamed { "integer" } else { "string" }}},"required":if renamed { json!(["value"]) } else { json!([]) },"additionalProperties":false}),
+                    description: "Probe the retained generation".into(),
+                    input_schema: json!({"type":"object","properties":{"value":{"type":if integer { "integer" } else { "string" }}},"required":if integer { json!(["value"]) } else { json!([]) },"additionalProperties":false}),
                     output_schema: None,
                     kind: ToolKind::Call,
                 })).collect::<Vec<_>>();
@@ -824,7 +824,7 @@ mod tests {
                 let snapshot = installation.request_snapshot().unwrap();
                 let repeated = installation.request_snapshot().unwrap();
                 proptest::prop_assert!(Arc::ptr_eq(&snapshot.manifest, &repeated.manifest));
-                issued.push((snapshot, tools, marker, renamed));
+                issued.push((snapshot, tools, marker, integer));
                 // Every earlier request remains usable after additions, removals,
                 // renaming, reordering, schema changes and scheduling changes.
                 for (snapshot, tools, marker, integer) in &issued {
