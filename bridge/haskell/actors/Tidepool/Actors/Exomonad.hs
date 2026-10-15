@@ -206,7 +206,11 @@ module Tidepool.Actors.Exomonad
   , SpawnLimitError (..)
   , descendantDepth
   , activeDescendants
-  , SpawnOptions (..)
+  , SpawnOptions
+  , spawnModel, spawnEffort, spawnInstructions, spawnLabel, spawnLifetime, spawnLimits
+  , ValidatedAgentSpec, AgentSpecValidationReport (..)
+  , SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..)
+  , validateAgentSpec, validatedAgentSpecReport, defaultValidatedSpawnOptions
   , defaultSpawnOptions
   , SpawnError (..)
   , SpawnRetainedResources (..)

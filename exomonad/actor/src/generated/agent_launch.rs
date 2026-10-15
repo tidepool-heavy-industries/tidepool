@@ -32,6 +32,11 @@ pub enum AgentLaunchReq {
         Option<String>,
         crate::WorkerLifetime,
         Option<(i64, i64)>,
+        tidepool_bridge::HaskellValue,
+    ),
+    AgentLaunchValidateSpecWith(
+        tidepool_bridge::HaskellValue,
+        Vec<crate::ActorEffectKeyWire>,
     ),
     AgentLaunchReplaceSpecWith(
         (i64, i64),

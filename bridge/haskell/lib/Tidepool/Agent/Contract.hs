@@ -102,6 +102,10 @@ module Tidepool.Agent.Contract
   , HasActorApi
   , HasInstalledAgentApi
   , compileInstalledTools
+  , PreparedAgentSpec
+  , prepareAgentSpec
+  , preparedAgentSpecMetadata
+  , installPreparedSpec
   , compileTools
   , serveTools
   , serveToolsWith
@@ -1129,13 +1133,38 @@ initialContextEntry = 2
 -- revision, and a slot can never be a revision ahead of the tools beside it.
 -- Entries 0, 1 and 2 retain the named-call, after-tool and initial-context
 -- protocols. Installed endpoints enter at their certified ordinal plus 3.
+-- | One evaluated declaration set coupled to its exact retained dispatcher.
+-- Preparation evaluates schemas and metadata, never tool handlers or slots.
+data PreparedAgentSpec tools effects = PreparedAgentSpec
+  Value (Int -> Eff (AgentTools ': SyncEffects effects) Text)
+
+type role PreparedAgentSpec nominal nominal
+
+preparedAgentSpecMetadata :: PreparedAgentSpec tools effects -> Value
+preparedAgentSpecMetadata (PreparedAgentSpec metadata _) = metadata
+
+installPreparedSpec
+  :: PreparedAgentSpec tools effects -> Eff (AgentTools ': SyncEffects effects) ()
+installPreparedSpec (PreparedAgentSpec metadata entry) = send (AgentToolsInstallWith metadata entry)
+
 installSpec
   :: forall effects tools. (HasInstalledAgentApi tools effects, KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec tools effects -> Eff (AgentTools ': SyncEffects effects) ()
-installSpec spec = case compileInstalledTools (specTools spec) of
+installSpec spec = case prepareAgentSpec spec of
   Left problem -> error (T.unpack (renderToolCompileError problem))
-  Right compiled -> send (AgentToolsInstallWith installation entry)
+  Right prepared -> installPreparedSpec prepared
+
+prepareAgentSpec
+  :: forall effects tools. (HasInstalledAgentApi tools effects, KnownToolEffects effects, AsyncEffects effects)
+  => AgentSpec tools effects -> Either ToolCompileError (PreparedAgentSpec tools effects)
+prepareAgentSpec spec = case compileInstalledTools (specTools spec) of
+  Left problem -> Left problem
+  Right compiled -> forceMetadata installation `seq` Right (PreparedAgentSpec installation entry)
     where
+      forceMetadata (Object fields) = Map.foldr (\value rest -> forceMetadata value `seq` rest) () fields
+      forceMetadata (Array values) = foldr (\value rest -> forceMetadata value `seq` rest) () values
+      forceMetadata value = value `seq` ()
+
       installation =
         object
           [ "tools" .= declarationsToJson (map resolvedProfile (declarations compiled))

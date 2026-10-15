@@ -19,7 +19,21 @@ module Tidepool.Actors.Spawn
   , atRef
   , existingWorktree
   , currentWorkspace
-  , SpawnOptions (..)
+  , SpawnOptions
+  , spawnModel
+  , spawnEffort
+  , spawnInstructions
+  , spawnLabel
+  , spawnLifetime
+  , spawnLimits
+  , ValidatedAgentSpec
+  , AgentSpecValidationReport (..)
+  , SpecValidationError (..)
+  , SpecValidationReceipt (..)
+  , SpecProvenance (..)
+  , validateAgentSpec
+  , validatedAgentSpecReport
+  , defaultValidatedSpawnOptions
   , SpawnLimits (..)
   , DescendantDepth
   , ActiveDescendants
@@ -37,10 +51,13 @@ module Tidepool.Actors.Spawn
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
+import Tidepool.Aeson (Value)
 import Numeric.Natural (Natural)
 import Prelude
 import Tidepool.Agent.Contract
-  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec )
+  ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec
+  , PreparedAgentSpec, prepareAgentSpec, preparedAgentSpecMetadata, installPreparedSpec
+  , renderToolCompileError )
 import Tidepool.Agent.Launch hiding (workspaceWire)
 import qualified Tidepool.Agent.Launch as Launch
 import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
@@ -50,7 +67,7 @@ import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
   , WorkerLifetime (..), SpawnContextWire (..)
   , SpawnCleanup (..)
-  , SpecReplacementError (..)
+  , SpecReplacementError (..), SpecValidationError (..), SpecValidationReceipt (..), SpecProvenance (..)
   )
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
@@ -75,7 +92,8 @@ data SpawnRetainedResources
   deriving (Show)
 
 data SpawnError
-  = SpawnRefused Text
+  = SpawnInvalidSpec SpecValidationError
+  | SpawnRefused Text
   | SpawnPartialFailure SpawnRetainedResources SpawnCleanup Text
   deriving (Show)
 
@@ -115,7 +133,7 @@ limitsWire (SpawnLimits (DescendantDepth depth) (ActiveDescendants active)) = (d
 
 -- | The real typed spec is retained with all its compiled closure dependencies.
 data SpawnOptions tools childEffects = SpawnOptions
-  { spawnSpec :: AgentSpec tools childEffects
+  { selectedSpawnSpec :: SpawnSpec tools childEffects
   , spawnModel :: Maybe Model
   , spawnEffort :: Maybe ForkEffort
   , spawnInstructions :: Maybe Text
@@ -126,7 +144,41 @@ data SpawnOptions tools childEffects = SpawnOptions
   }
 
 defaultSpawnOptions :: AgentSpec tools childEffects -> SpawnOptions tools childEffects
-defaultSpawnOptions spec = SpawnOptions spec Nothing Nothing Nothing Nothing ActorOwned Nothing
+defaultSpawnOptions spec = SpawnOptions (RawSpawnSpec spec) Nothing Nothing Nothing Nothing ActorOwned Nothing
+
+data SpawnSpec tools effects
+  = RawSpawnSpec (AgentSpec tools effects)
+  | ValidatedSpawnSpec (ValidatedAgentSpec tools effects)
+
+data ValidatedAgentSpec tools effects = ValidatedAgentSpec (PreparedAgentSpec tools effects) SpecValidationReceipt
+
+data AgentSpecValidationReport = AgentSpecValidationReport
+  { validationInstallation :: Value
+  , validationReceipt :: SpecValidationReceipt
+  } deriving (Show)
+
+validatedAgentSpecReport :: ValidatedAgentSpec tools effects -> AgentSpecValidationReport
+validatedAgentSpecReport (ValidatedAgentSpec prepared receipt) =
+  AgentSpecValidationReport (preparedAgentSpecMetadata prepared) receipt
+
+defaultValidatedSpawnOptions :: ValidatedAgentSpec tools effects -> SpawnOptions tools effects
+defaultValidatedSpawnOptions validated = SpawnOptions (ValidatedSpawnSpec validated) Nothing Nothing Nothing Nothing ActorOwned Nothing
+
+validateAgentSpec
+  :: forall tools childEffects effects.
+     (Member AgentLaunch effects, HasInstalledAgentApi tools childEffects,
+      KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects)
+  => AgentSpec tools childEffects -> Eff effects (Either SpecValidationError (ValidatedAgentSpec tools childEffects))
+validateAgentSpec spec = case prepareAgentSpec spec of
+  Left failure -> pure (Left (SpecPreparationFailed (renderToolCompileError failure)))
+  Right prepared -> validatePreparedSpec prepared
+
+validatePreparedSpec
+  :: forall tools childEffects effects. (Member AgentLaunch effects, KnownEffects childEffects)
+  => PreparedAgentSpec tools childEffects -> Eff effects (Either SpecValidationError (ValidatedAgentSpec tools childEffects))
+validatePreparedSpec prepared = do
+  result <- send (AgentLaunchValidateSpecWith (preparedAgentSpecMetadata prepared) (effectKeys (knownEffects @childEffects)))
+  pure (ValidatedAgentSpec prepared <$> result)
 
 -- | Return only after workspace, tools and provider attachment are ready.
 -- Fresh seed text creates context; it does not activate inference.
@@ -137,22 +189,31 @@ spawnSubagent
   => SpawnContext -> Workspace -> SpawnOptions tools childEffects
   -> Eff effects (Either SpawnError AgentRef)
 spawnSubagent context workspace options = do
-  admitted <- send (AgentLaunchSpawnWith
-    (contextWire context)
-    (\_ -> do
-      installSpec @childEffects (spawnSpec options)
-      installRequestReceiver)
-    (Launch.workspaceWire workspace)
-    (effectKeys (knownEffects @childEffects))
-    (spawnLabel options)
-    (spawnModel options)
-    (spawnEffort options)
-    (spawnInstructions options)
-    (spawnLifetime options)
-    (limitsWire <$> spawnLimits options))
-  pure $ case admitted of
-    Left failure -> Left (spawnError failure)
-    Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
+  validation <- case selectedSpawnSpec options of
+    RawSpawnSpec spec -> validateAgentSpec spec
+    ValidatedSpawnSpec validated -> pure (Right validated)
+  case validation of
+    Left failure -> pure (Left (SpawnInvalidSpec failure))
+    Right (ValidatedAgentSpec prepared _) -> launch prepared
+  where
+    launch prepared = do
+     admitted <- send (AgentLaunchSpawnWith
+      (contextWire context)
+      (\_ -> do
+        installPreparedSpec prepared
+        installRequestReceiver)
+      (Launch.workspaceWire workspace)
+      (effectKeys (knownEffects @childEffects))
+      (spawnLabel options)
+      (spawnModel options)
+      (spawnEffort options)
+      (spawnInstructions options)
+      (spawnLifetime options)
+      (limitsWire <$> spawnLimits options)
+      (preparedAgentSpecMetadata prepared))
+     pure $ case admitted of
+      Left failure -> Left (spawnError failure)
+      Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
 
 -- These identities come only from the interpreter's admission receipt.
 admittedAgent :: Int -> Int -> Maybe Core.WorktreeHandle -> AgentRef

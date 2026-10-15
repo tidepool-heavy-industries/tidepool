@@ -86,18 +86,114 @@ pub(crate) struct AdmittedInstallation {
     pub(crate) initial_context: Option<InitialContextEntry>,
 }
 
-pub(crate) fn admit_installation(
+/// Checked metadata without a dispatcher, actor, workspace or resource allocation.
+pub(crate) struct ValidatedSpecMetadata {
+    pub(crate) plans: Vec<exomonad_tool::EndpointPlan>,
+    pub(crate) slots: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, tidepool_bridge_derive::ToHaskell)]
+pub enum SpecValidationError {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("spec preparation failed: {0}")]
+    SpecPreparationFailed(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("invalid spec metadata: {0}")]
+    SpecMetadataInvalid(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("spec effect mismatch: {0}")]
+    SpecEffectMismatch(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("spec interpreter unavailable: {0}")]
+    SpecInterpreterUnavailable(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    #[error("invalid spec input schema: {0}")]
+    SpecInputSchemaInvalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
+pub enum SpecProvenance {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpecProvenanceUnavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
+pub enum SpecValidationReceipt {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpecValidationReceipt(Vec<String>, Vec<String>, SpecProvenance),
+}
+
+pub(crate) type ToolSurfaceValidator =
+    dyn Fn(&[exomonad_tool::HostedTool]) -> Result<(), String> + Send + Sync;
+
+pub(crate) fn preflight_spec_metadata(
+    metadata: serde_json::Value,
+    effects: &[ActorEffectKey],
+    support: &[ToolEffectKey],
+    validate_surface: Option<&ToolSurfaceValidator>,
+) -> Result<SpecValidationReceipt, SpecValidationError> {
+    let mut unique = HashSet::new();
+    for key in effects {
+        if !unique.insert(*key) {
+            return Err(SpecValidationError::SpecEffectMismatch(
+                "child effects contain duplicates".into(),
+            ));
+        }
+        if !support.contains(&ToolEffectKey::Actor(*key)) {
+            return Err(SpecValidationError::SpecInterpreterUnavailable(format!(
+                "requested interpreter {key:?} is unavailable"
+            )));
+        }
+    }
+    let installation = decode_installation(metadata)
+        .map_err(|error| SpecValidationError::SpecMetadataInvalid(error.to_string()))?;
+    let admitted = admit_spec_metadata(installation, effects, support)?;
+    if let Some(validate) = validate_surface {
+        let surface = admitted
+            .plans
+            .iter()
+            .map(|plan| plan.surface())
+            .collect::<Vec<_>>();
+        validate(&surface).map_err(SpecValidationError::SpecInputSchemaInvalid)?;
+    }
+    Ok(SpecValidationReceipt::SpecValidationReceipt(
+        admitted
+            .plans
+            .iter()
+            .map(|plan| plan.name().to_owned())
+            .collect(),
+        effects.iter().map(|key| format!("{key:?}")).collect(),
+        SpecProvenance::SpecProvenanceUnavailable(
+            "an arbitrary spec value has no single issued source-module identity".into(),
+        ),
+    ))
+}
+
+impl SpecValidationError {
+    fn from_contract(failure: ToolContractError) -> Self {
+        match failure {
+            ToolContractError::Unsupported { .. } => {
+                Self::SpecInterpreterUnavailable(failure.to_string())
+            }
+            ToolContractError::Ungranted { .. }
+            | ToolContractError::AsyncContext(_)
+            | ToolContractError::CanonicalRow(_) => Self::SpecEffectMismatch(failure.to_string()),
+            other => Self::SpecMetadataInvalid(other.to_string()),
+        }
+    }
+}
+
+pub(crate) fn admit_spec_metadata(
     installation: SpecInstallation,
     admitted_base: &[ActorEffectKey],
     installed_support: &[ToolEffectKey],
-    dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
-) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
+) -> Result<ValidatedSpecMetadata, SpecValidationError> {
     let SpecInstallation {
         mut tools,
         slots,
         slot_effect_keys,
     } = installation;
-    let error = |error: String| crate::ResidentActorWorkbenchError::ActorProtocol(error);
+    let error = SpecValidationError::SpecMetadataInvalid;
     validate_installation(
         &tools,
         &slots,
@@ -105,7 +201,7 @@ pub(crate) fn admit_installation(
         admitted_base,
         installed_support,
     )
-    .map_err(|failure| error(failure.to_string()))?;
+    .map_err(SpecValidationError::from_contract)?;
     // Native notebook declarations select an actor-effect subset. Synchronous
     // invocation capabilities are supplied by the installed scheduling contract.
     for tool in &mut tools {
@@ -131,11 +227,11 @@ pub(crate) fn admit_installation(
                 admitted_base,
                 installed_support,
             )
-            .map_err(|failure| error(failure.to_string()))?;
+            .map_err(SpecValidationError::from_contract)?;
         }
     }
     let mut names = HashSet::from([crate::status_tool::STATUS_TOOL.to_string()]);
-    let endpoints = tools
+    let plans = tools
         .into_iter()
         .map(|tool| {
             if tool.name.is_empty()
@@ -151,8 +247,30 @@ pub(crate) fn admit_installation(
                     tool.name
                 )));
             }
-            let plan = exomonad_tool::EndpointPlan::admit(tool)
-                .map_err(|failure| error(failure.to_string()))?;
+            exomonad_tool::EndpointPlan::admit(tool).map_err(|failure| match failure {
+                exomonad_tool::ToolDeclarationError::FunctionInputMustBeObject { .. } => {
+                    SpecValidationError::SpecInputSchemaInvalid(failure.to_string())
+                }
+                other => SpecValidationError::SpecMetadataInvalid(other.to_string()),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ValidatedSpecMetadata { plans, slots })
+}
+
+pub(crate) fn admit_installation(
+    installation: SpecInstallation,
+    admitted_base: &[ActorEffectKey],
+    installed_support: &[ToolEffectKey],
+    dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
+) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
+    let ValidatedSpecMetadata { plans, slots } =
+        admit_spec_metadata(installation, admitted_base, installed_support).map_err(|failure| {
+            crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string())
+        })?;
+    let endpoints = plans
+        .into_iter()
+        .map(|plan| {
             let execution_effects = match plan.execution() {
                 exomonad_tool::EndpointExecution::ResidentAsync(_)
                 | exomonad_tool::EndpointExecution::ResidentSync(_) => dispatcher_effects.clone(),
@@ -176,12 +294,12 @@ pub(crate) fn admit_installation(
                     )
                 }
             };
-            Ok(AdmittedEndpoint {
+            AdmittedEndpoint {
                 plan,
                 execution_effects,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
     let after_tool = slots
         .iter()
         .any(|slot| slot == "afterTool")

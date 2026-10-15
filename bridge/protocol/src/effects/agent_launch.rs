@@ -90,6 +90,7 @@ pub fn agent_launch() -> Effect {
                         HsType::Tuple(vec![HsType::Int, HsType::Int]),
                         RustBinding::Path("Option<(i64, i64)>"),
                     ),
+                    Arg { name: "spec_metadata", ty: HsType::Value, rust: RustBinding::HaskellValue },
                 ],
                 ret: HsType::either(
                     HsType::Named("SpawnErrorWire"),
@@ -99,6 +100,17 @@ pub fn agent_launch() -> Effect {
                         HsType::maybe(HsType::Named("WorktreeHandle")),
                     ]),
                 ),
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
+            Verb {
+                ctor: "AgentLaunchValidateSpecWith",
+                method: "agent_launch_validate_spec_with",
+                args: vec![
+                    Arg { name: "spec_metadata", ty: HsType::Value, rust: RustBinding::HaskellValue },
+                    Arg { name: "effects", ty: HsType::list(HsType::Named("ActorEffectKey")), rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>") },
+                ],
+                ret: HsType::either(HsType::Named("SpecValidationError"), HsType::Named("SpecValidationReceipt")),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -215,9 +227,47 @@ fn sum_type(
     }
 }
 
+fn spec_type(
+    name: &'static str,
+    rust: &'static str,
+    variants: Vec<(&'static str, Vec<HsType>)>,
+) -> TypeDef {
+    let mut definition = sum_type(name, Some(rust), variants);
+    definition.json = JsonInstance::Generic;
+    definition
+}
+
 fn spawn_types() -> Vec<TypeDef> {
     let mut types = context_types();
     types.extend(vec![
+        spec_type(
+            "SpecValidationError",
+            "crate::tool_contract::SpecValidationError",
+            vec![
+                ("SpecPreparationFailed", vec![HsType::Text]),
+                ("SpecMetadataInvalid", vec![HsType::Text]),
+                ("SpecEffectMismatch", vec![HsType::Text]),
+                ("SpecInterpreterUnavailable", vec![HsType::Text]),
+                ("SpecInputSchemaInvalid", vec![HsType::Text]),
+            ],
+        ),
+        spec_type(
+            "SpecProvenance",
+            "crate::tool_contract::SpecProvenance",
+            vec![("SpecProvenanceUnavailable", vec![HsType::Text])],
+        ),
+        spec_type(
+            "SpecValidationReceipt",
+            "crate::tool_contract::SpecValidationReceipt",
+            vec![(
+                "SpecValidationReceipt",
+                vec![
+                    HsType::list(HsType::Text),
+                    HsType::list(HsType::Text),
+                    HsType::Named("SpecProvenance"),
+                ],
+            )],
+        ),
         sum_type(
             "SpawnContextWire",
             Some("crate::start::SpawnContextWire"),

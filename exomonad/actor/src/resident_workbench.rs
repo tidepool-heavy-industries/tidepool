@@ -3623,6 +3623,11 @@ pub(crate) enum ResidentActorBoundary {
         request: crate::ContextReq,
         table: DataConTable,
     },
+    SpecValidation {
+        continuation: ResidentHole,
+        metadata: serde_json::Value,
+        effects: Vec<crate::ActorEffectKey>,
+    },
     Source {
         continuation: ResidentHole,
         request: crate::generated::source::SourceReq,
@@ -3834,6 +3839,7 @@ impl ResidentActorBoundary {
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,
+            Self::SpecValidation { .. } => WorkbenchOperationDisposition::Read,
             Self::Source {
                 request:
                     crate::generated::source::SourceReq::SourceReadModule(_)
@@ -3860,6 +3866,7 @@ impl ResidentActorBoundary {
             Self::Context { .. } => "context transformation",
             Self::Source { request, .. } => source_operation(request),
             Self::Reload { .. } => "reloadSource",
+            Self::SpecValidation { .. } => "validateAgentSpec",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::Form { .. } => "human form",
@@ -4200,6 +4207,7 @@ impl ResidentRequest {
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(..),
             ) => "spawnSubagent",
+            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchValidateSpecWith(..)) => "validateAgentSpec",
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(..),
             ) => "checkpoint",
@@ -8424,6 +8432,32 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Validate only the already evaluated installation metadata on this exact
+    /// machine. This does not run an installer, tool handler or startup slot.
+    pub(crate) async fn validate_agent_spec(
+        &self,
+        context: crate::ActorSessionContext,
+        metadata: serde_json::Value,
+        effects: Vec<crate::ActorEffectKey>,
+        allowed: Vec<crate::ActorEffectKey>,
+    ) -> Result<crate::tool_contract::SpecValidationReceipt, crate::tool_contract::SpecValidationError> {
+        use crate::tool_contract::SpecValidationError;
+        let support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        let validate_surface = self.access.source.tool_surface_validator.clone();
+        self.access.with_machine(context, move |session, _, _| {
+            let answer = (|| {
+                if effects.iter().any(|key| !allowed.contains(key)) {
+                    return Err(SpecValidationError::SpecEffectMismatch("child effects exceed parent authority".into()));
+                }
+                let mut support = support;
+                support.extend(observer(session.handlers()));
+                crate::tool_contract::preflight_spec_metadata(metadata, &effects, &support, validate_surface.as_deref())
+            })();
+            Ok(answer)
+        }).await.map_err(|error| SpecValidationError::SpecInterpreterUnavailable(error.to_string()))?
+    }
+
     /// Move only the returned actor-program successor out of a hosted cell's
     /// cleanup set. The target guard is established before the source releases
     /// its exact id; all other cell continuations remain owned by the cell.
@@ -9299,6 +9333,7 @@ where
             ResidentOutcome::Suspended { hole, request, .. } => (hole, request),
         };
 
+        let spec_support_observer = self.access.handler_effect_support.clone();
         self.access
             .with_compiler_machine(context, move |session, context, source, settlement| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
@@ -9392,14 +9427,29 @@ where
                         })
                     }
                     ResidentRequest::AgentLaunch(
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchValidateSpecWith(metadata, effects),
+                    ) => Ok(ResidentActorBoundary::SpecValidation {
+                        continuation: hole,
+                        metadata: tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0),
+                        effects: effects.into_iter().map(Into::into).collect(),
+                    }),
+                    ResidentRequest::AgentLaunch(
                         crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
                             spawn_context, _, workspace, effects, label, model, effort,
-                            instructions, lifetime, limits,
+                            instructions, lifetime, limits, metadata,
                         ),
-                    ) => crate::ResidentActorStart::capture_spawn(
-                        session, hole, spawn_context, workspace, effects, label, model,
-                        effort, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
-                        .map_err(ResidentActorWorkbenchError::StartCapture),
+                    ) => {
+                        let metadata = tidepool_runtime::value_to_json(&metadata, session.data_con_table(), 0);
+                        let selected_effects = effects.iter().cloned().map(Into::into).collect::<Vec<_>>();
+                        let mut support = source.installed_effect_support().to_vec();
+                        support.extend(spec_support_observer(session.handlers()));
+                        crate::tool_contract::preflight_spec_metadata(metadata, &selected_effects, &support, source.tool_surface_validator.as_deref())
+                            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                        crate::ResidentActorStart::capture_spawn(
+                            session, hole, spawn_context, workspace, effects, label, model,
+                            effort, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
+                            .map_err(ResidentActorWorkbenchError::StartCapture)
+                    },
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { continuation: hole, token })),

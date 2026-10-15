@@ -5661,6 +5661,16 @@ where
                 );
                 return Box::pin(std::future::ready(Ok(operation)));
             }
+            ResidentActorBoundary::SpecValidation { continuation, metadata, effects } => {
+                let runner = self.environment.runner.clone();
+                let allowed = self.descriptor.capabilities().effect_keys().to_vec();
+                let operation: futures_util::future::BoxFuture<'static, commands::CommandResolution> = Box::pin(async move {
+                    let answer = runner.validate_agent_spec(context.clone(), metadata, effects, allowed).await;
+                    let disposition = if answer.is_ok() { WorkbenchOperationDisposition::Read } else { WorkbenchOperationDisposition::Rejected };
+                    commands::CommandResolution::settled(disposition, runner.resume_value(context, continuation, answer).await)
+                });
+                return Box::pin(std::future::ready(Ok(operation)));
+            }
             ResidentActorBoundary::Source {
                 continuation,
                 request,
