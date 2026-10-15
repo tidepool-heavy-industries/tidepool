@@ -4189,6 +4189,27 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f636f6e74726f6c6c65645f6e6578742e6873",
+    src = "src/actor_host/fixtures/researcher_controlled_next.hs",
+    out = "researcher_controlled_next.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f636f6e74726f6c6c65645f726571756573742e6873",
+    src = "src/actor_host/fixtures/researcher_controlled_request.hs",
+    out = "researcher_controlled_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f706f7369746976655f7265706f72742e6873",
+    src = "src/actor_host/fixtures/researcher_positive_report.hs",
+    out = "researcher_positive_report.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726573656172636865725f707265666c696768742e6873",
     src = "src/actor_host/fixtures/researcher_preflight.hs",
     out = "researcher_preflight.hs",
