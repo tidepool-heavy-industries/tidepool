@@ -28,7 +28,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/da2a2e14d2cbadfeb09914e4e10afb7a4406c30f";
+      url = "github:tidepool-heavy-industries/exomonad-harness/159c110802fa1b064907192532294dd4240d5409";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -153,7 +153,7 @@
         harnessPkgs = import harnessNixpkgs { inherit system; };
         embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
           src = "${harnessWeb}/web";
-          hash = "sha256-4K2fllv5MraU1ib4e59qOKqcaHfnLZmsfEall14vgKk=";
+          hash = "sha256-pxt+5PAVAVb0xUf2YII0ZutBPmK3bff4UasRvQPdUcY=";
         };
         browserTestNpmCache = harnessPkgs.fetchNpmDeps {
           src = ./nix/browser-test;
