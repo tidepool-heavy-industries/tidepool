@@ -1331,6 +1331,12 @@ async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation
         .unwrap()
         .id;
     let (_, control, _) = harness::server::server(directory.path().into());
+    let owner = Arc::new(
+        HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        )
+        .unwrap(),
+    );
     let root_target = fixture.hosts[&root].identity.clone();
     let before = fixture
         .store
@@ -1355,7 +1361,7 @@ async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation
         &fixture.projection,
         |_| panic!("account selection must not acquire conversation authority"),
         &fixture.lifecycle,
-        Some((&auth, &control)),
+        Some((&auth, &control, &owner)),
     )
     .unwrap()
     .complete()
@@ -1401,7 +1407,7 @@ async fn run_account_command_uses_exact_live_root_and_never_wakes_a_conversation
         &fixture.projection,
         |_| panic!("child must refuse before conversation authority"),
         &fixture.lifecycle,
-        Some((&auth, &control)),
+        Some((&auth, &control, &owner)),
     )
     .unwrap()
     .complete()

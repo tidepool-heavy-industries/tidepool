@@ -197,7 +197,7 @@ tidepool_rust_library(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -341,7 +341,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -485,7 +485,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -629,7 +629,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -773,7 +773,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -941,7 +941,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/src/bin/exomonad.rs",
@@ -1082,6 +1082,7 @@ rust_filegroup(
         "src/actor_host/fixtures/review_named_first_acceptance.hs": "bridge/facade/src/actor_host/fixtures/review_named_first_acceptance.hs",
         "src/actor_host/fixtures/review_named_reuse.hs": "bridge/facade/src/actor_host/fixtures/review_named_reuse.hs",
         "src/actor_host/fixtures/review_named_setup.hs": "bridge/facade/src/actor_host/fixtures/review_named_setup.hs",
+        "src/actor_host/fixtures/saved-account-test.json": "bridge/facade/src/actor_host/fixtures/saved-account-test.json",
         "src/actor_host/fixtures/scripted_three_actor_capture.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_capture.hs",
         "src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "src/actor_host/fixtures/scripted_three_actor_read.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs",
@@ -1266,7 +1267,7 @@ tidepool_rust_binary(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs",
@@ -1274,6 +1275,7 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs",
+        "bridge/facade/src/actor_host/fixtures/saved-account-test.json",
         "bridge/facade/src/actor_host/m1_cancel_performance.rs",
         "bridge/facade/src/actor_host/m1_chat_projection_tests.rs",
         "bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs",
@@ -1319,6 +1321,7 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
         "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
         "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
+        "bridge/facade/src/actor_host/fixtures/saved-account-test.json",
         "bridge/facade/src/actor_host/fixtures/startup_child_activate.hs",
         "bridge/facade/src/actor_host/fixtures/startup_child_reply.hs",
         "bridge/facade/src/actor_host/fixtures/startup_children_spawn.hs",
@@ -2424,7 +2427,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/tests/bridge_decl_guard.rs",
@@ -2527,7 +2530,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_action_surface.rs",
@@ -2628,7 +2631,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_namespace_entry.rs",
@@ -2718,7 +2721,7 @@ tidepool_rust_isolated_test(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness",
+        "harness": "//third-party/rust:harness-0.1",
     },
     required_test_modules = [
         "bridge/facade/tests/exomonad_workspace_check.rs",
@@ -2877,6 +2880,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/review_named_first_acceptance.hs": "src/actor_host/fixtures/review_named_first_acceptance.hs",
         "bridge/facade/src/actor_host/fixtures/review_named_reuse.hs": "src/actor_host/fixtures/review_named_reuse.hs",
         "bridge/facade/src/actor_host/fixtures/review_named_setup.hs": "src/actor_host/fixtures/review_named_setup.hs",
+        "bridge/facade/src/actor_host/fixtures/saved-account-test.json": "src/actor_host/fixtures/saved-account-test.json",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_capture.hs": "src/actor_host/fixtures/scripted_three_actor_capture.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs": "src/actor_host/fixtures/scripted_three_actor_read.hs",

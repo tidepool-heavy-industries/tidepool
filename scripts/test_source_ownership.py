@@ -119,6 +119,7 @@ TEST_ONLY_FIXTURES = {
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/fixtures/saved-account-test.json',
         'bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs',
         'bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs',
         'bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs',

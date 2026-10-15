@@ -1143,6 +1143,7 @@ fn prepare_embedded_browser_command(
     accounts: Option<(
         &harness::transport::auth::chatgpt::RunAccountAuth,
         &harness::server::ServerControl,
+        &Arc<HostIncarnationLease>,
     )>,
 ) -> Result<EmbeddedBrowserCommandDispatch, String> {
     use harness::server::CommandReceiptOutcome;
@@ -1202,7 +1203,7 @@ fn prepare_embedded_browser_command(
         {
             return refuse("account selection must target the current root actor".into());
         }
-        let Some((auth, control)) = accounts else {
+        let Some((auth, control, owner)) = accounts else {
             return refuse("saved accounts are unavailable".into());
         };
         return Ok(EmbeddedBrowserCommandDispatch::SelectAccount {
@@ -1211,6 +1212,7 @@ fn prepare_embedded_browser_command(
             store: store.clone(),
             auth: auth.clone(),
             control: control.clone(),
+            owner: owner.clone(),
         });
     }
     let Some(conversation) = conversation_for(actor) else {
@@ -1234,6 +1236,7 @@ enum EmbeddedBrowserCommandDispatch {
         store: Arc<harness::store::Store>,
         auth: harness::transport::auth::chatgpt::RunAccountAuth,
         control: harness::server::ServerControl,
+        owner: Arc<HostIncarnationLease>,
     },
     Settled(Option<harness::server::CommandReceipt>),
     Admitted {
@@ -1258,8 +1261,12 @@ impl EmbeddedBrowserCommandDispatch {
                 store,
                 auth,
                 control,
+                owner,
             } => {
                 let (receipt, selection) = tokio::task::spawn_blocking(move || {
+                    // Blocking work survives async cancellation; retain the exact
+                    // host lease until its atomic Store transition has settled.
+                    let _owner = owner;
                     let accounts = match auth.accounts() {
                         Ok(accounts) => accounts,
                         Err(_) => {
@@ -1443,7 +1450,10 @@ fn drain_embedded_browser_commands(
     conversations: &HashMap<ActorRef, embedded_harness::EmbeddedActorBinding>,
     lifecycle: &embedded_projection::LifecycleSender,
     tasks: &mut BrowserCommandTasks,
-    account_auth: Option<&harness::transport::auth::chatgpt::RunAccountAuth>,
+    account_auth: Option<(
+        &harness::transport::auth::chatgpt::RunAccountAuth,
+        &Arc<HostIncarnationLease>,
+    )>,
 ) -> Result<(), String> {
     // The channel is a wake hint. Store rows survive the persist/enqueue gap
     // and are also drained by the existing host health tick.
@@ -1484,7 +1494,7 @@ fn drain_embedded_browser_commands(
                     })
             },
             lifecycle,
-            account_auth.map(|auth| (auth, control)),
+            account_auth.map(|(auth, owner)| (auth, control, owner)),
         )?;
         match dispatch {
             EmbeddedBrowserCommandDispatch::Settled(Some(receipt)) => {

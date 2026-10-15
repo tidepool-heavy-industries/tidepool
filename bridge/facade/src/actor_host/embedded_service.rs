@@ -57,7 +57,7 @@ pub(super) fn responses_client(
 }
 
 pub(super) struct EmbeddedService {
-    _owner: Arc<super::HostIncarnationLease>,
+    pub(super) _owner: Arc<super::HostIncarnationLease>,
     pub(super) settings: EmbeddedLaunchConfig,
     pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
