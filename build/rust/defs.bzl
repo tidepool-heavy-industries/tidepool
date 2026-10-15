@@ -76,6 +76,7 @@ def tidepool_rust_test_cases(
         ignored = False,
         case_compiler_modes = {},
         delegated_service = False,
+        service_slice = None,
         timeout = 300,
         jobs = None,
         env = {},
@@ -138,6 +139,10 @@ def tidepool_rust_test_cases(
         args.extend(["--case-compiler-mode", test + "=" + mode])
     if delegated_service:
         args.append("--delegated-service")
+    if service_slice != None:
+        if not delegated_service:
+            fail("service_slice requires delegated_service")
+        args.extend(["--service-slice", service_slice])
     if ignored:
         args.append("--ignored")
     sh_test_kwargs = {

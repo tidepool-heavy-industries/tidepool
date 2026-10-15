@@ -4574,3 +4574,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "exomonad/production_restart_acceptance_tests.rs"]
+mod production_restart_acceptance_tests;

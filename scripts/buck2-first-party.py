@@ -1398,6 +1398,16 @@ def facade_test_cases(binary):
         ("facade_browser_test", [prefix +
             "production_browser_executes_resident_haskell_retries_and_controls_root"],
          host_env, browser_paths, browser_resources, True, True, 900),
+        ("facade_outer_restart_test", [
+            "exomonad::production_restart_acceptance_tests::outer_host_stop_and_crash_restore_accepted_source_and_selected_account_without_replay",
+            "exomonad::production_restart_acceptance_tests::outer_host_rolls_split_binding_admission_forward_and_refuses_missing_issued_evidence",
+            "exomonad::production_restart_acceptance_tests::outer_host_before_launch_admission_is_nonrunnable_without_allocating_an_epoch",
+            "exomonad::production_restart_acceptance_tests::outer_host_uncertain_initializer_refuses_before_successor_without_replaying_effects",
+            "exomonad::production_restart_acceptance_tests::outer_host_pending_effect_after_crash_remains_blocked_without_replay",
+        ], all_env, all_paths, all_resources, True, True, 1200),
+        ("facade_outer_restart_positive_test", [
+            "exomonad::production_restart_acceptance_tests::outer_host_stop_and_crash_restore_accepted_source_and_selected_account_without_replay",
+        ], all_env, all_paths, all_resources, True, True, 1200),
         ("tidepool_unit_tests_all", [], all_env, all_paths, all_resources, True, False, 600),
     ]
     rules = []
@@ -1407,6 +1417,9 @@ def facade_test_cases(binary):
         if tests:
             lines.extend(["    exact_tests = [", render_strings(tests, 8), "    ],",
                           f"    expected_count = {len(tests)},"])
+        if name in ("facade_outer_restart_test", "facade_outer_restart_positive_test"):
+            lines.extend(["    delegated_service = True,", '    service_slice = "tidepool-completion-build.slice",',
+                          '    companion_executables = {"exomonad-view-helper": "//exomonad/node:view_helper_fixture"},'])
         lines.extend([f"    ignored = {ignored},", "    jobs = 1,",
                       f"    timeout = {timeout},",
                       f"    test_rule_timeout_ms = {(len(tests) * timeout + 60) * 1000 if tests else 7_200_000},",
