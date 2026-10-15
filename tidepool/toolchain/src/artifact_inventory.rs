@@ -13749,9 +13749,19 @@ mod tests {
             &[&original],
             &BTreeMap::new(),
         );
-        let types = ambient
-            .interface_projection(&[original.descriptor.owner.clone()])
+        let ArtifactPayload::Original(product) = &original.payload else {
+            unreachable!()
+        };
+        let types = inventory
+            .admit(
+                &empty,
+                vec![ArtifactEntry::canonical(
+                    product.module_interface().unwrap().clone(),
+                )],
+            )
             .unwrap();
+        assert!(!types.artifact_ids().contains(&original.descriptor.id));
+        assert!(types.entries().iter().all(|entry| !entry.is_native()));
         let before = inventory.node_count();
         assert!(inventory.admit(&types, vec![consumer.clone()]).is_err());
         assert_eq!(inventory.node_count(), before);
