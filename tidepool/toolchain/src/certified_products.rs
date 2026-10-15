@@ -11798,7 +11798,7 @@ pub(crate) mod tests {
                         inventory
                             .admit_certified_with_demand(
                                 &view,
-                                vec![],
+                                vec![entry.clone()],
                                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                                 &selection,
                             )
