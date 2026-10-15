@@ -1,6 +1,4 @@
-import qualified Tidepool.Lookup as LookupApi
-import qualified Tidepool.Inspection as Inspection
-import qualified Data.Text as Text
-let entry = LookupApi.LookupEntry "checkedWrite" (Just "Tidepool.Effects.Core") "checkedWrite :: Text" LookupApi.LookupValue LookupApi.LookupAvailable LookupApi.LookupModuleExport LookupApi.LookupExact Nothing (Just "retained contract hash token") Nothing
-let batch = LookupApi.LookupBatch [LookupApi.LookupResult "retained-query" (LookupApi.LookupRejected (Text.replicate 3000 "detail " <> "end-of-retained-query")), LookupApi.LookupResult "second-query" (LookupApi.LookupMissing ["missing-api"] []), LookupApi.LookupResult "contract-query" (LookupApi.LookupFound [entry] False)] [] "retained-view" Nothing
-shown <- Inspection.display batch
+shown <- do
+  let entry = LookupApi.LookupEntry "checkedWrite" (Just "Tidepool.Effects.Core") "checkedWrite :: Text" LookupApi.LookupValue LookupApi.LookupAvailable LookupApi.LookupModuleExport LookupApi.LookupExact Nothing (Just "retained contract hash token") Nothing
+  let batch = LookupApi.LookupBatch [LookupApi.LookupResult "retained-query" (LookupApi.LookupRejected (T.pack (concat (replicate 3000 "detail ")) <> "end-of-retained-query")), LookupApi.LookupResult "second-query" (LookupApi.LookupMissing ["missing-api"] []), LookupApi.LookupResult "contract-query" (LookupApi.LookupFound [entry] False)] [] "retained-view" Nothing
+  display batch
