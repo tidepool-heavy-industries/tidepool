@@ -23,7 +23,7 @@ query evidence = J.taken <$> J.question (J.state (#evidence J.:= evidence)) #rou
       J..| J.alt #subtract "Subtract the authored offset." (subtract payloadOffset)))
 
 observeAndSave :: (Member Jev effects, Member FsWrite effects)
-  => FilePath -> Eff effects (Either Text Int)
+  => Text -> Eff effects (Either Text Int)
 observeAndSave path = do
   evaluation <- J.runQuery (query "unchanged evidence")
   stored <- Example.saveEvaluation path evaluation
@@ -32,7 +32,7 @@ observeAndSave path = do
     action <- either (Left . T.pack . show) Right (J.result evaluation)
     pure (action 5)
 
-replaySaved :: Member FsRead effects => FilePath -> Eff effects (Either Text Int)
+replaySaved :: Member FsRead effects => Text -> Eff effects (Either Text Int)
 replaySaved path = do
   loaded <- Example.loadRecordings path
   pure $ do
@@ -44,7 +44,7 @@ replaySaved path = do
     pure (action 5)
 
 refusesChangedEvidence :: Member FsRead effects
-  => FilePath -> Eff effects (Either Text Bool)
+  => Text -> Eff effects (Either Text Bool)
 refusesChangedEvidence path = do
   loaded <- Example.loadRecordings path
   pure $ do

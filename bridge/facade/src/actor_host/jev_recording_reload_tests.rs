@@ -4,7 +4,6 @@ use super::test_campaign::{self, TestCampaign};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const PROBE: &str = include_str!("fixtures/jev-recording-reload.hs");
 const ARCHIVE: &str = ".exomonad/state/jev-observation.json";
 
 #[derive(Default)]
@@ -19,7 +18,10 @@ impl exomonad_actor::JevBackend for RecordingBackend {
     ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
         let request: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(request["model"], "jev-latest");
-        assert_eq!(request["state"], serde_json::json!({"evidence": "unchanged evidence"}));
+        assert_eq!(
+            request["state"],
+            serde_json::json!({"evidence": "unchanged evidence"})
+        );
         let questions = request["questions"].as_object().unwrap();
         assert_eq!(questions.len(), 1);
         let (key, question) = questions.iter().next().unwrap();
@@ -48,7 +50,9 @@ async fn displayed(
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let receipt = campaign
         .drive_actor_output(&store, async {
-            let result = test_campaign::dispatch_haskell_script_named(endpoint, "haskell_sync", source).await;
+            let result =
+                test_campaign::dispatch_haskell_script_named(endpoint, "haskell_sync", source)
+                    .await;
             assert_eq!(result["status"], "committed", "{result}");
             result
         })
@@ -58,6 +62,9 @@ async fn displayed(
 
 #[tokio::test]
 async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_provider_call() {
+    let probe = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/jev-recording-reload.hs",
+    );
     let backend = Arc::new(RecordingBackend::default());
     let owned_backend = Arc::clone(&backend);
     let campaign = TestCampaign::start_with_conversation(
@@ -68,23 +75,29 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
             std::fs::create_dir_all(authored.join("state")).unwrap();
-            std::fs::write(authored.join("Project/RecordingReloadProbe.hs"), PROBE).unwrap();
+            std::fs::write(authored.join("Project/RecordingReloadProbe.hs"), &probe).unwrap();
             let installed = test_campaign::declared_workspace_package().join(".exomonad");
             crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
                 project.haskell.source_roots = vec![".".into(), installed];
                 project.haskell.modules = vec!["Project.RecordingReloadProbe".into()];
-                project.haskell.flake_sources.insert("jev-dsl".into(), vec!["core".into()]);
+                project
+                    .haskell
+                    .flake_sources
+                    .insert("jev-dsl".into(), vec!["core".into()]);
             });
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace, &config.run_directory.path(),
-                ).expect("capture authored probe and exact installed Jev sources"),
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .expect("capture authored probe and exact installed Jev sources"),
             );
         },
         Some(Arc::new(|_, _| {
             Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
         })),
-    ).await;
+    )
+    .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
         let endpoint = Arc::clone(&campaign.root_installation.policy);
         let first = displayed(campaign, endpoint.as_ref(),
@@ -97,8 +110,8 @@ async fn saved_jev_observation_replays_after_reload_with_new_payload_and_no_prov
         assert_eq!(decoded["version"], 1);
         assert_eq!(decoded["records"].as_array().unwrap().len(), 1);
 
-        let edited = PROBE.replace("payloadOffset = 7", "payloadOffset = 31");
-        assert_ne!(edited, PROBE);
+        let edited = probe.replace("payloadOffset = 7", "payloadOffset = 31");
+        assert_ne!(edited, probe);
         std::fs::write(campaign._repository.path().join(".exomonad/Project/RecordingReloadProbe.hs"), edited).unwrap();
         let published = displayed(campaign, endpoint.as_ref(),
             "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished before after changed _ -> revisionIdentity before /= revisionIdentity after && \"Project.RecordingReloadProbe\" `elem` changed; _ -> False })").await;
