@@ -481,6 +481,68 @@ async fn persona_quickstart_displays_lookup_and_rejects_native_io() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn persona_snapshot_memory_examples_preserve_versions_errors_and_context() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "AgentSpec.agentSpec", |_, _| {});
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        host.input("Try a version-checked memory edit").await.unwrap();
+        let mut pending = VecDeque::new();
+        let root = harness::model::AgentPath("/root".into());
+        let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let memory_source = include_str!("fixtures/api-guide/persona-memory-edit.hs");
+        assert!(round.request.instructions.contains(memory_source), "the published memory example must match the executed source");
+        let origin = harness::store::actor_output::ActorOutputOrigin {
+            run: host.runtime.run_identity().to_owned(),
+            native_actor: host.context.actor.identity().id.0,
+            incarnation: host.context.actor.identity().incarnation.0,
+        };
+        for (call, source, expected) in [
+            ("snapshot-context-before", "import qualified Tidepool.Agent.Context as C\nimport Control.Lens (view)\nC.InitialContextPublished _ _ _ initialMemoryReference <- C.getInitialContext\nbeforeMemoryContext <- C.getContext\nlet memoryBlockTexts context = [body | C.Text (Just reference) _ body _ <- view C.contextBlocks context, reference == initialMemoryReference]\nlet originalMemoryBlock = memoryBlockTexts beforeMemoryContext\n", None),
+            ("persona-memory-edit", memory_source, Some("Written")),
+            ("file-snapshot-example", include_str!("../../../../exomonad/examples/workspace/.exomonad/checks/file-snapshot-example.hs"), Some("True")),
+            ("snapshot-refusals", include_str!("fixtures/persona_snapshot_refusals.hs"), Some("True")),
+        ] {
+            let operation = round.operation(call);
+            round.sync_call_named(call, "haskell", source);
+            round = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+            if let Some(expected) = expected {
+                let pages = super::test_campaign::retained_committed_display_texts(&host.runtime.store(), &origin, &round.settled_output(call));
+                assert_eq!(pages.len(), if call == "snapshot-refusals" { 1 } else { 2 }, "{call}: {pages:?}");
+                let text = pages.join("\n");
+                assert!(text.contains(expected), "{call}: {text}");
+                if call == "file-snapshot-example" {
+                    assert!(text.contains("FileSnapshot") && text.contains("ContentVersion"), "snapshot display: {text}");
+                }
+            }
+        }
+        for (call, source, expected) in [
+            ("snapshot-private-constructor", "let forged = File.FileSnapshot\n", "File.FileSnapshot"),
+            ("version-private-constructor", "let forged = File.ContentVersion\n", "File.ContentVersion"),
+            ("snapshot-no-independent-path", "File.writeSnapshot target \"wrong destination\"\n", "FileSnapshot"),
+        ] {
+            let operation = round.operation(call);
+            round.sync_call_named(call, "haskell", source);
+            round = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
+            super::test_campaign::require_ghc_compile_rejection(&round.settled_output(call), &[expected]).unwrap();
+        }
+        let workspace = &host.context.config.workspace;
+        assert_eq!(std::fs::read_to_string(workspace.join(".exomonad/state/memory/human.md")).unwrap(),
+            format!("{}\nAn experiment worth returning to.\n", PERSONA_MEMORIES[1].1));
+        assert!(!workspace.join(".exomonad/state/notes/missing-snapshot.md").exists());
+        assert!(!workspace.join(".exomonad/state/notes/missing-revision.md").exists());
+        round.finish();
+    })).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn persona_web_selection_retains_native_judgment_and_empty_control() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);

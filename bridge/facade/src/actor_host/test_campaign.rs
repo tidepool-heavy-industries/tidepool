@@ -1263,6 +1263,26 @@ pub(super) fn retained_committed_display_text(
     retained_display_text(store, origin, response)
 }
 
+/// Read every explicit page in receipt order through the same Store checks as
+/// the single-display observer. Examples may intentionally emit several values.
+pub(super) fn retained_committed_display_texts(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &serde_json::Value,
+) -> Vec<String> {
+    assert_eq!(response["status"], "committed", "{response}");
+    let items = response["items"].as_array().expect("cell item receipts");
+    for item in items {
+        assert_eq!(item["status"], "committed", "{response}");
+    }
+    items
+        .iter()
+        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .filter(|operation| operation.get("display").is_some())
+        .map(|operation| retained_display_operation_text(store, origin, operation))
+        .collect()
+}
+
 pub(super) fn retained_replied_display_text(
     store: &harness::store::Store,
     origin: &harness::store::actor_output::ActorOutputOrigin,
@@ -1288,6 +1308,14 @@ fn retained_display_text(
     response: &serde_json::Value,
 ) -> String {
     let operation = explicit_display_operation(response);
+    retained_display_operation_text(store, origin, operation)
+}
+
+fn retained_display_operation_text(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    operation: &serde_json::Value,
+) -> String {
     let display = &operation["display"];
     let sequence = display["output"]["sequence"]
         .as_i64()

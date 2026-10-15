@@ -9,6 +9,12 @@ value. A bare expression only binds an observation for later use. Use `display`
 to read a result now, and the available Tidepool effects for actions. Native
 `Prelude` IO actions such as `putStrLn` do not run in notebook cells.
 
+The default aliases are `T` (`Tidepool.Data.Text`), `Cmd` (commands), `J` (Jev),
+`R` (record actors), `Map`, and `Set`. Reuse them directly. If you import ordinary
+`Data.Text`, give it a distinct alias such as `Text`. Put imports before statements.
+A file read returns `Either FsError Text`; display it directly or branch on
+`Left` and `Right`, preserving errors as distinct from text.
+
 ## Files and active code
 
 File paths start at your ordinary workspace root. `.exomonad` is an ordinary
@@ -25,9 +31,27 @@ and revision, which may differ from the current active head;
 `sourceStatus` compares current drafts with the issued generation. These observations answer different
 questions even when the bytes agree.
 
-Import `Persona.Memory` qualified as `Memory` for `Memory.recall Memory.Human`,
-`Memory.remember Memory.Human body`, or `Memory.note "name" body`.
+Import `Persona.Memory` qualified as `Memory`. `revise` transforms existing
+contents and commits only while the captured content version still matches:
+
+```haskell source=persona-memory-edit
+import qualified Persona.Memory as Memory
+beforeMemory <- Memory.recall Memory.Human
+display beforeMemory
+memoryEdit <- Memory.revise Memory.Human (<> "\nAn experiment worth returning to.\n")
+display memoryEdit
+```
+
+`Memory.replaceBlock Memory.Human body` explicitly replaces a whole block.
+`Memory.note "name" body` writes a note. Neither operation refreshes context.
 `Memory.initialise` creates only absent seed blocks. Inspect each returned result.
+For delayed edits, `Memory.prepareAt` retains the destination, version and proposed
+text; `Memory.commitRevision` refuses a stale proposal without retrying it.
+The underlying `Tidepool.File.readSnapshot` and `writeSnapshot` also compose over
+ordinary files. Contents and Blake3 version come from the same byte read;
+filesystem-effect writers share its lock. External writers that bypass that
+lock are outside the guarantee. A version identifies contents, so restoring
+identical contents restores the same version.
 Import `Persona.Web` qualified as `PersonaWeb` for
 `PersonaWeb.search query 3 [] []`. Search returns source hits, not a generated
 answer. Bind a Page returned by `PersonaWeb.open` before using `readLines`,
@@ -53,7 +77,8 @@ reference material describes a vocabulary, not a grant.
 `reloadSource` takes only the list of additional modules to validate. Reload
 does not commit files to Git; commit authored changes separately when wanted.
 
-Keep reusable definitions in `.hs` files: notebook names are discarded by changed
+Keep reusable definitions in `.hs` files and update directly affected prompt
+examples when changing their interface. Notebook names are discarded by changed
 reload. Conversation, resources and the published memory block persist. Reload
 does not rerun startup or refresh memory; use `Persona.Context.refresh` explicitly.
 Already-issued work and existing children retain their captured generation;

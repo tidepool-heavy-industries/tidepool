@@ -56,7 +56,7 @@ personaSeedTests = testGroup "persona seed"
   , testCase "initialisation preserves an edited identity and unrelated notes" $ do
       let action = do
             _ <- M.initialise
-            _ <- M.remember M.Persona "I have discovered a fondness for tiny maps."
+            _ <- M.replaceBlock M.Persona "I have discovered a fondness for tiny maps."
             _ <- M.note "map" "A place to return to"
             M.initialise
           (_,files) = run (runState (Map.empty :: Map.Map Text Text) (interpret writeHost action))

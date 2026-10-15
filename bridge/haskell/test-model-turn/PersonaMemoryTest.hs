@@ -16,9 +16,10 @@ import Test.Tasty.HUnit (assertBool, assertEqual)
 import Test.Tasty.QuickCheck (testProperty, (===))
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Tidepool.Agent.Contract (StartupInput(..), ContextSeed(..), ContextSection(..))
-import Tidepool.Effects.Core (FsRead(..), FsWrite(..), ContextReadWrite(..))
+import Tidepool.Effects.Core (FsRead(..), FsWrite(..), FsSnapshot(..), ContextReadWrite(..))
 import Tidepool.Records (FsError(..))
 import qualified Tidepool.Agent.Context as C
+import qualified Persona.Memory as Memory
 import qualified Persona.Orientation as O
 import qualified Persona.Context as Context
 
@@ -64,6 +65,30 @@ personaMemoryTests = testGroup "persona memory"
       let (ContextSeed sections, _) = startup (Map.fromList [(head paths, Left (FsIo "denied"))])
       result <- try (evaluate (sum (map (T.length . contextSectionBody) sections))) :: IO (Either SomeException Int)
       assertBool "refused publication" (case result of Left _ -> True; Right _ -> False)
+  , testCase "revision preserves snapshot storage errors and performs no write" $ do
+      let reader :: FsRead a -> Eff '[FsWrite] a
+          reader (FsReadSnapshot _) = pure (Left (FsIo "snapshot denied"))
+          reader _ = error "revision must read contents and version together"
+          writer :: FsWrite a -> Eff '[] a
+          writer _ = error "failed snapshot must not write"
+      assertEqual "typed acquisition failure"
+        (Left (FsIo "snapshot denied"))
+        (run (interpret writer (interpret reader (Memory.reviseAt "memory" (<> "new")))))
+  , testCase "revision preserves visible durability uncertainty without retry" $ do
+      let reader :: FsRead a -> Eff '[FsWrite, State Int] a
+          reader (FsReadSnapshot file) = pure (Right (FsSnapshot file "old" "observed-version"))
+          reader _ = error "revision must use the snapshot operation"
+          writer :: FsWrite a -> Eff '[State Int] a
+          writer (FsWriteCas file expected body)
+            | file == "memory" && expected == Just "observed-version" && body == "oldnew" =
+                modify @Int (+1) >> pure (Left (FsDurabilityUnknown "visible; sync unconfirmed"))
+          writer _ = error "revision changed its captured destination, version or proposal"
+          (result, attempts) = run $ runState (0 :: Int) $
+            interpret writer (interpret reader (Memory.reviseAt "memory" (<> "new")))
+      assertEqual "visible publication is not a conflict or a successful retry"
+        (Left (FsDurabilityUnknown "visible; sync unconfirmed"))
+        result
+      assertEqual "visible publication is never replayed" 1 attempts
   , testCase "unpublished startup context refuses explicit activation without edits" $ do
       let owner :: ContextReadWrite a -> Eff '[] a
           owner GetInitialContextWith = pure C.InitialContextAbsent

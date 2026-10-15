@@ -4,7 +4,7 @@ import qualified Persona.Memory as Memory
 import qualified Tidepool.Agent.Context as C
 
 personaBefore <- C.getContext
-Right () <- Memory.remember Memory.Persona "persona-memory-updated"
+Right () <- Memory.replaceBlock Memory.Persona "persona-memory-updated"
 personaAfterWrite <- C.getContext
 Right personaBody <- Orientation.renderMemory
 Right () <- PersonaContext.refresh

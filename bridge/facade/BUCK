@@ -1030,6 +1030,7 @@ rust_filegroup(
         "src/actor_host/fixtures/api-guide/human-forms.hs": "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
         "src/actor_host/fixtures/api-guide/lookup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",
         "src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
+        "src/actor_host/fixtures/api-guide/persona-memory-edit.hs": "bridge/facade/src/actor_host/fixtures/api-guide/persona-memory-edit.hs",
         "src/actor_host/fixtures/api-guide/reflect.hs": "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs",
         "src/actor_host/fixtures/api-guide/request-setup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs",
         "src/actor_host/fixtures/api-guide/request.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request.hs",
@@ -1071,6 +1072,7 @@ rust_filegroup(
         "src/actor_host/fixtures/m3_recursive_root.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_root.hs",
         "src/actor_host/fixtures/m3_recursive_setup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_setup.hs",
         "src/actor_host/fixtures/narrow_parent_forwarding.hs": "bridge/facade/src/actor_host/fixtures/narrow_parent_forwarding.hs",
+        "src/actor_host/fixtures/persona_snapshot_refusals.hs": "bridge/facade/src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "bridge/facade/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "src/actor_host/fixtures/recipe_unbound_restart.hs": "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs",
@@ -2823,6 +2825,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs": "src/actor_host/fixtures/api-guide/human-forms.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs": "src/actor_host/fixtures/api-guide/lookup.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/persona-memory-edit.hs": "src/actor_host/fixtures/api-guide/persona-memory-edit.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs": "src/actor_host/fixtures/api-guide/reflect.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs": "src/actor_host/fixtures/api-guide/request-setup.hs",
         "bridge/facade/src/actor_host/fixtures/api-guide/request.hs": "src/actor_host/fixtures/api-guide/request.hs",
@@ -2864,6 +2867,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/m3_recursive_root.hs": "src/actor_host/fixtures/m3_recursive_root.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_setup.hs": "src/actor_host/fixtures/m3_recursive_setup.hs",
         "bridge/facade/src/actor_host/fixtures/narrow_parent_forwarding.hs": "src/actor_host/fixtures/narrow_parent_forwarding.hs",
+        "bridge/facade/src/actor_host/fixtures/persona_snapshot_refusals.hs": "src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "bridge/facade/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
         "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs": "src/actor_host/fixtures/recipe_unbound_restart.hs",
@@ -3448,6 +3452,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f706572736f6e612d6d656d6f72792d656469742e6873",
+    src = "src/actor_host/fixtures/api-guide/persona-memory-edit.hs",
+    out = "persona-memory-edit.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f7265666c6563742e6873",
     src = "src/actor_host/fixtures/api-guide/reflect.hs",
     out = "reflect.hs",
@@ -3885,6 +3896,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6c6f6f6b75705f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
     out = "notebook_lookup_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f736e617073686f745f7265667573616c732e6873",
+    src = "src/actor_host/fixtures/persona_snapshot_refusals.hs",
+    out = "persona_snapshot_refusals.hs",
     visibility = ["PUBLIC"],
 )
 

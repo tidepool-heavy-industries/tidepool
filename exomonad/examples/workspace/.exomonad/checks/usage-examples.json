@@ -5,8 +5,26 @@
       "name": "start",
       "namespace": "value",
       "source": "checks/background-command-example.hs",
-      "prerequisites": ["Project/BackgroundCommandExample.hs"],
+      "prerequisites": [
+        "Project/BackgroundCommandExample.hs"
+      ],
       "requirements": "Run each marked stage in a separate resident workbench cell, in order. The Project.BackgroundCommandExample source must be on the selected source path. Query evidence after completion, then finish the watcher."
+    },
+    {
+      "module": "Tidepool.File",
+      "name": "readSnapshot",
+      "namespace": "value",
+      "source": "checks/file-snapshot-example.hs",
+      "prerequisites": [],
+      "requirements": "Requires FsRead, FsWrite and Console. Uses and replaces the named scratch note. Read contents and version together, commit to that captured destination, and observe stale-write refusal. Only filesystem-effect writers participate in the shared advisory lock; external writers are outside the guarantee."
+    },
+    {
+      "module": "Tidepool.File",
+      "name": "writeSnapshot",
+      "namespace": "value",
+      "source": "checks/file-snapshot-example.hs",
+      "prerequisites": [],
+      "requirements": "Requires FsRead, FsWrite and Console. Uses and replaces the named scratch note. Read contents and version together, commit to that captured destination, and observe stale-write refusal. Only filesystem-effect writers participate in the shared advisory lock; external writers are outside the guarantee."
     }
   ]
 }
