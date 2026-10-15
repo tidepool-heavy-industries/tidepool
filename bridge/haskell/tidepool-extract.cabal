@@ -808,6 +808,10 @@ test-suite model-turn-test
   other-modules:
     PersonaSeedTest
     PersonaMemoryTest
+    PersonaFileTest
+    Persona.FileTools
+    Persona.Patch
+    Tidepool.Text.Navigation
     Persona.Memory
     Persona.Web
     Persona.Spec
