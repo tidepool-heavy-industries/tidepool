@@ -2191,7 +2191,7 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
             config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
             crate::exomonad::workspace::copy_authored(
-                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
+                &super::test_campaign::declared_workspace_package(),
                 &config.workspace,
             )
             .unwrap();
@@ -2848,7 +2848,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     )
     .unwrap();
     crate::exomonad::workspace::copy_authored(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
+        &super::test_campaign::declared_workspace_package(),
         repository.path(),
     )
     .unwrap();

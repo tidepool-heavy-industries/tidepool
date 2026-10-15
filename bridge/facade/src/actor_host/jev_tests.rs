@@ -248,10 +248,7 @@ impl JevBackend for LookupScoreJev {
 }
 
 fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../exomonad/examples/workspace")
-        .canonicalize()
-        .unwrap();
+    let package = super::test_campaign::declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
@@ -486,21 +483,21 @@ async fn template_lookup_batches_related_declarations_and_recovers_from_jev_fail
 pub(super) use super::test_campaign::pinned_jev_workspace;
 
 async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign {
-    TestCampaign::start_with_config(
+    TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
             config.jev = Some(backend as exomonad_actor::JevBackendHandle);
             pinned_jev_workspace(config);
         },
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await
 }
 
 pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../exomonad/examples/workspace")
-        .canonicalize()
-        .expect("the shipped workspace template");
+    let package = super::test_campaign::declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -1317,10 +1314,7 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     // result at `run_root/workspace/selection.json` and would otherwise hand
     // a SECOND call here the stale pre-authored selection instead of
     // re-reading the config and files written below. One workspace, one load.
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../exomonad/examples/workspace")
-        .canonicalize()
-        .expect("the Exomonad workspace package this repository ships");
+    let package = super::test_campaign::declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -1569,10 +1563,7 @@ monitorsFor path
 /// a second source root, beside a per-test `AgentSpec.hs` and `Project/Tools.hs`
 /// that install `Watchdog.watchBy` as the after-tool slot.
 fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../exomonad/examples/workspace")
-        .canonicalize()
-        .expect("the Exomonad workspace package this repository ships");
+    let package = super::test_campaign::declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {

@@ -1517,16 +1517,24 @@ pub(super) async fn dispatch_status(
     dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
 }
 
+/// Return the package containing the declared authored workspace resource.
+pub(super) fn declared_workspace_package() -> std::path::PathBuf {
+    let authored = std::env::var_os("TIDEPOOL_RECIPE_WORKSPACE")
+        .map(std::path::PathBuf::from)
+        .expect("TIDEPOOL_RECIPE_WORKSPACE must name the declared authored workspace resource");
+    authored
+        .parent()
+        .expect("the declared authored workspace resource has a package parent")
+        .to_path_buf()
+}
+
 /// The Jev surface is pinned source, not Tidepool library: a run reaches it
 /// through a workspace whose `flake.nix` names the jev-dsl revision and whose
 /// own `Jev/Operators.hs` fixes that library's JSON type to Tidepool's. These
 /// tests select the package this repository ships, so what they compile is
 /// what a project gets — including the pin.
 pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../exomonad/examples/workspace")
-        .canonicalize()
-        .expect("the Exomonad workspace package this repository ships");
+    let package = declared_workspace_package();
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
