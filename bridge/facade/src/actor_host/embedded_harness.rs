@@ -80,6 +80,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     output_observer: Arc<OnceLock<harness::server::ServerControl>>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
     context_models: Arc<OnceLock<ModelResolver>>,
+    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
     #[cfg(test)]
     admission_test_hooks: OnceLock<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -93,6 +94,7 @@ impl EmbeddedHarnessRuntime {
             output_observer: Arc::new(OnceLock::new()),
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
+            account_auth: OnceLock::new(),
             #[cfg(test)]
             admission_test_hooks: OnceLock::new(),
             store,
@@ -101,6 +103,28 @@ impl EmbeddedHarnessRuntime {
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
         })
+    }
+
+    pub(super) fn configure_accounts(
+        &self,
+        credential_file: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let accounts = harness::transport::auth::chatgpt::SavedAccounts::beside(credential_file)
+            .map_err(|e| e.to_string())?;
+        let auth = harness::transport::auth::chatgpt::RunAccountAuth::new(
+            self.store.clone(),
+            self.run.clone(),
+            accounts,
+        )
+        .map_err(|e| e.to_string())?;
+        self.account_auth
+            .set(auth)
+            .map_err(|_| "run account authentication already configured".to_owned())
+    }
+    pub(super) fn account_auth(&self) -> &harness::transport::auth::chatgpt::RunAccountAuth {
+        self.account_auth
+            .get()
+            .expect("run accounts configured before model admission")
     }
 
     #[cfg(test)]
@@ -819,6 +843,7 @@ pub(super) struct EmbeddedHostActor {
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
     context_models: Arc<OnceLock<ModelResolver>>,
+    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
     #[cfg(test)]
     admission_test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -868,6 +893,7 @@ impl EmbeddedHostActor {
             round_control,
             next_surface: AtomicU64::new(1),
             context_models: Arc::new(OnceLock::new()),
+            account_auth: OnceLock::new(),
             #[cfg(test)]
             admission_test_hooks: None,
         })
@@ -992,6 +1018,7 @@ struct EmbeddedCancellationOwner {
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
     context_models: Arc<OnceLock<ModelResolver>>,
+    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
     identity: HostIdentity,
     issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,

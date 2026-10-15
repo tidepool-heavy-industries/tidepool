@@ -1,12 +1,15 @@
 use std::{num::NonZeroU64, path::Path, sync::Arc};
 
 use exomonad_actor::LocalResidentInstallation;
+#[cfg(test)]
+use harness::transport::auth::ChatGptPlanAuth;
 use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{auth::ChatGptPlanAuth, ResponsesClient},
+    transport::{auth::chatgpt::RunAccountAuth, ResponsesClient},
 };
+
 #[cfg(test)]
 use harness::{
     server::ClientCommand,
@@ -48,9 +51,9 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
 }
 
 pub(super) fn responses_client(
-    settings: &EmbeddedLaunchConfig,
-) -> ResponsesClient<ChatGptPlanAuth> {
-    ResponsesClient::new(ChatGptPlanAuth::new(settings.credential_file.clone()))
+    runtime: &EmbeddedHarnessRuntime,
+) -> ResponsesClient<RunAccountAuth> {
+    ResponsesClient::new(runtime.account_auth().clone())
 }
 
 pub(super) struct EmbeddedService {
@@ -264,10 +267,10 @@ impl EmbeddedService {
         #[cfg(test)]
         let contract = match &self.test_transport {
             Some(transport) => transport.response_contract(),
-            None => responses_client(&self.settings).response_contract(),
+            None => responses_client(&self.runtime).response_contract(),
         };
         #[cfg(not(test))]
-        let contract = responses_client(&self.settings).response_contract();
+        let contract = responses_client(&self.runtime).response_contract();
         let (route, protocol) = contract.map_err(|error| error.to_string())?;
         Ok(harness::context::ContextProjectionTarget {
             model,
@@ -302,6 +305,7 @@ impl EmbeddedService {
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
+        runtime.configure_accounts(settings.credential_file.clone())?;
         // Only this exclusive host startup can prove native continuations
         // from the previous process no longer exist. Ordinary Store reads
         // must preserve live mounted forms.
@@ -320,6 +324,7 @@ impl EmbeddedService {
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_browser_bundle(browser_bundle)
             .with_history_store(runtime.store())
+            .with_account_auth(runtime.account_auth().clone())
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
         let server_config = match &settings.public_origin {
@@ -360,6 +365,14 @@ impl EmbeddedService {
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let (router, control, commands) = harness::server::server_with_config(server_config);
         runtime.configure_output_observer(control.clone())?;
+        control.publish(
+            harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
+                runtime
+                    .account_auth()
+                    .selection()
+                    .map_err(|e| e.to_string())?,
+            ),
+        );
         let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
             let _server_owner = server_owner;
@@ -756,7 +769,8 @@ pub(super) async fn drive_conversation(
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
 ) -> Result<(), EmbeddedDriverError> {
-    drive_conversation_with_transport::<ChatGptPlanAuth, _>(
+    let transport = responses_client(&runtime);
+    drive_conversation_with_transport::<RunAccountAuth, _>(
         embedded,
         runtime,
         settings,
@@ -766,7 +780,7 @@ pub(super) async fn drive_conversation(
         cancellation,
         lifecycle,
         actor_ref,
-        responses_client(settings),
+        transport,
     )
     .await
 }
@@ -1403,7 +1417,8 @@ mod shutdown_tests {
         std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
         for path in [credentials.path().join("absent.json"), legacy] {
             settings.credential_file = path;
-            let client = responses_client(&settings);
+            let client =
+                ResponsesClient::new(ChatGptPlanAuth::new(settings.credential_file.clone()));
             assert_eq!(
                 harness::engine::ResponsesTransport::response_contract(&client).unwrap(),
                 (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),

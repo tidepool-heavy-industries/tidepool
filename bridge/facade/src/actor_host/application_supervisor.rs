@@ -281,6 +281,7 @@ pub(super) async fn run_interactive_applications(
                         &graph, &live_actors, &embedded_projection,
                         &conversations, &embedded_lifecycle_tx,
                         &mut browser_commands,
+                        service.runtime.account_auth(),
                     ) {
                         break Some(format!("embedded browser command drain failed: {error}"));
                     }
@@ -345,6 +346,7 @@ pub(super) async fn run_interactive_applications(
                     &live_actors, &embedded_projection, &conversations,
                     &embedded_lifecycle_tx,
                     &mut browser_commands,
+                        service.runtime.account_auth(),
                 ) {
                     break Some(format!("embedded browser command drain failed: {error}"));
                 }

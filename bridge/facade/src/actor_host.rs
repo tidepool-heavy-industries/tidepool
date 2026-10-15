@@ -1140,6 +1140,7 @@ fn prepare_embedded_browser_command(
     projection: &embedded_projection::EmbeddedProjection,
     conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
+    accounts: Option<&harness::transport::auth::chatgpt::SavedAccounts>,
 ) -> Result<EmbeddedBrowserCommandDispatch, String> {
     use harness::server::CommandReceiptOutcome;
 
@@ -1190,6 +1191,21 @@ fn prepare_embedded_browser_command(
         && live.contains(&actor);
     if !is_live {
         return refuse("target actor is no longer live".into());
+    }
+    if matches!(command, harness::server::HostCommand::SelectAccount { .. }) {
+        if !nodes
+            .iter()
+            .any(|node| node.actor == actor && node.creator.is_none())
+        {
+            return refuse("account selection must target the current root actor".into());
+        }
+        let Some(accounts) = accounts else {
+            return refuse("saved accounts are unavailable".into());
+        };
+        return store
+            .select_run_account(run, operation, accounts)
+            .map(|receipt| EmbeddedBrowserCommandDispatch::Settled(Some(receipt)))
+            .map_err(|e| e.to_string());
     }
     let Some(conversation) = conversation_for(actor) else {
         return refuse("target has no live model conversation".into());
@@ -1285,7 +1301,8 @@ impl EmbeddedBrowserCommandDispatch {
             }
             harness::server::HostCommand::Retire { .. } => harness::embedding::HostControl::Retire,
             harness::server::HostCommand::Input { .. }
-            | harness::server::HostCommand::Recover { .. } => {
+            | harness::server::HostCommand::Recover { .. }
+            | harness::server::HostCommand::SelectAccount { .. } => {
                 unreachable!("atomic commands return their retained receipt")
             }
         };
@@ -1300,7 +1317,8 @@ impl EmbeddedBrowserCommandDispatch {
                         harness::server::CommandControl::Interrupt
                     }
                     harness::server::HostCommand::Input { .. }
-                    | harness::server::HostCommand::Recover { .. } => {
+                    | harness::server::HostCommand::Recover { .. }
+                    | harness::server::HostCommand::SelectAccount { .. } => {
                         unreachable!("atomic commands return their retained receipt")
                     }
                 };
@@ -1337,6 +1355,7 @@ async fn dispatch_embedded_browser_command(
         projection,
         conversation_for,
         lifecycle,
+        None,
     )?
     .complete()
     .await
@@ -1358,6 +1377,7 @@ fn drain_embedded_browser_commands(
     conversations: &HashMap<ActorRef, embedded_harness::EmbeddedActorBinding>,
     lifecycle: &embedded_projection::LifecycleSender,
     tasks: &mut BrowserCommandTasks,
+    account_auth: &harness::transport::auth::chatgpt::RunAccountAuth,
 ) -> Result<(), String> {
     // The channel is a wake hint. Store rows survive the persist/enqueue gap
     // and are also drained by the existing host health tick.
@@ -1379,6 +1399,14 @@ fn drain_embedded_browser_commands(
                 continue;
             }
         }
+        let accounts = if matches!(
+            record.command,
+            harness::server::HostCommand::SelectAccount { .. }
+        ) {
+            account_auth.accounts().ok()
+        } else {
+            None
+        };
         let dispatch = prepare_embedded_browser_command(
             record.operation_id,
             &record.command,
@@ -1398,9 +1426,22 @@ fn drain_embedded_browser_commands(
                     })
             },
             lifecycle,
+            accounts.as_ref(),
         )?;
         match dispatch {
             EmbeddedBrowserCommandDispatch::Settled(Some(receipt)) => {
+                if let harness::server::CommandReceiptOutcome::AccountSelected {
+                    account_id, ..
+                } = &receipt.outcome
+                {
+                    if let Some(accounts) = accounts.as_ref() {
+                        control.publish(
+                            harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
+                                accounts.projection(account_id.clone()),
+                            ),
+                        );
+                    }
+                }
                 control.publish_command_receipt(receipt);
             }
             EmbeddedBrowserCommandDispatch::Settled(None) => {}
@@ -3992,6 +4033,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         runtime_directory.path(),
         settings.concurrent_jobs,
     )?;
+    runtime.configure_accounts(settings.credential_file.clone())?;
     let recovery = exomonad_actor::ActorRecoveryJournal::open(
         &runtime_directory,
         "actor-lifecycle.v2.jsonl",

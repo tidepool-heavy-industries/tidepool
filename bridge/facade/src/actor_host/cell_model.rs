@@ -2,6 +2,8 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use exomonad_actor::{ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, ModelReq};
+use harness::transport::auth::chatgpt::RunAccountAuth;
+#[cfg(test)]
 use harness::transport::auth::ChatGptPlanAuth;
 use harness::{
     engine::ResponsesTransport, invocation::Limits, model::Effort, store::Store, transport::Auth,
@@ -12,10 +14,7 @@ use tidepool_handlers::handlers::model::ModelService;
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
-use super::{
-    embedded_service::{responses_client, EmbeddedService},
-    ActorHostConfig,
-};
+use super::{embedded_service::EmbeddedService, ActorHostConfig};
 use crate::{
     exomonad::EmbeddedLaunchConfig,
     model_turn::{CellModelService, ModelPolicy},
@@ -224,14 +223,15 @@ pub(super) fn admitted_runtime_factory(
         exomonad_actor::ForkEffort::Medium => Effort::Medium,
         exomonad_actor::ForkEffort::High => Effort::High,
     };
-    let settings = settings.clone();
+    let _ = settings;
+    let auth = runtime.account_auth().clone();
     Arc::new(
-        EmbeddedCellModelFactory::<ChatGptPlanAuth, _>::new(
+        EmbeddedCellModelFactory::<RunAccountAuth, _>::new(
             runtime.store(),
             runtime.scheduler(),
             config.model.clone(),
             effort,
-            Arc::new(move || responses_client(&settings)),
+            Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
         )
         .with_launch_config(config),
     )
