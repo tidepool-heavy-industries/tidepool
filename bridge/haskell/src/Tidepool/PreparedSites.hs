@@ -739,19 +739,18 @@ siteWireType authority spec answer = case vsWireSource spec of
 -- Only the known progress verbs expose a progress type. The shared verb table
 -- must retain their exact input and answer positions before a signature issues.
 requestProgressType :: VerbSpec -> [Type] -> Either String (Maybe Type)
-requestProgressType spec inputs = do
-  (indices, answer, progress) <- case (vsModule spec, vsName spec) of
-    ("Tidepool.Actors.Internal.Agent", "request") -> Right ([1], FirstTypeArgument, False)
-    ("Tidepool.Actors.Internal.Agent", "requestWithProgress") -> Right ([2, 0], TypeArgument 1, True)
-    ("Tidepool.Actors.Internal.Agent", "requestWithProgressInto") -> Right ([2, 0], TypeArgument 1, True)
-    _ -> Left "request site lacks known reply/progress semantics"
-  if vsInputTypeArgs spec /= indices || vsAnswerSource spec /= answer
-      || vsDerivedInput spec /= Just (if progress then 1 else 0, ResponseResultEvidence) || vsListAnswer spec
-    then Left "request site has another input or answer type shape"
-    else case (progress, inputs) of
-      (False, [_]) -> Right Nothing
-      (True, [_, progressType]) -> Right (Just progressType)
+requestProgressType spec inputs =
+  -- The admitted catalogue already owns the input positions and reply source.
+  -- Derive request semantics from that typed shape rather than maintaining a
+  -- second verb-name roster that can omit a newly registered request producer.
+  case (vsInputTypeArgs spec, vsAnswerSource spec, vsDerivedInput spec, vsListAnswer spec) of
+    ([1], FirstTypeArgument, Just (0, ResponseResultEvidence), False) -> case inputs of
+      [_] -> Right Nothing
       _ -> Left "request site has another live input arity"
+    ([2, 0], TypeArgument 1, Just (1, ResponseResultEvidence), False) -> case inputs of
+      [_, progressType] -> Right (Just progressType)
+      _ -> Left "request site has another live input arity"
+    _ -> Left "request site has another input or answer type shape"
 
 -- | Exact generated siblings present in one tidied home module. Merging these
 -- maps in dependency order gives later modules the real imported Ids without
