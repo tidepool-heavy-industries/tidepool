@@ -18,7 +18,6 @@ module Tidepool.TypePolicy
   ) where
 
 import Control.Monad.State.Strict
-import Control.Monad (when)
 import Control.Exception (Exception)
 import qualified Data.ByteString as BS
 import Data.Char (isDigit)
