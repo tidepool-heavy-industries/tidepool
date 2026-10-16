@@ -19,12 +19,15 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import JevPreparedTest (jevPreparedTests)
 import JevRecordingTest (jevRecordingTests)
 import qualified Examples.ModelCallWorkflow as ModelExample
+import qualified Persona.Spec as Persona
 import LookupEvidenceTest (lookupEvidenceTests)
 
 import Prelude
 import Control.Monad (unless)
-import Control.Monad.Freer (Eff, interpret, run)
+import Control.Monad.Freer (interpret, run)
+import Control.Monad.Freer.Internal (Eff (..), qApp)
 import Control.Monad.Freer.State (State, modify, runState)
+import Data.OpenUnion (prj)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -36,11 +39,11 @@ import Tidepool.Agent.Contract
 import qualified Tidepool.Reload as Reload
 import Tidepool.Model
 import Tidepool.Internal.ModelControl qualified as Control
-import Tidepool.Effects.Core (ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
+import Tidepool.Effects.Core (Console (..), say, ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
 
 data Tools mode = Tools { echo :: mode :- Call Text Text } deriving Generic
 data Reply = Reply { count :: Int, optional :: Maybe Text }
-  deriving (Generic, FromJSON, ToJSON, JsonSchema)
+  deriving (Generic, FromJSON, ToJSON, JsonSchema, Show)
 
 program :: Eff '[ModelCall, State [Text]] (ModelResult Reply)
 program = invokeModel (typedTurn @Reply (defaultSpec
@@ -68,7 +71,14 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [testCase "NoTools model examples preserve selectors limits and receipts" noToolsExample, testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  [testCase "NoTools model examples preserve selectors limits and receipts" noToolsExample
+  , testCase "synchronous model helpers compose in the Persona notebook with Console and display" personaNotebookExample
+  , testGroup "model invocation cleanup"
+      [ testCase "resume failure closes the acquired callback token once" (cleanupExample ResumeFailure)
+      , testCase "cleanup failure preserves the primary resume failure" (cleanupExample CloseFailure)
+      , testCase "malformed continuation returns typed failure and closes once" (cleanupExample MalformedResume)
+      ]
+  , testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 scenario :: IO ()
 scenario = do
@@ -148,3 +158,137 @@ noToolsExample = do
                 (Control.ModelTextOutcome "bounded answer")))))
         _ -> error "NoTools recipe changed selector, input, limits, tools or hook"
     handleText _ _ = error "NoTools recipe attempted callback, hook or close"
+
+-- This is the installed Persona notebook row, including its invocation-only
+-- effects. A helper fixed to SyncEffects '[ModelCall] cannot inhabit this cell.
+personaNotebook :: Eff (SyncEffects Persona.PersonaEffects)
+  (ModelResult Text, ModelResult Text, (Int, Int, Int), (Int, Int, Int))
+personaNotebook = do
+  say "before model calls"
+  lunaResult <- ModelExample.synchronousLuna "persona Luna input"
+  lunaPage <- display (ModelExample.report lunaResult)
+  say "between model calls"
+  solResult <- ModelExample.synchronousSol "persona Sol input"
+  solPage <- display (ModelExample.report solResult)
+  say "after model calls"
+  pure (lunaResult, solResult, displayIdentity lunaPage, displayIdentity solPage)
+
+data NotebookEvent
+  = ModelRequested Text Text
+  | Narrated Text
+  | DisplayBudgetRequested
+  | DisplayPublished Text
+  deriving (Eq, Show)
+
+-- Handle the two effects this real-row program is expected to request. Reject
+-- every other Persona effect instead of changing the program to a sparse row.
+runPersonaNotebook :: Eff (SyncEffects Persona.PersonaEffects) a -> (a, [NotebookEvent])
+runPersonaNotebook = go 1
+  where
+    go :: Int -> Eff (SyncEffects Persona.PersonaEffects) b -> (b, [NotebookEvent])
+    go _ (Val value) = (value, [])
+    go next (E effect continuation) = case prj @ModelCall effect of
+      Just request -> let (answer, event) = modelStep request
+        in prepend event (go next (qApp continuation answer))
+      Nothing -> case prj @Console effect of
+        Just (Print text) -> prepend (Narrated text) (go next (qApp continuation ()))
+        Just DisplayAllowanceWith -> prepend DisplayBudgetRequested
+          (go next (qApp continuation 4096))
+        Just (DisplayWith (identity, text, keys, more) _)
+          | identity == (0, 0, 0) && null keys && not more ->
+              prepend (DisplayPublished text)
+                (go (next + 1) (qApp continuation (17, 3, next)))
+          | otherwise -> error "bounded report unexpectedly required display navigation"
+        Just _ -> error "Persona model example requested an unexpected Console operation"
+        Nothing -> error "Persona model example requested an unrelated effect"
+    prepend event (answer, events) = (answer, event : events)
+    modelStep :: ModelCall b -> (b, NotebookEvent)
+    modelStep (ModelStartWith value) = case fromJSON value of
+      Success (Control.ModelRequestEnvelope _ input model _ limits tools _ hook)
+        | limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
+        , tools == toJSON ([] :: [Value])
+        , not hook ->
+            let label = case model of
+                  Just Luna -> "Luna"
+                  Just Sol -> "Sol"
+                  _ -> error "Persona model example changed its explicit model selector"
+            in (Right (toJSON (Control.ModelFinished
+                  (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"]
+                    (Control.ModelUsageEnvelope 1 0 9 0) (Control.ModelUsageEnvelope 1 0 9 0)
+                    (Control.ModelTextOutcome ("answer from " <> label)))))
+               , ModelRequested label input)
+      _ -> error "Persona model example changed its bounded NoTools request"
+    modelStep _ = error "NoTools Persona composition attempted a callback, hook or close"
+
+personaNotebookExample :: IO ()
+personaNotebookExample = do
+  let ((lunaResult, solResult, lunaPage, solPage), events) = runPersonaNotebook personaNotebook
+      require condition detail = unless condition (error detail)
+  require (lunaPage == (17, 3, 1) && solPage == (17, 3, 2))
+    "display handles lost the identities returned by the Console owner"
+  require ([ (model, input) | ModelRequested model input <- events ] ==
+    [("Luna", "persona Luna input"), ("Sol", "persona Sol input")])
+    "Persona composition changed model choice, explicit input or request multiplicity"
+  mapM_ (\(label, result) -> do
+    case modelOutcome result of
+      Right answer -> require (answer == "answer from " <> label) "model answer changed"
+      Left failure -> error (show failure)
+    require (modelReceipt result == Just (ModelReceipt ("persona-" <> label)
+      "persona-cell" [label <> "-request"] (ModelUsage 1 0 9 0)))
+      "Persona composition lost receipt identity or bounded usage")
+    [("Luna", lunaResult), ("Sol", solResult)]
+  case [text | DisplayPublished text <- events] of
+    [lunaText, solText] -> mapM_ (\(label, text) ->
+      mapM_ (\piece -> require (piece `Text.isInfixOf` text)
+        "display omitted the actual model answer or receipt evidence")
+        ["answer from " <> label, "persona-" <> label, "persona-cell", label <> "-request",
+         "provider_requests", "tool_attempts"])
+      [("Luna", lunaText), ("Sol", solText)]
+    _ -> error "Persona composition did not display both retained reports"
+  require (map eventKind events ==
+    ["say", "model", "allowance", "display", "say", "model", "allowance", "display", "say"])
+    "Console and model effects did not follow the notebook's authored order"
+  require ([text | Narrated text <- events] ==
+    ["before model calls", "between model calls", "after model calls"])
+    "Console text changed while raising the synchronous helpers"
+  where
+    eventKind (ModelRequested _ _) = "model" :: Text
+    eventKind (Narrated _) = "say"
+    eventKind DisplayBudgetRequested = "allowance"
+    eventKind (DisplayPublished _) = "display"
+
+data CleanupScript = ResumeFailure | CloseFailure | MalformedResume
+  deriving (Eq, Show)
+
+cleanupExample :: CleanupScript -> IO ()
+cleanupExample script = do
+  let (result, events) = run (runState [] (interpret cleanupHost program))
+  unless (events == ["start", "called", "resume", "close:cleanup-token"])
+    (error ("callback or token cleanup did not run exactly once: " ++ show events))
+  unless (modelReceipt result == Nothing) (error "failed continuation fabricated a receipt")
+  case (script, modelOutcome result) of
+    (ResumeFailure, Left (ModelBoundary (ModelTransportFailed "resume transport failed"))) -> pure ()
+    (CloseFailure, Left (ModelCleanupFailed
+      (ModelBoundary (ModelTransportFailed "resume transport failed"))
+      (ModelRejected "close refused"))) -> pure ()
+    (MalformedResume, Left (InvalidModelResponse detail))
+      | not (Text.null detail) -> pure ()
+    _ -> error ("invokeModel lost the primary or cleanup failure: " ++ show result)
+  where
+    cleanupHost :: ModelCall a -> Eff '[State [Text]] a
+    cleanupHost (ModelStartWith _) = do
+      modify @[Text] (<> ["start"])
+      pure (Right (toJSON (Control.ModelCallback "cleanup-token" "cleanup-call" "echo" (String "called"))))
+    cleanupHost (ModelResumeWith token call answer)
+      | token == "cleanup-token" && call == "cleanup-call"
+      , answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = do
+          modify @[Text] (<> ["resume"])
+          pure (if script == MalformedResume then Right (Bool True)
+            else Left (ModelTransportFailed "resume transport failed"))
+      | otherwise = error "cleanup test resumed a different callback or result"
+    cleanupHost (ModelCloseWith token)
+      | token == "cleanup-token" = do
+          modify @[Text] (<> ["close:" <> token])
+          pure (if script == CloseFailure then Left (ModelRejected "close refused") else Right ())
+      | otherwise = error "cleanup used a token other than the acquired invocation"
+    cleanupHost (ModelAnnotateWith _ _ _) = error "failed continuation reached its after-tool hook"
