@@ -3955,6 +3955,20 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f7472616e73616374696f6e5f726561646261636b2e6873",
+    src = "src/actor_host/fixtures/context_transaction_readback.hs",
+    out = "context_transaction_readback.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f7472616e73616374696f6e5f73746167652e6873",
+    src = "src/actor_host/fixtures/context_transaction_stage.hs",
+    out = "context_transaction_stage.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f64656665727265645f7265706c795f61776169742e6873",
     src = "src/actor_host/fixtures/deferred_reply_await.hs",
     out = "deferred_reply_await.hs",

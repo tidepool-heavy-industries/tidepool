@@ -1680,7 +1680,7 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
             .context_transaction_status(&conversation_identity, &transaction)
             .unwrap(),
         harness::context::ContextTransactionStatus::Cancelled,
-        "confirmed cancellation must have a durable context outcome before successor inference",
+        "confirmed cancellation has a durable context outcome when the successor is observed",
     );
     assert_eq!(successor.request.model, "test-model");
     assert!(has_user_text(&successor.request, "parent-original"));
