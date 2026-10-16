@@ -935,9 +935,12 @@ impl OriginalCompilerInputs {
             })
             .cloned()
             .collect();
+        // The support view predates private complete-product issuance. Keep
+        // that exact issued graph as custody while preserving support's roots.
+        let artifacts = self.artifacts.retain_original_custody(support)?;
         Ok(Self {
             projection,
-            artifacts: support.clone(),
+            artifacts,
             native_original_requirements,
             native_availability,
         })
