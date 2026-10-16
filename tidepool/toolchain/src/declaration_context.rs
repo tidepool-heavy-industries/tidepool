@@ -4687,15 +4687,12 @@ impl ExactCompilationRequest {
                 },
             ))
         })?;
-        let interfaces = context.interface_owners();
-        let mut exact_owners: BTreeSet<_> = interfaces
-            .iter()
-            .map(|interface| {
-                (
-                    interface.owner.unit.as_str(),
-                    interface.owner.module.as_str(),
-                )
-            })
+        // Retained proof custody may contain interfaces that this request must
+        // compile freshly. Only selected compiler roles are admitted owners.
+        let admitted_compiler_owners = context.compiler_metadata_snapshot()?.entries;
+        let mut exact_owners: BTreeSet<_> = admitted_compiler_owners
+            .keys()
+            .map(|owner| (owner.unit.as_str(), owner.module.as_str()))
             .collect();
         if let Some(planned) = planned {
             exact_owners.insert((planned.unit.as_str(), planned.module.as_str()));
@@ -4706,23 +4703,11 @@ impl ExactCompilationRequest {
             .iter()
             .map(|module| (module.unit.as_str(), module.module.as_str(), module.boot))
             .collect();
-        if let Some((unit, module, _)) = source_owners
+        if source_owners
             .iter()
-            .find(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
+            .any(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
         {
-            let context_owner = interfaces.iter().any(|interface| {
-                interface.owner.unit == *unit && interface.owner.module == *module
-            });
-            let planned_owner =
-                planned.is_some_and(|owner| owner.unit == *unit && owner.module == *module);
-            let checked_value_owner = self
-                .checked_value_imports
-                .owners()
-                .any(|owner| owner == (*unit, *module));
-            return Err(failure(format!(
-                "fresh module replaced an admitted exact owner: owner={unit}:{module}, context={context_owner}, planned={planned_owner}, checked_value={checked_value_owner}, source={}",
-                source_path.display(),
-            )));
+            return Err(failure("fresh module replaced an admitted exact owner"));
         }
         let mut selected: BTreeSet<_> = context
             .facts
