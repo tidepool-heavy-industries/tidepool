@@ -934,10 +934,24 @@ impl OriginalCompilerInputs {
                     .any(|role| role.original() == Some(offer.original()))
             })
             .cloned()
-            .collect();
-        // The support view predates private complete-product issuance. Keep
-        // that exact issued graph as custody while preserving support's roots.
-        let artifacts = self.artifacts.retain_original_custody(support)?;
+            .collect::<Vec<_>>();
+        // Support predates private complete-product issuance. Reopen only the
+        // surviving issuer proofs, then retain them without changing support's
+        // roots or namespace. Generated and unrelated originals stay excluded.
+        let mut artifacts = support.clone();
+        let mut retained = Vec::new();
+        for proof in native_original_requirements
+            .iter()
+            .chain(native_availability.iter().filter_map(|offer| offer.proof()))
+        {
+            if retained.contains(&proof) {
+                continue;
+            }
+            let issued = self.artifacts.select_issued(Vec::new(), &proof.selection)?;
+            artifacts = artifacts.merge(&issued)?;
+            retained.push(proof);
+        }
+        let artifacts = artifacts.retain_original_custody(support)?;
         Ok(Self {
             projection,
             artifacts,
