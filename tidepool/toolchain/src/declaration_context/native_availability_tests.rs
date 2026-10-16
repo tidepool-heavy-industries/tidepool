@@ -2360,15 +2360,56 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             canonical_only =
                 canonical_only.rebuild(|facts| facts.compiler_support.projection = updated);
         }
-        assert!(
-            OriginalCompilerInputs::from_selected_authored_declarations(
-                &canonical_only,
+        let exact = OriginalCompilerInputs::from_selected_authored_declarations(
+            &canonical_only,
+            producer,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            exact
+                .projection
+                .roles()
+                .iter()
+                .filter_map(CompilerInputRole::original)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([current_native]),
+            "one exact issued offer wins over unoffered equal-canonical custody"
+        );
+        let other = OriginalCompilerInputs::from_native_availability(
+            &type_context(std::slice::from_ref(&products[1])),
+            producer,
+            std::slice::from_ref(&products[1]),
+        )
+        .unwrap();
+        assert!(other.native_offers().iter().any(|offer| offer.is_full()));
+        for reverse in [false, true] {
+            let mut offers = canonical_only.facts.compiler_support.native_offers.to_vec();
+            offers.extend_from_slice(other.native_offers());
+            if reverse {
+                offers.reverse();
+            }
+            let mut competing = canonical_only.clone();
+            competing.facts.compiler_support =
+                crate::artifact_inventory::CompilerSourceSupport::new(
+                    competing.facts.compiler_support.projection.clone(),
+                    competing.artifact_view().clone(),
+                    offers,
+                )
+                .unwrap();
+            let error = OriginalCompilerInputs::from_selected_authored_declarations(
+                &competing,
                 producer,
                 &[],
             )
-            .is_err(),
-            "full body selections cannot choose an ambiguous canonical-only namespace"
-        );
+            .unwrap_err();
+            assert!(
+                matches!(error, CompileError::ArtifactInventory(error)
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::CompilerOriginalOfferConflict { .. })),
+                "competing eligible issued products refuse in either offer order"
+            );
+        }
         let different = fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
                 "main",

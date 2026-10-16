@@ -490,7 +490,11 @@ impl OriginalCompilerInputs {
                 if !authored.contains(&facts.owner) {
                     continue;
                 }
-                let Some(role) = projection.snapshot_roles().get(&facts.owner) else {
+                let Some(role) = context
+                    .compiler_input_projection()
+                    .snapshot_roles()
+                    .get(&facts.owner)
+                else {
                     continue;
                 };
                 if role.interface() != facts.interface
