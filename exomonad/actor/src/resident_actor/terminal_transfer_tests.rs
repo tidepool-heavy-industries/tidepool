@@ -213,3 +213,93 @@ async fn resumed_reply_requires_publication_and_cannot_succeed_after_retirement(
         fixture.finish().await;
     }
 }
+
+#[tokio::test]
+async fn response_publication_refuses_missing_wrong_and_duplicate_settlement() {
+    let fixture = invocation_work::tests::Fixture::start().await;
+    let (mut resident, mut context, _source, mut parked, _root) =
+        crate::resident_workbench::request_tests::activation_session_fixture(|_| {});
+    context.actor = fixture.actor.identity();
+    let owner = ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
+    let requests = &fixture.environment.requests;
+    let request = requests.reserve(owner, context.actor);
+    crate::request::test_support::admit_destination(requests, owner, request);
+    requests.mark_queued(owner, context.actor, request).unwrap();
+    requests.present(context.actor, request).unwrap();
+    let claim = requests.begin_reply(context.actor, request).unwrap();
+    let snapshot = crate::request::test_support::snapshot(&claim);
+    let mut admitted = Some(claim);
+    let mut behavior = ResidentKernelBehavior::with_boot(
+        ActorDescriptor::new("publication-refusal", context.placement),
+        fixture.environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    let (continuation, input) = parked.remove(0);
+    let ancestry = crate::CallAncestry::begin(context.actor);
+    for history in 0..3 {
+        if history == 1 {
+            behavior.accepted_settlement = Some(AcceptedRequestSettlement {
+                transfer: None,
+                kind: AcceptedRequestKind::Reply(AcceptedReply {
+                    claim: admitted.take().unwrap(),
+                    preview: None,
+                    publication: AcceptedReplyPublication::Awaiting,
+                }),
+            });
+        }
+        if history == 2 {
+            let AcceptedRequestKind::Reply(reply) =
+                &mut behavior.accepted_settlement.as_mut().unwrap().kind
+            else {
+                unreachable!();
+            };
+            reply.publication = AcceptedReplyPublication::Published(snapshot.clone());
+        }
+        let effect_owner = behavior.actor_effect_owner(context.actor);
+        let error = behavior
+            .prepare_actor_effect(
+                &fixture.kernel,
+                &context,
+                effect_owner,
+                &ancestry,
+                ResidentActorBoundary::ResponsePublication {
+                    continuation: continuation.clone(),
+                    request: if history == 1 {
+                        crate::RequestId(request.0 + 100)
+                    } else {
+                        request
+                    },
+                    value: crate::request::test_support::publication(request),
+                },
+            )
+            .await
+            .unwrap_err();
+        let expected = if history == 2 {
+            "published its response twice"
+        } else {
+            "does not belong to the accepted reply"
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let AcceptedRequestKind::Reply(reply) = behavior.accepted_settlement.take().unwrap().kind
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(reply.publication, AcceptedReplyPublication::Published(ref retained) if Arc::ptr_eq(retained, &snapshot)),
+        "refused publication must preserve the original snapshot"
+    );
+    requests.fail_reply_settlement(reply.claim, "publication refusal fixture complete");
+    drop(input);
+    let _ = resident.abort(
+        continuation.cont_id(),
+        "publication refusal fixture complete".into(),
+    );
+    for (hole, input) in parked {
+        drop(input);
+        let _ = resident.abort(hole.cont_id(), "unused publication fixture".into());
+    }
+    drop(behavior);
+    fixture.finish().await;
+}
