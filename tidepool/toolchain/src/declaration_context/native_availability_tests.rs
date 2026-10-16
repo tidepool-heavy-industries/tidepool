@@ -376,6 +376,18 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             );
         }
     }
+    let competing_roots = left.merge(&right).unwrap();
+    let competing =
+        NativeOriginalRequirement::from_selected_view(native_entry.descriptor.id, &competing_roots)
+            .unwrap()
+            .unwrap();
+    assert_eq!(competing.issued_groups(&broad).unwrap().len(), 4);
+    assert!(competing.qualify_availability(&broad).unwrap().is_none());
+    assert!(matches!(
+        capture_native_availability(&baseline, &broad, std::slice::from_ref(&competing))
+            .unwrap().as_slice(),
+        [NativeCompilerAvailability::Issued { proof: Some(proof), .. }] if proof == &competing
+    ));
     let marker = product("DifferentCarrier", 80);
     let other = inventory
         .admit_shared_with_demand(
