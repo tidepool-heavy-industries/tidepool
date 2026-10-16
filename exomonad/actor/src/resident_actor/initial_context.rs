@@ -345,6 +345,7 @@ fn wire_initial_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{PreparedFailureKind, PreparedRuntimeError};
 
     fn receipt(operation: &WorkbenchExecutionId) -> WorkbenchItemReceipt {
