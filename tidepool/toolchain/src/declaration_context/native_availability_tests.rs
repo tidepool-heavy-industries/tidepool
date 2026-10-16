@@ -3591,3 +3591,97 @@ fn generated_private_transport_histories_preserve_issued_graphs() {
     );
     result.unwrap();
 }
+
+#[test]
+fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_admission() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("BoundedRequest", 117);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for ordinal in [None, Some(7)] {
+        let selected = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![entry.clone()],
+                &ordinal
+                    .into_iter()
+                    .map(|original_ordinal| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal,
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let custody = full.retain_original_custody(&selected).unwrap();
+        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+            &projection,
+            &selected,
+            &[],
+        )
+        .unwrap();
+        let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
+            entry.descriptor.id,
+            &selected,
+            requirements.first().cloned(),
+        )
+        .unwrap();
+        let private = OriginalCompilerInputs {
+            projection: projection.clone(),
+            artifacts: custody.clone(),
+            native_offers: vec![offer],
+        };
+        let context = Arc::new(ExactDeclarationContext::from_facts(
+            DeclarationContextFacts {
+                producer: producer.sha256(),
+                inventory: custody,
+                compiler_projection: projection.interface_only(),
+                lexical: Default::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            },
+        ));
+        let request = ExactCompileContext::new(context)
+            .prepare_compilation_with_private_input(
+                &root.path().join(format!("{ordinal:?}")),
+                PRODUCER,
+                None,
+                Some(private),
+            )
+            .unwrap();
+        let inputs = request.compiler_inputs();
+        let validation = PackageInterfaceValidation::default();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        for demanded in [7, 9001] {
+            let mut fixed = inventory
+                .bind_segment(&inputs.artifacts, vec![], &selection)
+                .unwrap();
+            let imports = [source_import(&native, demanded)];
+            let admitted = inventory.admit_bound_target(
+                &mut fixed,
+                &inputs.artifacts,
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            );
+            if ordinal == Some(demanded) {
+                assert!(admitted.is_ok());
+            } else {
+                assert!(
+                    matches!(admitted, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
+                        if artifact == entry.descriptor.id && original_ordinal == demanded))
+                );
+            }
+        }
+    }
+}
