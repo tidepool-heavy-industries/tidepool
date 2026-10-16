@@ -202,6 +202,170 @@ fn issued_mode(ordinals: &[u32]) -> Value {
 }
 
 #[test]
+fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallback() {
+    use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
+
+    let native = product("CarriedDependency", 75);
+    let consumer = dependent_product(
+        "PrivateConsumer",
+        76,
+        vec![(7, vec![source_import(&native, 7)])],
+    );
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let recovered = recovered_witness_fixtures(&[native, consumer]);
+    let native = &recovered
+        .iter()
+        .find(|row| row.product.owner().module == "CarriedDependency")
+        .unwrap()
+        .product;
+    let consumer = &recovered
+        .iter()
+        .find(|row| row.product.owner().module == "PrivateConsumer")
+        .unwrap()
+        .product;
+    let native_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let consumer_entry = ArtifactEntry::original(producer.sha256(), consumer.clone()).unwrap();
+    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone());
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![native_entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let groups = native_entry
+        .native_group_ordinals
+        .iter()
+        .map(|original_ordinal| NativeGroupKey {
+            artifact: native_entry.descriptor.id,
+            original_ordinal: *original_ordinal,
+        })
+        .collect();
+    let make = |module: &str, version| {
+        let marker = product(module, version);
+        inventory
+            .admit_recovery_selection(
+                &base,
+                vec![Arc::new(ArtifactEntry::canonical(
+                    marker.module_interface().unwrap().clone(),
+                ))],
+                &groups,
+            )
+            .unwrap()
+    };
+    let left = make("LeftIssuance", 77);
+    let right = make("RightIssuance", 78);
+    let proof = |view: &ArtifactView| {
+        NativeOriginalRequirement::from_issued_group_custody(
+            native_entry.descriptor.id,
+            canonical.descriptor.id,
+            view,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let left_proof = proof(&left);
+    let right_proof = proof(&right);
+    let dependency = |proof: &NativeOriginalRequirement, view: &ArtifactView| {
+        proof
+            .issued_groups(view)
+            .unwrap()
+            .into_iter()
+            .find(|group| {
+                group.binding.artifact == native_entry.descriptor.id && group.original_ordinal == 7
+            })
+            .unwrap()
+    };
+    let left_group = dependency(&left_proof, &left);
+    let right_group = dependency(&right_proof, &right);
+    assert_ne!(left_group, right_group);
+    assert_eq!(
+        left_proof.selection.graph_selection().namespace,
+        right_proof.selection.graph_selection().namespace,
+        "the distinct group scopes share one original carrier"
+    );
+    let view = left
+        .merge(&right)
+        .unwrap()
+        .retain_original_custody(&right)
+        .unwrap();
+    let baseline = CompilerInputProjection::from_issued_entries(&[native_entry.clone()]).unwrap();
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            inventory: view.clone(),
+            compiler_projection: baseline.interface_only(),
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    let root = tempfile::tempdir().unwrap();
+    for (index, supplied, expected) in [
+        (0, vec![left_proof.clone()], left_group),
+        (1, vec![left_proof.clone(), left_proof.clone()], left_group),
+        (2, Vec::new(), right_group),
+    ] {
+        let input = OriginalCompilerInputs::issue_complete_native_availability(
+            &view,
+            &baseline,
+            producer.sha256(),
+            std::slice::from_ref(consumer),
+            &supplied,
+        )
+        .unwrap();
+        let issued = input
+            .native_original_requirements
+            .iter()
+            .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .unwrap();
+        assert_eq!(
+            dependency(issued, &input.artifacts),
+            expected,
+            "carried availability chooses the private dependency before selected-state fallback"
+        );
+        assert_eq!(
+            input.artifacts.selected_native_groups(),
+            view.selected_native_groups(),
+            "private availability preserves execution demand"
+        );
+        let request = ExactCompileContext::new(context.clone())
+            .prepare_compilation_with_private_input(
+                &root.path().join(index.to_string()),
+                PRODUCER,
+                None,
+                Some(input),
+            )
+            .unwrap();
+        let retained = request
+            .compiler_inputs()
+            .native_original_requirements
+            .iter()
+            .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .unwrap();
+        assert_eq!(
+            dependency(retained, &request.compiler_inputs().artifacts),
+            expected
+        );
+        assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
+        assert_eq!(wire_mode(&request, "CarriedDependency"), issued_mode(&[7]));
+    }
+    assert!(matches!(
+        OriginalCompilerInputs::issue_complete_native_availability(
+            &view,
+            &baseline,
+            producer.sha256(),
+            std::slice::from_ref(consumer),
+            &[left_proof, right_proof],
+        ),
+        Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })
+    ));
+}
+
+#[test]
 fn private_native_availability_preserves_partial_baseline_and_exact_advertised_closure() {
     let unused = product("UnusedNative", 40);
     let required = product("RequiredNative", 41);
