@@ -2578,7 +2578,7 @@ impl SelectedModuleCandidateOffer {
                 &initial.request_sha256,
                 &output.source,
                 &output.target,
-                sealed.original_execution.clone().ok_or_else(|| {
+                sealed.original.execution().cloned().ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "program output lacks original execution evidence".into(),
                     )
@@ -2816,11 +2816,9 @@ impl SelectedModuleCandidateOffer {
             &generated,
         )?;
         let sealed = output.products.as_ref().expect("program output was sealed");
-        let private = sealed.original_compiler_inputs().for_program_continuation(
-            &support,
-            source_segment.admissions(),
-            &output.source,
-        )?;
+        let private = sealed
+            .original_compiler_inputs()?
+            .for_program_continuation(&support, source_segment.admissions(), &output.source)?;
         let mut continued = request.in_program_context_with_private_input(
             &output.directory.join("private-compiler-inputs"),
             context.clone(),
@@ -3007,7 +3005,7 @@ impl SelectedModuleCandidateOffer {
             interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
-            compiler_input: sealed.original_compiler_inputs().clone(),
+            compiler_input: sealed.original_compiler_inputs()?.clone(),
         }))
     }
 }
@@ -3105,10 +3103,7 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
-    original_compiler_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
-    // Issued for this exact output before support selection; later program
-    // items cannot enlarge an earlier item's original instance environment.
-    original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
+    original: SealedOriginalEvidence,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
@@ -3122,11 +3117,37 @@ pub struct SealedTurnProducts {
     pub checked: Option<CheckedNativeProof>,
 }
 
+/// Exact inputs and their execution context share one output issuer. Later
+/// program items cannot enlarge this output's original instance environment.
+#[derive(Debug)]
+enum SealedOriginalEvidence {
+    Exact {
+        inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+    },
+    Ordinary(Arc<crate::declaration_context::ExactDeclarationContext>),
+    Absent,
+}
+
+impl SealedOriginalEvidence {
+    fn execution(&self) -> Option<&Arc<crate::declaration_context::ExactDeclarationContext>> {
+        match self {
+            Self::Exact { execution, .. } | Self::Ordinary(execution) => Some(execution),
+            Self::Absent => None,
+        }
+    }
+}
+
 impl SealedTurnProducts {
-    fn original_compiler_inputs(&self) -> &crate::declaration_context::OriginalCompilerInputs {
-        self.original_compiler_inputs
-            .as_deref()
-            .expect("exact output retains its issued compiler inputs")
+    fn original_compiler_inputs(
+        &self,
+    ) -> Result<&crate::declaration_context::OriginalCompilerInputs, CompileError> {
+        match &self.original {
+            SealedOriginalEvidence::Exact { inputs, .. } => Ok(inputs),
+            _ => Err(CompileError::ExtractFailed(
+                "program output lacks exact compiler inputs".into(),
+            )),
+        }
     }
 }
 
@@ -3794,28 +3815,29 @@ fn seal_turn_outputs_with_validation(
             None
         };
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
-    let original_compiler_inputs = exact
-        .as_ref()
-        .map(|_| {
-            crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &certified.source_selection,
-                &artifact_view,
+    let original = match exact.as_ref() {
+        Some(admission) => {
+            let inputs = tracing::debug_span!(
+                target: "exomonad_harness::timing",
+                "products.original_compiler_inputs",
+                inclusive = true,
             )
-            .map(Arc::new)
-        })
-        .transpose()?;
-    let original_execution = match exact.as_ref() {
-        Some(admission) => Some(
-            admission.original_execution_context(
-                original_compiler_inputs
-                    .as_deref()
-                    .expect("exact output compiler inputs"),
-            )?,
-        ),
+            .in_scope(|| {
+                crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &certified.source_selection,
+                    &artifact_view,
+                )
+                .map(Arc::new)
+            })?;
+            let execution = admission.original_execution_context(&inputs)?;
+            SealedOriginalEvidence::Exact { inputs, execution }
+        }
         None => original_compile_input
             .as_ref()
-            .map(|proof| proof.issued_original_execution()),
+            .map(|proof| SealedOriginalEvidence::Ordinary(proof.issued_original_execution()))
+            .unwrap_or(SealedOriginalEvidence::Absent),
     };
+    let original_execution = original.execution().cloned();
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
     let checked = if let Some(checked) = &offer.checked {
@@ -3907,11 +3929,10 @@ fn seal_turn_outputs_with_validation(
         module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
     Ok(Some(SealedTurnProducts {
-        original_compiler_inputs,
+        original,
         artifact_view,
         typed_entry,
         target_native_selection,
-        original_execution,
         original_compile_input,
         checked,
         certified_groups,
