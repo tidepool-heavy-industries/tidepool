@@ -434,14 +434,13 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
         .await;
 }
 
-#[tokio::test]
-async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
-    use exomonad_actor::{ActorPlacement, Model};
+fn policy_config() -> (tempfile::TempDir, ActorHostConfig) {
     let storage = tempfile::tempdir().unwrap();
     let workspace = serde_json::from_value(json!({
         "include": [], "modules": [], "prompts": {}, "models": {
             "fast":"admitted-model", "luna":"configured-luna",
-            "sol":"configured-sol", "astra":"configured-astra"
+            "sol":"configured-sol", "astra":"configured-astra",
+            "sol-twin":"configured-sol", "unrelated":"unadmitted-model"
         },
         "files": {}, "config": "", "library_identity": "", "runtime_orchestration": ""
     }))
@@ -468,6 +467,13 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         pane_environment: Default::default(),
         jev: None,
     };
+    (storage, config)
+}
+
+#[tokio::test]
+async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
+    use exomonad_actor::ActorPlacement;
+    let (_storage, config) = policy_config();
     let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
         Arc::new(Store::memory().unwrap()),
         Arc::new(JobScheduler::new(1).unwrap()),
@@ -488,7 +494,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     let policy = factory.policy(&descriptor).unwrap();
     assert_eq!(
         policy.models,
-        [super::super::resolve_model(&config, descriptor.model().unwrap()).unwrap()]
+        ["admitted-model", "configured-sol", "configured-luna"]
     );
     assert!(matches!(
         (
@@ -507,7 +513,13 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         let selected = descriptor.clone().with_model(Some(selection));
         let policy = factory.policy(&selected).unwrap();
         assert_eq!(policy.default_model, expected);
-        assert_eq!(policy.models, [expected]);
+        let mut expected_models = vec![expected];
+        for tier in ["configured-sol", "configured-luna"] {
+            if !expected_models.contains(&tier) {
+                expected_models.push(tier);
+            }
+        }
+        assert_eq!(policy.models, expected_models);
     }
     let mut missing = config.clone();
     missing.workspace_inputs = None;
@@ -539,4 +551,102 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     assert!(factory
         .policy(&descriptor.with_model(Some(Model::CustomAlias("not-admitted".into()))))
         .is_err());
+}
+
+#[tokio::test]
+async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work() {
+    use exomonad_actor::ActorPlacement;
+    let (_storage, config) = policy_config();
+    let script = Arc::new(ScriptState::default());
+    let transport = script.clone();
+    let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
+        Arc::new(Store::memory().unwrap()),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        config.model.clone(),
+        Effort::Medium,
+        Arc::new(move || Script(transport.clone())),
+    )
+    .with_launch_config(&config);
+    let descriptor = ActorDescriptor::new(
+        "selected-cell",
+        ActorPlacement {
+            session: tidepool_repr::SessionId(1),
+            resource_scope: tidepool_codegen::suspension::RealmId(1),
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    )
+    .with_model(Some(Model::Astra));
+    let policy = factory.policy(&descriptor).unwrap();
+    let service = Arc::new(CellModelService::<Offline, Script>::new(
+        tokio::runtime::Handle::current(),
+        PrincipalId::new(1, 1),
+        "selected-cell".into(),
+        factory.store.clone(),
+        factory.scheduler.clone(),
+        policy,
+        factory.transport.clone(),
+    ));
+    let worker = service.clone();
+    tokio::task::spawn_blocking(move || {
+        let request = |selection: Option<Model>| {
+            json!({"instructions":"budget","input":"explicit input","model":selection,
+                "effort":null,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
+        };
+        for selection in [
+            None,
+            Some(Model::Sol),
+            Some(Model::Luna),
+            Some(Model::ProviderModel("configured-sol".into())),
+            Some(Model::CustomAlias("sol-twin".into())),
+        ] {
+            let result = worker
+                .start(PrincipalId::new(1, 1), request(selection))
+                .unwrap();
+            assert_eq!(result["receipt"]["outcome"]["kind"], "text");
+            assert_eq!(result["receipt"]["outcome"]["value"], "allowed");
+            assert_eq!(result["receipt"]["counts"]["requests"], 1);
+        }
+        for selection in [
+            Model::CustomAlias("unrelated".into()),
+            Model::CustomAlias("missing".into()),
+            Model::ProviderModel("luna".into()),
+            Model::ProviderModel("unadmitted-model".into()),
+        ] {
+            assert!(matches!(
+                worker.start(PrincipalId::new(1, 1), request(Some(selection))),
+                Err(tidepool_handlers::handlers::model::ModelBoundaryError::ModelRejected(_))
+            ));
+        }
+    })
+    .await
+    .unwrap();
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.model.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "configured-astra",
+            "configured-sol",
+            "configured-luna",
+            "configured-sol",
+            "configured-sol"
+        ]
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.pinned_effort == Effort::Medium));
+    assert!(requests.iter().all(|request| request.tools.is_empty()
+        && request.input[0].0 == json!({"type":"message","role":"user","content":[{"type":"input_text","text":"explicit input"}]})));
+    assert_eq!(
+        factory
+            .store
+            .events(None)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "model_invocation_receipt")
+            .count(),
+        5
+    );
 }

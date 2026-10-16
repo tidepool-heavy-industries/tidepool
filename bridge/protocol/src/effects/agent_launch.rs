@@ -422,7 +422,7 @@ fn context_types() -> Vec<TypeDef> {
                     },
                 ],
             },
-            json: JsonInstance::None,
+            json: JsonInstance::Generic,
             derives: WireDerives(&[
                 WireDerive::FromHaskell,
                 WireDerive::ToHaskell,
@@ -430,6 +430,8 @@ fn context_types() -> Vec<TypeDef> {
                 WireDerive::Debug,
                 WireDerive::PartialEq,
                 WireDerive::Eq,
+                WireDerive::Serialize,
+                WireDerive::Deserialize,
             ]),
             domain: None,
             doc: &[

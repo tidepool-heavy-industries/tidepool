@@ -22,7 +22,8 @@
 use super::{header, index_body, module_name as effect_module_name, render_variant, GeneratedFile};
 use crate::hs::HsType;
 use crate::schema::{
-    Effect, IdentityPayload, TypeDef, TypeShape, Validation, VariantFields, WireDerive,
+    Effect, IdentityPayload, JsonInstance, TypeDef, TypeShape, Validation, VariantFields,
+    WireDerive,
 };
 
 /// Where this effect's wire module lives, relative to the workspace root.
@@ -262,6 +263,17 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
     }
     out.push_str(&t.derives.render());
     out.push('\n');
+    // Payload-bearing positional sums use the same tagged-object representation as
+    // Tidepool.Aeson.Generic, including nullary constructors in that sum.
+    if matches!(t.json, JsonInstance::Generic)
+        && (t.derives.has(WireDerive::Serialize) || t.derives.has(WireDerive::Deserialize))
+        && matches!(&t.shape, TypeShape::Sum { variants }
+            if variants.iter().all(|variant| matches!(&variant.fields, VariantFields::Positional(_)))
+            && variants.iter().any(|variant|
+                matches!(&variant.fields, VariantFields::Positional(fields) if !fields.is_empty())))
+    {
+        out.push_str("#[serde(tag = \"tag\", content = \"contents\", deny_unknown_fields)]\n");
+    }
     if let Some(module) = t
         .haskell_module
         .filter(|_| !matches!(t.shape, TypeShape::Sum { .. }))

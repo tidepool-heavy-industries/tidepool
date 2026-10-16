@@ -1,7 +1,9 @@
 //! Compose the admitted cell's ModelCall service from the embedded run owners.
 use std::{marker::PhantomData, sync::Arc};
 
-use exomonad_actor::{ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, ModelReq};
+use exomonad_actor::{
+    ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, Model, ModelReq,
+};
 use harness::transport::auth::chatgpt::RunAccountAuth;
 #[cfg(test)]
 use harness::transport::auth::ChatGptPlanAuth;
@@ -17,7 +19,7 @@ use tidepool_runtime::session::WorkbenchExecutionId;
 use super::{embedded_service::EmbeddedService, ActorHostConfig};
 use crate::{
     exomonad::EmbeddedLaunchConfig,
-    model_turn::{CellModelService, ModelPolicy},
+    model_turn::{CellModelService, ModelPolicy, ModelResolver},
 };
 
 pub(super) struct EmbeddedCellModelFactory<A, C> {
@@ -51,19 +53,29 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
         }
     }
     fn policy(&self, descriptor: &ActorDescriptor) -> Result<ModelPolicy, String> {
-        let model = match descriptor.model() {
-            Some(model) => match self.launch_config.as_ref() {
-                Some(config) => super::resolve_model(config, model),
-                None => match model.workspace_key() {
-                    None => Ok(model.value().to_owned()),
-                    Some(alias) => Err(format!(
-                        "model alias {alias} has no admitted workspace policy"
-                    )),
-                },
+        let config = self.launch_config.clone();
+        let resolve_model: Arc<ModelResolver> = Arc::new(move |model| match config.as_ref() {
+            Some(config) => super::resolve_model(config, model),
+            None => match model.workspace_key() {
+                None => Ok(model.value().to_owned()),
+                Some(alias) => Err(format!(
+                    "model alias {alias} has no admitted workspace policy"
+                )),
             },
+        });
+        let model = match descriptor.model() {
+            Some(model) => resolve_model(model),
             None => Ok(self.default_model.clone()),
         };
         let model = model?;
+        let mut models = vec![model.clone()];
+        for tier in [Model::Sol, Model::Luna] {
+            if let Ok(configured) = resolve_model(&tier) {
+                if !models.contains(&configured) {
+                    models.push(configured);
+                }
+            }
+        }
         let effort = match descriptor.fork_effort() {
             Some(ForkEffort::Low) => Effort::Low,
             Some(ForkEffort::Medium) => Effort::Medium,
@@ -72,7 +84,8 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
         };
         Ok(ModelPolicy {
             default_model: model.clone(),
-            models: vec![model],
+            models,
+            resolve_model,
             default_effort: effort,
             efforts: vec![effort],
             limits: Limits::default(),

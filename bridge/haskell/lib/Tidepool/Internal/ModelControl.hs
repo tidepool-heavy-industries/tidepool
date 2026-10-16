@@ -4,6 +4,7 @@ module Tidepool.Internal.ModelControl where
 import Prelude
 import Data.Text (Text)
 import Tidepool.Aeson
+import Tidepool.Effects.Core (Model)
 import qualified Tidepool.Aeson.KeyMap as KM
 
 controlObject :: [Text] -> (Object -> Result a) -> Value -> Result a
@@ -45,7 +46,7 @@ instance ToJSON ModelRequestLimits where
 instance FromJSON ModelRequestLimits where
   parseJSON = controlObject ["requests", "tools", "reported_tokens", "seconds"] $ \o -> pure ModelRequestLimits <*> ((o .:? "requests") >>= traverse controlCount) <*> ((o .:? "tools") >>= traverse controlCount) <*> ((o .:? "reported_tokens") >>= traverse controlCount) <*> ((o .:? "seconds") >>= traverse controlCount)
 
-data ModelRequestEnvelope = ModelRequestEnvelope Text Text (Maybe Text) (Maybe ModelEffortEnvelope) ModelRequestLimits Value (Maybe Value) Bool deriving (Show, Eq)
+data ModelRequestEnvelope = ModelRequestEnvelope Text Text (Maybe Model) (Maybe ModelEffortEnvelope) ModelRequestLimits Value (Maybe Value) Bool deriving (Show, Eq)
 instance ToJSON ModelRequestEnvelope where
   toJSON (ModelRequestEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["instructions" .= f0, "input" .= f1, "model" .= f2, "effort" .= f3, "limits" .= f4, "tools" .= f5, "result_schema" .= f6, "after_tool" .= f7]
 instance FromJSON ModelRequestEnvelope where

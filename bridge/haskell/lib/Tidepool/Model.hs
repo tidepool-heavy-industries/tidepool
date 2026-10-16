@@ -18,6 +18,7 @@ module Tidepool.Model
   , withModel
   , withEffort
   , withLimits
+  , Model (..)
   , ModelEffort (..)
   , ModelLimits (..)
   , defaultLimits
@@ -38,7 +39,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson
 import Tidepool.Internal.ModelControl
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..))
+import Tidepool.Effects.Core (Model (..), ModelCall (..), ModelBoundaryError (..))
 
 -- | Requested effort is constrained by the host's admitted model policy.
 data ModelEffort = LowEffort | MediumEffort | HighEffort
@@ -65,7 +66,7 @@ data ModelTurn tools effects a = ModelTurn
   { turnSpec :: AgentSpec tools effects
   , turnInstructions :: Text
   , turnFormat :: ResultFormat a
-  , turnModel :: Maybe Text
+  , turnModel :: Maybe Model
   , turnEffort :: Maybe ModelEffort
   , turnLimits :: ModelLimits
   }
@@ -76,7 +77,9 @@ textTurn spec instructions = ModelTurn spec instructions TextResult Nothing Noth
 typedTurn :: forall a tools effects. (FromJSON a, JsonSchema a) => AgentSpec tools effects -> Text -> ModelTurn tools effects a
 typedTurn spec instructions = ModelTurn spec instructions (JsonResult (Proxy @a)) Nothing Nothing defaultLimits
 
-withModel :: Text -> ModelTurn tools effects a -> ModelTurn tools effects a
+-- | Select through the caller's frozen workspace model configuration. Omitting
+-- this option inherits the caller's resolved model; the host bounds all choices.
+withModel :: Model -> ModelTurn tools effects a -> ModelTurn tools effects a
 withModel model turn = turn { turnModel = Just model }
 withEffort :: ModelEffort -> ModelTurn tools effects a -> ModelTurn tools effects a
 withEffort effort turn = turn { turnEffort = Just effort }

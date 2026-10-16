@@ -3,7 +3,10 @@
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
 /// A configured built-in tier, custom workspace alias, or explicit provider model name.
-#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(tag = "tag", content = "contents", deny_unknown_fields)]
 pub enum Model {
     /// The configured Luna tier.
     #[haskell(module = "Tidepool.Effects.Core")]

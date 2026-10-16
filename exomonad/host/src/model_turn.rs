@@ -26,6 +26,9 @@ use tidepool_handlers::handlers::model::{ModelBoundaryError, ModelService};
 use tidepool_repr::PrincipalId;
 use tokio::runtime::Handle;
 
+pub type ModelResolver =
+    dyn Fn(&tidepool_bridge_effects::Model) -> Result<String, String> + Send + Sync;
+
 /// Choices admitted by the host; authored requests can only select these models
 /// and efforts, and can only narrow the shared allowance.
 /// Narrower limits apply to this invocation; nested calls have their own limits
@@ -34,6 +37,7 @@ use tokio::runtime::Handle;
 pub struct ModelPolicy {
     pub default_model: String,
     pub models: Vec<String>,
+    pub resolve_model: Arc<ModelResolver>,
     pub default_effort: Effort,
     pub efforts: Vec<Effort>,
     pub limits: Limits,
@@ -355,9 +359,10 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         self.authorize(caller)?;
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
-        let model = request
-            .model
-            .unwrap_or_else(|| self.policy.default_model.clone());
+        let model = match request.model {
+            Some(selection) => (self.policy.resolve_model)(&selection).map_err(rejected)?,
+            None => self.policy.default_model.clone(),
+        };
         let effort = request
             .effort
             .map(|effort| match effort {
@@ -642,6 +647,10 @@ mod tests {
             ModelPolicy {
                 default_model: "offline".into(),
                 models: vec!["offline".into()],
+                resolve_model: Arc::new(|selection| match selection {
+                    tidepool_bridge_effects::Model::ProviderModel(model) => Ok(model.clone()),
+                    _ => Err("no frozen workspace models in this fixture".into()),
+                }),
                 default_effort: Effort::Low,
                 efforts: vec![Effort::Low],
                 limits,
@@ -850,7 +859,7 @@ mod tests {
         let service = service(&runtime, vec![], Limits::default());
         let caller = PrincipalId::new(1, 2);
         let mut invalid = request(false);
-        invalid["model"] = json!("foreign-model");
+        invalid["model"] = json!({"tag":"ProviderModel","contents":"foreign-model"});
         assert!(service.start(caller, invalid).is_err());
         let mut invalid = request(false);
         invalid["effort"] = json!("high");

@@ -16,7 +16,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
             "AgentLaunchReleaseCheckpointWith :: Text -> AgentLaunch (Either CheckpointRefusal ())",
         ],
         type_defs: &[
-            "data Model = Luna | Sol | Astra | CustomAlias Text | ProviderModel Text deriving (Show, Eq)",
+            "data Model = Luna | Sol | Astra | CustomAlias Text | ProviderModel Text deriving (Show, Eq, Generic)",
             "data WorkerLifetime = InvocationOwned | ActorOwned | RunOwned | InScope Scope deriving (Show, Eq)",
             "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | ReleasedCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
@@ -32,6 +32,7 @@ pub fn agent_launch_decl() -> crate::EffectDecl {
             "data SpawnCleanup = SpawnCleanupNotNeeded | SpawnCleanupConfirmed | SpawnCleanupUnconfirmed Text deriving (Show, Eq)",
             "data SpawnErrorWire = SpawnRefused Text | SpawnPartialFailure SpawnRetainedResourcesWire SpawnCleanup Text deriving (Show, Eq)",
             "data SpecReplacementError = SpecReplacementUnavailable | SpecReplacementUnauthorized | SpecReplacementSurfaceChanged | SpecReplacementFailed Text deriving (Show, Eq)",
+            "instance ToJSON Model\ninstance FromJSON Model\ninstance JsonSchema Model",
             "instance ToJSON SpecValidationError\ninstance FromJSON SpecValidationError\ninstance JsonSchema SpecValidationError",
             "instance ToJSON SpecProvenance\ninstance FromJSON SpecProvenance\ninstance JsonSchema SpecProvenance",
             "instance ToJSON SpecProviderValidation\ninstance FromJSON SpecProviderValidation\ninstance JsonSchema SpecProviderValidation",

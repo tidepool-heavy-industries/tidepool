@@ -1,5 +1,5 @@
 use crate::{
-    ModelAnnotationEnvelope, ModelControlStep, ModelEffortEnvelope, ModelLimitEnvelope,
+    Model, ModelAnnotationEnvelope, ModelControlStep, ModelEffortEnvelope, ModelLimitEnvelope,
     ModelOutcomeEnvelope, ModelReceiptEnvelope, ModelRequestEnvelope, ModelRequestLimits,
     ModelUsageEnvelope,
 };
@@ -91,6 +91,47 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
     assert_eq!(
         serde_json::from_value::<ModelRequestEnvelope>(valid.clone()).unwrap(),
         request
+    );
+    for (selection, expected) in [
+        (Model::Luna, json!({"tag":"Luna"})),
+        (Model::Sol, json!({"tag":"Sol"})),
+        (Model::Astra, json!({"tag":"Astra"})),
+        (
+            Model::CustomAlias("luna".into()),
+            json!({"tag":"CustomAlias","contents":"luna"}),
+        ),
+        (
+            Model::ProviderModel("luna".into()),
+            json!({"tag":"ProviderModel","contents":"luna"}),
+        ),
+    ] {
+        let mut selected = request.clone();
+        selected.model = Some(selection);
+        let encoded = serde_json::to_value(&selected).unwrap();
+        assert_eq!(encoded["model"], expected);
+        assert_eq!(
+            serde_json::from_value::<ModelRequestEnvelope>(encoded).unwrap(),
+            selected
+        );
+    }
+    for selection in [
+        json!("luna"),
+        json!({"tag":"Unknown"}),
+        json!({"tag":"ProviderModel"}),
+        json!({"tag":"ProviderModel","contents":true}),
+        json!({"tag":"Sol","foreign":"value"}),
+    ] {
+        let mut malformed = valid.clone();
+        malformed["model"] = selection;
+        assert!(serde_json::from_value::<ModelRequestEnvelope>(malformed).is_err());
+    }
+    let mut omitted = valid.clone();
+    omitted.as_object_mut().unwrap().remove("model");
+    assert_eq!(
+        serde_json::from_value::<ModelRequestEnvelope>(omitted)
+            .unwrap()
+            .model,
+        None
     );
     let mut foreign = valid.clone();
     foreign["effort"] = json!("foreign");
