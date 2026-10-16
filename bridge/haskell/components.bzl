@@ -6933,7 +6933,7 @@ def declare_haskell_components():
         srcs = {
         "Main.hs": "test-check/PinnedContract.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
-        "Project/Checks.hs": "//bridge/facade:workspace_pinned_check_source",
+        "Project/Checks.hs": "//exomonad/host:workspace_pinned_check_source",
         "Tidepool/Aeson.hs": "lib/Tidepool/Aeson.hs",
         "Tidepool/Aeson/FromJSON.hs": "lib/Tidepool/Aeson/FromJSON.hs",
         "Tidepool/Aeson/KeyMap.hs": "lib/Tidepool/Aeson/KeyMap.hs",
