@@ -3960,7 +3960,7 @@ impl ArtifactInventory {
         selection: &ArtifactGraphSelection,
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<ArtifactView, CompileError> {
-        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) || !parent.is_empty() {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) || parent.has_retained_nodes() {
             return Err(failure("bound recovery requires an empty owning view"));
         }
         let entries = entries
@@ -5067,6 +5067,10 @@ impl ArtifactView {
     pub fn is_empty(&self) -> bool {
         self.lease.selection.roots.is_empty()
     }
+    /// Retained support is state even when it grants no executable roots.
+    fn has_retained_nodes(&self) -> bool {
+        !self.lease.selection.roots.is_empty() || !self.lease.selection.custody_roots.is_empty()
+    }
     pub fn inventory(&self) -> &ArtifactInventory {
         &self.lease.inventory
     }
@@ -6108,7 +6112,7 @@ impl ArtifactView {
             lease.materialization.parents = Arc::from([]);
         }
         let mut materializations = Vec::new();
-        if !retained.is_empty() {
+        if retained.has_retained_nodes() {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
             if !materializations.is_empty() {
                 let custody =
@@ -6377,10 +6381,10 @@ impl ArtifactView {
     }
 
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        if Arc::ptr_eq(&self.lease, &other.lease) || other.is_empty() {
+        if Arc::ptr_eq(&self.lease, &other.lease) || !other.has_retained_nodes() {
             return Ok(self.clone());
         }
-        if self.is_empty() {
+        if !self.has_retained_nodes() {
             return Ok(other.clone());
         }
         self.validate_issued_merge(other)?;
@@ -15333,6 +15337,88 @@ mod tests {
         assert_eq!(inventory.node_count(), 1);
         drop(second);
         assert_eq!(inventory.node_count(), 0);
+    }
+    #[test]
+    fn custody_only_merge_preserves_exact_support_without_selecting_roots() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let hidden = inventory
+            .admit(
+                &empty,
+                vec![issued_native_groups(
+                    "Hidden",
+                    vec![(7, vec![])],
+                    &[],
+                    &BTreeMap::new(),
+                )],
+            )
+            .unwrap();
+        let proof = hidden.capture_graph_selection();
+        let custody = inventory.retain(vec![], proof.roots.clone(), vec![], vec![]);
+        assert!(custody.is_empty(), "custody grants no executable roots");
+        let visible = inventory
+            .admit(&empty, vec![entry("Visible", &[])])
+            .unwrap();
+        for (left, right, selected) in [
+            (&visible, &custody, &visible),
+            (&custody, &visible, &visible),
+            (&empty, &custody, &empty),
+            (&custody, &empty, &empty),
+        ] {
+            let merged = left.merge(right).unwrap();
+            let graph = merged.capture_graph_selection();
+            assert_eq!(graph.roots, selected.capture_graph_selection().roots);
+            assert_eq!(
+                graph.namespace,
+                selected.capture_graph_selection().namespace
+            );
+            let state = inventory.0.lock().unwrap();
+            validate_issued_selection(&state, &merged.read_projection(&state).nodes, &proof)
+                .expect("the donor's exact proof remains observable");
+        }
+        let second = inventory
+            .admit(
+                &empty,
+                vec![issued_native_groups(
+                    "Second",
+                    vec![(9001, vec![])],
+                    &[],
+                    &BTreeMap::new(),
+                )],
+            )
+            .unwrap();
+        let second_proof = second.capture_graph_selection();
+        let second_custody = inventory.retain(vec![], second_proof.roots.clone(), vec![], vec![]);
+        for (left, right) in [(&custody, &second_custody), (&second_custody, &custody)] {
+            let merged = left.merge(right).unwrap();
+            let graph = merged.capture_graph_selection();
+            assert!(graph.roots.is_empty());
+            assert!(graph.namespace.is_empty());
+            let state = inventory.0.lock().unwrap();
+            for issued in [&proof, &second_proof] {
+                validate_issued_selection(&state, &merged.read_projection(&state).nodes, issued)
+                    .expect("both custody-only operands survive");
+            }
+        }
+        assert!(
+            inventory
+                .recover_selection(
+                    &custody,
+                    hidden.entries(),
+                    &proof,
+                    &hidden.binding_dependencies(),
+                )
+                .is_err(),
+            "recovery requires a fresh empty parent, not custody-only state"
+        );
+        assert!(inventory
+            .recover_selection(
+                &empty,
+                hidden.entries(),
+                &proof,
+                &hidden.binding_dependencies(),
+            )
+            .is_ok());
     }
     #[test]
     fn selected_root_keeps_hidden_requirements_and_reclaims_unselected_history() {

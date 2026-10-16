@@ -940,6 +940,68 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
 }
 
 #[test]
+fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let native = product("CustodyMaterialization", 96);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let context = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_checked_original_products(producer.sha256(), &[native])
+        .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let completed = context
+        .prepare_compilation(scratch.path(), PRODUCER)
+        .unwrap();
+    let materialization = completed.materialization.as_ref().unwrap();
+    let directory = materialization._directory.as_ref().unwrap();
+    let directory_owner = Arc::downgrade(directory);
+    let directory_path = directory.path().to_path_buf();
+    assert!(!materialization.rows.is_empty());
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    let entry = context
+        .artifact_view()
+        .entries()
+        .into_iter()
+        .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+        .unwrap();
+    let canonical = context
+        .facts
+        .compiler_projection
+        .roles()
+        .into_iter()
+        .find(|role| role.original() == Some(entry.descriptor.id))
+        .unwrap()
+        .interface();
+    let proof = NativeOriginalRequirement::from_issued_group_custody(
+        entry.descriptor.id,
+        canonical,
+        context.artifact_view(),
+    )
+    .unwrap()
+    .unwrap();
+    let offer = IssuedNativeOffer::issue(entry.descriptor.id, context.artifact_view(), Some(proof))
+        .unwrap();
+    drop(completed);
+    drop(context);
+    assert!(
+        directory_owner.upgrade().is_some(),
+        "exact offer custody retains materialized file leases"
+    );
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    offer
+        .proof()
+        .unwrap()
+        .issued_group_carriers(offer.custody())
+        .unwrap();
+    drop(offer);
+    assert!(
+        directory_owner.upgrade().is_none(),
+        "the offer must release its last materialization lease"
+    );
+    assert!(!directory_path.exists());
+}
+
+#[test]
 fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     use crate::artifact_inventory::{
         ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
