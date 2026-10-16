@@ -913,6 +913,7 @@ fn recovery_validation_error(
         | CertificationError::OriginalGroupConflict(_)
         | CertificationError::OriginalSelectionConflict(_)
         | CertificationError::OriginalMembership(_)
+        | CertificationError::OriginalAvailability(_)
         | CertificationError::OriginalClosure(_)
         | CertificationError::FinalizedInterfaceRequirement { .. }
         | CertificationError::OriginalInterfaceClosure { .. }
