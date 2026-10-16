@@ -81,14 +81,14 @@ fn source_import(
         &mut PackageInterfaceValidation::default(),
     )
     .expect("fixture native import has authenticated original groups");
-    let binder = product
-        .original_native()
-        .unwrap()
-        .group(ordinal)
-        .expect("fixture native import names an issued original group")
-        .group()
-        .binders()[0]
-        .clone();
+    let definitions =
+        crate::certified_products::original_native_group_definitions(&product, ordinal)
+            .expect("fixture native import names an issued original group");
+    let binding = match &definitions.bindings()[0] {
+        tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+        tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+    };
+    let binder = binding.identity.clone();
     crate::certified_products::PendingImportOwner::Source {
         owner: product.owner().clone(),
         original_ordinal: ordinal,
