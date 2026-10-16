@@ -38,8 +38,7 @@ One module per effect under `src/handlers/`:
   `exomonad_worktree::create`/`registry`/`git`; also not in the
   `base_effects!` default row — see `exomonad/worktree/CLAUDE.md`
 - `src/handlers/journal.rs`, `journal_version.rs` — the durable append-only
-  run journal, one JSON line per `record`, and its wire-format version stamp on
-  `tidepool_repr::version_ladder`
+  run journal, one JSON line per `record`, and its current wire-format version stamp
 - `src/handlers/jev.rs` — the Jev HTTP client behind the `Jev` effect
 - `src/handlers/agent.rs` — the agent effect's request handling
 - `src/handlers/entropy.rs` — process-local randomness for authored programs

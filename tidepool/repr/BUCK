@@ -34,7 +34,6 @@ rust_filegroup(
         "src/type_graph/cursor.rs": "tidepool/repr/src/type_graph/cursor.rs",
         "src/type_graph/properties.rs": "tidepool/repr/src/type_graph/properties.rs",
         "src/types.rs": "tidepool/repr/src/types.rs",
-        "src/version_ladder.rs": "tidepool/repr/src/version_ladder.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -88,7 +87,6 @@ rust_filegroup(
         "src/type_graph/cursor.rs": "tidepool/repr/src/type_graph/cursor.rs",
         "src/type_graph/properties.rs": "tidepool/repr/src/type_graph/properties.rs",
         "src/types.rs": "tidepool/repr/src/types.rs",
-        "src/version_ladder.rs": "tidepool/repr/src/version_ladder.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -197,7 +195,6 @@ filegroup(
         "tidepool/repr/src/type_graph/cursor.rs": "src/type_graph/cursor.rs",
         "tidepool/repr/src/type_graph/properties.rs": "src/type_graph/properties.rs",
         "tidepool/repr/src/types.rs": "src/types.rs",
-        "tidepool/repr/src/version_ladder.rs": "src/version_ladder.rs",
         "tidepool/repr/tests/execution_schema_codec.rs": "tests/execution_schema_codec.rs",
         "tidepool/repr/tests/execution_schema_contract.rs": "tests/execution_schema_contract.rs",
         "tidepool/repr/tests/extend_checked_equivalence.rs": "tests/extend_checked_equivalence.rs",

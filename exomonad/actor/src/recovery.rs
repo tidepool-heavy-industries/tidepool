@@ -2038,12 +2038,11 @@ fn validate_initial_context_event(
 }
 
 fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>> {
-    let value: serde_json::Value = serde_json::from_str(line)?;
-    let found = tidepool_repr::version_ladder::found_version(&value);
-    if found != VERSION {
+    let row: Row = serde_json::from_str(line)?;
+    if row.version != VERSION {
         return Err("unsupported actor journal version; use its matching binary".into());
     }
-    Ok(serde_json::from_value(value)?)
+    Ok(row)
 }
 
 #[cfg(test)]

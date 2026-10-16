@@ -12,7 +12,6 @@ pub mod session_ids;
 pub mod tree;
 pub mod type_graph;
 pub mod types;
-pub mod version_ladder;
 
 pub use actor_path::{ActorPath, ActorPathError, ActorPathSegment};
 pub use datacon::*;

@@ -191,11 +191,14 @@ impl Journal {
 }
 
 fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>> {
-    let value: serde_json::Value = serde_json::from_str(line)?;
-    let found = tidepool_repr::version_ladder::found_version(&value);
-    let current =
-        tidepool_repr::version_ladder::migrate_to_current(value, found, VERSION, VERSION, &[])?;
-    let row: Row = serde_json::from_value(current)?;
+    let row: Row = serde_json::from_str(line)?;
+    if row.version != VERSION {
+        return Err(format!(
+            "unsupported command ownership journal version {}; expected {VERSION}",
+            row.version
+        )
+        .into());
+    }
     Ok(row)
 }
 
@@ -262,6 +265,39 @@ mod tests {
         drop(reopened);
         let (_, events) = open_path(&path).unwrap();
         assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn unsupported_rows_refuse_before_torn_tail_repair_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ownership.jsonl");
+        let (mut journal, _) = open_path(&path).unwrap();
+        journal
+            .append(EventKind::ProducerSealed {
+                producer: "run-a".into(),
+            })
+            .unwrap();
+        drop(journal);
+        let current = std::fs::read(&path).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&current).unwrap();
+        for version in [None, Some(1), Some(3)] {
+            let mut row = row.clone();
+            match version {
+                Some(version) => {
+                    row["version"] = version.into();
+                }
+                None => {
+                    row.as_object_mut().unwrap().remove("version");
+                }
+            }
+            let mut bytes = serde_json::to_vec(&row).unwrap();
+            bytes.extend_from_slice(b"\n{\"sequence\":");
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(open_path(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::write(&path, current).unwrap();
+        assert_eq!(open_path(&path).unwrap().1.len(), 1);
     }
 
     #[test]

@@ -20,16 +20,16 @@
 //! reopen; a failed append may already be visible and poisons its writer.
 
 use std::fs::{self, OpenOptions};
+use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tidepool_repr::jsonl::{self, SyncPolicy};
-use tidepool_repr::version_ladder;
 
 use crate::error::WorktreeError;
 use crate::id::EventId;
-use crate::journal_version::{self, MIGRATIONS};
+use crate::journal_version;
 use crate::monitor::RepositoryEvent;
 use crate::storage::{now_ms, storage_failure};
 use tidepool_atomic_write::DirectoryAnchor;
@@ -68,27 +68,27 @@ fn is_journal_header(v: &Value) -> bool {
     v.get("cursor").is_none() && v.get("version").is_some()
 }
 
-fn ladder_err_to_worktree_err(e: version_ladder::LadderError, path: &Path) -> WorktreeError {
-    match e {
-        version_ladder::LadderError::BelowFloor { found, floor } => {
-            WorktreeError::JournalBelowFloor {
-                path: path.to_path_buf(),
-                found,
-                floor,
-            }
-        }
-        version_ladder::LadderError::UnsupportedVersion { found, current } => {
-            WorktreeError::JournalFutureVersion {
-                path: path.to_path_buf(),
-                found,
-                current,
-            }
-        }
-        version_ladder::LadderError::Migration { from, source } => storage_failure(
-            path,
-            format!("journal migration from version {from} failed: {}", source.0),
-        ),
+fn check_version(found: u32, path: &Path) -> Result<(), WorktreeError> {
+    if found < journal_version::CURRENT {
+        return Err(WorktreeError::JournalBelowFloor {
+            path: path.to_path_buf(),
+            found,
+            floor: journal_version::CURRENT,
+        });
     }
+    if found > journal_version::CURRENT {
+        return Err(WorktreeError::JournalFutureVersion {
+            path: path.to_path_buf(),
+            found,
+            current: journal_version::CURRENT,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct JournalHeader {
+    version: u32,
 }
 
 impl EventJournal {
@@ -132,9 +132,7 @@ impl EventJournal {
             }
         }
         // Initialize an absent OR zero-length journal with one atomic durable
-        // header write. Creating the target and appending the header as two
-        // operations leaves a crash window in which an empty file reopens as
-        // legacy v0 and is permanently below this build's v2 floor. The
+        // header write. An empty file is an incomplete initialization. The
         // lifetime lock above makes replacing a zero-length crash remnant safe:
         // no other journal handle can be using this path.
         let needs_header = match fs::metadata(&path) {
@@ -155,18 +153,28 @@ impl EventJournal {
             .open(&path)
             .map_err(|e| storage_failure(&path, e))?;
 
-        // This handle owns the file for its lifetime, so a torn final row is
-        // TRUNCATED away — see
-        // `tidepool_repr::jsonl`'s module doc for why this is per-consumer.
-        // A malformed row anywhere else is loud, matching the old behavior.
-        //
-        // Parsed as raw `Value` first, not directly into `ObservationBatch`:
-        // the header line (present in every journal created above; ABSENT
-        // in one written before this scheme existed) has a different shape
-        // than an entry, and `read_tail`'s single `parse` closure has no
-        // way to know which line it's looking at. Torn writes are repaired at
-        // the JSON-syntax layer. A complete JSON value with the wrong v2 row
-        // shape is corruption and remains loud even at EOF.
+        // Reject unsupported headers before touching a possibly torn row tail.
+        // The first nonempty row owns the format; ordinary batches have no header.
+        let first_line =
+            std::io::BufReader::new(fs::File::open(&path).map_err(|e| storage_failure(&path, e))?)
+                .lines()
+                .find_map(|line| match line {
+                    Ok(line) if line.trim().is_empty() => None,
+                    line => Some(line),
+                })
+                .transpose()
+                .map_err(|e| storage_failure(&path, e))?;
+        let first: Value = serde_json::from_str(first_line.as_deref().unwrap_or("null"))
+            .map_err(|e| storage_failure(&path, e))?;
+        if !is_journal_header(&first) {
+            check_version(0, &path)?;
+        }
+        let header: JournalHeader =
+            serde_json::from_value(first).map_err(|e| storage_failure(&path, e))?;
+        check_version(header.version, &path)?;
+
+        // Only incomplete JSON tail syntax is repairable. Complete rows with
+        // invalid batch schemas are refused without truncation.
         let (raw_lines, torn) = jsonl::read_tail(
             &path,
             |l| serde_json::from_str::<Value>(l).map_err(|e| e.to_string()),
@@ -189,49 +197,14 @@ impl EventJournal {
             );
         }
 
-        // A real header line has no "cursor" key (every `ObservationBatch`
-        // does) and does carry "version" — see `is_journal_header`. An
-        // journal written before this scheme existed has NO header line at
-        // all: every line is a plain entry, and the whole file reads as
-        // version 0.
-        let (found, header_lines, rest): (u32, usize, &[Value]) = match raw_lines.split_first() {
-            Some((first, rest)) if is_journal_header(first) => {
-                (version_ladder::found_version(first), 1, rest)
-            }
-            _ => (0, 0, &raw_lines[..]),
-        };
-        // The header's own bounds must be validated even when the journal
-        // has zero entries after it (a header line with nothing else yet
-        // appended) — the loop below only runs once there's at least one
-        // entry to migrate, so a header-only future-version file needs its
-        // own check.
-        version_ladder::migrate_to_current(
-            Value::Null,
-            found,
-            journal_version::FLOOR,
-            journal_version::CURRENT,
-            MIGRATIONS,
-        )
-        .map_err(|e| ladder_err_to_worktree_err(e, &path))?;
-
-        let n = rest.len();
-        let mut entries = Vec::with_capacity(n);
-        for (i, raw) in rest.iter().enumerate() {
-            let migrated = version_ladder::migrate_to_current(
-                raw.clone(),
-                found,
-                journal_version::FLOOR,
-                journal_version::CURRENT,
-                MIGRATIONS,
-            )
-            .map_err(|e| ladder_err_to_worktree_err(e, &path))?;
-            let entry = serde_json::from_value::<ObservationBatch>(migrated).map_err(|e| {
+        let mut rows = raw_lines.into_iter();
+        rows.next(); // The header was validated before tail repair.
+        let mut entries = Vec::with_capacity(rows.len());
+        for (i, raw) in rows.enumerate() {
+            let entry = serde_json::from_value::<ObservationBatch>(raw).map_err(|e| {
                 storage_failure(
                     &path,
-                    format!(
-                        "malformed journal row shape at line {}: {e}",
-                        header_lines + i + 1
-                    ),
+                    format!("malformed journal row shape at line {}: {e}", i + 2),
                 )
             })?;
             entries.push(entry);
@@ -377,10 +350,7 @@ mod version_tests {
         );
     }
 
-    /// A crash between target creation and header publication in the old
-    /// initializer left an empty file that was then misclassified as legacy
-    /// v0 forever. Empty is an incomplete initialization, not a durable
-    /// legacy format, so opening it must atomically install the v2 header.
+    /// Empty initialization remnants atomically acquire a current header.
     #[test]
     fn empty_file_is_reinitialized_with_a_complete_current_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -400,40 +370,44 @@ mod version_tests {
         EventJournal::open(&dir_anchor, "events.jsonl").expect("reinitialized journal reopens");
     }
 
-    /// An unstamped event-per-row journal cannot be truthfully reconstructed
-    /// into atomic reconciliation batches and is rejected explicitly.
     #[test]
-    fn unstamped_legacy_journal_is_below_the_v2_floor() {
+    fn unsupported_headers_refuse_before_tail_repair_and_retain_typed_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("events.jsonl");
-        std::fs::write(&path, "{\"cursor\":1,\"event_id\":1}\n").unwrap();
-
-        let err = EventJournal::open(&dir_anchor, "events.jsonl")
-            .expect_err("legacy journal must be rejected");
-        assert!(matches!(
-            err,
-            WorktreeError::JournalBelowFloor {
-                found: 0,
-                floor: journal_version::FLOOR,
-                ..
+        for (header, found) in [
+            ("{\"cursor\":1,\"event_id\":1}", 0),
+            ("{\"version\":1}", 1),
+            ("{\"version\":9999}", 9999),
+        ] {
+            let bytes = format!("{header}\n{{\"cursor\":").into_bytes();
+            std::fs::write(&path, &bytes).unwrap();
+            let error = EventJournal::open(&anchor, "events.jsonl").unwrap_err();
+            match error {
+                WorktreeError::JournalBelowFloor {
+                    path: actual,
+                    found: actual_found,
+                    floor: 2,
+                } if found < 2 => {
+                    assert_eq!(actual, path);
+                    assert_eq!(actual_found, found);
+                }
+                WorktreeError::JournalFutureVersion {
+                    path: actual,
+                    found: actual_found,
+                    current: 2,
+                } if found > 2 => {
+                    assert_eq!(actual, path);
+                    assert_eq!(actual_found, found);
+                }
+                error => panic!("unexpected version rejection: {error:?}"),
             }
-        ));
-    }
-
-    /// A version newer than this build supports is a loud, typed refusal.
-    #[test]
-    fn future_version_header_is_a_typed_rejection() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
-        let path = dir.path().join("events.jsonl");
-        std::fs::write(&path, "{\"version\":9999}\n").unwrap();
-
-        let err = EventJournal::open(&dir_anchor, "events.jsonl")
-            .expect_err("a future version must be refused");
-        assert!(
-            matches!(err, WorktreeError::JournalFutureVersion { found: 9999, .. }),
-            "expected JournalFutureVersion, got {err:?}"
-        );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        // The accepted format still repairs an incomplete tail.
+        std::fs::write(&path, b"{\"version\":2}\n{\"cursor\":").unwrap();
+        let journal = EventJournal::open(&anchor, "events.jsonl").unwrap();
+        assert_eq!(journal.end_cursor(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"version\":2}\n");
     }
 }
