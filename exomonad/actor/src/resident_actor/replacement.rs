@@ -51,7 +51,7 @@ pub(super) struct PreparedSuccessor {
 pub(super) struct RetainedHandler {
     pub(super) placement: crate::ActorPlacement,
     _standing: ResidentStanding,
-    _checkpoint: Option<StateCheckpoint>,
+    _committed: Option<CommittedActorState>,
     _sources: Vec<crate::request::sources::SourceBinding>,
     _shutdown_hook: Option<RootCustody>,
 }
@@ -122,7 +122,7 @@ where
         );
         behavior.child_session_startup = session_startup;
         behavior.child_placement_custody = Some(placement_custody.clone());
-        behavior.exit_destination = exit_destination;
+        behavior.typed_exit = exit_destination.map(AdmittedTypedExit::new);
         let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
             Err(error) => {
@@ -228,7 +228,7 @@ where
         let retained = RetainedHandler {
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),
-            _checkpoint: self.checkpoint.take(),
+            _committed: self.committed.take(),
             _sources: std::mem::take(&mut self.sources),
             _shutdown_hook: self.shutdown_hook.take(),
         };
@@ -285,7 +285,10 @@ where
         self.worktree_custody = custody.worktree;
         self.retained_replacements = custody.retained;
         self.standing = ResidentStanding::Receiving(staged.receiver);
-        self.checkpoint = Some(staged.checkpoint);
+        self.committed = Some(CommittedActorState {
+            checkpoint: staged.checkpoint,
+            input: None,
+        });
         self.shutdown_hook = staged.shutdown_hook;
         self.static_source_count = staged.sources.len();
         self.sources = staged.sources;
@@ -344,8 +347,9 @@ where
         let checkpoint = match &self.standing {
             ResidentStanding::Paused(paused) => &paused.checkpoint,
             ResidentStanding::Receiving(_) => self
-                .checkpoint
+                .committed
                 .as_ref()
+                .map(|committed| &committed.checkpoint)
                 .ok_or_else(|| reject("replacement requires committed state"))?,
             _ => {
                 return Err(reject(

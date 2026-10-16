@@ -544,7 +544,7 @@ where
         } else {
             ResidentKernelBehavior::child(descriptor, environment.clone(), entry, launch_worktrees)
         };
-        behavior.exit_destination = exit_destination;
+        behavior.typed_exit = exit_destination.map(AdmittedTypedExit::new);
         behavior.child_placement_custody = Some(continuation.placement_custody.clone());
         behavior.admitted_checkpoint = checkpoint_admission.clone();
         behavior.prepared_workspace = prepared_workspace;
