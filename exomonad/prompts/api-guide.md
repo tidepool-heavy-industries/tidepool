@@ -117,7 +117,8 @@ Haskell typechecking because the hosted field requires `Presented`. Native
 `HaskellCell`/`HaskellTool` fields and programmatic actor handlers do not use
 this wrapper. The after-tool hook receives `toolResultValue` as semantic JSON
 and `toolResultOutput` as the selected text; it does not render or replace the
-tool's text.
+tool's text. Compile, input-schema and other preexecution refusals do not
+invoke this hook.
 
 ## Agent work
 

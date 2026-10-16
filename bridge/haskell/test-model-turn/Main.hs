@@ -32,6 +32,7 @@ import Tidepool.Records (WriteOutcome(..))
 import GHC.Generics (Generic)
 import Tidepool.Aeson
 import Tidepool.Agent.Contract
+import qualified Tidepool.Reload as Reload
 import Tidepool.Model
 import Tidepool.Internal.ModelControl qualified as Control
 import Tidepool.Effects.Core (ModelCall (..), SourceStatus(..), SourceRevision(..), SourceModule(..))
@@ -99,6 +100,17 @@ sourceInspection = do
       (rendered, _) = displayWith 4096 (Right (SourceStatus active disk) :: Either Text SourceStatus)
   mapM_ (\piece -> unless (piece `Text.isInfixOf` rendered) (error "source status omitted inspection facts"))
     ["captured-revision", "pending-revision", "Persona.Spec", "source-digest", "generation = 7", "pendingEdit = True"]
+  let diff = Reload.ReloadSurfaceDiff [] [] []
+      publications = [Reload.ReloadPublished active disk [] diff,
+        Reload.ReloadPublishedWithWarnings active disk [] ["projection repair"] diff]
+  mapM_ (\outcome -> unless ("Notebook reset; re-import modules" `Text.isInfixOf` Reload.reloadPresenter (Right outcome))
+    (error "committed reload omitted notebook recovery action")) publications
+  unless (Reload.reloadPresenter (Right (Reload.ReloadUnchanged active)) == "Configuration unchanged; notebook bindings preserved.")
+    (error "unchanged reload lost binding preservation")
+  mapM_ (\outcome -> unless (not ("Notebook reset" `Text.isInfixOf` Reload.reloadPresenter (Right outcome)))
+    (error "uncommitted reload falsely claimed a reset"))
+    [Reload.ReloadRejected active disk "compile failure", Reload.ReloadCancelled active,
+     Reload.ReloadPublicationUnconfirmed active "reconcile"]
   let outcomes = [Written "memory.md" 2, WriteBlocked "memory.md" ["check failed"], WriteConflict "memory.md" (Just "expected-digest") Nothing]
   mapM_ (\outcome -> unless ("memory.md" `Text.isInfixOf` fst (displayWith 4096 outcome)) (error "write outcome is opaque")) outcomes
   let page = pageWithContinuation 80 (TextLeaf (Text.replicate 200 "λ")) Nothing :: DisplayPage '[]
