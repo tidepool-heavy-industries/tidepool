@@ -536,11 +536,13 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
                 proof: Some(issued.clone()),
             });
         }
-        assert!(matches!(
-            NativeCompilerTransport::issue(&metadata, &full, &offers),
-            Err(CompileError::ExtractFailed(detail))
-                if detail == "artifact inventory: full native offer has no issued carrier"
-        ));
+        let error = NativeCompilerTransport::issue(&metadata, &full, &offers)
+            .map(|_| ())
+            .expect_err("each Full offer needs its own issued native root");
+        assert_eq!(
+            error.to_string(),
+            failure("full native offer has no issued carrier").to_string()
+        );
     }
     let no_demand = CompilerInputProjection::from_issued_entries(&[entry.clone()])
         .unwrap()
@@ -620,11 +622,17 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
                 .unwrap()
                 .project_metadata(view.metadata_snapshot())
                 .unwrap();
-        assert!(matches!(
-            NativeCompilerTransport::issue(&metadata, &view, &[NativeCompilerAvailability::Full(proof)]),
-            Err(CompileError::ExtractFailed(detail))
-                if detail == "artifact inventory: issued native dependency conflicts with request interface"
-        ));
+        let error = NativeCompilerTransport::issue(
+            &metadata,
+            &view,
+            &[NativeCompilerAvailability::Full(proof)],
+        )
+        .map(|_| ())
+        .expect_err("dependency availability cannot replace a selected product or interface");
+        assert_eq!(
+            error.to_string(),
+            failure("issued native dependency conflicts with request interface").to_string()
+        );
     }
 }
 
