@@ -940,6 +940,143 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
 }
 
 #[test]
+fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let b_seed = product("BackedgeDependency", 98);
+    let a_preliminary = dependent_product(
+        "BackedgeAncestor",
+        97,
+        vec![(7, vec![source_import(&b_seed, 7)]), (9001, vec![])],
+    );
+    let b_final = dependent_product(
+        "BackedgeDependency",
+        98,
+        vec![
+            (7, vec![source_import(&a_preliminary, 9001)]),
+            (9001, vec![]),
+        ],
+    );
+    let a_final = dependent_product(
+        "BackedgeAncestor",
+        97,
+        vec![(7, vec![source_import(&b_final, 7)]), (9001, vec![])],
+    );
+    assert_eq!(
+        a_preliminary.owner(),
+        a_final.owner(),
+        "source owner fixed point"
+    );
+    let recovered = recovered_witness_fixtures(&[a_final, b_final]);
+    let entries = recovered
+        .iter()
+        .map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let full = inventory.admit_shared(&base, entries.clone()).unwrap();
+    let a_id = entries[0].descriptor.id;
+    let b_id = entries[1].descriptor.id;
+    let canonical =
+        ArtifactEntry::canonical(recovered[0].product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    let proof = NativeOriginalRequirement::from_issued_group_custody(a_id, canonical, &full)
+        .unwrap()
+        .unwrap();
+    let a_offer = IssuedNativeOffer::issue(a_id, &full, Some(proof)).unwrap();
+    let support = a_offer
+        .dependency_group_carriers(&BTreeSet::from([b_id]))
+        .unwrap();
+    assert_eq!(
+        support
+            .keys()
+            .map(|group| (group.binding.artifact(), group.original_ordinal))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(b_id, 7), (a_id, 9001)]),
+        "the independently authored B closure includes its real backedge only",
+    );
+    let b_offer = IssuedNativeOffer::issue(b_id, &base, None).unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
+    let b = base.select_roots(vec![b_id]).unwrap();
+    let offers = vec![a_offer, b_offer];
+    let private = OriginalCompilerInputs {
+        projection: projection.clone(),
+        artifacts: retain_native_offers(&b, &offers).unwrap(),
+        native_offers: offers,
+    };
+    let context = |view, projection| {
+        ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            inventory: view,
+            compiler_projection: projection,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        })
+    };
+    ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&context(b.clone(), projection.clone()), Some(&private))
+        .expect("without a conflicting selected A, B retains its real A9001 dependency");
+    inventory
+        .admit_projected_with_native_offers(
+            &private.artifacts,
+            vec![],
+            &projection,
+            &private.native_offers,
+        )
+        .expect("typed admission accepts the same exact dependency closure");
+
+    let replacement = product("BackedgeAncestor", 99);
+    assert_eq!(
+        replacement.module_interface(),
+        recovered[0].product.module_interface()
+    );
+    let replacement = Arc::new(ArtifactEntry::original(producer.sha256(), replacement).unwrap());
+    assert_ne!(replacement.descriptor.id, a_id);
+    let selected_projection = projection
+        .merge(&CompilerInputProjection::from_issued_entries(&[replacement.clone()]).unwrap())
+        .unwrap();
+    let selected = inventory
+        .admit_shared_with_demand(
+            &b,
+            vec![replacement.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    assert!(
+        ProtectedScaffoldRequirements::default()
+            .compiler_inputs(
+                &context(selected, selected_projection.clone()),
+                Some(&private),
+            )
+            .is_err(),
+        "transport must not discard B's real backedge to old A"
+    );
+    assert!(
+        inventory
+            .admit_projected_with_native_offers(
+                &private.artifacts,
+                vec![replacement],
+                &selected_projection,
+                &private.native_offers,
+            )
+            .is_err(),
+        "typed admission must also preserve the incompatible exact backedge"
+    );
+}
+
+#[test]
 fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let native = product("CustodyMaterialization", 96);
