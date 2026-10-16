@@ -3715,6 +3715,17 @@ fn durable_mixed_originals_recover_independent_native_entry() {
             0,
             &publication,
         );
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            "later_capture_after_fresh_recovery",
+            "recoveredCapture <- pure (independent + 1)\nif recoveredCapture == (43 :: Int) then pure () else error \"lost recovered native capture\"",
+            0,
+            &publication,
+        );
         let missing_before = demand_missing_retained(
             &mut resident,
             public,
@@ -3799,6 +3810,17 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         persisted_root_state(&publication, &owner),
         crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
     ));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "later_capture_before_fresh_recovery",
+        "beforeRecoveryCapture <- pure (independent + 1)\nif beforeRecoveryCapture == (43 :: Int) then pure () else error \"lost continued native capture\"",
+        0,
+        &publication,
+    );
     drop(resident);
     drop(publication);
     // Execute the already-built native test binary in a fresh process. The

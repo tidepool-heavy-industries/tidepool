@@ -1915,325 +1915,830 @@ fn dependency_execution_graph_roots_stay_private_and_malformed_roots_refuse() {
     assert!(compiler_execution_scope(&malformed, &metadata).is_err());
 }
 
-#[test]
-fn private_transport_preserves_independent_closures_until_exact_demand() {
-    use crate::artifact_inventory::{
-        ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
-    };
+#[derive(Clone, Debug)]
+struct NativeTransportHistory {
+    same_root: bool,
+    overlap: bool,
+    shared_carrier: bool,
+    reverse: bool,
+    duplicate: bool,
+    custody: Vec<NativeCustodyOp>,
+}
 
+#[derive(Clone, Debug)]
+enum NativeCustodyOp {
+    Expand,
+    Capture { right: bool },
+}
+
+#[derive(Debug, Default)]
+struct NativeTransportCoverage {
+    callbacks: usize,
+    completed: usize,
+    equal_payload_scopes: usize,
+    shared_carriers: usize,
+    distinct_carriers: usize,
+    full_without_demand: usize,
+    partial_with_ambient_full: usize,
+    custody_expansions: usize,
+    captures: usize,
+    duplicate_joins: usize,
+    reversed_joins: usize,
+    preparations: usize,
+    dependent_issuances: usize,
+    continuations: usize,
+    successful_demands: usize,
+    ambiguous_demands: usize,
+    recoveries: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct LogicalNativeGroup {
+    issuance: usize,
+    payload: usize,
+    ordinal: u32,
+}
+
+#[derive(Default)]
+struct NativeTransportModel {
+    groups: BTreeMap<LogicalNativeGroup, crate::artifact_inventory::NativeGroupBinding>,
+    carriers: BTreeMap<LogicalNativeGroup, ArtifactBinding>,
+    edges: BTreeMap<LogicalNativeGroup, BTreeSet<LogicalNativeGroup>>,
+}
+
+impl NativeTransportModel {
+    fn observe_issuance(
+        &mut self,
+        issuance: usize,
+        root_payload: usize,
+        dependency_ordinal: u32,
+        entries: &[Arc<ArtifactEntry>; 3],
+        source: &ArtifactView,
+    ) -> LogicalNativeGroup {
+        let root = LogicalNativeGroup {
+            issuance,
+            payload: root_payload,
+            ordinal: 7,
+        };
+        let dependency = LogicalNativeGroup {
+            issuance,
+            payload: 0,
+            ordinal: dependency_ordinal,
+        };
+        let graph = source.capture_graph_selection();
+        assert_eq!(
+            graph.native_groups.len(),
+            2,
+            "fixture issues exactly the authored pair"
+        );
+        for logical in [root, dependency] {
+            let id = entries[logical.payload].descriptor.id;
+            let handles = graph
+                .native_groups
+                .iter()
+                .copied()
+                .filter(|group| {
+                    group.binding.artifact == id && group.original_ordinal == logical.ordinal
+                })
+                .collect::<Vec<_>>();
+            let [handle] = handles.as_slice() else {
+                panic!("one issued identity per logical group")
+            };
+            assert!(
+                !self.groups.values().any(|prior| prior == handle),
+                "independent group identities cannot alias"
+            );
+            let carriers = graph
+                .namespace
+                .iter()
+                .copied()
+                .filter(|binding| binding.artifact == id)
+                .collect::<Vec<_>>();
+            let [carrier] = carriers.as_slice() else {
+                panic!("one issued carrier per logical payload")
+            };
+            self.groups.insert(logical, *handle);
+            self.carriers.insert(logical, *carrier);
+        }
+        // Expected topology comes from the authored imports, not captured edges.
+        self.edges.insert(root, BTreeSet::from([dependency]));
+        self.edges.insert(dependency, BTreeSet::new());
+        let native_edges = source
+            .binding_dependencies()
+            .into_iter()
+            .filter_map(|(from, to, label)| match (from, to, label) {
+                (
+                    ArtifactBindingNode::Group(from),
+                    ArtifactBindingNode::Group(to),
+                    ArtifactDependency::NativeGroup { .. },
+                ) => Some((from, to)),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            native_edges,
+            BTreeSet::from([(self.groups[&root], self.groups[&dependency])])
+        );
+        root
+    }
+
+    fn closure(
+        &self,
+        root: LogicalNativeGroup,
+    ) -> BTreeMap<crate::artifact_inventory::NativeGroupBinding, ArtifactBinding> {
+        let mut reachable = BTreeSet::from([root]);
+        loop {
+            let next = reachable
+                .iter()
+                .flat_map(|group| self.edges[group].iter().copied())
+                .chain(reachable.iter().copied())
+                .collect::<BTreeSet<_>>();
+            if next == reachable {
+                break;
+            }
+            reachable = next;
+        }
+        reachable
+            .into_iter()
+            .map(|group| (self.groups[&group], self.carriers[&group]))
+            .collect()
+    }
+}
+
+fn replay_native_transport_history(
+    history: &NativeTransportHistory,
+    coverage: &mut NativeTransportCoverage,
+) {
+    use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
+    let NativeTransportHistory {
+        same_root,
+        overlap,
+        shared_carrier,
+        reverse,
+        duplicate,
+        custody,
+    } = history;
+    let (same_root, overlap, shared_carrier, reverse, duplicate) =
+        (*same_root, *overlap, *shared_carrier, *reverse, *duplicate);
+    assert!(
+        !same_root || overlap,
+        "one root has one authored dependency"
+    );
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let root = tempfile::tempdir().unwrap();
-    let mut histories = 0;
+    let dependency = product("OverlappingDependency", 80);
+    let left = dependent_product(
+        "IndependentLeft",
+        81,
+        vec![(7, vec![source_import(&dependency, 7)])],
+    );
+    let right = dependent_product(
+        "IndependentRight",
+        82,
+        vec![(
+            7,
+            vec![source_import(&dependency, if overlap { 7 } else { 9001 })],
+        )],
+    );
+    let recovered = recovered_witness_fixtures(&[dependency, left, right]);
+    let get = |module: &str| {
+        recovered
+            .iter()
+            .find(|row| row.product.owner().module == module)
+            .unwrap()
+            .product
+            .clone()
+    };
+    let products = [
+        get("OverlappingDependency"),
+        get("IndependentLeft"),
+        get(if same_root {
+            "IndependentLeft"
+        } else {
+            "IndependentRight"
+        }),
+    ];
+    let entries = products.each_ref().map(|product| {
+        Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+    });
+    let interfaces = CompilerInputProjection::from_issued_entries(&entries)
+        .unwrap()
+        .interface_only();
+    let inventory = ArtifactInventory::default();
+    let base_entries = if shared_carrier {
+        entries.to_vec()
+    } else {
+        products
+            .iter()
+            .map(|product| {
+                Arc::new(ArtifactEntry::canonical(
+                    product.module_interface().unwrap().clone(),
+                ))
+            })
+            .collect()
+    };
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            base_entries,
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    // Extra canonical owners distinguish the issuance scopes even
+    // when both sides offer exactly the same original root.
+    let issue = |index: usize, marker: &str, version| {
+        let marker = product(marker, version);
+        inventory
+            .admit_recovery_selection(
+                &base,
+                vec![
+                    entries[0].clone(),
+                    entries[index].clone(),
+                    Arc::new(ArtifactEntry::canonical(
+                        marker.module_interface().unwrap().clone(),
+                    )),
+                ],
+                &BTreeSet::from([
+                    NativeGroupKey {
+                        artifact: entries[index].descriptor.id,
+                        original_ordinal: 7,
+                    },
+                    NativeGroupKey {
+                        artifact: entries[0].descriptor.id,
+                        original_ordinal: if index == 1 || overlap { 7 } else { 9001 },
+                    },
+                ]),
+            )
+            .unwrap()
+    };
+    let sources = [issue(1, "LeftScope", 83), issue(2, "RightScope", 84)];
+    let proofs = std::array::from_fn::<_, 2, _>(|index| {
+        let canonical =
+            ArtifactEntry::canonical(products[index + 1].module_interface().unwrap().clone());
+        NativeOriginalRequirement::from_issued_group_custody(
+            entries[index + 1].descriptor.id,
+            canonical.descriptor.id,
+            &sources[index],
+        )
+        .unwrap()
+        .unwrap()
+    });
+    let mut model = NativeTransportModel::default();
+    let logical_roots = std::array::from_fn::<_, 2, _>(|index| {
+        model.observe_issuance(
+            index,
+            if same_root { 1 } else { index + 1 },
+            if index == 0 || overlap { 7 } else { 9001 },
+            &entries,
+            &sources[index],
+        )
+    });
+    let expected = logical_roots.map(|root| model.closure(root));
+    for index in 0..2 {
+        assert_eq!(
+            proofs[index]
+                .issued_group_carriers(&sources[index])
+                .unwrap(),
+            expected[index]
+        );
+    }
+    let child = |index: usize| {
+        expected[index]
+            .iter()
+            .find(|(group, _)| group.binding.artifact == entries[0].descriptor.id)
+            .map(|(group, carrier)| (*group, *carrier))
+            .unwrap()
+    };
+    assert_eq!(child(0).1 == child(1).1, shared_carrier);
+    coverage.shared_carriers += usize::from(shared_carrier);
+    coverage.distinct_carriers += usize::from(!shared_carrier);
+    if overlap {
+        assert_eq!(child(0).0.original_ordinal, child(1).0.original_ordinal);
+        assert_ne!(child(0).0, child(1).0);
+        coverage.equal_payload_scopes += 1;
+    }
+    let partial = std::array::from_fn::<_, 2, _>(|index| {
+        NativeOriginalRequirement::from_selected_view(entries[0].descriptor.id, &sources[index])
+            .unwrap()
+            .unwrap()
+    });
+    let ambient = inventory
+        .admit_recovery_selection(
+            &sources[0],
+            vec![],
+            &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
+                artifact: entries[0].descriptor.id,
+                original_ordinal,
+            })),
+        )
+        .unwrap();
+    let dependency_interface =
+        ArtifactEntry::canonical(products[0].module_interface().unwrap().clone());
+    let ambient_proof = NativeOriginalRequirement::from_issued_group_custody(
+        entries[0].descriptor.id,
+        dependency_interface.descriptor.id,
+        &ambient,
+    )
+    .unwrap()
+    .unwrap();
+    let mut expanded = sources[0].clone();
+    let mut has_ambient_full = false;
+    for op in custody {
+        match *op {
+            NativeCustodyOp::Expand => {
+                let before = expanded.capture_graph_selection();
+                expanded = expanded
+                    .merge(&sources[1])
+                    .unwrap()
+                    .merge(&ambient)
+                    .unwrap()
+                    .retain_original_custody(&sources[0])
+                    .unwrap();
+                let after = expanded.capture_graph_selection();
+                assert_eq!(before.namespace, after.namespace);
+                assert_eq!(before.roots, after.roots);
+                has_ambient_full = true;
+                coverage.custody_expansions += 1;
+            }
+            NativeCustodyOp::Capture { right } => {
+                let index = usize::from(right);
+                let capture_projection = CompilerInputProjection::from_issued_entries(&[
+                    entries[0].clone(),
+                    entries[index + 1].clone(),
+                ])
+                .unwrap();
+                let supplied = [proofs[index].clone(), partial[index].clone()];
+                let before =
+                    capture_native_availability(&capture_projection, &sources[index], &supplied)
+                        .unwrap();
+                let receiving = expanded.retain_original_custody(&sources[index]).unwrap();
+                let after = capture_native_availability(&capture_projection, &receiving, &supplied)
+                    .unwrap();
+                assert_eq!(after, before, "custody expansion cannot change supplied evidence with fixed canonical bindings");
+                assert!(after.iter().any(|offer| matches!(offer, NativeCompilerAvailability::Full(proof) if proof == &proofs[index])));
+                assert!(after.iter().any(|offer| matches!(offer, NativeCompilerAvailability::Issued { proof: Some(proof), .. } if proof == &partial[index])));
+                if index == 0 && has_ambient_full {
+                    assert!(ambient_proof
+                        .qualify_availability(&receiving)
+                        .unwrap()
+                        .is_some());
+                    coverage.partial_with_ambient_full += 1;
+                }
+                coverage.captures += 1;
+            }
+        }
+    }
+    let context = |view: &ArtifactView| {
+        let view = inventory
+            .empty_view()
+            .merge_compiler_inputs(&CompilerInputProjection::default(), view, &interfaces)
+            .unwrap()
+            .0;
+        Arc::new(ExactDeclarationContext::from_facts(
+            DeclarationContextFacts {
+                producer: producer.sha256(),
+                inventory: view,
+                compiler_projection: interfaces.clone(),
+                lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            },
+        ))
+    };
+    let private = std::array::from_fn::<_, 2, _>(|index| {
+        OriginalCompilerInputs::from_native_availability_with_requirements(
+            &context(&sources[index]),
+            producer,
+            std::slice::from_ref(&products[index + 1]),
+            std::slice::from_ref(&proofs[index]),
+        )
+        .unwrap()
+    });
+    let base_context = context(&base);
+    let first = usize::from(reverse);
+    let mut joined = private[first].merge(&private[1 - first]).unwrap();
+    coverage.reversed_joins += usize::from(reverse);
+    if duplicate {
+        joined = joined.merge(&private[first]).unwrap();
+        coverage.duplicate_joins += 1;
+    }
+    // Join order must not change demand when the caller pins the same namespace.
+    joined.artifacts = joined
+        .artifacts
+        .retain_original_custody(&private[0].artifacts)
+        .unwrap();
+    let request = ExactCompileContext::new(base_context.clone())
+        .prepare_compilation_with_private_input(
+            &root.path().join("request"),
+            PRODUCER,
+            None,
+            Some(joined),
+        )
+        .unwrap();
+    coverage.preparations += 1;
+    let inputs = request.compiler_inputs();
+    assert!(inputs.metadata.retained.selected_native_groups.is_empty());
+    let roles = inputs.projection.snapshot_roles();
+    let role = &roles[&entries[0].descriptor.owner];
+    assert!(
+        role.original().is_none(),
+        "a dependency receives no native role"
+    );
+    assert_eq!(
+        wire_mode(&request, "OverlappingDependency"),
+        issued_mode(if overlap { &[7] } else { &[7, 9001] }),
+        "a union of issued dependency groups never issues Full"
+    );
+    assert!(wire_groups(&request).values().all(Vec::is_empty));
+    assert_eq!(wire_mode(&request, "IndependentLeft"), full_mode());
+    coverage.full_without_demand += 1;
+    for index in 0..2 {
+        assert!(inputs.native_original_requirements.iter().any(|proof| {
+            proof.original == proofs[index].original
+                && proof.issued_group_carriers(&inputs.artifacts).unwrap() == expected[index]
+        }));
+    }
+    let validation = PackageInterfaceValidation::default();
+    let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        inputs,
+        &inputs.metadata,
+        &validation.inventory,
+    )
+    .unwrap();
+    let bind = || {
+        inputs
+            .artifacts
+            .inventory()
+            .bind_segment(&inputs.artifacts, vec![], &selected)
+    };
+    for index in 0..2 {
+        let mut fixed = bind().unwrap();
+        let imports = [source_import(&products[index + 1], 7)];
+        let admitted = inventory.admit_bound_target(
+            &mut fixed,
+            &inputs.artifacts,
+            NativeArtifactDemand::CertifiedTargetImports(&imports),
+            vec![],
+            &selected,
+        );
+        if same_root && shared_carrier {
+            assert!(
+                matches!(admitted, Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == entries[1].descriptor.id))
+            );
+            coverage.ambiguous_demands += 1;
+        } else {
+            let admitted = admitted.unwrap();
+            let groups = admitted
+                .selection
+                .groups_for_target(&admitted.artifacts, None, &imports)
+                .unwrap();
+            let expected_index = if same_root { 0 } else { index };
+            assert_eq!(groups, expected[expected_index].keys().copied().collect());
+            coverage.successful_demands += 1;
+        }
+    }
+    let mut fixed = bind().unwrap();
+    let imports = [source_import(&products[0], 7)];
+    let demanded = inventory.admit_bound_target(
+        &mut fixed,
+        &inputs.artifacts,
+        NativeArtifactDemand::CertifiedTargetImports(&imports),
+        vec![],
+        &selected,
+    );
+    if overlap {
+        assert!(
+            matches!(demanded, Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                if artifact == entries[0].descriptor.id))
+        );
+        coverage.ambiguous_demands += 1;
+    } else {
+        let demanded = demanded.unwrap();
+        let groups = demanded
+            .selection
+            .groups_for_target(&demanded.artifacts, None, &imports)
+            .unwrap();
+        assert_eq!(groups, BTreeSet::from([child(0).0]));
+        coverage.successful_demands += 1;
+    }
+    let handoff = OriginalCompilerInputs::from_selection(&selected, &inputs.artifacts).unwrap();
+    let next = ExactCompileContext::new(base_context.clone())
+        .prepare_compilation_with_private_input(
+            &root.path().join("handoff"),
+            PRODUCER,
+            None,
+            Some(handoff),
+        )
+        .unwrap();
+    let encoded = serde_json::to_vec(&(
+        next.compiler_inputs().artifacts.capture_graph_selection(),
+        next.compiler_inputs().artifacts.binding_dependencies(),
+    ))
+    .unwrap();
+    let (graph, edges): (ArtifactGraphSelection, Vec<_>) =
+        serde_json::from_slice(&encoded).unwrap();
+    let recovery = ArtifactInventory::default();
+    assert_eq!(recovery.node_count(), 0);
+    let restored = recovery
+        .recover_selection(
+            &recovery.empty_view(),
+            next.compiler_inputs().artifacts.entries(),
+            &graph,
+            &edges,
+        )
+        .unwrap();
+    coverage.recoveries += 1;
+    for index in 0..2 {
+        assert_eq!(
+            proofs[index].issued_group_carriers(&restored).unwrap(),
+            expected[index]
+        );
+    }
+    assert_eq!(restored.capture_graph_selection(), graph);
+    assert_eq!(restored.binding_dependencies(), edges);
+
+    // A dependent product earns its new graph before continuation returns to
+    // older support that owns its bytes but none of its issued group nodes.
+    let dependent = dependent_product(
+        "LaterDependent",
+        85,
+        vec![(7, vec![source_import(&products[1], 7)])],
+    );
+    let dependent =
+        recovered_witness_fixtures(&[products[0].clone(), products[1].clone(), dependent])
+            .into_iter()
+            .find(|row| row.product.owner().module == "LaterDependent")
+            .unwrap()
+            .product;
+    let dependent_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), dependent.clone()).unwrap());
+    let support = inventory
+        .admit_shared_with_demand(
+            &private[0].artifacts,
+            vec![dependent_entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let produced = OriginalCompilerInputs::issue_complete_native_availability(
+        &support,
+        &private[0].projection,
+        producer.sha256(),
+        std::slice::from_ref(&dependent),
+        std::slice::from_ref(&proofs[0]),
+    )
+    .unwrap();
+    coverage.dependent_issuances += 1;
+    let proof = produced
+        .native_original_requirements
+        .iter()
+        .find(|proof| proof.original == dependent_entry.descriptor.id)
+        .unwrap()
+        .clone();
+    assert!(
+        proof.issued_groups(&support).is_err(),
+        "older support cannot already contain the newly issued group"
+    );
+    let issued_graph = proof.selection.graph_selection();
+    let dependent_groups = issued_graph
+        .native_groups
+        .iter()
+        .copied()
+        .filter(|group| group.binding.artifact == dependent_entry.descriptor.id)
+        .collect::<Vec<_>>();
+    let [dependent_group] = dependent_groups.as_slice() else {
+        panic!("one new dependent group")
+    };
+    assert_eq!(dependent_group.original_ordinal, 7);
+    let dependent_carrier = issued_graph
+        .namespace
+        .iter()
+        .copied()
+        .find(|binding| binding.artifact == dependent_entry.descriptor.id)
+        .unwrap();
+    let mut dependent_expected = expected[0].clone();
+    assert!(dependent_expected
+        .insert(*dependent_group, dependent_carrier)
+        .is_none());
+    assert_eq!(
+        proof.issued_group_carriers(&produced.artifacts).unwrap(),
+        dependent_expected
+    );
+    let (admission, source) =
+        generated_source_admission_fixture(&root.path().join("receipt"), &request);
+    let continued = produced
+        .for_program_continuation(&support, &[admission], &source)
+        .unwrap();
+    coverage.continuations += 1;
+    assert_eq!(
+        continued.artifacts.capture_graph_selection().roots,
+        support.capture_graph_selection().roots
+    );
+    assert_eq!(
+        continued.artifacts.capture_graph_selection().namespace,
+        support.capture_graph_selection().namespace
+    );
+    assert_eq!(
+        proof.issued_group_carriers(&continued.artifacts).unwrap(),
+        dependent_expected
+    );
+    let continued_request = ExactCompileContext::new(base_context)
+        .prepare_compilation_with_private_input(
+            &root.path().join("continued"),
+            PRODUCER,
+            None,
+            Some(continued),
+        )
+        .unwrap();
+    let continued_inputs = continued_request.compiler_inputs();
+    assert!(continued_inputs
+        .metadata
+        .retained
+        .selected_native_groups
+        .is_empty());
+    let continued_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            continued_inputs,
+            &continued_inputs.metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+    let (continued_graph, continued_edges): (ArtifactGraphSelection, Vec<_>) =
+        serde_json::from_slice(
+            &serde_json::to_vec(&(
+                continued_inputs.artifacts.capture_graph_selection(),
+                continued_inputs.artifacts.binding_dependencies(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    let fresh = ArtifactInventory::default();
+    assert_eq!(fresh.node_count(), 0);
+    let reopened = fresh
+        .recover_selection(
+            &fresh.empty_view(),
+            continued_inputs.artifacts.entries(),
+            &continued_graph,
+            &continued_edges,
+        )
+        .unwrap();
+    coverage.recoveries += 1;
+    for view in [&continued_inputs.artifacts, &reopened] {
+        assert_eq!(
+            proof.issued_group_carriers(view).unwrap(),
+            dependent_expected
+        );
+        let mut fixed = view
+            .inventory()
+            .bind_segment(view, vec![], &continued_selection)
+            .unwrap();
+        let imports = [source_import(&dependent, 7)];
+        let admitted = view
+            .inventory()
+            .admit_bound_target(
+                &mut fixed,
+                view,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &continued_selection,
+            )
+            .unwrap();
+        let demanded = admitted
+            .selection
+            .groups_for_target(&admitted.artifacts, None, &imports)
+            .unwrap();
+        assert_eq!(demanded, dependent_expected.keys().copied().collect());
+        coverage.successful_demands += 1;
+    }
+}
+
+#[test]
+fn private_transport_preserves_independent_closures_until_exact_demand() {
+    let mut coverage = NativeTransportCoverage::default();
     for same_root in [false, true] {
         for overlap in [false, true] {
             if same_root && !overlap {
                 continue;
             }
-            let dependency = product("OverlappingDependency", 80);
-            let left = dependent_product(
-                "IndependentLeft",
-                81,
-                vec![(7, vec![source_import(&dependency, 7)])],
-            );
-            let right = dependent_product(
-                "IndependentRight",
-                82,
-                vec![(
-                    7,
-                    vec![source_import(&dependency, if overlap { 7 } else { 9001 })],
-                )],
-            );
-            let recovered = recovered_witness_fixtures(&[dependency, left, right]);
-            let get = |module: &str| {
-                recovered
-                    .iter()
-                    .find(|row| row.product.owner().module == module)
-                    .unwrap()
-                    .product
-                    .clone()
-            };
-            let products = [
-                get("OverlappingDependency"),
-                get("IndependentLeft"),
-                get(if same_root {
-                    "IndependentLeft"
-                } else {
-                    "IndependentRight"
-                }),
-            ];
-            let entries = products.each_ref().map(|product| {
-                Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
-            });
-            let interfaces = CompilerInputProjection::from_issued_entries(&entries)
-                .unwrap()
-                .interface_only();
             for shared_carrier in [false, true] {
-                let inventory = ArtifactInventory::default();
-                let base_entries = if shared_carrier {
-                    entries.to_vec()
-                } else {
-                    products
-                        .iter()
-                        .map(|product| {
-                            Arc::new(ArtifactEntry::canonical(
-                                product.module_interface().unwrap().clone(),
-                            ))
-                        })
-                        .collect()
-                };
-                let base = inventory
-                    .admit_shared_with_demand(
-                        &inventory.empty_view(),
-                        base_entries,
-                        NativeArtifactDemand::ScopeInterfaces,
-                    )
-                    .unwrap();
-                // Extra canonical owners distinguish the issuance scopes even
-                // when both sides offer exactly the same original root.
-                let issue = |index: usize, marker: &str, version| {
-                    let marker = product(marker, version);
-                    inventory
-                        .admit_recovery_selection(
-                            &base,
-                            vec![
-                                entries[0].clone(),
-                                entries[index].clone(),
-                                Arc::new(ArtifactEntry::canonical(
-                                    marker.module_interface().unwrap().clone(),
-                                )),
-                            ],
-                            &BTreeSet::from([
-                                NativeGroupKey {
-                                    artifact: entries[index].descriptor.id,
-                                    original_ordinal: 7,
-                                },
-                                NativeGroupKey {
-                                    artifact: entries[0].descriptor.id,
-                                    original_ordinal: if index == 1 || overlap { 7 } else { 9001 },
-                                },
-                            ]),
-                        )
-                        .unwrap()
-                };
-                let sources = [issue(1, "LeftScope", 83), issue(2, "RightScope", 84)];
-                let proofs = std::array::from_fn::<_, 2, _>(|index| {
-                    let canonical = ArtifactEntry::canonical(
-                        products[index + 1].module_interface().unwrap().clone(),
-                    );
-                    NativeOriginalRequirement::from_issued_group_custody(
-                        entries[index + 1].descriptor.id,
-                        canonical.descriptor.id,
-                        &sources[index],
-                    )
-                    .unwrap()
-                    .unwrap()
-                });
-                let expected = std::array::from_fn::<_, 2, _>(|index| {
-                    proofs[index]
-                        .issued_group_carriers(&sources[index])
-                        .unwrap()
-                });
-                let child = |index: usize| {
-                    expected[index]
-                        .iter()
-                        .find(|(group, _)| group.binding.artifact == entries[0].descriptor.id)
-                        .map(|(group, carrier)| (*group, *carrier))
-                        .unwrap()
-                };
-                assert_eq!(child(0).1 == child(1).1, shared_carrier);
-                if overlap {
-                    assert_eq!(child(0).0.original_ordinal, child(1).0.original_ordinal);
-                    assert_ne!(child(0).0, child(1).0);
-                }
-                let context = |view: &ArtifactView| {
-                    let view = inventory
-                        .empty_view()
-                        .merge_compiler_inputs(
-                            &CompilerInputProjection::default(),
-                            view,
-                            &interfaces,
-                        )
-                        .unwrap()
-                        .0;
-                    Arc::new(ExactDeclarationContext::from_facts(
-                        DeclarationContextFacts {
-                            producer: producer.sha256(),
-                            inventory: view,
-                            compiler_projection: interfaces.clone(),
-                            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-                            template_imports: None,
-                            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-                        },
-                    ))
-                };
-                let private = std::array::from_fn::<_, 2, _>(|index| {
-                    OriginalCompilerInputs::from_native_availability_with_requirements(
-                        &context(&sources[index]),
-                        producer,
-                        std::slice::from_ref(&products[index + 1]),
-                        std::slice::from_ref(&proofs[index]),
-                    )
-                    .unwrap()
-                });
-                let base_context = context(&base);
                 for reverse in [false, true] {
                     for duplicate in [false, true] {
-                        histories += 1;
-                        let first = usize::from(reverse);
-                        let mut joined = private[first].merge(&private[1 - first]).unwrap();
-                        if duplicate {
-                            joined = joined.merge(&private[first]).unwrap();
-                        }
-                        let request = ExactCompileContext::new(base_context.clone())
-                            .prepare_compilation_with_private_input(
-                                &root.path().join(histories.to_string()),
-                                PRODUCER,
-                                None,
-                                Some(joined),
-                            )
-                            .unwrap();
-                        let inputs = request.compiler_inputs();
-                        assert!(inputs.metadata.retained.selected_native_groups.is_empty());
-                        let roles = inputs.projection.snapshot_roles();
-                        let role = &roles[&entries[0].descriptor.owner];
-                        assert!(
-                            role.original().is_none(),
-                            "a dependency receives no native role"
+                        replay_native_transport_history(
+                            &NativeTransportHistory {
+                                same_root,
+                                overlap,
+                                shared_carrier,
+                                reverse,
+                                duplicate,
+                                custody: vec![
+                                    NativeCustodyOp::Capture { right: false },
+                                    NativeCustodyOp::Expand,
+                                    NativeCustodyOp::Capture { right: false },
+                                    NativeCustodyOp::Capture { right: true },
+                                ],
+                            },
+                            &mut coverage,
                         );
-                        assert_eq!(
-                            wire_mode(&request, "OverlappingDependency"),
-                            issued_mode(if overlap { &[7] } else { &[7, 9001] }),
-                            "a union of issued dependency groups never issues Full"
-                        );
-                        assert!(wire_groups(&request).values().all(Vec::is_empty));
-                        for index in 0..2 {
-                            assert!(inputs.native_original_requirements.iter().any(|proof| {
-                                proof.original == proofs[index].original
-                                    && proof.issued_group_carriers(&inputs.artifacts).unwrap()
-                                        == expected[index]
-                            }));
-                        }
-                        let validation = PackageInterfaceValidation::default();
-                        let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                            inputs,
-                            &inputs.metadata,
-                            &validation.inventory,
-                        )
-                        .unwrap();
-                        let bind = || {
-                            inputs.artifacts.inventory().bind_segment(
-                                &inputs.artifacts,
-                                vec![],
-                                &selected,
-                            )
-                        };
-                        for index in 0..2 {
-                            let mut fixed = bind().unwrap();
-                            let imports = [source_import(&products[index + 1], 7)];
-                            let admitted = inventory.admit_bound_target(
-                                &mut fixed,
-                                &inputs.artifacts,
-                                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                                vec![],
-                                &selected,
-                            );
-                            if same_root && shared_carrier {
-                                assert!(
-                                    matches!(admitted, Err(CompileError::ArtifactInventory(error))
-                                    if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
-                                        if artifact == entries[1].descriptor.id))
-                                );
-                            } else {
-                                let admitted = admitted.unwrap();
-                                let groups = admitted
-                                    .selection
-                                    .groups_for_target(&admitted.artifacts, None, &imports)
-                                    .unwrap();
-                                let expected_index = if same_root {
-                                    let graph = inputs.artifacts.capture_graph_selection();
-                                    let carrier = graph
-                                        .namespace
-                                        .iter()
-                                        .find(|carrier| {
-                                            carrier.artifact == entries[1].descriptor.id
-                                        })
-                                        .unwrap();
-                                    expected
-                                        .iter()
-                                        .position(|groups| {
-                                            groups.iter().any(|(group, owner)| {
-                                                group.binding.artifact == entries[1].descriptor.id
-                                                    && owner == carrier
-                                            })
-                                        })
-                                        .unwrap()
-                                } else {
-                                    index
-                                };
-                                assert_eq!(
-                                    groups,
-                                    expected[expected_index].keys().copied().collect()
-                                );
-                            }
-                        }
-                        let mut fixed = bind().unwrap();
-                        let imports = [source_import(&products[0], 7)];
-                        let demanded = inventory.admit_bound_target(
-                            &mut fixed,
-                            &inputs.artifacts,
-                            NativeArtifactDemand::CertifiedTargetImports(&imports),
-                            vec![],
-                            &selected,
-                        );
-                        if overlap {
-                            assert!(
-                                matches!(demanded, Err(CompileError::ArtifactInventory(error))
-                                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
-                                    if artifact == entries[0].descriptor.id))
-                            );
-                        } else {
-                            let demanded = demanded.unwrap();
-                            let groups = demanded
-                                .selection
-                                .groups_for_target(&demanded.artifacts, None, &imports)
-                                .unwrap();
-                            assert!(groups.contains(&child(0).0));
-                            assert!(!groups.contains(&child(1).0));
-                        }
-                        let handoff =
-                            OriginalCompilerInputs::from_selection(&selected, &inputs.artifacts)
-                                .unwrap();
-                        let next = ExactCompileContext::new(base_context.clone())
-                            .prepare_compilation_with_private_input(
-                                &root.path().join(format!("handoff-{histories}")),
-                                PRODUCER,
-                                None,
-                                Some(handoff),
-                            )
-                            .unwrap();
-                        let encoded = serde_json::to_vec(
-                            &next.compiler_inputs().artifacts.capture_graph_selection(),
-                        )
-                        .unwrap();
-                        let decoded = serde_json::from_slice(&encoded).unwrap();
-                        let restored = next
-                            .compiler_inputs()
-                            .artifacts
-                            .select_issued(
-                                vec![],
-                                &ExactArtifactSelection::from_recovered_graph_selection(decoded),
-                            )
-                            .unwrap();
-                        for index in 0..2 {
-                            assert_eq!(
-                                proofs[index].issued_group_carriers(&restored).unwrap(),
-                                expected[index]
-                            );
-                        }
+                        coverage.completed += 1;
                     }
                 }
             }
         }
     }
-    assert_eq!(histories, 24);
+    assert_eq!(coverage.completed, 24);
+    assert!(coverage.shared_carriers > 0 && coverage.distinct_carriers > 0);
+    assert_eq!(coverage.equal_payload_scopes, 16);
+    assert_eq!(coverage.captures, 72);
+    assert_eq!(coverage.partial_with_ambient_full, 24);
+    assert_eq!(coverage.full_without_demand, 24);
+    assert_eq!(coverage.preparations, 24);
+    assert_eq!(coverage.dependent_issuances, 24);
+    assert_eq!(coverage.continuations, 24);
+    assert_eq!(coverage.recoveries, 48);
+    assert!(coverage.successful_demands > 0 && coverage.ambiguous_demands > 0);
+    eprintln!("native transport deterministic support: {coverage:?}");
+}
+
+#[test]
+fn generated_private_transport_histories_preserve_issued_graphs() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{
+        contextualize_config, Config, FileFailurePersistence, TestCaseError, TestRunner,
+    };
+
+    let mut config = Config::default();
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = 32;
+    }
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+        config.max_shrink_iters = 4096;
+    }
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::generated_private_transport_histories_preserve_issued_graphs"
+    ));
+    let cases = config.cases;
+    let strategy = (
+        0u8..3,
+        any::<[bool; 3]>(),
+        prop::collection::vec(
+            prop_oneof![
+                Just(NativeCustodyOp::Expand),
+                any::<bool>().prop_map(|right| NativeCustodyOp::Capture { right })
+            ],
+            0..9,
+        ),
+    )
+        .prop_map(|(shape, [shared_carrier, reverse, duplicate], tail)| {
+            let mut custody = vec![
+                NativeCustodyOp::Capture { right: false },
+                NativeCustodyOp::Expand,
+                NativeCustodyOp::Capture { right: false },
+                NativeCustodyOp::Capture { right: true },
+            ];
+            custody.extend(tail);
+            NativeTransportHistory {
+                same_root: shape == 2,
+                overlap: shape != 0,
+                shared_carrier,
+                reverse,
+                duplicate,
+                custody,
+            }
+        });
+    let coverage = std::cell::RefCell::new(NativeTransportCoverage::default());
+    let result = TestRunner::new(config).run(&strategy, |history| {
+        coverage.borrow_mut().callbacks += 1;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replay_native_transport_history(&history, &mut coverage.borrow_mut());
+        }));
+        if let Err(panic) = outcome {
+            let reason = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic".into());
+            return Err(TestCaseError::fail(format!(
+                "history={history:?}: {reason}"
+            )));
+        }
+        coverage.borrow_mut().completed += 1;
+        Ok(())
+    });
+    eprintln!(
+        "native transport campaign configured_cases={cases} coverage={:?}",
+        coverage.borrow()
+    );
+    result.unwrap();
 }
