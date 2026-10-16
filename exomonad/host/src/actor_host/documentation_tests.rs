@@ -3901,6 +3901,10 @@ async fn hosted_parser_rejection_preserves_authored_diagnostics_without_publicat
         .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            let origin = super::test_campaign::actor_output_origin(
+                host.runtime.run_identity(),
+                host.context.actor.identity(),
+            );
             host.input("Exercise authored diagnostics through the installed notebook.")
                 .await
                 .unwrap();
@@ -3949,7 +3953,7 @@ async fn hosted_parser_rejection_preserves_authored_diagnostics_without_publicat
             }
             round.call("after-rejection", "display ((1 :: Int) + 1)");
             let done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            done.assert_value("after-rejection", "2");
+            done.assert_authored_value(&host.runtime.store(), &origin, "after-rejection", "2");
             done.finish();
         })
     })

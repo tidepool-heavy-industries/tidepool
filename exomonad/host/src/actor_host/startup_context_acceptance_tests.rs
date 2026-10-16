@@ -2,8 +2,8 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    commit_workspace, committed_display_text, hosted_script_provider, hosted_test_settings,
-    next_hosted_script_round, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    actor_output_origin, commit_workspace, committed_display_text, hosted_script_provider,
+    hosted_test_settings, next_hosted_script_round, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use exomonad_actor::{InitialContextObservation, InitialContextState, JevCallFailure};
 use harness::transport::ResponsesRequest;
@@ -505,6 +505,8 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            let origin =
+                actor_output_origin(host.runtime.run_identity(), host.context.actor.identity());
             assert_eq!(
                 observation(host).await.state,
                 InitialContextState::AbsentHook
@@ -567,7 +569,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
             }
             assert_ne!(operations[0], operations[1]);
             let installed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            installed.assert_value("startup-children-spawn", "True");
+            installed.assert_authored_value(&host.runtime.store(), &origin, "startup-children-spawn", "True");
             assert!(pending.is_empty(), "initialized children remain idle");
             assert!(matches!(
                 requests.try_recv(),
@@ -668,7 +670,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 include_str!("fixtures/startup_child_activate.hs"),
             );
             let parent = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            parent.assert_value("startup-child-activate", "True");
+            parent.assert_authored_value(&host.runtime.store(), &origin, "startup-child-activate", "True");
             parent.finish();
             let activated = next_hosted_script_round(&mut requests, &mut pending, &path).await;
             let texts = user_texts(&activated.request);

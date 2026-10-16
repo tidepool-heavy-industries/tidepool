@@ -1940,28 +1940,6 @@ impl HostedScriptRound {
             "{response}",
         );
     }
-
-    /// Compare the complete model-facing presentation, including binding feedback.
-    /// Authored page values require `assert_authored_value` and an independent Store origin.
-    pub fn assert_value(&self, call_id: &str, expected: &str) {
-        let output = self
-            .request
-            .input
-            .iter()
-            .find(|item| {
-                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call_id
-            })
-            .unwrap_or_else(|| panic!("{call_id}: actual provider request has no settled output"));
-        let value: serde_json::Value =
-            serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap();
-        assert!(
-            matches!(value["status"].as_str(), Some("completed" | "committed")),
-            "{value}"
-        );
-        let item = value["items"].as_array().unwrap().last().unwrap();
-        assert_eq!(item["status"], "committed", "{value}");
-        assert_eq!(explicit_display_text(&value), expected, "{value}");
-    }
 }
 
 struct HostedScriptProvider {
