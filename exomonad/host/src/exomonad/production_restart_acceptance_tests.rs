@@ -774,6 +774,47 @@ impl Fixture {
     }
 }
 
+fn projected_operation_output(
+    store: &harness::store::Store,
+    identity: &harness::embedding::HostIdentity,
+    operation: &harness::model::OperationId,
+) -> Item {
+    store
+        .inspect_embedded_result(identity, operation)
+        .unwrap()
+        .expect("the actual binding retains the exact original result");
+    let history = store.embedded_conversation_history(identity).unwrap();
+    let calls = history
+        .history
+        .iter()
+        .filter(|(_, _, item)| {
+            item.0["type"] == "custom_tool_call" && item.0["call_id"] == operation.call.0
+        })
+        .collect::<Vec<_>>();
+    let [(request, _, _)] = calls.as_slice() else {
+        panic!("the exact original call must occur once in the binding's qualified history");
+    };
+    assert_eq!(
+        store
+            .recorded_operation_for_request(request, &operation.call)
+            .unwrap()
+            .as_ref(),
+        Some(operation),
+    );
+    let outputs = history
+        .history
+        .into_iter()
+        .filter_map(|(_, _, item)| {
+            (item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == operation.call.0)
+                .then_some(item)
+        })
+        .collect::<Vec<_>>();
+    let [output] = outputs.as_slice() else {
+        panic!("the exact original output must occur once in the binding's qualified history");
+    };
+    output.clone()
+}
+
 #[tokio::test]
 #[ignore = "requires the declared delegated user slice and isolated systemd service"]
 async fn outer_host_stop_and_crash_restore_accepted_source_and_selected_account_without_replay() {
@@ -965,14 +1006,17 @@ async fn outer_host_stop_and_crash_restore_accepted_source_and_selected_account_
         .unwrap(),
     )
     .unwrap();
+    let original_model_output =
+        projected_operation_output(&fixture.store(), &restart_identity, &original);
+    assert_ne!(original_model_output, original_output.item);
     assert_eq!(
         observed_request
             .input
             .iter()
-            .filter(|item| **item == original_output.item)
+            .filter(|item| **item == original_model_output)
             .count(),
         1,
-        "the in-flight request must contain the exact retained original output once"
+        "the in-flight request must contain the exact qualified original presentation once"
     );
 
     write_json(
@@ -1071,11 +1115,14 @@ async fn outer_host_stop_and_crash_restore_accepted_source_and_selected_account_
             .count(),
         1
     );
+    let recovered_model_output =
+        projected_operation_output(&fixture.store(), &successor, &original);
+    assert_eq!(recovered_model_output, original_model_output);
     assert_eq!(
         resumed
             .input
             .iter()
-            .filter(|item| **item == retained_output.item)
+            .filter(|item| **item == recovered_model_output)
             .count(),
         1
     );
