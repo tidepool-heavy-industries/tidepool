@@ -67,15 +67,18 @@ data LookupCaptureExcerpt = LookupCaptureExcerpt
   deriving (Eq, Show)
 data LookupCaptureIssue = CaptureNotRetained LookupCapturePart
   | CaptureRefused LookupCapturePart LookupSearchReceipt (Maybe Text)
-  | CaptureViewMismatch Text Text | CaptureSelectionIssue LookupSelectionIssue
+  | CaptureViewMismatch Text Text | CaptureBatchMismatch Text Text
+  | CaptureSelectionIssue LookupSelectionIssue
   | CaptureTextIssue TextSelectionIssue | CaptureInvalidTextRange Int Int Int
   | CaptureInvalidSearchBounds Int Int
   deriving (Eq, Show)
 
 -- | Offsets are 0-based half-open Unicode scalar ranges in one complete
 -- retained section, independent of its line lengths or display truncation.
+-- The issuing batch and view travel with every reusable location.
 data LookupCaptureTextSelection = LookupCaptureTextSelection
   { textCapture :: LookupCapturePart, textAddress :: LookupAddress
+  , textBatchIdentity :: Text, textView :: Text
   , textStart :: Int, textEnd :: Int }
   deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
 data LookupCaptureText = LookupCaptureText
@@ -113,9 +116,12 @@ searchLookupCapture captured query = do
     else pure ()
   let excerpt = captureExcerpt selected
       source = excerptText excerpt
-      location start end = LookupCaptureTextSelection part at start end
+      location start end = LookupCaptureTextSelection part at
+        (excerptBatchIdentity excerpt) (excerptView excerpt) start end
   matches <- either (Left . CaptureTextIssue) Right
     (literalSearch (excerptBatchIdentity excerpt) (literalRadius query) (literalNeedle query) source)
+  -- take 0 never demands the zipped context list; counting forces only the
+  -- literal search locations, never context slices or their text bodies.
   let bounded = take (literalLimit query) (zip (occurrenceLocations matches) (occurrenceContexts matches))
       hits = [LookupLiteralMatch (location start end) (location (sliceStart context) (sliceEnd context)) context
              | ((start, end), context) <- bounded]
@@ -127,10 +133,16 @@ searchLookupCapture captured query = do
 
 selectLookupCaptureText :: RetainedLookupCapture -> LookupCaptureTextSelection -> Either LookupCaptureIssue LookupCaptureText
 selectLookupCaptureText captured selection = do
-  selected <- selectLookupCapture captured (LookupCaptureSelection (textCapture selection)
-    (LookupSelection (textAddress selection) Nothing))
-  let excerpt = captureExcerpt selected
-      source = excerptText excerpt
+  batch <- captureBatch captured (textCapture selection)
+  if textBatchIdentity selection /= lookupIdentity batch
+    then Left (CaptureBatchMismatch (textBatchIdentity selection) (lookupIdentity batch))
+    else pure ()
+  if textView selection /= lookupView batch
+    then Left (CaptureViewMismatch (textView selection) (lookupView batch))
+    else pure ()
+  excerpt <- either (Left . CaptureSelectionIssue) Right
+    (selectLookup batch (LookupSelection (textAddress selection) Nothing))
+  let source = excerptText excerpt
       size = T.length source
       start = textStart selection
       end = textEnd selection

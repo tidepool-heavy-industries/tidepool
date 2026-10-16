@@ -44,7 +44,8 @@ completeExample :: RetainedLookupCapture -> Either LookupCaptureIssue LookupCapt
 completeExample captured = selectLookupCapture captured
   (LookupCaptureSelection PrimaryLookup (LookupSelection (LookupAddress 1 1 Example) Nothing))
 
--- Both exact matches and their contexts carry reusable addresses. These
+-- Both exact matches and their contexts carry reusable addresses with their
+-- issuing batch and view; reuse those locations unchanged. These
 -- selections stay small even when the example consists of one very long line.
 exactMatches :: RetainedLookupCapture -> LookupLiteralSearch -> [Either LookupCaptureIssue LookupCaptureText]
 exactMatches captured found = selectLookupCaptureTextMany captured

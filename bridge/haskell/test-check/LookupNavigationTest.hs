@@ -53,8 +53,8 @@ lookupNavigationTests = testGroup "retained lookup navigation"
          assert "issuing provenance retained" (literalBatchIdentity found == "related-capture"
            && literalView found == "immutable-view" && literalSourceIdentity found == Just "main-digest")
          assert "Unicode scalar match offsets" (map literalMatchSelection matches ==
-           [LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) 1 3,
-            LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) 2 4])
+           [LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) "related-capture" "immutable-view" 1 3,
+            LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) "related-capture" "immutable-view" 2 4])
          assert "exact match ranges replay in caller order" (map (fmap (sliceText . captureTextSlice))
            (selectLookupCaptureTextMany captured (map literalMatchSelection (reverse matches ++ matches))) == replicate 4 (Right "αα"))
          assert "contexts replay exactly" (map (fmap captureTextSlice) (selectLookupCaptureTextMany captured
@@ -69,7 +69,7 @@ lookupNavigationTests = testGroup "retained lookup navigation"
          at = LookupAddress 1 1 Example
          query part section needle radius limit = LookupLiteralQuery part section needle radius limit
          search = searchLookupCapture captured
-         select start end = selectLookupCaptureText captured (LookupCaptureTextSelection PrimaryLookup at start end)
+         select start end = selectLookupCaptureText captured (LookupCaptureTextSelection PrimaryLookup at "fixture-capture" "immutable-view" start end)
      assert "empty literal refused" (search (query PrimaryLookup at "" 0 2) == Left (CaptureTextIssue EmptyNeedle))
      assert "missing stage remains explicit" (search (query RelatedLookup at "α" 0 2) == Left (CaptureNotRetained RelatedLookup))
      assert "unretained source remains explicit" (case search (query PrimaryLookup (LookupAddress 1 1 Source) "α" 0 2) of
@@ -87,7 +87,29 @@ lookupNavigationTests = testGroup "retained lookup navigation"
        Right found -> literalCount found == 0 && literalOmitted found == 0 && null (literalMatches found); _ -> False)
      assert "empty text and terminal ranges remain exact" (fmap (sliceText . captureTextSlice) (select 4 4) == Right ""
        && fmap (sliceText . captureTextSlice) (selectLookupCaptureText (retainLookupCapture (batch "") Nothing)
-         (LookupCaptureTextSelection PrimaryLookup at 0 0)) == Right "")
+         (LookupCaptureTextSelection PrimaryLookup at "fixture-capture" "immutable-view" 0 0)) == Right "")
+  ,testCase "reusable literal locations refuse changed issuing batch or view" $ do
+     let original = batch "original token"
+         captured = retainLookupCapture original Nothing
+         at = LookupAddress 1 1 Example
+         replacement = original {lookupIdentity = "replacement-capture", lookupResults = lookupResults (batch "replacement token")}
+         changedView = original {lookupView = "changed-view", lookupSearchReceipt =
+           (lookupSearchReceipt original) {searchView = "changed-view"}}
+     case searchLookupCapture captured (LookupLiteralQuery PrimaryLookup at "token" 2 1) of
+       Left issue -> fail (show issue)
+       Right found -> do
+         let selections = literalSource found : concatMap (\hit ->
+               [literalMatchSelection hit, literalContextSelection hit]) (literalMatches found)
+         assert "locations retain the exact issuing facts" (all (\selection ->
+           textBatchIdentity selection == lookupIdentity original && textView selection == lookupView original) selections)
+         assert "same view with another batch refuses every issued location" (
+           selectLookupCaptureTextMany (retainLookupCapture replacement Nothing) selections ==
+           replicate (length selections) (Left (CaptureBatchMismatch "fixture-capture" "replacement-capture")))
+         assert "same batch with another view refuses every issued location" (
+           selectLookupCaptureTextMany (retainLookupCapture changedView Nothing) selections ==
+           replicate (length selections) (Left (CaptureViewMismatch "immutable-view" "changed-view")))
+         assert "original locations remain readable" (all (either (const False) (const True))
+           (selectLookupCaptureTextMany captured selections))
   ,testProperty "literal search agrees with independent String overlap oracle and exact replay" $ \(NonNegative seed) (NonNegative budget) ->
      let alphabet = "α🙂\r\n"
          source = take (seed `mod` 100) (cycle alphabet)
@@ -101,7 +123,7 @@ lookupNavigationTests = testGroup "retained lookup navigation"
        Left _ -> False
        Right found -> literalCount found == length starts && literalOmitted found == max 0 (length starts - limit)
          && map literalMatchSelection (literalMatches found) ==
-           [LookupCaptureTextSelection PrimaryLookup at n (n + length needle) | n <- take limit starts]
+           [LookupCaptureTextSelection PrimaryLookup at "fixture-capture" "immutable-view" n (n + length needle) | n <- take limit starts]
          && map (fmap (sliceText . captureTextSlice)) (Example.exactMatches captured found) ==
            replicate (min limit (length starts)) (Right (T.pack needle))
   ,testCase "hosted query and retained read compile through ordinary tool owner" $
@@ -149,7 +171,7 @@ lookupNavigationTests = testGroup "retained lookup navigation"
            (LookupLiteralQuery RelatedLookup (LookupAddress 1 1 Example) "retained" 1 2)) ==
            fmap (const ()) (selectLookupCapture captured (selection RelatedLookup))
          && fmap (const ()) (selectLookupCaptureText captured
-           (LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) 0 1)) ==
+           (LookupCaptureTextSelection RelatedLookup (LookupAddress 1 1 Example) "fixture-capture" "immutable-view" 0 1)) ==
            fmap (const ()) (selectLookupCapture captured (selection RelatedLookup)))
        assert "related selection refuses" (case selectLookupCapture captured (selection RelatedLookup) of
          Left (CaptureRefused RelatedLookup _ _) -> True
