@@ -11,6 +11,66 @@ fn failure(error: impl std::fmt::Display) -> ResidentActorWorkbenchError {
     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
 }
 
+fn initial_context_execution_event(
+    result: &Result<KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
+) -> Result<InitialContextEvent, ResidentActorWorkbenchError> {
+    Ok(match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => {
+            let receipts = serde_json::to_value(&response.items).map_err(failure)?;
+            if response.status == WorkbenchRunStatus::Committed {
+                match response
+                        .items
+                        .first()
+                        .and_then(|item| item.value.clone())
+                        .map(serde_json::from_value::<RetainedContextSeed>)
+                        .transpose()
+                    {
+                        Ok(Some(seed)) => InitialContextEvent::Retain {
+                            result: seed,
+                            receipts,
+                        },
+                        invalid => InitialContextEvent::Uncertain {
+                            detail: format!(
+                                "initial context completed without a decodable semantic seed: {invalid:?}"
+                            ),
+                            receipts,
+                        },
+                    }
+            } else {
+                InitialContextEvent::Fail {
+                    detail: "initial context execution did not commit".into(),
+                    cancelled: response.status == WorkbenchRunStatus::RequestCancelled,
+                    receipts,
+                }
+            }
+        }
+        Err(error) => {
+            let receipts = serde_json::to_value(error.receipts()).map_err(failure)?;
+            if matches!(
+                error,
+                crate::KernelInvocationFailure::CleanupUnconfirmed { .. }
+            ) || matches!(
+                error.publication(),
+                Some(WorkbenchPublicationOutcome::RecoveryRequired { .. })
+            ) {
+                InitialContextEvent::Uncertain {
+                    detail: error.to_string(),
+                    receipts,
+                }
+            } else {
+                InitialContextEvent::Fail {
+                    detail: error.to_string(),
+                    cancelled: error.is_cancelled(),
+                    receipts,
+                }
+            }
+        }
+    })
+}
+
 struct InitialContextWaitGuard(Option<Arc<crate::WorkbenchExecutionControl>>);
 
 impl Drop for InitialContextWaitGuard {
@@ -34,64 +94,7 @@ where
         operation: &WorkbenchExecutionId,
         result: &Result<KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        let change = match result {
-            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
-            | Ok(KernelStep::Stop {
-                output: response, ..
-            }) => {
-                let receipts = serde_json::to_value(&response.items).map_err(failure)?;
-                if response.status == WorkbenchRunStatus::Committed {
-                    match response
-                        .items
-                        .first()
-                        .and_then(|item| item.value.clone())
-                        .map(serde_json::from_value::<RetainedContextSeed>)
-                        .transpose()
-                    {
-                        Ok(Some(seed)) => InitialContextEvent::Retain {
-                            result: seed,
-                            receipts,
-                        },
-                        invalid => InitialContextEvent::Uncertain {
-                            detail: format!(
-                                "initial context completed without a decodable semantic seed: {invalid:?}"
-                            ),
-                            receipts,
-                        },
-                    }
-                } else {
-                    InitialContextEvent::Fail {
-                        detail: "initial context execution did not commit".into(),
-                        cancelled: response.status == WorkbenchRunStatus::RequestCancelled,
-                        receipts,
-                    }
-                }
-            }
-            Err(error) => {
-                let receipts = serde_json::to_value(error.receipts()).map_err(failure)?;
-                if matches!(
-                    error,
-                    crate::KernelInvocationFailure::CleanupUnconfirmed { .. }
-                ) || matches!(
-                    error.publication(),
-                    Some(WorkbenchPublicationOutcome::RecoveryRequired { .. })
-                ) {
-                    InitialContextEvent::Uncertain {
-                        detail: error.to_string(),
-                        receipts,
-                    }
-                } else {
-                    InitialContextEvent::Fail {
-                        detail: error.to_string(),
-                        cancelled: matches!(
-                            error,
-                            crate::KernelInvocationFailure::Cancelled { .. }
-                        ),
-                        receipts,
-                    }
-                }
-            }
-        };
+        let change = initial_context_execution_event(result)?;
         lifecycle
             .change_initial_context(change, operation.clone())
             .await
@@ -337,4 +340,217 @@ fn wire_initial_context(
             unreachable!("handled without identity")
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_runtime::session::{PreparedFailureKind, PreparedRuntimeError};
+
+    fn receipt(operation: &WorkbenchExecutionId) -> WorkbenchItemReceipt {
+        WorkbenchItemReceipt {
+            presentation: None,
+            index: 0,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            status: WorkbenchItemStatus::Rejected,
+            output: String::new(),
+            value: None,
+            diagnostics: Vec::new(),
+            failure_layer: None,
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: [
+                ("FsRead", WorkbenchOperationDisposition::Committed),
+                ("FsWrite", WorkbenchOperationDisposition::Committed),
+                ("Jev", WorkbenchOperationDisposition::Unknown),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(effect_ordinal, (effect, disposition))| WorkbenchOperationReceipt {
+                    display: None,
+                    display_publication: None,
+                    id: WorkbenchOperationId {
+                        execution: operation.clone(),
+                        input_unit_index: 0,
+                        effect_ordinal,
+                    },
+                    effect: effect.into(),
+                    disposition,
+                },
+            )
+            .collect(),
+            terminal_transfer: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_execution_cancellation_retains_journal_state_and_effect_receipts() {
+        for case in 0..4 {
+            let root = Arc::new(tempfile::tempdir().unwrap());
+            let anchor =
+                tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap();
+            let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl", root.clone())
+                .await
+                .unwrap();
+            let actor = ActorRef::first(crate::ActorId(7));
+            let descriptor = ActorDescriptor::new(
+                "journal retention",
+                crate::ActorPlacement {
+                    session: tidepool_repr::SessionId(1),
+                    lexical_scope: ScopeId::ROOT,
+                    resource_scope: RealmId::ROOT,
+                },
+            );
+            journal.admit(actor, &descriptor, &[]).await.unwrap();
+            let operation = WorkbenchExecutionId::from_digest([case; 16]);
+            journal
+                .record_initial_context(
+                    actor,
+                    InitialContextEvent::Begin {
+                        identity: InitialContextIdentity {
+                            operation: operation.clone(),
+                            actor,
+                            spec_install: 1,
+                            spec_revision: None,
+                            spec_entry: None,
+                            spec_source: "journal-retention-data".into(),
+                        },
+                        caller_seed: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let item = receipt(&operation);
+            let expected_receipts = serde_json::to_value([item.clone()]).unwrap();
+            let source = if case == 1 {
+                // Identical text cannot turn an ordinary actor failure into cancellation.
+                ResidentActorWorkbenchError::ActorProtocol("prepared execution cancelled".into())
+            } else {
+                ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+                    PreparedRuntimeError::Cancelled,
+                ))
+            };
+            let mut error = workbench_invocation_failure(
+                actor,
+                WorkbenchExecutionFailure {
+                    receipts: vec![item],
+                    point: WorkbenchFailurePoint::InputUnit { index: 0 },
+                    total: 1,
+                    publication: (case == 2).then(|| {
+                        WorkbenchPublicationOutcome::RecoveryRequired {
+                            detail: "native publication unknown".into(),
+                        }
+                    }),
+                    source,
+                },
+            );
+            if case == 3 {
+                error = owned_workbench::retain_cleanup_failure(
+                    actor,
+                    "native cleanup unknown".into(),
+                    WorkbenchFinalizationResult {
+                        result: Err(error),
+                        cleanup_confirmed: true,
+                    },
+                )
+                .result
+                .unwrap_err();
+            }
+            let change = initial_context_execution_event(&Err(error)).unwrap();
+            journal.record_initial_context(actor, change).await.unwrap();
+            let observed = journal.initial_context(actor).await.unwrap().unwrap();
+            match case {
+                0 => assert_eq!(observed.state, InitialContextState::Cancelled),
+                1 => assert!(matches!(observed.state, InitialContextState::Failed { .. })),
+                _ => assert!(matches!(
+                    observed.state,
+                    InitialContextState::RecoveryRequired { .. }
+                )),
+            }
+            assert_eq!(observed.receipts, expected_receipts);
+            assert!(observed.result.is_none() && observed.publication.is_none());
+            drop(journal);
+            let reopened =
+                crate::ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", root)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                reopened.initial_context(actor).await.unwrap(),
+                Some(observed)
+            );
+        }
+    }
+
+    #[test]
+    fn typed_cancellation_survives_execution_wrappers_without_classifying_error_text() {
+        let cancelled = || {
+            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+                PreparedRuntimeError::Cancelled,
+            ))
+        };
+        let sources = [
+            cancelled(),
+            ResidentActorWorkbenchError::Delivered(ResidentError::Prepared(
+                PreparedRuntimeError::Cancelled,
+            )),
+            ResidentActorWorkbenchError::Resident(ResidentError::Run(
+                tidepool_runtime::RuntimeError::Prepared(PreparedRuntimeError::Cancelled),
+            )),
+            ResidentActorWorkbenchError::InvocationCancelled,
+            ResidentActorWorkbenchError::PreparationAdmission(Arc::new(cancelled())),
+            ResidentActorWorkbenchError::PrivatePublication {
+                actor: ActorRef::first(crate::ActorId(1)),
+                scope: ScopeId::ROOT,
+                phase: crate::resident_workbench::PrivatePublicationPhase::Publish,
+                source: Box::new(cancelled()),
+            },
+            ResidentActorWorkbenchError::ActivationBindingCommitted {
+                binding: tidepool_repr::SessionVarId::from_extract(1),
+                source: Box::new(cancelled()),
+            },
+        ];
+        for source in sources {
+            assert_eq!(
+                source.execution_failure_kind(),
+                Some(PreparedFailureKind::Cancelled)
+            );
+        }
+        assert_eq!(
+            ResidentActorWorkbenchError::ActorProtocol("prepared execution cancelled".into())
+                .execution_failure_kind(),
+            None
+        );
+        assert_eq!(
+            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+                PreparedRuntimeError::MachineNotInstalled
+            ))
+            .execution_failure_kind(),
+            Some(PreparedFailureKind::Rejected)
+        );
+        for (disposition, expected) in [
+            (
+                tidepool_codegen::machine_state::MachineDisposition::Reusable,
+                PreparedFailureKind::Cancelled,
+            ),
+            (
+                tidepool_codegen::machine_state::MachineDisposition::Unavailable,
+                PreparedFailureKind::Integrity,
+            ),
+        ] {
+            let source = ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
+                PreparedRuntimeError::Run(
+                    tidepool_codegen::prepared_program::ExecutionError::Runtime(
+                        tidepool_codegen::machine_state::MachineFailure {
+                            cause: tidepool_codegen::host_fns::RuntimeError::Cancelled,
+                            disposition,
+                        },
+                    ),
+                ),
+            ));
+            assert_eq!(source.execution_failure_kind(), Some(expected));
+        }
+    }
 }

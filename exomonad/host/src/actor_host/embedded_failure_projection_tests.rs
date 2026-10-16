@@ -60,6 +60,7 @@ fn error(
 ) -> ResidentToolError {
     ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
         exomonad_actor::KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: ActorRef::first(exomonad_actor::ActorId(7)),
             point: WorkbenchFailurePoint::InputUnit {
                 index: receipts.len(),

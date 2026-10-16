@@ -2494,6 +2494,7 @@ mod tests {
             detail: "rename failed".into(),
         };
         let failure = crate::KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: crate::ActorRef::first(crate::ActorId(1)),
             receipts: Vec::new(),
             point: tidepool_runtime::session::WorkbenchFailurePoint::Publication {

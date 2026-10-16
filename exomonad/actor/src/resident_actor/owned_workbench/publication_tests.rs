@@ -207,6 +207,7 @@ fn publication_error_obeys_the_cancellation_arbiter_and_retains_diagnostics() {
         let actor = ActorRef::first(crate::ActorId(1));
         let result = Err(KernelInvocationFailure::Workbench(
             crate::KernelWorkbenchFailure {
+                execution_failure_kind: None,
                 actor,
                 receipts: failure.receipts,
                 point: failure.point,

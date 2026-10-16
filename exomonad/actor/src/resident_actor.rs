@@ -3256,32 +3256,7 @@ where
             Some(cleanup),
         ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
     };
-    let result = result.map_err(|failure| {
-        let source = failure.source;
-        if matches!(&source, ResidentActorWorkbenchError::ToolDispatch(_))
-            && failure.publication.is_none()
-        {
-            let detail = match &source {
-                ResidentActorWorkbenchError::ToolDispatch(error) => error.to_string(),
-                _ => source.to_string(),
-            };
-            return KernelInvocationFailure::Rejected {
-                receipts: failure.receipts,
-                actor: context.actor,
-                detail,
-                diagnostic: None,
-            };
-        }
-        KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
-            actor: context.actor,
-            receipts: failure.receipts,
-            point: failure.point,
-            publication: failure.publication,
-            total: failure.total,
-            diagnostic: source.failure_diagnostic(),
-            detail: source.to_string(),
-        })
-    });
+    let result = result.map_err(|failure| workbench_invocation_failure(context.actor, failure));
     let result = result.map_err(|source| match reply_refusal {
         Some((request, refusal)) => KernelInvocationFailure::RequestReplyRefused {
             request,
@@ -3294,6 +3269,37 @@ where
         result,
         cleanup_confirmed,
     }
+}
+
+fn workbench_invocation_failure(
+    actor: ActorRef,
+    failure: WorkbenchExecutionFailure,
+) -> KernelInvocationFailure {
+    let source = failure.source;
+    if matches!(&source, ResidentActorWorkbenchError::ToolDispatch(_))
+        && failure.publication.is_none()
+    {
+        let detail = match &source {
+            ResidentActorWorkbenchError::ToolDispatch(error) => error.to_string(),
+            _ => source.to_string(),
+        };
+        return KernelInvocationFailure::Rejected {
+            receipts: failure.receipts,
+            actor,
+            detail,
+            diagnostic: None,
+        };
+    }
+    KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+        execution_failure_kind: source.execution_failure_kind(),
+        actor,
+        receipts: failure.receipts,
+        point: failure.point,
+        publication: failure.publication,
+        total: failure.total,
+        diagnostic: source.failure_diagnostic(),
+        detail: source.to_string(),
+    })
 }
 
 struct WorkbenchEffectState {

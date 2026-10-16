@@ -1,7 +1,7 @@
 //! Invocation-local authority for synchronous context transformations.
 
 use exomonad_tool::ToolInvocationContext;
-use tidepool_effect::{DeferredEffect, error::EffectError};
+use tidepool_effect::{error::EffectError, DeferredEffect};
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
@@ -45,7 +45,7 @@ impl CellExit {
             CellExitCause::Cancelled
         } else {
             match result {
-                Err(crate::KernelInvocationFailure::Cancelled { .. }) => CellExitCause::Cancelled,
+                Err(error) if error.is_cancelled() => CellExitCause::Cancelled,
                 Err(crate::KernelInvocationFailure::Rejected { .. }) => CellExitCause::Rejected,
                 Err(_) => CellExitCause::Failed,
                 Ok(step) => {
@@ -193,5 +193,49 @@ mod tests {
             CellExit::from_reply(execution, &failure, true, false).cause,
             CellExitCause::Failed
         );
+    }
+    #[test]
+    fn wrapped_workbench_cancellation_preserves_kind_without_a_native_cancel_flag() {
+        let actor = crate::ActorRef::first(crate::ActorId(9));
+        let execution = WorkbenchExecutionId::from_digest([3; 16]);
+        for kind in [
+            None,
+            Some(tidepool_runtime::session::PreparedFailureKind::Language),
+            Some(tidepool_runtime::session::PreparedFailureKind::Cancelled),
+        ] {
+            for cleanup_confirmed in [false, true] {
+                let source =
+                    crate::KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+                        execution_failure_kind: kind,
+                        actor,
+                        receipts: Vec::new(),
+                        point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit {
+                            index: 0,
+                        },
+                        total: 1,
+                        publication: None,
+                        detail: "prepared execution cancelled".into(),
+                        diagnostic: None,
+                    });
+                let wrapped = crate::KernelInvocationFailure::TerminalTransferFailed {
+                    actor,
+                    request: crate::RequestId(1),
+                    source: Box::new(source),
+                };
+                let reply = Err(wrapped);
+                let exit =
+                    CellExit::from_reply(execution.clone(), &reply, cleanup_confirmed, false);
+                assert_eq!(
+                    exit.cause,
+                    if kind == Some(tidepool_runtime::session::PreparedFailureKind::Cancelled) {
+                        CellExitCause::Cancelled
+                    } else {
+                        CellExitCause::Failed
+                    }
+                );
+                assert_eq!(exit.cleanup_confirmed, cleanup_confirmed);
+                assert!(!exit.permits_context_commit());
+            }
+        }
     }
 }

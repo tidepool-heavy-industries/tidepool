@@ -5193,6 +5193,34 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn execution_failure_kind(
+        &self,
+    ) -> Option<tidepool_runtime::session::PreparedFailureKind> {
+        fn resident_kind(
+            error: &ResidentError,
+        ) -> Option<tidepool_runtime::session::PreparedFailureKind> {
+            match error {
+                ResidentError::Prepared(error)
+                | ResidentError::Run(tidepool_runtime::RuntimeError::Prepared(error)) => {
+                    Some(error.kind())
+                }
+                ResidentError::ActivationInputConsumed { source, .. }
+                | ResidentError::ActivationMountCommitted { source, .. } => resident_kind(source),
+                _ => None,
+            }
+        }
+        match self {
+            Self::InvocationCancelled => {
+                Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+            }
+            Self::Resident(error) | Self::Delivered(error) => resident_kind(error),
+            Self::PrivatePublication { source, .. }
+            | Self::ActivationBindingCommitted { source, .. } => source.execution_failure_kind(),
+            Self::PreparationAdmission(source) => source.execution_failure_kind(),
+            _ => None,
+        }
+    }
+
     /// The run owner must stop admission and recover before any further execution.
     pub fn requires_recovery(&self) -> bool {
         match self {

@@ -184,6 +184,19 @@ pub enum KernelInvocationFailure {
 }
 
 impl KernelInvocationFailure {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled { .. } => true,
+            Self::Workbench(failure) => {
+                failure.execution_failure_kind
+                    == Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+            }
+            Self::TerminalTransferFailed { source, .. }
+            | Self::RequestReplyRefused { source, .. } => source.is_cancelled(),
+            _ => false,
+        }
+    }
+
     pub fn request_reply_refusal(
         &self,
     ) -> Option<(crate::RequestId, &crate::RequestReplyAdmissionError)> {
@@ -252,6 +265,9 @@ impl KernelInvocationFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelWorkbenchFailure {
+    /// Original prepared/invocation classification, when that owner supplied one.
+    /// Diagnostic text and effect receipts do not determine this classification.
+    pub execution_failure_kind: Option<tidepool_runtime::session::PreparedFailureKind>,
     pub actor: ActorRef,
     pub receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
     pub point: tidepool_runtime::session::WorkbenchFailurePoint,
@@ -1530,6 +1546,7 @@ mod tests {
     #[test]
     fn workbench_failure_keeps_committed_prefix_and_exact_cause() {
         let failure = KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: ActorRef::first(crate::ActorId(7)),
             receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
                 presentation: None,
@@ -1598,6 +1615,7 @@ mod tests {
             })
             .collect();
         let failure = KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: ActorRef::first(crate::ActorId(8)),
             receipts,
             point: WorkbenchFailurePoint::Publication {

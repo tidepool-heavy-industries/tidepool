@@ -1254,6 +1254,7 @@ mod artifact_tests {
             WorkbenchPublicationOutcome,
         };
         let failure = exomonad_actor::KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: ActorRef::first(ActorId(9)),
             receipts: (0..3)
                 .map(|index| WorkbenchItemReceipt {
@@ -1367,6 +1368,7 @@ mod artifact_tests {
         };
         assert!(unconfirmed.public_bindings().is_empty());
         let uncertain_failure = exomonad_actor::KernelWorkbenchFailure {
+            execution_failure_kind: None,
             actor: ActorRef::first(ActorId(9)),
             receipts: vec![],
             point: WorkbenchFailurePoint::Publication {

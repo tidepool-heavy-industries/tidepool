@@ -2461,6 +2461,7 @@ mod round_control_tests {
             let error = ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(
                     exomonad_actor::KernelWorkbenchFailure {
+                        execution_failure_kind: None,
                         actor: ActorRef::first(exomonad_actor::ActorId(7)),
                         receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
                             presentation: None,
