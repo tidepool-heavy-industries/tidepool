@@ -30,7 +30,8 @@ pub fn context_read_write() -> Effect {
         description: &[
             "Targeted transactional edits to the admitted synchronous tool's committed context projection, next model and reasoning effort. ",
             "Use `Tidepool.Agent.Context` to curate the next inference's evidence or select its model; `reflect` only reads recorded conversation data. ",
-            "Context edits stage together and commit on whole-cell success; external effects already issued are not rolled back on failure. ",
+            "Accepted context batches and explicit next-model/effort choices commit together on whole-cell success; a terminal rejection rolls them back together. External effects already issued are not rolled back. ",
+            "A stage refusal accepts no transaction and leaves separately requested choices and any accepted batch intact. A patch never changes model or effort; choice-only cells remain supported. ",
             "Context references and native blocks retain host-owned evidence provenance, while system and developer instructions remain host-controlled. ",
             "Saving an inspection preserves data and content versions, not authority; stage one version-bound patch and inspect its retained terminal receipt. ",
             "For curation followed by delegation, complete the synchronous context edit before capturing that context for `spawnSubagent`. Context and workspace are independent choices; see `exomonad-agent-work`. ",
@@ -146,10 +147,18 @@ fn type_defs() -> Vec<TypeDef> {
             field("contextUnitVersionReference", "reference", HsType::Named("ContextReference")),
             field("contextUnitVersionDigest", "digest", HsType::Text),
         ]),
+        sum("ContextTextAuthor", &["ContextAuthorUser", "ContextAuthorAssistant", "ContextAuthorTool", "ContextAuthorSystem", "ContextAuthorDeveloper", "ContextAuthorUnknown"], &["Owner-observed authorship of an exact retained text field; not reconstructed from its body."]),
+        record("ContextTextAuthorship", vec![
+            field("contextAuthorshipReference", "reference", HsType::Named("ContextReference")),
+            field("contextAuthorshipSelector", "selector", HsType::Named("ContextTextSelector")),
+            field("contextAuthorshipAuthor", "author", HsType::Named("ContextTextAuthor")),
+            field("contextAuthorshipNote", "authored_note", HsType::Bool),
+        ]),
         record("ContextInspection", vec![
             field("contextInspectionDocument", "document", HsType::Named("ContextDocument")),
             field("contextInspectionTextVersions", "text_versions", HsType::list(HsType::Named("ContextTextVersion"))),
             field("contextInspectionUnitVersions", "unit_versions", HsType::list(HsType::Named("ContextUnitVersion"))),
+            field("contextInspectionAuthorship", "authorship", HsType::list(HsType::Named("ContextTextAuthorship"))),
         ]),
         record("ContextPatch", vec![field("contextPatchChanges", "changes", HsType::list(HsType::Named("ContextChange")))]),
         variants("ContextChange", vec![
@@ -590,6 +599,10 @@ mod tests {
                     "unit_versions",
                     HsType::list(HsType::Named("ContextUnitVersion"))
                 ),
+                (
+                    "authorship",
+                    HsType::list(HsType::Named("ContextTextAuthorship"))
+                ),
             ]
         );
         assert_eq!(
@@ -598,6 +611,15 @@ mod tests {
                 ("reference", HsType::Named("ContextReference")),
                 ("selector", HsType::Named("ContextTextSelector")),
                 ("digest", HsType::Text),
+            ]
+        );
+        assert_eq!(
+            fields("ContextTextAuthorship"),
+            vec![
+                ("reference", HsType::Named("ContextReference")),
+                ("selector", HsType::Named("ContextTextSelector")),
+                ("author", HsType::Named("ContextTextAuthor")),
+                ("authored_note", HsType::Bool),
             ]
         );
         let change = definitions

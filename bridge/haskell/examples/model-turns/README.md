@@ -40,7 +40,9 @@ as an authority-free `Context`. `contextBlocks`, `visibleTexts`, and
 `referencedTexts` inspect its native structure, full text, selectors and origins.
 `editableTexts` is a read-only fold. Native Haskell source/input and function
 arguments stay pinned. `display` gives bounded text previews, character counts,
-exact references, selectors and content versions.
+exact references, selectors and content versions. `contextAuthorship` reads
+owner-observed authorship and authored-note status keyed by reference and
+selector, without copying bodies or guessing roles from text.
 
 Build one `ContextPatch` with `contextPatch`. Each `replaceText target body`
 uses an opaque target from `textTargets current`, binding the exact reference,
@@ -53,7 +55,9 @@ purely builds removals and assistant notes for selected removable exchanges.
 
 `previewContext current patch` validates known fields, versions and overlapping
 targets without effects, returning a projected document, changed targets and
-before/after character counts. It makes no provider token or cache estimate and
+before/after character counts. Its `previewInspectedAuthorship` retains the input
+observation rather than issuing metadata for the proposed document; appended
+notes have no reference until commit. It makes no provider token or cache estimate and
 cannot establish current authority. Removing a group and editing a nested field
 in the same patch is invalid; distinct multipart selectors remain independent.
 `ContextWorkflow.inspectAndCurate` demonstrates this build, preview, stage flow.
@@ -62,8 +66,12 @@ in the same patch is invalid; distinct multipart selectors remain independent.
 `ContextStaged transaction`. One synchronous cell may stage one batch; build
 all changes before staging. A staged handle is pending work, not a commit
 receipt. Context reads continue to show the committed base. On whole-cell
-success, context, model and effort commit together. Failure or cancellation
-discards the batch; external effects already issued remain. In a later cell,
+success, the accepted context batch and explicit model/effort choices commit
+together. A terminal transaction rejection rolls them back together. Failure or
+cancellation discards the batch; external effects already issued remain. A stage
+refusal accepts no transaction and leaves separately requested choices and any
+already accepted batch intact. A patch never changes model or effort by itself;
+choice-only cells remain supported. In a later cell,
 `inspectContextTransaction transaction` reports staged, committed with the
 actual head/generation and appended references, rejected, cancelled, or unknown.
 A saved inspection or target preserves data and versions, never edit authority.

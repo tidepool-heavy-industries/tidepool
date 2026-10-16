@@ -6,6 +6,7 @@
 module PersonaMemoryTest (personaMemoryTests) where
 
 import Prelude
+import Control.Lens (view)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.Freer (Eff, Member, interpret, run)
 import Control.Monad.Freer.State (State, get, modify, runState)
@@ -127,7 +128,7 @@ personaMemoryTests = testGroup "persona memory"
                 [ C.ContextVisibleText note (C.MessageText 0) "same" True True
                 , C.ContextVisibleText provider (C.MessageText 0) "same" True False
                 ]
-            ]) [] [ContextUnitVersion note "issued-note-version"])
+            ]) [] [ContextUnitVersion note "issued-note-version"] [])
       case C.unitTargets context of
         [target] -> case C.previewContext context (C.contextPatch [C.removeUnit target]) of
           Left err -> error (show err)
@@ -146,7 +147,7 @@ personaMemoryTests = testGroup "persona memory"
             [C.Native group C.CompletedExchange "preview" False
               [C.ContextVisibleText child (C.MessageText 0) "original" True False]])
             [ContextTextVersion child (C.MessageText 0) "issued-text-version"]
-            [ContextUnitVersion group "issued-group-version"])
+            [ContextUnitVersion group "issued-group-version"] [])
       case (C.unitTargets context, C.textTargets context) of
         ([unit], [text]) -> do
           let removal = C.removeUnit unit
@@ -166,10 +167,10 @@ personaMemoryTests = testGroup "persona memory"
              C.ContextVisibleText reference (C.MessageText 1) "second" True False]]
           context = observedContext (ContextInspection document
             [ContextTextVersion reference (C.MessageText 0) "version-first",
-             ContextTextVersion reference (C.MessageText 1) "version-second"] [])
+             ContextTextVersion reference (C.MessageText 1) "version-second"] [] [])
           newer = observedContext (ContextInspection document
             [ContextTextVersion reference (C.MessageText 0) "version-newer",
-             ContextTextVersion reference (C.MessageText 1) "version-second"] [])
+             ContextTextVersion reference (C.MessageText 1) "version-second"] [] [])
       case C.textTargets context of
         [first, second] -> do
           let patch = C.contextPatch [C.replaceText first "new first", C.replaceText second "new second"]
@@ -183,4 +184,23 @@ personaMemoryTests = testGroup "persona memory"
           assertEqual "new inspection refuses old version" [C.ContextProblemStale]
             (either (map C.contextProblemCode) (const []) (C.previewContext newer patch))
         _ -> error "multipart fields lost their selectors"
+  , testCase "authorship remains exact observation data through a pure preview" $ do
+      let reference = ContextReference "assistant-message"
+          selector = C.MessageText 0
+          author = C.ContextTextAuthorship reference selector C.ContextAuthorAssistant False
+          document = ContextDocument [C.Text (Just reference) C.Assistant "original" []]
+          context = observedContext (ContextInspection document
+            [ContextTextVersion reference selector "issued-text-version"] [] [author])
+      assertEqual "inspection retains exact metadata" [author] (view C.contextAuthorship context)
+      case C.textTargets context of
+        [target] -> case C.previewContext context (C.contextPatch
+          [C.replaceText target "updated", C.appendNote "new assistant note" [reference]]) of
+          Left err -> error (show err)
+          Right preview -> do
+            assertEqual "preview retains original observation" [author] (C.previewInspectedAuthorship preview)
+            assertEqual "new note has no invented issued identity"
+              [C.Text (Just reference) C.Assistant "updated" [], C.Text Nothing C.Assistant "new assistant note" [reference]]
+              (blocks (C.previewDocument preview))
+            assertEqual "preview does not mutate inspection metadata" [author] (view C.contextAuthorship context)
+        _ -> error "assistant target missing from test observation"
   ]

@@ -17,11 +17,14 @@ module Tidepool.Agent.Context
   , ContextNativeKind (..)
   , ContextTextSelector (..)
   , ContextVisibleText (..)
+  , ContextTextAuthor (..)
+  , ContextTextAuthorship (..)
   , ContextBlockKind (..)
   , ContextProvenance (..)
   , Effort
   , ForkEffort (..)
   , contextBlocks
+  , contextAuthorship
   , editableTexts
   , visibleTexts
   , referencedTexts
@@ -75,7 +78,7 @@ import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Inspection.Display (Display (..), displayRecord)
-import Tidepool.Inspection.Tree (treeParts)
+import Tidepool.Inspection.Tree (DisplayTree, treeParts)
 import Tidepool.Effects.Core
   ( ContextBlock (..)
   , ContextDocument (..)
@@ -94,6 +97,8 @@ import Tidepool.Effects.Core
   , ContextNativeKind (..)
   , ContextTextSelector (..)
   , ContextVisibleText (..)
+  , ContextTextAuthor (..)
+  , ContextTextAuthorship (..)
   , ContextReadWrite (..)
   , InitialContextIdentity (..)
   , InitialContextPublicationReceipt (..)
@@ -118,6 +123,7 @@ instance Display Context where
       [ ("blocks", treeParts "[" "]" (map displayBlock (blocks (documentOf context))))
       , ("textVersions", treeParts "[" "]" (map displayVersion (contextInspectionTextVersions inspection)))
       , ("removableUnits", treeParts "[" "]" (map displayUnit (contextInspectionUnitVersions inspection)))
+      , ("authorship", treeParts "[" "]" (map displayAuthorship (contextInspectionAuthorship inspection)))
       ]
     where
       summary body = displayRecord 0 "Text"
@@ -152,6 +158,16 @@ instance Display Context where
         , ("version", displayTree (Text.take 16 (contextUnitVersionDigest version)))
         ]
 
+-- Authorship is an observation from the transcript owner, keyed by exact field.
+-- It contains no copied text and adds no edit authority.
+displayAuthorship :: ContextTextAuthorship -> DisplayTree
+displayAuthorship authorship = displayRecord 0 "ContextTextAuthorship"
+  [ ("reference", displayTree (show (contextAuthorshipReference authorship)))
+  , ("selector", displayTree (contextAuthorshipSelector authorship))
+  , ("author", displayTree (show (contextAuthorshipAuthor authorship)))
+  , ("authoredNote", displayTree (contextAuthorshipNote authorship))
+  ]
+
 data ContextBlockKind
   = AuthoredText ContextRole
   | NativeEvidence ContextNativeKind
@@ -167,6 +183,11 @@ data ContextProvenance
 -- | Read-only ordered blocks from the active committed projection.
 contextBlocks :: Getter Context [ContextBlock]
 contextBlocks = to (blocks . documentOf)
+
+-- | Owner-observed role and authored-note status for each exact text field.
+-- Replacing text does not rewrite its original authorship.
+contextAuthorship :: Getter Context [ContextTextAuthorship]
+contextAuthorship = to (\(Context inspection) -> contextInspectionAuthorship inspection)
 
 -- | Eligible text bodies for inspection. Build edits with 'textTargets'.
 editableTexts :: Fold Context Text
@@ -259,11 +280,14 @@ contextPatch = ContextPatch
 
 -- | Pure projected document, changed targets, and character counts. This is a
 -- local preview, not host admission or a provider token/cache estimate.
+-- Inspected authorship is retained observation data from the input, not a new
+-- issuance for the proposed document; appended notes have no reference yet.
 data ContextPreview = ContextPreview
   { previewDocument :: ContextDocument
   , previewChanges :: [ContextChange]
   , previewCharactersBefore :: Int
   , previewCharactersAfter :: Int
+  , previewInspectedAuthorship :: [ContextTextAuthorship]
   } deriving (Show, Eq)
 
 instance Display ContextPreview where
@@ -271,7 +295,8 @@ instance Display ContextPreview where
     [ ("changes", treeParts "[" "]" (map displayChange (previewChanges preview)))
     , ("charactersBefore", displayTree (previewCharactersBefore preview))
     , ("charactersAfter", displayTree (previewCharactersAfter preview))
-    , ("document", displayTree (Context (ContextInspection (previewDocument preview) [] [])))
+    , ("document", displayTree (Context (ContextInspection (previewDocument preview) [] [] [])))
+    , ("inspectedAuthorship", treeParts "[" "]" (map displayAuthorship (previewInspectedAuthorship preview)))
     ]
     where
       displayChange (ReplaceContextText reference selector _ body) = displayRecord 0 "ReplaceText"
@@ -287,7 +312,7 @@ instance Display ContextPreview where
 -- Only the host can decide current authority and commit the transaction.
 previewContext :: Context -> ContextPatch -> Either [ContextProblem] ContextPreview
 previewContext context@(Context inspection) (ContextPatch changes)
-  | null problems = Right (ContextPreview after changes (size before) (size after))
+  | null problems = Right (ContextPreview after changes (size before) (size after) (contextInspectionAuthorship inspection))
   | otherwise = Left problems
   where
     before = documentOf context
@@ -393,6 +418,10 @@ getContext = Context <$> send GetContextWith
 
 -- | Stage one batch. A refusal is ordinary data; a staged handle is not a
 -- commit receipt. Inspect it in a later cell to observe final settlement.
+-- A terminal rejection rolls back this accepted batch and explicit model/effort
+-- choices together. A stage refusal accepts no transaction and does not discard
+-- separately requested choices or an already accepted batch. Patches themselves
+-- never change model or effort; choice-only cells remain supported.
 stageContext :: Member ContextReadWrite effects => ContextPatch -> Eff effects ContextStageResult
 stageContext = send . StageContextWith
 

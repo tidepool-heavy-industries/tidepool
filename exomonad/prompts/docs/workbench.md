@@ -50,8 +50,12 @@ lifecycle. Only an explicit synchronous profile can include
 `ContextReadWrite`, which provides context
 editing, `setNextModel`, and `setNextEffort`.
 
-Context, next-model, and next-effort edits staged by a synchronous cell commit
-together only when the whole cell succeeds. A failed cell does not commit those edits, but it
+An accepted context batch and explicit next-model/effort choices in a synchronous
+cell commit together only when the whole cell succeeds. A terminal transaction
+rejection rolls them back together. A patch never changes model or effort by
+itself, and choice-only cells remain supported. A stage refusal accepts no
+transaction: it leaves separately requested choices and any first accepted batch
+intact. A failed cell does not commit its staged edits, but it
 cannot undo external effects already issued, such as a command or provider
 request. Captured contexts are snapshots. To use a completed edit as another actor’s
 starting context, explicitly capture and pass that context. `setNextModel` takes `Text`: the
@@ -69,7 +73,9 @@ evidence.
 `C.getContext` reads the active committed projection, including full visible
 text and owner-issued content versions. Repeated reads in one cell keep that
 committed base. `contextBlocks` is read-only; `visibleTexts` and `referencedTexts`
-inspect bodies, exact references and selectors. `editableTexts` is a read-only
+inspect bodies, exact references and selectors. `contextAuthorship` is a read-only
+getter of owner-observed role and authored-note status for each exact field;
+it contains no copied text and does not infer roles from content. `editableTexts` is a read-only
 fold over eligible bodies. Tool source/input and function arguments stay pinned.
 
 Build one batch with `C.contextPatch`: use `C.replaceText target body` on targets
@@ -83,7 +89,9 @@ and must not appear in the same batch.
 
 `C.previewContext current patch` returns typed problems or a rich projected
 document with changed targets and before/after character counts. It checks known
-fields and versions without effects; it does not predict provider tokens or
+fields and versions without effects. Preview authorship retains the original
+inspection observation, not newly issued metadata for the proposed document;
+appended notes have no reference yet. It does not predict provider tokens or
 cache reuse. `display` shows bounded text previews, references and versions.
 `C.stageContext patch` returns `C.ContextStageRefused problems` or
 `C.ContextStaged transaction`. One cell stages one batch. A staged identifier is
