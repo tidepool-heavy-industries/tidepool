@@ -711,10 +711,18 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
-    user_text_occurrences(request, expected) != 0
+    role_text_occurrences(request, "user", expected) != 0
 }
 
 fn user_text_occurrences(request: &ResponsesRequest, expected: &str) -> usize {
+    role_text_occurrences(request, "user", expected)
+}
+
+fn has_assistant_text(request: &ResponsesRequest, expected: &str) -> bool {
+    role_text_occurrences(request, "assistant", expected) != 0
+}
+
+fn role_text_occurrences(request: &ResponsesRequest, role: &str, expected: &str) -> usize {
     // Match the authored line in flat or structured provider message bodies.
     let count_lines = |text: &Value| {
         text.as_str().map_or(0, |text| {
@@ -724,7 +732,7 @@ fn user_text_occurrences(request: &ResponsesRequest, expected: &str) -> usize {
     request
         .input
         .iter()
-        .filter(|item| item.0["role"] == "user")
+        .filter(|item| item.0["role"] == role)
         .map(|item| {
             count_lines(&item.0["content"])
                 + item.0["content"].as_array().map_or(0, |parts| {
@@ -863,6 +871,74 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
 }
 
 #[tokio::test]
+async fn resident_targeted_transaction_reconciles_after_cell_and_retains_original_visible_text() {
+    let (_files, fixture, mut rounds) = start().await;
+    let first = next_round(&mut rounds, &fixture.context).await;
+    let model = first.request.model.clone();
+    let effort = first.request.pinned_effort;
+    first.cell(
+        "targeted-context-stage",
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_transaction_stage.hs",
+        ),
+    );
+    let committed = next_round(&mut rounds, &fixture.context).await;
+    let staged_output = successful_output(&committed.request, "targeted-context-stage");
+    let true_displays = |output: &Value| {
+        output["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["output"] == "True")
+            .count()
+    };
+    assert_eq!(true_displays(&staged_output), 2, "{staged_output}");
+    assert_context_operations_uncommitted(&staged_output);
+    assert_eq!(committed.request.model, model);
+    assert_eq!(committed.request.pinned_effort, effort);
+    assert!(has_user_text(
+        &committed.request,
+        "conditional-context-replacement"
+    ));
+    assert!(!has_user_text(&committed.request, "parent-original"));
+    assert!(has_assistant_text(
+        &committed.request,
+        "assistant-source-note"
+    ));
+    assert!(!has_user_text(&committed.request, "assistant-source-note"));
+    assert!(
+        committed.request.input.iter().any(|item| {
+            item.0["role"] == "assistant"
+                && item.0["content"]
+                    .as_str()
+                    .is_some_and(|body| body.contains("Agent-authored context note; sources:"))
+        }),
+        "source attribution must reach the provider projection"
+    );
+    committed.cell(
+        "targeted-context-readback",
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_transaction_readback.hs",
+        ),
+    );
+    let observed = next_round(&mut rounds, &fixture.context).await;
+    let output = successful_output(&observed.request, "targeted-context-readback");
+    assert_eq!(true_displays(&output), 3, "{output}");
+    assert_eq!(observed.request.model, model);
+    assert_eq!(observed.request.pinned_effort, effort);
+    assert!(has_user_text(
+        &observed.request,
+        "conditional-context-replacement"
+    ));
+    assert!(has_assistant_text(
+        &observed.request,
+        "assistant-source-note"
+    ));
+    observed.finish();
+    fixture.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn resident_authored_note_removal_roundtrips_through_native_projection() {
     const NOTE: &str = "[Agent-authored context note]\nindependent-note-roundtrip";
     let (_files, fixture, mut rounds) = start().await;
@@ -879,7 +955,11 @@ async fn resident_authored_note_removal_roundtrips_through_native_projection() {
         request
             .input
             .iter()
-            .filter(|item| item.0["type"] == "message" && item.0["content"] == NOTE)
+            .filter(|item| {
+                item.0["type"] == "message"
+                    && item.0["role"] == "assistant"
+                    && item.0["content"] == NOTE
+            })
             .count()
     };
     assert_eq!(count(&remove.request), 2);
@@ -1092,14 +1172,14 @@ async fn resident_sync_notes_commit_atomically_without_changing_captured_childre
             assert!(raw.contains(&reasoning_item("context-parent")));
             assert_portable_exchange(&round.request, &raw, "context-parent", "haskell_sync");
             assert_eq!(round.request.model, "parent-curated-model");
-            assert!(has_user_text(&round.request, "parent-curated"));
+            assert!(has_assistant_text(&round.request, "parent-curated"));
             assert!(has_user_text(&round.request, "parent-original"));
             root_committed = true;
             round.finish();
         } else if child_sessions.insert(round.request.session_id.thread().to_owned()) {
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
             assert_eq!(round.request.model, "child-preparation-model");
-            assert!(!has_user_text(&round.request, "parent-curated"));
+            assert!(!has_assistant_text(&round.request, "parent-curated"));
             assert!(has_user_text(&round.request, "parent-original"));
             let raw = raw_request_items(&fixture, &round.request);
             assert_before_call_prefix(&round.request, &raw, "context-parent");
@@ -1118,8 +1198,8 @@ async fn resident_sync_notes_commit_atomically_without_changing_captured_childre
             assert!(raw.contains(&reasoning_item("context-child")));
             assert_portable_exchange(&round.request, &raw, "context-child", "haskell_sync");
             assert_eq!(round.request.model, "gpt-6.1-sol");
-            assert!(has_user_text(&round.request, "child-curated"));
-            assert!(!has_user_text(&round.request, "parent-curated"));
+            assert!(has_assistant_text(&round.request, "child-curated"));
+            assert!(!has_assistant_text(&round.request, "parent-curated"));
             assert!(has_user_text(&round.request, "parent-original"));
             children_committed += 1;
             round.finish();
@@ -1227,12 +1307,15 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         displayed[1].contains("compiled-handler-curated"),
         "{output}"
     );
-    assert!(displayed[1].contains("Child finding:"), "{output}");
+    assert!(
+        !displayed[1].contains("Child finding:"),
+        "staged notes are absent from committed reads: {output}"
+    );
     assert!(has_user_text(
         &inspected.request,
         "compiled-handler-curated"
     ));
-    assert!(has_user_text(
+    assert!(has_assistant_text(
         &inspected.request,
         "Child finding: The cache key must include the selected transcript prefix."
     ));
@@ -1552,6 +1635,7 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
     let before = store
         .context_request_state(&operation.request, &conversation_identity)
         .unwrap();
+    let staged_snapshot = store.begin_context(&operation, &operation.request).unwrap();
     fixture
         .runtime
         .scheduler()
@@ -1578,6 +1662,26 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
         _ => panic!("expected confirmed cancellation, received {settled:?}"),
     }
     let (successor, child) = root_and_child_rounds(&mut rounds, &mut fixture, child).await;
+    let completion = fixture
+        .runtime
+        .scheduler()
+        .invocation_completion(&operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let harness::provider::ContextDisposition::Discarded(discarded) = completion.context else {
+        panic!("cancelled producer must preserve its staged transaction association");
+    };
+    let transaction = store
+        .context_transaction(&staged_snapshot, &discarded.patch)
+        .unwrap();
+    assert_eq!(
+        store
+            .context_transaction_status(&conversation_identity, &transaction)
+            .unwrap(),
+        harness::context::ContextTransactionStatus::Cancelled,
+        "confirmed cancellation must have a durable context outcome before successor inference",
+    );
     assert_eq!(successor.request.model, "test-model");
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));

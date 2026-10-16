@@ -11,13 +11,190 @@ use tidepool_bridge_effects::{
     ContextVisibleText as WireVisibleText,
 };
 
+pub(super) fn inspection_to_wire(
+    inspection: &harness::context::ContextInspection,
+) -> tidepool_bridge_effects::ContextInspection {
+    tidepool_bridge_effects::ContextInspection {
+        document: to_wire(&inspection.document),
+        text_versions: inspection
+            .text_versions
+            .iter()
+            .map(|version| tidepool_bridge_effects::ContextTextVersion {
+                reference: reference_to_wire(&version.reference),
+                selector: selector_to_wire(&version.selector),
+                digest: version.digest.clone(),
+            })
+            .collect(),
+        unit_versions: inspection
+            .unit_versions
+            .iter()
+            .map(|version| tidepool_bridge_effects::ContextUnitVersion {
+                reference: reference_to_wire(&version.reference),
+                digest: version.digest.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub(super) fn patch_from_wire(
+    patch: tidepool_bridge_effects::ContextPatch,
+) -> Result<harness::context::ContextPatch, ContextError> {
+    use harness::context::ContextChange;
+    use tidepool_bridge_effects::ContextChange as WireChange;
+    Ok(harness::context::ContextPatch {
+        changes: patch
+            .changes
+            .into_iter()
+            .map(|change| {
+                Ok(match change {
+                    WireChange::ReplaceContextText {
+                        reference,
+                        selector,
+                        expected,
+                        text,
+                    } => ContextChange::ReplaceContextText {
+                        reference: reference_from_wire(reference),
+                        selector: selector_from_wire(selector)?,
+                        expected,
+                        text,
+                    },
+                    WireChange::RemoveContextUnit {
+                        reference,
+                        expected,
+                    } => ContextChange::RemoveContextUnit {
+                        reference: reference_from_wire(reference),
+                        expected,
+                    },
+                    WireChange::AppendContextNote { text, sources } => {
+                        ContextChange::AppendContextNote {
+                            text,
+                            sources: sources.into_iter().map(reference_from_wire).collect(),
+                        }
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, ContextError>>()?,
+    })
+}
+
+pub(super) fn transaction_from_wire(
+    transaction: tidepool_bridge_effects::ContextTransaction,
+) -> harness::context::ContextTransaction {
+    harness::context::ContextTransaction {
+        raw: transaction.raw,
+    }
+}
+
+pub(super) fn stage_accepted(
+    transaction: &harness::context::ContextTransaction,
+) -> tidepool_bridge_effects::ContextStageResult {
+    tidepool_bridge_effects::ContextStageResult::ContextStaged(
+        tidepool_bridge_effects::ContextTransaction {
+            raw: transaction.raw.clone(),
+        },
+    )
+}
+
+pub(super) fn stage_refused(
+    problems: Vec<harness::context::ContextProblem>,
+) -> tidepool_bridge_effects::ContextStageResult {
+    tidepool_bridge_effects::ContextStageResult::ContextStageRefused(
+        problems.into_iter().map(problem_to_wire).collect(),
+    )
+}
+
+fn problem_to_wire(
+    problem: harness::context::ContextProblem,
+) -> tidepool_bridge_effects::ContextProblem {
+    use harness::context::ContextProblemCode as Code;
+    use tidepool_bridge_effects::ContextProblemCode as Wire;
+    tidepool_bridge_effects::ContextProblem {
+        code: match problem.code {
+            Code::Stale => Wire::ContextProblemStale,
+            Code::Missing => Wire::ContextProblemMissing,
+            Code::Ambiguous => Wire::ContextProblemAmbiguous,
+            Code::Denied => Wire::ContextProblemDenied,
+            Code::InvalidPatch => Wire::ContextProblemInvalidPatch,
+            Code::AlreadyStaged => Wire::ContextProblemAlreadyStaged,
+            Code::Ineligible => Wire::ContextProblemIneligible,
+            Code::UnsupportedSelector => Wire::ContextProblemUnsupportedSelector,
+        },
+        reference: problem.reference.as_ref().map(reference_to_wire),
+        detail: problem.detail,
+    }
+}
+
+pub(super) fn status_to_wire(
+    status: harness::context::ContextTransactionStatus,
+) -> Result<tidepool_bridge_effects::ContextTransactionStatus, tidepool_effect::error::EffectError>
+{
+    use harness::context::ContextTransactionStatus as Status;
+    use tidepool_bridge_effects::ContextTransactionStatus as Wire;
+    Ok(match status {
+        Status::Staged => Wire::ContextTransactionStaged,
+        Status::Committed(receipt) => {
+            Wire::ContextTransactionCommitted(tidepool_bridge_effects::ContextTransactionReceipt {
+                head: receipt.head.0,
+                generation: i64::try_from(receipt.generation).map_err(|_| {
+                    tidepool_effect::error::EffectError::Handler(
+                        "context generation exceeds wire range".into(),
+                    )
+                })?,
+                changed: receipt.changed,
+                appended: receipt.appended.iter().map(reference_to_wire).collect(),
+            })
+        }
+        Status::Rejected(problems) => {
+            Wire::ContextTransactionRejected(problems.into_iter().map(problem_to_wire).collect())
+        }
+        Status::Cancelled => Wire::ContextTransactionCancelled,
+        Status::Unknown(detail) => Wire::ContextTransactionUnknown(detail),
+    })
+}
+
+pub(super) fn original_to_wire(
+    observed: Result<String, harness::context::ContextProblem>,
+) -> tidepool_bridge_effects::OriginalTextObservation {
+    use harness::context::ContextProblemCode as Code;
+    use tidepool_bridge_effects::OriginalTextObservation as Wire;
+    match observed {
+        Ok(text) => Wire::OriginalTextAvailable(text),
+        Err(problem) => match problem.code {
+            Code::Missing => Wire::OriginalTextMissing,
+            Code::UnsupportedSelector => Wire::OriginalTextUnsupported(problem.detail),
+            _ => Wire::OriginalTextDenied(problem.detail),
+        },
+    }
+}
+
+pub(super) fn selector_from_wire(
+    selector: WireTextSelector,
+) -> Result<ContextTextSelector, ContextError> {
+    match selector {
+        WireTextSelector::MessageText { part } => Ok(ContextTextSelector::MessageText {
+            part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
+        }),
+        WireTextSelector::ToolResultText => Ok(ContextTextSelector::ToolResultText),
+    }
+}
+
+fn selector_to_wire(selector: &ContextTextSelector) -> WireTextSelector {
+    match selector {
+        ContextTextSelector::MessageText { part } => WireTextSelector::MessageText {
+            part: i64::from(*part),
+        },
+        ContextTextSelector::ToolResultText => WireTextSelector::ToolResultText,
+    }
+}
+
 pub(super) fn to_wire(document: &ContextDocument) -> WireDocument {
     WireDocument {
         blocks: document.blocks.iter().map(block_to_wire).collect(),
     }
 }
 
-pub(super) fn from_wire(document: WireDocument) -> Result<ContextDocument, ContextError> {
+#[cfg(test)]
+fn from_wire(document: WireDocument) -> Result<ContextDocument, ContextError> {
     Ok(ContextDocument {
         blocks: document
             .blocks
@@ -56,6 +233,7 @@ fn block_to_wire(block: &ContextBlock) -> WireBlock {
     }
 }
 
+#[cfg(test)]
 fn block_from_wire(block: WireBlock) -> Result<ContextBlock, ContextError> {
     Ok(match block {
         WireBlock::Text {
@@ -103,6 +281,7 @@ fn text_to_wire(text: &ContextVisibleText) -> WireVisibleText {
     }
 }
 
+#[cfg(test)]
 fn text_from_wire(text: WireVisibleText) -> Result<ContextVisibleText, ContextError> {
     Ok(ContextVisibleText {
         reference: reference_from_wire(text.reference),
@@ -124,7 +303,7 @@ fn reference_to_wire(reference: &ContextReference) -> WireReference {
     }
 }
 
-fn reference_from_wire(reference: WireReference) -> ContextReference {
+pub(super) fn reference_from_wire(reference: WireReference) -> ContextReference {
     ContextReference::from_raw(reference.raw)
 }
 
@@ -135,6 +314,7 @@ fn role_to_wire(role: ContextRole) -> WireRole {
     }
 }
 
+#[cfg(test)]
 fn role_from_wire(role: WireRole) -> ContextRole {
     match role {
         WireRole::User => ContextRole::User,
@@ -150,6 +330,7 @@ fn native_kind_to_wire(kind: ContextNativeKind) -> WireNativeKind {
     }
 }
 
+#[cfg(test)]
 fn native_kind_from_wire(kind: WireNativeKind) -> ContextNativeKind {
     match kind {
         WireNativeKind::CompletedExchange => ContextNativeKind::CompletedExchange,
@@ -246,6 +427,35 @@ mod tests {
                 super::text_from_wire(text),
                 Err(ContextError::InvalidReference)
             ));
+        }
+    }
+
+    #[test]
+    fn original_observation_preserves_missing_denied_and_unsupported_distinctions() {
+        use harness::context::{ContextProblem, ContextProblemCode};
+        use tidepool_bridge_effects::OriginalTextObservation;
+        for (code, expected) in [
+            (
+                ContextProblemCode::Missing,
+                OriginalTextObservation::OriginalTextMissing,
+            ),
+            (
+                ContextProblemCode::Denied,
+                OriginalTextObservation::OriginalTextDenied("detail".into()),
+            ),
+            (
+                ContextProblemCode::UnsupportedSelector,
+                OriginalTextObservation::OriginalTextUnsupported("detail".into()),
+            ),
+        ] {
+            assert_eq!(
+                super::original_to_wire(Err(ContextProblem {
+                    code,
+                    reference: None,
+                    detail: "detail".into(),
+                })),
+                expected
+            );
         }
     }
 }
