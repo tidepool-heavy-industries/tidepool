@@ -183,6 +183,26 @@ impl CompilerSourceSupport {
         })
     }
 
+    /// Issue availability at a checked original input ingress from its exact
+    /// selected graph. Custody outside that selection cannot supply bodies.
+    pub(crate) fn from_selected_issuance(
+        projection: CompilerInputProjection,
+        artifacts: ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let mut offers = Vec::new();
+        for role in projection.roles() {
+            if let Some(original) = role.original() {
+                let proof = NativeOriginalRequirement::from_role(role.clone())
+                    .map(|proof| Ok(Some(proof)))
+                    .unwrap_or_else(|| {
+                        NativeOriginalRequirement::from_selected_view(original, &artifacts)
+                    })?;
+                offers.push(IssuedNativeOffer::issue(original, &artifacts, proof)?);
+            }
+        }
+        Self::new(projection, artifacts, offers)
+    }
+
     pub(crate) fn native_offer_observations(&self) -> Result<BTreeSet<[u8; 32]>, CompileError> {
         self.native_offers
             .iter()

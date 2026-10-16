@@ -381,7 +381,10 @@ pub trait SnapshotValueCodec<V> {
         store: &mut Materializer<'_, BS>,
         value: &V,
     ) -> Result<Self::Wire, SnapshotError>;
-    fn decode<BS: Blockstore>(store: &BS, value: Self::Wire) -> Result<V, SnapshotError>;
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        value: Self::Wire,
+    ) -> Result<V, SnapshotError>;
 }
 #[derive(Clone, Copy, Debug)]
 pub struct InlineValues;
@@ -390,7 +393,7 @@ impl<V: Clone + Eq + Serialize + DeserializeOwned> SnapshotValueCodec<V> for Inl
     fn encode<BS: Blockstore>(_: &mut Materializer<'_, BS>, value: &V) -> Result<V, SnapshotError> {
         Ok(value.clone())
     }
-    fn decode<BS: Blockstore>(_: &BS, value: V) -> Result<V, SnapshotError> {
+    fn decode<BS: Blockstore>(_: &SnapshotHydrator<'_, BS>, value: V) -> Result<V, SnapshotError> {
         Ok(value)
     }
 }
@@ -431,7 +434,7 @@ where
     hamt.get(&BytesKey(encoded))
         .map_err(hamt_error)?
         .cloned()
-        .map(|value| C::decode(store, value))
+        .map(|value| C::decode(&SnapshotHydrator::new(store), value))
         .transpose()
 }
 
@@ -449,6 +452,19 @@ where
 
 pub fn hydrate_map_with<K, V, C, BS>(
     store: &BS,
+    root: &SnapshotMapRoot,
+) -> Result<MaterializedMap<K, V, C>, SnapshotError>
+where
+    K: SnapshotKey,
+    V: Clone + Eq,
+    C: SnapshotValueCodec<V>,
+    BS: Blockstore,
+{
+    hydrate_map_owned::<K, V, C, BS>(&SnapshotHydrator::new(store), root)
+}
+
+fn hydrate_map_owned<K, V, C, BS>(
+    store: &SnapshotHydrator<'_, BS>,
     root: &SnapshotMapRoot,
 ) -> Result<MaterializedMap<K, V, C>, SnapshotError>
 where
@@ -481,6 +497,41 @@ where
         facts,
         codec: PhantomData,
     })
+}
+
+/// One read operation shares immutable decoded graph owners by exact CID.
+/// These decoded facts still require inventory authentication before use.
+pub struct SnapshotHydrator<'a, BS> {
+    store: &'a BS,
+    selections: RefCell<std::collections::BTreeMap<SelectionRoot, MaterializedSelection>>,
+    scopes: RefCell<std::collections::BTreeMap<Cid, ImmutableScopeProofRef>>,
+}
+impl<'a, BS: Blockstore> SnapshotHydrator<'a, BS> {
+    fn new(store: &'a BS) -> Self {
+        Self {
+            store,
+            selections: RefCell::new(Default::default()),
+            scopes: RefCell::new(Default::default()),
+        }
+    }
+    fn selection(&self, root: &SelectionRoot) -> Result<MaterializedSelection, SnapshotError> {
+        if let Some(selection) = self.selections.borrow().get(root) {
+            return Ok(selection.clone());
+        }
+        let selection = hydrate_selection_owned(self, root)?;
+        self.selections
+            .borrow_mut()
+            .insert(root.clone(), selection.clone());
+        Ok(selection)
+    }
+}
+impl<BS: Blockstore> Blockstore for SnapshotHydrator<'_, BS> {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        self.store.get(cid)
+    }
+    fn put_keyed(&self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
+        self.store.put_keyed(cid, bytes)
+    }
 }
 
 /// Scope facts keep their complete immutable proof. Independently decoded
@@ -729,9 +780,12 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         Ok(*cid)
     }
     fn decode<BS: Blockstore>(
-        store: &BS,
+        store: &SnapshotHydrator<'_, BS>,
         cid: Cid,
     ) -> Result<ImmutableScopeProofRef, SnapshotError> {
+        if let Some(proof) = store.scopes.borrow().get(&cid) {
+            return Ok(proof.clone());
+        }
         let bytes = store
             .get(&cid)
             .map_err(storage_error)?
@@ -740,10 +794,12 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         let proof: ScopeProofV3 = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
         // The inventory authenticates complete scope identities and ancestry
         // before these decoded facts become live compiler custody.
-        Ok(ImmutableScopeProofRef(Arc::new(ScopeFact {
+        let proof = ImmutableScopeProofRef(Arc::new(ScopeFact {
             proof: Arc::new(proof),
             encoded: OnceLock::from((cid, bytes.into())),
-        })))
+        }));
+        store.scopes.borrow_mut().insert(cid, proof.clone());
+        Ok(proof)
     }
 }
 
@@ -807,12 +863,18 @@ pub fn hydrate_selection<BS: Blockstore>(
     store: &BS,
     root: &SelectionRoot,
 ) -> Result<MaterializedSelection, SnapshotError> {
+    SnapshotHydrator::new(store).selection(root)
+}
+fn hydrate_selection_owned<BS: Blockstore>(
+    store: &SnapshotHydrator<'_, BS>,
+    root: &SelectionRoot,
+) -> Result<MaterializedSelection, SnapshotError> {
     let descriptor: SelectionDescriptor = read_value(store, root.cid())?;
     if descriptor.version != 2 {
         return Err(malformed("selection encoding version"));
     }
     let scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec> =
-        hydrate_map_with::<_, _, ScopeProofCodec, _>(store, &descriptor.scopes)?;
+        hydrate_map_owned::<_, _, ScopeProofCodec, _>(store, &descriptor.scopes)?;
     if scopes
         .facts
         .iter()
@@ -820,9 +882,10 @@ pub fn hydrate_selection<BS: Blockstore>(
     {
         return Err(malformed("scope fact has another binding identity"));
     }
-    let roots = hydrate_map(store, &descriptor.roots)?;
-    let namespace = hydrate_map(store, &descriptor.namespace)?;
-    let custody_roots = hydrate_map(store, &descriptor.custody_roots)?;
+    let roots = hydrate_map_owned::<_, _, InlineValues, _>(store, &descriptor.roots)?;
+    let namespace = hydrate_map_owned::<_, _, InlineValues, _>(store, &descriptor.namespace)?;
+    let custody_roots =
+        hydrate_map_owned::<_, _, InlineValues, _>(store, &descriptor.custody_roots)?;
     let snapshot = Arc::new(ExactSelectionSnapshot {
         scopes: scopes.facts.clone(),
         roots: roots.facts.clone(),
@@ -948,7 +1011,7 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
         Ok(fact.cid)
     }
     fn decode<BS: Blockstore>(
-        store: &BS,
+        store: &SnapshotHydrator<'_, BS>,
         cid: Cid,
     ) -> Result<ImmutableLexicalFactRef, SnapshotError> {
         let bytes = store
@@ -971,7 +1034,7 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
 /// Availability is an issuance fact independent of compiler roles and execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NativeOfferSnapshotBody {
-    Empty,
+    Empty(crate::artifact_inventory::ExactArtifactSelection),
     Partial(crate::artifact_inventory::ExactArtifactSelection),
     Full(crate::artifact_inventory::ExactArtifactSelection),
 }
@@ -986,7 +1049,7 @@ impl NativeOfferSnapshotFacts {
     pub(crate) fn identity(&self) -> Result<[u8; 32], crate::CompileError> {
         use sha2::{Digest, Sha256};
         let (mode, selection) = match &self.body {
-            NativeOfferSnapshotBody::Empty => (0u8, None),
+            NativeOfferSnapshotBody::Empty(custody) => (0u8, Some(custody.observation_digest()?)),
             NativeOfferSnapshotBody::Partial(selection) => {
                 (1u8, Some(selection.observation_digest()?))
             }
@@ -1019,7 +1082,7 @@ impl NativeOfferSnapshotFacts {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum NativeOfferBodyWire {
-    Empty,
+    Empty { custody: SelectionRoot },
     Partial { selection: SelectionRoot },
     Full { selection: SelectionRoot },
 }
@@ -1040,14 +1103,17 @@ impl SnapshotValueCodec<NativeOfferSnapshotFacts> for NativeOfferCodec {
         facts: &NativeOfferSnapshotFacts,
     ) -> Result<Cid, SnapshotError> {
         let body = match &facts.body {
-            NativeOfferSnapshotBody::Empty => NativeOfferBodyWire::Empty,
-            NativeOfferSnapshotBody::Partial(selection)
+            NativeOfferSnapshotBody::Empty(selection)
+            | NativeOfferSnapshotBody::Partial(selection)
             | NativeOfferSnapshotBody::Full(selection) => {
                 let base = store.selection_base.clone();
                 let selection = store
                     .materialize_selection(base.as_ref(), selection.snapshot())?
                     .root;
                 match &facts.body {
+                    NativeOfferSnapshotBody::Empty(_) => {
+                        NativeOfferBodyWire::Empty { custody: selection }
+                    }
                     NativeOfferSnapshotBody::Partial(_) => {
                         NativeOfferBodyWire::Partial { selection }
                     }
@@ -1063,20 +1129,24 @@ impl SnapshotValueCodec<NativeOfferSnapshotFacts> for NativeOfferCodec {
         })
     }
     fn decode<BS: Blockstore>(
-        store: &BS,
+        store: &SnapshotHydrator<'_, BS>,
         cid: Cid,
     ) -> Result<NativeOfferSnapshotFacts, SnapshotError> {
         let wire: NativeOfferWire = read_value(store, &cid)?;
         let body = match wire.body {
-            NativeOfferBodyWire::Empty => NativeOfferSnapshotBody::Empty,
+            NativeOfferBodyWire::Empty { custody } => NativeOfferSnapshotBody::Empty(
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    store.selection(&custody)?.snapshot,
+                ),
+            ),
             NativeOfferBodyWire::Partial { selection } => NativeOfferSnapshotBody::Partial(
                 crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
-                    hydrate_selection(store, &selection)?.snapshot,
+                    store.selection(&selection)?.snapshot,
                 ),
             ),
             NativeOfferBodyWire::Full { selection } => NativeOfferSnapshotBody::Full(
                 crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
-                    hydrate_selection(store, &selection)?.snapshot,
+                    store.selection(&selection)?.snapshot,
                 ),
             ),
         };
@@ -1195,7 +1265,10 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
         };
         store.materialize_value(&fact)
     }
-    fn decode<BS: Blockstore>(store: &BS, cid: Cid) -> Result<CompilerInputRole, SnapshotError> {
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        cid: Cid,
+    ) -> Result<CompilerInputRole, SnapshotError> {
         Ok(match read_value::<CompilerRoleFact, _>(store, &cid)? {
             CompilerRoleFact::InterfaceOnly { interface } => {
                 CompilerInputRole::InterfaceOnly { interface }
@@ -1215,7 +1288,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                 selection,
                 selection_sha256,
             } => {
-                let selection = hydrate_selection(store, &selection)?;
+                let selection = store.selection(&selection)?;
                 CompilerInputRole::PublishedSourceOriginal {
                     interface,
                     original,
@@ -1312,14 +1385,16 @@ pub fn hydrate_context<BS: Blockstore>(
     store: &BS,
     root: &ContextRoot,
 ) -> Result<MaterializedContext, SnapshotError> {
+    let hydrator = SnapshotHydrator::new(store);
+    let store = &hydrator;
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
     if descriptor.version != 3 {
         return Err(malformed("context encoding version"));
     }
-    let selection = hydrate_selection(store, &descriptor.selection)?;
-    let roles = hydrate_map_with::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
+    let selection = store.selection(&descriptor.selection)?;
+    let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
     let lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec> =
-        hydrate_map_with::<_, _, LexicalFactCodec, _>(store, &descriptor.lexical)?;
+        hydrate_map_owned::<_, _, LexicalFactCodec, _>(store, &descriptor.lexical)?;
     if lexical
         .facts
         .iter()
@@ -1327,7 +1402,7 @@ pub fn hydrate_context<BS: Blockstore>(
     {
         return Err(malformed("lexical key differs from fact owner"));
     }
-    let offers = hydrate_map_with::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
+    let offers = hydrate_map_owned::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
     for (identity, fact) in offers.facts.iter() {
         if *identity != fact.identity().map_err(malformed)? {
             return Err(malformed("native offer key differs from fact identity"));

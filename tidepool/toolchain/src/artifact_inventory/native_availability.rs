@@ -200,7 +200,9 @@ impl IssuedNativeOffer {
             interface: self.0.interface,
             owner: self.0.owner.clone(),
             body: match &self.0.body {
-                NativeOfferBody::Empty => NativeOfferSnapshotBody::Empty,
+                NativeOfferBody::Empty => {
+                    NativeOfferSnapshotBody::Empty(ExactArtifactSelection::capture(&self.0.custody))
+                }
                 NativeOfferBody::Partial(proof) => {
                     NativeOfferSnapshotBody::Partial(proof.selection.clone())
                 }
@@ -218,8 +220,24 @@ impl IssuedNativeOffer {
         source: &ArtifactView,
     ) -> Result<Self, CompileError> {
         use crate::exact_context::NativeOfferSnapshotBody;
+        let exact_empty;
+        let source = if let NativeOfferSnapshotBody::Empty(custody) = &facts.body {
+            let graph = custody.graph_selection();
+            if !graph.roots.is_empty()
+                || !graph.namespace.is_empty()
+                || !matches!(graph.custody_roots.as_slice(), [ArtifactBindingNode::Artifact(binding)] if binding.artifact == facts.original)
+            {
+                return Err(failure(
+                    "recovered empty offer lacks exact original custody",
+                ));
+            }
+            exact_empty = source.select_issued(Vec::new(), custody)?;
+            &exact_empty
+        } else {
+            source
+        };
         let selection = match &facts.body {
-            NativeOfferSnapshotBody::Empty => None,
+            NativeOfferSnapshotBody::Empty(_) => None,
             NativeOfferSnapshotBody::Partial(selection)
             | NativeOfferSnapshotBody::Full(selection) => Some(selection.clone()),
         };

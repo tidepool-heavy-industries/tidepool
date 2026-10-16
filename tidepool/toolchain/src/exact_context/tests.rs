@@ -361,7 +361,7 @@ fn native_offer_classes_round_trip_and_change_context_identity() {
     ));
     let mut snapshot = ExactContextSnapshot::empty();
     for body in [
-        NativeOfferSnapshotBody::Empty,
+        NativeOfferSnapshotBody::Empty(selection.clone()),
         NativeOfferSnapshotBody::Partial(selection.clone()),
         NativeOfferSnapshotBody::Full(selection),
     ] {
@@ -395,6 +395,20 @@ fn native_offer_classes_round_trip_and_change_context_identity() {
     assert_eq!(receipt.root(), reordered_receipt.root());
     let restored = hydrate_context(&store, receipt.root()).unwrap();
     assert_eq!(restored.snapshot().offers, snapshot.offers);
+    let offered_selections = restored
+        .snapshot()
+        .native_offers()
+        .map(|fact| match &fact.body {
+            NativeOfferSnapshotBody::Empty(selection)
+            | NativeOfferSnapshotBody::Partial(selection)
+            | NativeOfferSnapshotBody::Full(selection) => selection.snapshot(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(offered_selections.len(), 3);
+    for selection in &offered_selections {
+        assert!(Arc::ptr_eq(selection, restored.snapshot().selection()));
+    }
+
     let mut materializer = Materializer::new(&store);
     let same = materializer
         .materialize_context(Some(&restored), &snapshot)

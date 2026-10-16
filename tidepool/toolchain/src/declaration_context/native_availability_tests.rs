@@ -3885,7 +3885,11 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         .native_groups
         .is_empty());
     assert!(empty.custody().capture_graph_selection().roots.is_empty());
-    assert!(empty.custody().namespace().is_empty());
+    assert!(empty
+        .custody()
+        .capture_graph_selection()
+        .namespace
+        .is_empty());
     let canonical_support = CompilerSourceSupport::new(
         projection.interface_only(),
         artifacts.clone(),
@@ -3964,7 +3968,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         assert!(match (&restored_offer.snapshot_facts().body, index) {
             (NativeOfferSnapshotBody::Full(_), 0)
             | (NativeOfferSnapshotBody::Partial(_), 1)
-            | (NativeOfferSnapshotBody::Empty, 2) => true,
+            | (NativeOfferSnapshotBody::Empty(_), 2) => true,
             _ => false,
         });
         let request = ExactCompileContext::new(Arc::new(restored))
@@ -3985,4 +3989,143 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
             context.artifact_view().selected_native_groups()
         );
     }
+}
+
+#[test]
+fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
+    use crate::artifact_inventory::{
+        CompilerSourceSupport, IssuedNativeOffer, NativeArtifactDemand,
+    };
+    use crate::exact_context::{hydrate_context, Materializer};
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), product("EmptyCarrier", 88)).unwrap());
+    let inventory = ArtifactInventory::default();
+    let issue = |marker: &str, version| {
+        inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![
+                    entry.clone(),
+                    Arc::new(ArtifactEntry::canonical(
+                        product(marker, version).module_interface().unwrap().clone(),
+                    )),
+                ],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap()
+    };
+    let left = issue("EmptyLeft", 89);
+    let right = issue("EmptyRight", 90);
+    let left_offer = IssuedNativeOffer::issue(entry.descriptor.id, &left, None).unwrap();
+    let right_offer = IssuedNativeOffer::issue(entry.descriptor.id, &right, None).unwrap();
+    assert_ne!(
+        left_offer.custody().capture_graph_selection(),
+        right_offer.custody().capture_graph_selection()
+    );
+    assert_ne!(
+        left_offer.snapshot_facts().identity().unwrap(),
+        right_offer.snapshot_facts().identity().unwrap()
+    );
+    assert!(
+        left_offer.snapshot_facts().restore(&right).is_err(),
+        "a competing carrier cannot satisfy exact Empty custody"
+    );
+    let artifacts = left
+        .merge(&right)
+        .unwrap()
+        .retain_original_custody(&right)
+        .unwrap();
+    let restored_left = left_offer.snapshot_facts().restore(&artifacts).unwrap();
+    assert_eq!(restored_left.snapshot_facts(), left_offer.snapshot_facts());
+    assert!(restored_left.proof().is_none());
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()])
+        .unwrap()
+        .interface_only();
+    let support = CompilerSourceSupport::new(
+        projection,
+        artifacts,
+        [left_offer.clone(), right_offer.clone()],
+    )
+    .unwrap()
+    .source_support(&BTreeSet::from([entry.descriptor.owner.clone()]))
+    .unwrap();
+    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: support,
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let store = MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    let receipt = materializer
+        .materialize_context(None, &context.snapshot())
+        .unwrap();
+    for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+        store.put_keyed(&cid, &bytes).unwrap();
+    }
+    let receipt = hydrate_context(&store, receipt.root()).unwrap();
+    assert_eq!(receipt.snapshot().native_offers().count(), 2);
+    let mut shared_scopes = 0;
+    for fact in receipt.snapshot().native_offers() {
+        let crate::exact_context::NativeOfferSnapshotBody::Empty(custody) = &fact.body else {
+            panic!("Empty issuance");
+        };
+        assert!(!Arc::ptr_eq(
+            custody.snapshot(),
+            receipt.snapshot().selection()
+        ));
+        for (scope, proof) in &custody.snapshot().scopes {
+            let context_proof = &receipt.snapshot().selection().scopes[scope];
+            assert!(Arc::ptr_eq(proof.proof(), context_proof.proof()));
+            shared_scopes += 1;
+        }
+    }
+    assert!(
+        shared_scopes >= 2,
+        "distinct offer selections must share their overlapping scope owners"
+    );
+
+    let graph = receipt.snapshot().graph_selection().unwrap();
+    let view = context.artifact_view();
+    let recovered = RecoveredArtifactInventory {
+        producer: producer.sha256(),
+        entries: view
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, entry))
+            .collect(),
+        recorded_inventory: true,
+        bindings: graph.bindings.iter().copied().collect(),
+        binding_edges: receipt.snapshot().binding_dependencies().unwrap(),
+        interfaces: view.interface_dependencies(),
+    };
+    let mut restored = recovered.context_with_snapshot(receipt.snapshot()).unwrap();
+    restored.bind_snapshot_baseline(&receipt).unwrap();
+    let expected = [left_offer.snapshot_facts(), right_offer.snapshot_facts()]
+        .into_iter()
+        .map(|fact| (fact.identity().unwrap(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let actual = restored
+        .facts
+        .compiler_support
+        .native_offers()
+        .iter()
+        .map(|offer| {
+            assert!(offer.proof().is_none());
+            assert!(!offer.is_full());
+            assert!(offer.custody().selected_native_groups().is_empty());
+            let fact = offer.snapshot_facts();
+            (fact.identity().unwrap(), fact)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
+    assert!(restored
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(restored.artifact_view().selected_native_groups().is_empty());
 }

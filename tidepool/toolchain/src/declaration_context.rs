@@ -2284,12 +2284,20 @@ impl RecoveredArtifactInventory {
             Some(roles) => CompilerInputProjection::restore(&restored, roles)?,
             None => compiler_projection.expect("direct input issuer"),
         };
-        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
-            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+        let compiler_support = if roles.is_none() {
+            crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                compiler_projection,
+                restored,
+            )?
+        } else {
+            crate::artifact_inventory::CompilerSourceSupport::new(
                 compiler_projection,
                 restored,
                 [],
-            )?,
+            )?
+        };
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support,
 
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -5807,24 +5815,11 @@ impl ExactDeclarationContext {
             let updated = projection;
             context = context.rebuild(|facts| facts.compiler_support.projection = updated);
         }
-        let mut offers = Vec::new();
-        for role in context.compiler_input_projection().roles() {
-            if let Some(original) = role.original() {
-                let proof = crate::artifact_inventory::NativeOriginalRequirement::from_role(
-                    role.clone(),
-                )
-                .map(|proof| Ok(Some(proof)))
-                .unwrap_or_else(|| {
-                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original, artifacts,
-                    )
-                })?;
-                offers.push(crate::artifact_inventory::IssuedNativeOffer::issue(
-                    original, artifacts, proof,
-                )?);
-            }
-        }
-        context.facts.compiler_support.native_offers = offers.into();
+        context.facts.compiler_support =
+            crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                context.facts.compiler_support.projection.clone(),
+                artifacts.clone(),
+            )?;
         context
             .facts
             .compiler_support
@@ -6444,11 +6439,6 @@ impl ExactDeclarationContext {
         values: &[Arc<CertifiedValueInterface>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            &self.facts.compiler_support.projection,
-            &self.facts.compiler_support.artifacts,
-            &native_requirement_facts(self.facts.compiler_support.native_offers()),
-        )?;
         let mut entries = Vec::new();
         for value in values {
             self = self.admit_producer(value.interface().toolchain_identity_sha256())?;
@@ -6461,17 +6451,22 @@ impl ExactDeclarationContext {
         let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.facts.compiler_support.projection.merge(&issued)?;
+        let offers = preserve_native_offers(
+            &projection,
+            &self.facts.compiler_support.artifacts,
+            self.facts.compiler_support.native_offers(),
+        )?;
         {
             let updated = self
                 .facts
                 .compiler_support
                 .artifacts
                 .inventory()
-                .admit_projected_with_native_requirements(
+                .admit_projected_with_native_offers(
                     &self.facts.compiler_support.artifacts,
                     entries,
                     &projection,
-                    &requirements,
+                    &offers,
                 )?;
             self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
@@ -8490,7 +8485,7 @@ mod tests {
     }
 
     #[test]
-    fn context_observation_wire_preserves_v6_v7_and_missing_owner_order() {
+    fn context_observation_wire_preserves_v8_v9_and_missing_owner_order() {
         let base = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         assert_context_observation_wire(&base);
         assert_eq!(
