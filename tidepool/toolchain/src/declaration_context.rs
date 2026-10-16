@@ -875,7 +875,7 @@ impl OriginalCompilerInputs {
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
-        let mut native_availability =
+        let native_availability =
             capture_native_availability(&projection, &artifacts, &native_original_requirements)?;
         let mut native_original_requirements = native_original_requirements;
         for availability in &native_availability {

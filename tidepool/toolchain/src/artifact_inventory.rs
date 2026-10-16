@@ -3126,6 +3126,21 @@ impl ArtifactInventory {
         projection: &CompilerInputProjection,
         availability: &[NativeOriginalRequirement],
     ) -> Result<ArtifactView, CompileError> {
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        if let Some(proof) = availability
+            .iter()
+            .find(|proof| !offered.contains(&proof.original))
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: proof.original,
+                },
+            ));
+        }
         self.admit_shared_with_intent(
             parent,
             entries,
