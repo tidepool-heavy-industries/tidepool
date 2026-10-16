@@ -136,15 +136,15 @@ mod hosted_tools_tests;
 #[cfg(test)]
 mod invocation_lifetime_tests;
 #[cfg(test)]
-mod jev_tests;
-#[cfg(test)]
 mod jev_recording_reload_tests;
+#[cfg(test)]
+mod jev_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
-mod researcher_acceptance_tests;
-#[cfg(test)]
 mod persona_file_tools_acceptance_tests;
+#[cfg(test)]
+mod researcher_acceptance_tests;
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
@@ -299,10 +299,12 @@ fn with_host_interpreters(
     runtime
         .configure_context_models(config)
         .map_err(runtime_error)?;
-    let mut forest = forest.with_conversation_reader(embedded_reflect::run_conversation_reader(
-        runtime.store(),
-        recovery,
-    ));
+    let mut forest = forest
+        .with_conversation_reader(embedded_reflect::run_conversation_reader(
+            runtime.store(),
+            recovery.clone(),
+        ))
+        .with_result_inspection_reader(embedded_reflect::result_reader(runtime.store(), recovery));
     forest.set_jev_backend(jev_backend(config));
     Ok(forest
         .with_cell_model_factory(models)

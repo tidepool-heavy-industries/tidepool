@@ -59,7 +59,7 @@ import Tidepool.View.Types (View(..), viewTree)
 import Tidepool.View.Wire (encodeView)
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith, DisplaySelectableWith, DisplaySelectWith, DisplayNavigationInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( ResultReference(..), ResultInspectionError(..), SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith, DisplaySelectableWith, DisplaySelectWith, DisplayNavigationInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -177,6 +177,18 @@ instance Display WriteOutcome where
   displayTree (Written f c) = displayRecord 0 "Written" [("file", displayTree f), ("checks", displayTree c)]
   displayTree (WriteBlocked f xs) = displayRecord 0 "WriteBlocked" [("file", displayTree f), ("failed", displayTree xs)]
   displayTree (WriteConflict f e a) = displayRecord 0 "WriteConflict" [("file", displayTree f), ("expected", displayTree e), ("actual", displayTree a)]
+
+instance Display ResultReference where
+  displayTree value = Constructor "ResultReference"
+    [("resultRun", displayTree (resultRun value)), ("resultActor", displayTree (resultActor value)),
+     ("resultIncarnation", displayTree (resultIncarnation value)), ("resultRequest", displayTree (resultRequest value)),
+     ("resultCall", displayTree (resultCall value))]
+
+instance Display ResultInspectionError where
+  displayTree ResultUnbound = TextLeaf "ResultUnbound"
+  displayTree ResultMissing = TextLeaf "ResultMissing"
+  displayTree ResultUnauthorized = TextLeaf "ResultUnauthorized"
+  displayTree (ResultUnreadable detail) = application 0 "ResultUnreadable" [displayTree detail]
 
 instance Display SourceModule where
   displayTree value = Constructor "SourceModule"

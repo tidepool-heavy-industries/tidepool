@@ -27,6 +27,8 @@ module Tidepool.Inspection.Display
   )
 where
 
+import qualified Tidepool.Aeson.Value as Json
+import qualified Data.Map.Strict as Map
 import Data.Kind (Type)
 import GHC.Generics
 import Data.Text (Text)
@@ -102,6 +104,16 @@ opaqueHandle description = TextLeaf ("<" <> description <> ">")
 -- rendering is an explicit authored choice: @display (show value)@.
 instance {-# OVERLAPPABLE #-} Display a where
   displayTree _ = TextLeaf "<opaque>"
+
+-- JSON is semantic data: retain its tree for ordinary bounded expansion.
+instance Display Json.Value where
+  displayTree value = case value of
+    Json.Object fields -> Constructor "Object" [(key, displayTree item) | (key, item) <- Map.toList fields]
+    Json.Array items -> Sequence "[" "]" (map displayTree items)
+    Json.String text -> literalText text
+    Json.Number number -> StringLeaf (show number)
+    Json.Bool flag -> displayTree flag
+    Json.Null -> TextLeaf "null"
 
 instance Display Int where displayTree = shownAtom
 instance Display Integer where displayTree = shownAtom

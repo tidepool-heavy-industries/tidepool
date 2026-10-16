@@ -139,6 +139,7 @@ fn merge_display_receipt(
     let index = snapshot.id.input_unit_index;
     if !receipts.iter().any(|item| item.index == index) {
         receipts.push(WorkbenchItemReceipt {
+            presentation: None,
             index,
             status: WorkbenchItemStatus::Stopped,
             kind: None,
@@ -470,6 +471,7 @@ mod tests {
                 sequence: 7,
             };
             let cancelled_receipts = vec![WorkbenchItemReceipt {
+                presentation: None,
                 index: 0,
                 status: WorkbenchItemStatus::Stopped,
                 kind: None,

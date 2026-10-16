@@ -52,6 +52,68 @@ pub fn reflect() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "ResultReference",
+                wire_rust: Some("RfResultReference"),
+                haskell_module: None,
+                shape: TypeShape::Record {
+                    fields: vec![
+                        field("resultRun", "run", HsType::Text),
+                        field("resultActor", "actor", HsType::Text),
+                        field("resultIncarnation", "incarnation", HsType::Text),
+                        field("resultRequest", "request", HsType::Text),
+                        field("resultCall", "call", HsType::Text),
+                    ],
+                },
+                json: JsonInstance::Generic,
+                derives: WireDerives(&[
+                    WireDerive::ToHaskell,
+                    WireDerive::FromHaskell,
+                    WireDerive::Clone,
+                    WireDerive::Debug,
+                    WireDerive::PartialEq,
+                    WireDerive::Eq,
+                ]),
+                domain: None,
+                doc: &[
+                    "Exact retained operation identity. Reading still requires the caller's current conversation ownership.",
+                ],
+            },
+            TypeDef {
+                name: "ResultInspectionError",
+                wire_rust: Some("RfResultError"),
+                haskell_module: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "ResultUnbound",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ResultMissing",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ResultUnauthorized",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ResultUnreadable",
+                            fields: positional_fields![HsType::Text],
+                            doc: &[],
+                        },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WIRE,
+                domain: None,
+                doc: &[
+                    "Missing data, inaccessible storage and refused ownership are separate observations.",
+                ],
+            },
+            TypeDef {
                 name: "ConversationRole",
                 wire_rust: Some("RfRole"),
                 haskell_module: None,
@@ -116,10 +178,26 @@ pub fn reflect() -> Effect {
                 haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
-                        SumVariant { ctor: "TurnInProgress", fields: VariantFields::Positional(Vec::new()), doc: &[] },
-                        SumVariant { ctor: "TurnCompleted", fields: positional_fields![HsType::maybe(HsType::Text)], doc: &["The exact provider response identity, when recorded."] },
-                        SumVariant { ctor: "TurnInterrupted", fields: VariantFields::Positional(Vec::new()), doc: &[] },
-                        SumVariant { ctor: "TurnUnknown", fields: VariantFields::Positional(Vec::new()), doc: &[] },
+                        SumVariant {
+                            ctor: "TurnInProgress",
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "TurnCompleted",
+                            fields: positional_fields![HsType::maybe(HsType::Text)],
+                            doc: &["The exact provider response identity, when recorded."],
+                        },
+                        SumVariant {
+                            ctor: "TurnInterrupted",
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "TurnUnknown",
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        },
                     ],
                 },
                 json: JsonInstance::None,
@@ -190,38 +268,63 @@ pub fn reflect() -> Effect {
         ],
         external_types: &[],
         errors: None,
-        verbs: vec![Verb {
-            ctor: "ReflectWith",
-            method: "reflect_with",
-            args: vec![Arg {
-                name: "count",
-                ty: HsType::Int,
-                rust: RustBinding::Path("i64"),
-            }],
-            ret: HsType::Either(
-                Box::new(HsType::Named("ReflectError")),
-                Box::new(HsType::list(HsType::Named("ConversationTurn"))),
-            ),
-            errors: None,
-            handling: HandlingClass::Actor,
-        }],
-        helpers: vec![Helper {
-            name: "reflect",
-            ctor: Some("ReflectWith"),
-            substrate: false,
-            doc: &[
-                "`reflect n` reads your OWN latest n conversation turns including the active",
-                "turn, oldest first, each carrying recorded messages, tool calls and tool",
-                "results. `turnState` distinguishes progress from missing timestamps; pending",
-                "tool results are never invented. Fewer than n turns returns the ones that exist,",
-                "and `n <= 0` returns none.",
-                "Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`",
-                "means this context has no conversation of its own — no other actor's is",
-                "returned in its place. Bind the result once and reuse it across the",
-                "calls that need it rather than reading it again per call.",
-            ],
-            body: HelperBody::Pointfree,
-        }],
+        verbs: vec![
+            Verb {
+                ctor: "ReflectResultWith",
+                method: "reflect_result_with",
+                args: vec![Arg {
+                    name: "reference",
+                    ty: HsType::Named("ResultReference"),
+                    rust: RustBinding::HaskellValue,
+                }],
+                ret: HsType::either(HsType::Named("ResultInspectionError"), HsType::Value),
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
+            Verb {
+                ctor: "ReflectWith",
+                method: "reflect_with",
+                args: vec![Arg {
+                    name: "count",
+                    ty: HsType::Int,
+                    rust: RustBinding::Path("i64"),
+                }],
+                ret: HsType::Either(
+                    Box::new(HsType::Named("ReflectError")),
+                    Box::new(HsType::list(HsType::Named("ConversationTurn"))),
+                ),
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
+        ],
+        helpers: vec![
+            Helper {
+                name: "inspectResult",
+                ctor: Some("ReflectResultWith"),
+                substrate: false,
+                doc: &[
+                    "Read canonical JSON from this exact retained operation without executing its handler again. Bind the result and select or display it.",
+                ],
+                body: HelperBody::Pointfree,
+            },
+            Helper {
+                name: "reflect",
+                ctor: Some("ReflectWith"),
+                substrate: false,
+                doc: &[
+                    "`reflect n` reads your OWN latest n conversation turns including the active",
+                    "turn, oldest first, each carrying recorded messages, tool calls and tool",
+                    "results. `turnState` distinguishes progress from missing timestamps; pending",
+                    "tool results are never invented. Fewer than n turns returns the ones that exist,",
+                    "and `n <= 0` returns none.",
+                    "Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`",
+                    "means this context has no conversation of its own — no other actor's is",
+                    "returned in its place. Bind the result once and reuse it across the",
+                    "calls that need it rather than reading it again per call.",
+                ],
+                body: HelperBody::Pointfree,
+            },
+        ],
         polymorphism: Polymorphism::None,
         generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate,

@@ -595,6 +595,7 @@ mod tests {
             status: WorkbenchRunStatus::Committed,
             summary: None,
             items: vec![WorkbenchItemReceipt {
+                presentation: None,
                 diagnostics: Vec::new(),
                 index: 0,
                 kind: None,

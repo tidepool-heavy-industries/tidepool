@@ -8,7 +8,10 @@ fn dispatch_envelope_preserves_authored_output_and_decodes_typed_refusals() {
         "status": "success", "output": output, "presentation": presentation,
     }))
     .unwrap();
-    assert_eq!(reply.into_parts().unwrap(), (output, presentation.into()));
+    assert_eq!(
+        reply.into_parts().unwrap(),
+        (Some(output), presentation.to_owned())
+    );
     for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
         let mut payload = serde_json::json!({
             "status": "refused", "kind": kind, "error": "correct the call", "tool": "echo",
@@ -54,7 +57,7 @@ fn successful_dispatch_keeps_semantics_separate_from_presentation() {
     .unwrap();
 
     let (value, presentation) = reply.into_parts().unwrap();
-    assert_eq!(value, semantic);
+    assert_eq!(value, Some(semantic));
     assert_eq!(presentation, "three items were accepted");
 }
 

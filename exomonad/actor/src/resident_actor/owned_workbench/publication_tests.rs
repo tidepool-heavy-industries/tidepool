@@ -2,6 +2,7 @@ use super::*;
 
 fn receipt() -> WorkbenchItemReceipt {
     WorkbenchItemReceipt {
+        presentation: None,
         index: 0,
         kind: Some(WorkbenchCellItemKind::Statement),
         span: None,

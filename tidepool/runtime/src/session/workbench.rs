@@ -420,8 +420,19 @@ pub struct WorkbenchCellSourceItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkbenchPresentationOutcome {
+    Published,
+    Failed { detail: String },
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchItemReceipt {
+    /// Presentation cannot change the handler's retained semantic settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<WorkbenchPresentationOutcome>,
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<WorkbenchCellItemKind>,
@@ -1920,6 +1931,7 @@ mod tests {
             status: WorkbenchRunStatus::Replied,
             summary: None,
             items: vec![WorkbenchItemReceipt {
+                presentation: None,
                 index: 0,
                 kind: None,
                 span: None,

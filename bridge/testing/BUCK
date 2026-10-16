@@ -414,6 +414,7 @@ filegroup(
         "bridge/facade/src/actor_host/record_actor_unfold.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f7265636f72645f6163746f725f756e666f6c642e6873",
         "bridge/facade/src/actor_host/request_update_setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f726571756573745f7570646174655f73657475702e6873",
         "bridge/facade/src/actor_host/restart_effect_once.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f726573746172745f6566666563745f6f6e63652e6873",
+        "bridge/facade/src/actor_host/result_retention_agent_spec.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f726573756c745f726574656e74696f6e5f6167656e745f737065632e6873",
         "bridge/facade/src/actor_host/roster_observe.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f726f737465725f6f6273657276652e6873",
         "bridge/facade/src/actor_host/roster_setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f726f737465725f73657475702e6873",
         "bridge/facade/src/actor_host/scaffold_expired_output.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f73636166666f6c645f657870697265645f6f75747075742e6873",

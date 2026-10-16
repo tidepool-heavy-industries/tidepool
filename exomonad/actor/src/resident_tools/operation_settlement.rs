@@ -183,7 +183,8 @@ impl HostedOperationSettlement {
         }
     }
 
-    pub(crate) fn reply(&self) -> Option<crate::KernelWorkbenchReply> {
+    /// Complete retained evidence; this does not certify successful cleanup.
+    pub fn reply(&self) -> Option<crate::KernelWorkbenchReply> {
         match &*self.native.lock() {
             ProviderNativeCustody::Acknowledged { reply, .. } => Some(reply.clone()),
             ProviderNativeCustody::Computing(control)

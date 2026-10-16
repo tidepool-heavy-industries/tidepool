@@ -2267,6 +2267,8 @@ pub enum ResidentError {
     /// and owns successful prefix settlement.
     #[error("checked turn requires its authenticated execution route")]
     UnsupportedCheckedTurn,
+    #[error("tool presentation requires the original plain protocol continuation")]
+    InvalidPresentationContinuation,
     #[error(transparent)]
     BindingAlias(#[from] BindingAliasError),
     /// A rooted value minted by another resident session was presented to
@@ -2360,6 +2362,24 @@ pub enum ResidentError {
 }
 
 impl ResidentError {
+    /// Authored evaluation failures, excluding integrity and resource failures.
+    pub fn is_language_failure(&self) -> bool {
+        let execution = match self {
+            Self::Prepared(PreparedRuntimeError::Run(error))
+            | Self::Run(RuntimeError::Prepared(PreparedRuntimeError::Run(error))) => error,
+            _ => return false,
+        };
+        matches!(execution, tidepool_codegen::prepared_program::ExecutionError::Runtime(failure) if matches!(
+            failure.cause,
+            tidepool_codegen::host_fns::RuntimeError::UserError
+                | tidepool_codegen::host_fns::RuntimeError::UserErrorMsg(_)
+                | tidepool_codegen::host_fns::RuntimeError::Undefined
+                | tidepool_codegen::host_fns::RuntimeError::RaisedException
+                | tidepool_codegen::host_fns::RuntimeError::RaisedExceptionMessage(_)
+                | tidepool_codegen::host_fns::RuntimeError::PatternMatchFailure(_)
+        ))
+    }
+
     /// Whether this failure is only an observation budget running out
     /// somewhere in the turn — materializing a display value, or observing a
     /// suspended effect's own request so it can be classified and dispatched
@@ -8610,6 +8630,28 @@ where
         }
     }
 
+    /// Resume the private named-tool result publication under the bounded
+    /// presentation observation contract. The caller has retained semantics.
+    pub fn resume_tool_presentation(
+        &mut self,
+        mut hole: ResidentHole,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
+        match &mut hole {
+            ResidentHole::Plain(plain)
+                if matches!(plain.observation, ResultObservation::Protocol) =>
+            {
+                plain.observation = ResultObservation::Presentation
+            }
+            _ => {
+                return Err(ResidentResumeError::Rejected(
+                    ResidentError::InvalidPresentationContinuation,
+                ))
+            }
+        }
+        self.resume_classified(hole, (), settlement)
+    }
+
     /// The prepared arm of [`Self::reenter`]. A host-built `Answer` is
     /// validated against the frame's site evidence and built before the frame
     /// is taken, then the runner's resume entry re-enters the continuation
@@ -12015,5 +12057,32 @@ mod renderer_slot_tests {
             RendererAccess::CloseUnconfirmed
         ));
         assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+    }
+}
+
+#[cfg(test)]
+mod tool_presentation_failure_tests {
+    use super::*;
+
+    #[test]
+    fn authored_presentation_failure_excludes_integrity_resource_and_cancellation() {
+        use tidepool_codegen::{
+            host_fns::RuntimeError as Cause, machine_state::MachineFailure,
+            prepared_program::ExecutionError,
+        };
+        for (cause, authored) in [
+            (Cause::UserErrorMsg("presenter exploded".into()), true),
+            (Cause::Undefined, true),
+            (Cause::Cancelled, false),
+            (Cause::HeapOverflow, false),
+            (Cause::StackOverflow, false),
+            (Cause::NullFunPtr, false),
+        ] {
+            let disposition = cause.machine_disposition();
+            let error = ResidentError::Prepared(PreparedRuntimeError::Run(
+                ExecutionError::Runtime(MachineFailure { cause, disposition }),
+            ));
+            assert_eq!(error.is_language_failure(), authored);
+        }
     }
 }

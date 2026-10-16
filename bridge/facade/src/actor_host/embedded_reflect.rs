@@ -257,3 +257,47 @@ mod tests {
         );
     }
 }
+
+/// Canonical result inspection uses the same exact bound conversation as Reflect.
+pub(super) fn result_reader(
+    store: Arc<Store>,
+    recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
+) -> exomonad_actor::ResultInspectionReader {
+    Arc::new(move |actor, reference| {
+        let store = store.clone();
+        let recovery = recovery.clone();
+        Box::pin(async move {
+            use tidepool_bridge_effects::RfResultError;
+            let conversation = recovery
+                .active_application_conversation(actor)
+                .await
+                .map_err(|error| RfResultError::ResultUnreadable(error.to_string()))?
+                .ok_or(RfResultError::ResultUnbound)?;
+            let identity = super::embedded_recovery::identity_from_conversation(&conversation)
+                .map_err(RfResultError::ResultUnreadable)?;
+            let operation = harness::model::OperationId {
+                origin: harness::model::ConversationIdentity::Embedded {
+                    run: reference.run,
+                    actor: harness::model::AgentPath(reference.actor),
+                    incarnation: reference.incarnation,
+                },
+                request: harness::model::RequestId(reference.request),
+                call: harness::model::CallId(reference.call),
+            };
+            let output = store
+                .inspect_embedded_result(&identity, &operation)
+                .map_err(|error| match error {
+                    harness::store::StoreError::OperationOriginMismatch => {
+                        RfResultError::ResultUnauthorized
+                    }
+                    error => RfResultError::ResultUnreadable(error.to_string()),
+                })?
+                .ok_or(RfResultError::ResultMissing)?;
+            let text = output.item.0["output"].as_str().ok_or_else(|| {
+                RfResultError::ResultUnreadable("canonical output has no text body".into())
+            })?;
+            serde_json::from_str(text)
+                .map_err(|error| RfResultError::ResultUnreadable(error.to_string()))
+        })
+    })
+}

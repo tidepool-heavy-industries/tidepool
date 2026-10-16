@@ -1188,7 +1188,7 @@ prepareAgentSpec spec = case compileInstalledTools (specTools spec) of
         | otherwise = do
             (_, arguments) <- send AgentToolsInputWith
             result <- raise (dispatchAt compiled (index - 3) arguments)
-            pure (encodeValue (toolDispatchReply result))
+            publishResult result
 
       runInitialContext
         :: Maybe (StartupInput -> Eff effects ContextSeed)
@@ -1203,11 +1203,19 @@ prepareAgentSpec spec = case compileInstalledTools (specTools spec) of
             pure (encodeValue (object
               ["status" .= ("success" :: Text), "output" .= seed, "presentation" .= ("" :: Text)]))
 
+      -- Publish semantics before the pure presenter is demanded. The native
+      -- invocation retains this result before resuming the same continuation.
+      publishResult :: Either ToolDispatchError ToolDispatchSuccess -> Eff (AgentTools ': SyncEffects effects) Text
+      publishResult (Left problem) = pure (encodeValue (refusalReply problem))
+      publishResult (Right (ToolDispatchSuccess output presentation)) = do
+        send (AgentToolsPublishResultWith (encodeValue output))
+        pure (encodeValue (object ["status" .= ("success" :: Text), "presentation" .= presentation]))
+
       runToolCall :: CompiledTools (Eff (SyncEffects effects)) -> Eff (AgentTools ': SyncEffects effects) Text
       runToolCall tooling = do
         (name, arguments) <- send AgentToolsInputWith
         result <- raise (dispatch tooling name arguments)
-        pure (encodeValue (toolDispatchReply result))
+        publishResult result
 
       -- An unfilled slot is never selected by the runtime, which reads the
       -- installed slot list; asking for one anyway is the honest silence the

@@ -3151,7 +3151,8 @@ impl ToolDispatchReply {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum InstalledToolDispatchReply {
     Success {
-        output: serde_json::Value,
+        #[serde(default)]
+        output: Option<serde_json::Value>,
         presentation: String,
     },
     Refused {
@@ -3161,7 +3162,7 @@ enum InstalledToolDispatchReply {
 }
 
 impl InstalledToolDispatchReply {
-    fn into_parts(self) -> Result<(serde_json::Value, String), ToolDispatchError> {
+    fn into_parts(self) -> Result<(Option<serde_json::Value>, String), ToolDispatchError> {
         match self {
             Self::Success {
                 output,
@@ -3728,6 +3729,14 @@ pub(crate) enum ResidentActorBoundary {
     AgentList(ResidentHole),
     /// The caller's own recent conversation. It carries no actor argument:
     /// the boundary reads the executing actor's conversation or none.
+    ToolResultPublication {
+        continuation: ResidentHole,
+        value: serde_json::Value,
+    },
+    InspectResult {
+        continuation: ResidentHole,
+        reference: tidepool_bridge_effects::RfResultReference,
+    },
     ReflectConversation {
         continuation: ResidentHole,
         count: i64,
@@ -3953,6 +3962,8 @@ impl ResidentActorBoundary {
             },
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
+            Self::ToolResultPublication { .. } => "tool semantic result publication",
+            Self::InspectResult { .. } => "inspectResult",
             Self::ReflectConversation { .. } => "reflect",
             Self::AgentShareObservation { .. } => "shareObservation",
             Self::AgentForget(_) => "forgetAgent",
@@ -4213,6 +4224,7 @@ impl ResidentRequest {
             Self::ActorContext(
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
+            Self::Reflect(crate::generated::reflect::ReflectReq::ReflectResultWith(..)) => "inspectResult",
             Self::Reflect(crate::generated::reflect::ReflectReq::ReflectWith(..)) => "reflect",
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
@@ -4337,6 +4349,7 @@ impl ResidentRequest {
             Self::AgentTools(
                 crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallReceiverWith(..),
             ) => "agent request receiver installation",
+            Self::AgentTools(crate::generated::agent_tools::AgentToolsReq::AgentToolsPublishResultWith(..)) => "tool semantic result publication",
             Self::AgentTools(crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith) => {
                 "agent tool input"
             }
@@ -5230,6 +5243,16 @@ impl ResidentActorWorkbenchError {
                 Some(tidepool_runtime::failclass::classify_prepared(error))
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn is_tool_presentation_failure(&self) -> bool {
+        match self {
+            Self::CompletedResultObservation { .. } => true,
+            Self::Resident(error) | Self::Delivered(error) => {
+                error.is_language_failure() || error.is_observation_budget_exhausted()
+            }
+            _ => false,
         }
     }
 
@@ -8351,7 +8374,7 @@ where
                         let (value, presentation) = reply
                             .into_parts()
                             .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
-                        semantic_value = Some(value);
+                        semantic_value = value;
                         presentation
                     } else {
                         text
@@ -9653,6 +9676,10 @@ where
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
+                    ResidentRequest::Reflect(crate::generated::reflect::ReflectReq::ReflectResultWith(reference)) => {
+                        let reference = tidepool_bridge_effects::RfResultReference::from_value(&reference, session.data_con_table())?;
+                        Ok(ResidentActorBoundary::InspectResult { continuation: hole, reference })
+                    },
                     ResidentRequest::Reflect(
                         crate::generated::reflect::ReflectReq::ReflectWith(count),
                     ) => Ok(ResidentActorBoundary::ReflectConversation {
@@ -9870,6 +9897,13 @@ where
                         | crate::generated::actor_local::ActorLocalReq::ActorLocalAttachCommandSourceWith(..)
                         | crate::generated::actor_local::ActorLocalReq::ActorLocalAttachLifecycleSourceWith(..)
                     ) => unreachable!("attachment captured above"),
+                    ResidentRequest::AgentTools(
+                        crate::generated::agent_tools::AgentToolsReq::AgentToolsPublishResultWith(value),
+                    ) => Ok(ResidentActorBoundary::ToolResultPublication {
+                        continuation: hole,
+                        value: serde_json::from_str(&value).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(
+                            format!("canonical named-tool result JSON could not be decoded: {error}")))?,
+                    }),
                     ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(
                             declarations,
@@ -10743,6 +10777,20 @@ where
                     ))
                 })?;
                 Ok(Some((kind, site)))
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_tool_presentation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_compiler_machine(context, move |session, _, _, settlement| {
+                session
+                    .resume_tool_presentation(hole, settlement)
+                    .map_err(classify_resumption)
             })
             .await
     }

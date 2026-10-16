@@ -505,6 +505,7 @@ async fn cancelled_prefix_with_order(order: Option<CancellationOrder>) {
                 assert!(matches!(
                     TerminalOutcome::from(&output),
                     TerminalOutcome::CancelledWithReceipt(_)
+                        | TerminalOutcome::CancelledWithValueReceipt
                 ));
                 assert_eq!(scheduler.wait(&operation).await.unwrap(), output);
                 if race.is_none() {

@@ -33,6 +33,18 @@ pub type ConversationFuture =
 pub type ConversationReader =
     Arc<dyn Fn(crate::ActorRef, usize) -> ConversationFuture + Send + Sync>;
 
+pub type ResultInspectionFuture = Pin<
+    Box<
+        dyn Future<Output = Result<serde_json::Value, tidepool_bridge_effects::RfResultError>>
+            + Send,
+    >,
+>;
+pub type ResultInspectionReader = Arc<
+    dyn Fn(crate::ActorRef, tidepool_bridge_effects::RfResultReference) -> ResultInspectionFuture
+        + Send
+        + Sync,
+>;
+
 /// The answer a caller receives, as the wire types its Haskell row declares.
 pub fn reflection(
     outcome: Result<Vec<ConversationTurn>, ConversationUnavailable>,

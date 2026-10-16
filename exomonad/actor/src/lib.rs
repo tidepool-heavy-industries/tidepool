@@ -85,7 +85,10 @@ mod wait;
 mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;
 
-pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
+pub use conversation::{
+    ConversationFuture, ConversationReader, ConversationUnavailable, ResultInspectionFuture,
+    ResultInspectionReader,
+};
 // A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who
 // installs one has to be able to name what it yields. Actor capabilities belong
 // to this crate; a conversation's speaker is the

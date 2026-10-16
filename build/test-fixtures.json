@@ -286,6 +286,7 @@
     "bridge/facade/src/actor_host/record_actor_unfold.hs",
     "bridge/facade/src/actor_host/request_update_setup.hs",
     "bridge/facade/src/actor_host/restart_effect_once.hs",
+    "bridge/facade/src/actor_host/result_retention_agent_spec.hs",
     "bridge/facade/src/actor_host/roster_observe.hs",
     "bridge/facade/src/actor_host/roster_setup.hs",
     "bridge/facade/src/actor_host/scaffold_expired_output.hs",

@@ -1165,6 +1165,7 @@ rust_filegroup(
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/recipe_checks/prepared_contract_tests.rs": "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs",
         "src/actor_host/researcher_acceptance_tests.rs": "bridge/facade/src/actor_host/researcher_acceptance_tests.rs",
+        "src/actor_host/result_retention_agent_spec.hs": "bridge/facade/src/actor_host/result_retention_agent_spec.hs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scaffold_admission_tests.rs": "bridge/facade/src/actor_host/scaffold_admission_tests.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -3143,6 +3144,7 @@ filegroup(
         "bridge/facade/src/actor_host/recipe_checks.rs": "src/actor_host/recipe_checks.rs",
         "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs": "src/actor_host/recipe_checks/prepared_contract_tests.rs",
         "bridge/facade/src/actor_host/researcher_acceptance_tests.rs": "src/actor_host/researcher_acceptance_tests.rs",
+        "bridge/facade/src/actor_host/result_retention_agent_spec.hs": "src/actor_host/result_retention_agent_spec.hs",
         "bridge/facade/src/actor_host/root_declaration_recovery.rs": "src/actor_host/root_declaration_recovery.rs",
         "bridge/facade/src/actor_host/scaffold_admission_tests.rs": "src/actor_host/scaffold_admission_tests.rs",
         "bridge/facade/src/actor_host/scoped_custody.rs": "src/actor_host/scoped_custody.rs",
@@ -5155,6 +5157,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f726573746172745f6566666563745f6f6e63652e6873",
     src = "src/actor_host/restart_effect_once.hs",
     out = "restart_effect_once.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f726573756c745f726574656e74696f6e5f6167656e745f737065632e6873",
+    src = "src/actor_host/result_retention_agent_spec.hs",
+    out = "result_retention_agent_spec.hs",
     visibility = ["PUBLIC"],
 )
 
