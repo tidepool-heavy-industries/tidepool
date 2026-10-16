@@ -227,6 +227,22 @@ stderr, build products and dependency evidence. Raw worker flags in a refusal
 report remain explicitly unadmitted; missing canonical counts are not zeroes.
 Inspection has no internal wall timeout; its execution owner supplies one.
 
+## Native handoff acceptance
+
+Native availability, executable demand and retained graph custody are distinct.
+A new complete product receives its dependency closure from the inventory owner
+using the compiler request's exact issued availability. Carry that evidence into
+issuance before validation; do not attach it afterward or reconstruct it from
+all retained artifacts. Temporary private issuance must restore the caller's
+namespace and executable roots while retaining the exact dependency bindings.
+
+Changes here need a history crossing offer, dependent-product admission, private
+handoff and subsequent compilation. Cover full availability with no selected
+groups, valid subset imports, unavailable dependencies and independently issued
+bindings with equal payloads. Check both acceptance and unchanged executable
+demand, plus refusal when only the required authority is removed. Run the owning
+toolchain test target as well as a real actor/compiler consumer on the join.
+
 ## Execution failure diagnostics
 
 The isolated libtest runner's `--output-dir` owns one fresh diagnostic root per

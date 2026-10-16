@@ -335,6 +335,12 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   representation's contract. For a negative case, establish the valid path
   first and assert the intended typed refusal plus unchanged state where
   atomicity is promised; an unrelated setup error must not count as success.
+- For a changed ownership or evidence boundary, review the downstream journey,
+  not only the newly constructed value. Exercise issuance, handoff and use by
+  the next real consumer; include another handoff when the result is reusable.
+  Ask which distinction the change preserves and which executable case fails
+  if it is collapsed. Component checks complement, rather than replace, this
+  representative joined history.
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
   Each worker runs these checks through the admitted repository commands;
@@ -343,6 +349,9 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   APIs, before describing a parcel as integration-ready. Formatting, metadata
   checks and source review do not replace compilation. Compile joined changes
   incrementally rather than deferring the first compile to release assembly.
+  Choose the joined compile set from changed owning crates and direct consumers,
+  including each owner's test target; a familiar top-level package list can
+  omit the changed crate's `cfg(test)` code even when its library builds.
   An owner library build does not compile downstream test callers. Name any
   uncompiled consumer explicitly in the handoff instead of calling the change
   integration-ready.

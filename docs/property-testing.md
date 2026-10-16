@@ -114,6 +114,14 @@ false failures and miss real authority changes. If issuance supplies opaque
 handles, use them only for checked identity correspondence, never to derive the
 expected edges, selection or reachability from production output.
 
+Deliberately generate states where related facts differ: available but unselected,
+retained without an availability grant, and partially selected dependencies.
+Keeping these sets equal makes their accidental conflation invisible. For a
+handoff repair, include a newly produced dependent object consuming one such
+fact, then retain and reuse the result through the next production boundary.
+Keep both a permitted history and the minimally different refusal history; use
+an old-code failure or isolated mutation to check that the distinction is observed.
+
 Useful maintained examples are:
 
 - `tidepool/runtime/src/session/binding_table.rs`: incremental membership,
