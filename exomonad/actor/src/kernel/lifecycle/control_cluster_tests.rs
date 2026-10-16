@@ -240,6 +240,152 @@ async fn opened() -> (LifecycleHandle, RactorRef<KernelMessage>) {
     (owner, executor)
 }
 
+fn external_failure_probe() -> crate::ExternalApplicationFailure {
+    crate::ExternalApplicationFailure {
+        class: crate::ExternalApplicationFailureClass::ToolHostStartup,
+        detail: "application attachment completed after cancellation".into(),
+    }
+}
+
+fn local_actor_for_owner(
+    owner: &LifecycleHandle,
+    executor: &RactorRef<KernelMessage>,
+) -> crate::LocalActorRef {
+    crate::LocalActorRef::with_identity_admission(
+        executor.clone(),
+        owner.retained_terminal().clone(),
+        owner.identity(),
+        owner.clone(),
+    )
+}
+
+async fn stop_test_owners(owner: &LifecycleHandle, executor: &RactorRef<KernelMessage>) {
+    executor.stop(None);
+    executor
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    owner.address.stop(None);
+    owner
+        .address
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn external_failure_reuses_exact_terminal_published_during_control_admission() {
+    external_failure_retirement_race(true).await;
+}
+
+#[tokio::test]
+async fn external_failure_reuses_exact_terminal_published_before_dropped_reply() {
+    external_failure_retirement_race(false).await;
+}
+
+async fn external_failure_retirement_race(refuse_admission: bool) {
+    let (owner, executor) = opened().await;
+    let actor = local_actor_for_owner(&owner, &executor);
+    if refuse_admission {
+        owner.executor_retired();
+        owner.close().await.unwrap();
+        assert_eq!(owner.observation().phase, LifecyclePhase::Retired);
+    }
+    assert!(actor.terminal().get().is_none());
+    let mut reporting = Box::pin(actor.report_external_failure(external_failure_probe()));
+    // The current-thread runtime cannot process the queued control until this
+    // task yields. Its initial terminal check has already completed.
+    assert!(futures_util::poll!(reporting.as_mut()).is_pending());
+    let original = ActorTerminal::new(
+        crate::ActorExitKind::Cancelled,
+        "cancelled before attachment",
+    );
+    actor.terminal().publish(original.clone()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), reporting)
+            .await
+            .unwrap(),
+        Ok(crate::ExternalFailureDisposition::AlreadyTerminal)
+    );
+    assert_eq!(actor.terminal().get(), Some(original));
+    assert!(
+        actor.terminal().cleanup().is_none(),
+        "reporting issues no cleanup evidence"
+    );
+    stop_test_owners(&owner, &executor).await;
+}
+
+#[tokio::test]
+async fn external_failure_without_published_terminal_preserves_admission_and_reply_errors() {
+    for refuse_admission in [true, false] {
+        let (owner, executor) = opened().await;
+        let actor = local_actor_for_owner(&owner, &executor);
+        if refuse_admission {
+            owner.executor_retired();
+            owner.close().await.unwrap();
+            assert_eq!(owner.observation().phase, LifecyclePhase::Retired);
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            actor.report_external_failure(external_failure_probe()),
+        )
+        .await
+        .unwrap();
+        if refuse_admission {
+            assert_eq!(
+                result,
+                Err(crate::KernelInvocationFailure::ActorExited(
+                    actor.identity()
+                ))
+            );
+        } else {
+            assert!(
+                matches!(result, Err(crate::KernelInvocationFailure::CleanupUnconfirmed { actor: identity, .. }) if identity == actor.identity())
+            );
+        }
+        assert!(actor.terminal().get().is_none());
+        stop_test_owners(&owner, &executor).await;
+    }
+}
+
+#[tokio::test]
+async fn external_failure_cannot_use_another_incarnations_retained_exit() {
+    let (owner, executor) = opened().await;
+    let actor = local_actor_for_owner(&owner, &executor);
+    let other_identity = ActorRef {
+        id: actor.identity().id,
+        incarnation: crate::Incarnation(actor.identity().incarnation.0 + 1),
+    };
+    let other = LifecycleHandle::start(other_identity, RetainedActorExit::new())
+        .await
+        .unwrap();
+    let mut reporting = Box::pin(actor.report_external_failure(external_failure_probe()));
+    assert!(futures_util::poll!(reporting.as_mut()).is_pending());
+    other
+        .retained_terminal()
+        .publish(ActorTerminal::new(
+            crate::ActorExitKind::Cancelled,
+            "successor cancelled",
+        ))
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), reporting).await.unwrap(),
+        Err(crate::KernelInvocationFailure::CleanupUnconfirmed { actor: identity, .. }) if identity == actor.identity()
+    ));
+    assert!(actor.terminal().get().is_none());
+    assert_eq!(other.identity(), other_identity);
+    other.address.stop(None);
+    other
+        .address
+        .get_cell()
+        .wait(Some(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    stop_test_owners(&owner, &executor).await;
+}
+
 #[tokio::test]
 async fn close_preserves_accepted_lease_and_refuses_new_admission() {
     let (owner, executor) = opened().await;

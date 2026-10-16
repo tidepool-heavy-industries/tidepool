@@ -1382,17 +1382,31 @@ impl LocalActorRef {
         if self.terminal.get().is_some() {
             return Ok(ExternalFailureDisposition::AlreadyTerminal);
         }
-        let (reply, receive) = tokio::sync::oneshot::channel();
-        self.lifecycle
-            .control(KernelMessage::ExternalApplicationFailed {
-                failure,
-                reply: reply.into(),
+        let outcome = async {
+            let (reply, receive) = tokio::sync::oneshot::channel();
+            self.lifecycle
+                .control(KernelMessage::ExternalApplicationFailed {
+                    failure,
+                    reply: reply.into(),
+                })
+                .await
+                .map_err(|failure| self.control_admission_failure(failure))?;
+            receive.await.map_err(|_| {
+                self.unavailable_invocation("admitted actor control outcome is unavailable")
             })
-            .await
-            .map_err(|failure| self.control_admission_failure(failure))?;
-        receive.await.map_err(|_| {
-            self.unavailable_invocation("admitted actor control outcome is unavailable")
-        })
+        }
+        .await;
+        match outcome {
+            // Retirement can publish while either control admission or its reply
+            // is pending. Only this incarnation's retained exit settles the report;
+            // it does not certify that physical cleanup succeeded.
+            Err(KernelInvocationFailure::ActorExited(actor))
+                if actor == self.identity && self.terminal.get().is_some() =>
+            {
+                Ok(ExternalFailureDisposition::AlreadyTerminal)
+            }
+            outcome => outcome,
+        }
     }
 
     pub async fn seal_hosted_work(&self) -> Result<crate::HostedWorkSeal, KernelInvocationFailure> {
