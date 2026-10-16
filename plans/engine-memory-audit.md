@@ -2,8 +2,8 @@
 
 `CommandJobs.entries` in `exomonad/actor/src/command_jobs.rs` retains completed
 jobs until the registry is dropped. Dropping a `CommandConnection` removes an
-observer, not the registry entry. The facade backend in
-`bridge/facade/src/actor_host/commands.rs` retains its `HostCommand`, including
+observer, not the registry entry. The host backend in
+`exomonad/host/src/actor_host/commands.rs` retains its `HostCommand`, including
 stdout and stderr buffers capped at 4 MiB each by `exomonad/node/src/host_command.rs`.
 The source-derived output bound is therefore about 8 MiB per retained host job,
 plus capacity slack and metadata; actual retained bytes have not been measured.
