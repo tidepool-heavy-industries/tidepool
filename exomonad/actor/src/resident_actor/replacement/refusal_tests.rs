@@ -689,6 +689,10 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
         .await
         .unwrap();
+    staged
+        .placement_custody
+        .transfer_to_actor(actor, staged.descriptor.placement())
+        .unwrap();
     let original_checkpoint = Arc::clone(&staged.checkpoint.value);
     behavior.descriptor = staged.descriptor;
     behavior.standing = ResidentStanding::Receiving(staged.receiver);
@@ -786,8 +790,13 @@ async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_unce
         .compiler_lifecycle_scope(behavior.stage_replacement(target, definition))
         .await
         .unwrap();
+    staged
+        .placement_custody
+        .transfer_to_actor(target, staged.descriptor.placement())
+        .unwrap();
     behavior.descriptor = staged.descriptor;
     behavior.boot = None;
+    behavior.standing = ResidentStanding::Boot;
     let requests = Arc::clone(&behavior.environment.requests);
     let requester = ActorRef::first(crate::ActorId(target.id.0 + 100));
     let request = requests.reserve(requester, target);
