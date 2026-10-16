@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
 
-use tidepool_runtime::session::ContextCheckpointBoundary;
+use crate::ContextCheckpointBoundary;
 
 use crate::ActorRef;
 use crate::HostedCheckpointAttachment;

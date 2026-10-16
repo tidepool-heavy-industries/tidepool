@@ -246,9 +246,10 @@ impl HostedOperationSettlement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ContextCheckpointBoundary;
     use crate::{ActorId, ActorRef, CellExitCause, KernelStep};
     use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
-    use tidepool_runtime::session::{ContextCheckpointBoundary, WorkbenchRunStatus};
+    use tidepool_runtime::session::WorkbenchRunStatus;
 
     fn issued(
         call: &str,

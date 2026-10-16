@@ -155,10 +155,8 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
         .is_err());
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        crate::resident_tools::ResidentToolClient::local(actor.clone()).dispatch_workbench(
-            tidepool_runtime::session::WorkbenchRequest::from_cell_input("undefined"),
-            None,
-        ),
+        crate::resident_tools::ResidentToolClient::local(actor.clone())
+            .dispatch_workbench(crate::WorkbenchRequest::from_cell_input("undefined"), None),
     )
     .await
     .expect("pending durable admission refuses without compiler work")

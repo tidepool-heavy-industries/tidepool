@@ -392,7 +392,7 @@ impl WorkbenchExecutions {
 
     fn provider_cleanup_record(
         &mut self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Result<&mut WorkbenchExecutionRecord, KernelBehaviorError> {
         let keys = self
             .0
@@ -418,7 +418,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn provider_invocation_work(
         &mut self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Result<Option<Arc<InvocationWork>>, KernelBehaviorError> {
         Ok(self
             .provider_cleanup_record(boundary)?
@@ -428,7 +428,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn finalize_provider_boundary(
         &self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
         result: Result<crate::ProviderFinalizationKind, String>,
     ) {
         let records = self
@@ -455,9 +455,7 @@ impl WorkbenchExecutions {
         }
     }
 
-    pub(super) fn pending_provider_boundaries(
-        &self,
-    ) -> Vec<tidepool_runtime::session::ContextCheckpointBoundary> {
+    pub(super) fn pending_provider_boundaries(&self) -> Vec<crate::ContextCheckpointBoundary> {
         let mut boundaries = Vec::new();
         for record in self.0.values().filter(|record| {
             record
@@ -476,7 +474,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn boundary_abort_owner(
         journal: &Arc<Mutex<Self>>,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
         has_pending_work: impl FnOnce() -> bool,
     ) -> Result<Option<BoundaryAbortOwner>, KernelBehaviorError> {
         let key = boundary
@@ -517,7 +515,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn cell_allows_publication(
         &self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> bool {
         self.0
             .iter()
@@ -564,7 +562,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn at_boundary(
         &self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Option<WorkbenchBoundaryRecord> {
         let mut terminal = None;
         for (key, record) in &self.0 {
@@ -756,7 +754,7 @@ mod tests {
         behavior: ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>,
         control: Arc<crate::WorkbenchExecutionControl>,
         execution: WorkbenchExecutionId,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
         request: WorkbenchRequest,
         work: Arc<InvocationWork>,
     }
@@ -789,7 +787,7 @@ mod tests {
             let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
             let key = control.invocation.as_ref().unwrap();
             let execution = control.execution_id(actor);
-            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+            let boundary = crate::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "turn".into(),
                 "call".into(),
@@ -986,7 +984,7 @@ mod tests {
                     .pending_provider_boundaries()
                     .is_empty());
             }
-            let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
+            let other = crate::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "turn".into(),
                 "other".into(),
@@ -1110,7 +1108,7 @@ mod tests {
         let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
         let key = control.invocation.as_ref().unwrap();
         let execution = control.execution_id(actor);
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1280,9 +1278,9 @@ mod tests {
 
     #[test]
     fn abort_owner_refuses_nested_and_foreign_operations_before_checkpoint_extraction() {
+        use crate::ContextCheckpointBoundary;
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::SessionId;
-        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
         let checkpoints = crate::ActorAdmissionRegistry::new();
@@ -1349,9 +1347,9 @@ mod tests {
 
     #[test]
     fn abort_cleanup_survives_retry_without_reextracting_obligations() {
+        use crate::ContextCheckpointBoundary;
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::SessionId;
-        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
@@ -1585,7 +1583,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1609,7 +1607,7 @@ mod tests {
         exit.cleanup_confirmed = true;
         journal.retain_cell_terminal(&execution, Some(&invocation), exit);
         assert!(journal.cell_allows_publication(&boundary));
-        let sibling = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let sibling = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "sibling".into(),
@@ -1628,7 +1626,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1729,7 +1727,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1802,13 +1800,11 @@ mod tests {
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&execution, request.clone(), Some(&invocation));
         assert!(matches!(
-            journal.at_boundary(
-                &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "thread".into(),
-                    "turn".into(),
-                    "outer".into()
-                )
-            ),
+            journal.at_boundary(&crate::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "outer".into()
+            )),
             Some(WorkbenchBoundaryRecord::Unconfirmed)
         ));
         journal.record(
@@ -1821,33 +1817,29 @@ mod tests {
             Some(&invocation),
         );
         assert!(matches!(
-            journal.at_boundary(&tidepool_runtime::session::ContextCheckpointBoundary::external("thread".into(), "turn".into(), "outer".into())),
+            journal.at_boundary(&crate::ContextCheckpointBoundary::external("thread".into(), "turn".into(), "outer".into())),
             Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
         ));
         assert!(journal
-            .at_boundary(
-                &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "thread".into(),
-                    "turn".into(),
-                    "other".into()
-                )
-            )
+            .at_boundary(&crate::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "other".into()
+            ))
             .is_none());
         assert!(journal
-            .at_boundary(
-                &tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "thread".into(),
-                    "later-turn".into(),
-                    "outer".into()
-                )
-            )
+            .at_boundary(&crate::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "later-turn".into(),
+                "outer".into()
+            ))
             .is_none());
     }
 
     #[test]
     fn several_nested_replies_do_not_prove_the_original_operation_result() {
         let mut journal = WorkbenchExecutions::default();
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "outer".into(),

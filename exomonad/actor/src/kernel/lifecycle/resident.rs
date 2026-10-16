@@ -1103,7 +1103,7 @@ fn complete(
                 .and_then(|transition| transition.observation.identity.clone());
             if let Some(identity) = start {
                 let resident = state.resident.as_ref().unwrap();
-                let request = tidepool_runtime::session::WorkbenchRequest::for_retained_operation(
+                let request = crate::WorkbenchRequest::for_retained_operation(
                     crate::initial_context::INITIAL_CONTEXT_SLOT,
                     serde_json::json!({"operation":identity.operation.as_str(),"callerSeed":resident.current.initial_context.as_ref().unwrap().caller_seed}))
                     .with_execution_id(identity.operation.clone());

@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 mod display_callback_tests;
 #[cfg(test)]
 mod replacement_input_tests;
+pub(crate) mod request;
 mod structured_introspection;
 pub(crate) mod to_haskell;
 
@@ -41,6 +42,7 @@ use to_haskell::{
     ActorContextProjection, CallStatus, LifecycleAnswer, ProgressAnswer, RouteStateAnswer,
 };
 
+use crate::WorkbenchRequest;
 use serde::Serialize;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, HaskellVisitor, ToHaskell};
@@ -61,7 +63,6 @@ use tidepool_runtime::session::{
     PendingPreparedInstall, PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent,
     ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
     RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
-    WorkbenchRequest,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -843,10 +844,10 @@ impl ActorWorkbenchSource {
                     imports: String::new(),
                     entry: match program.policy {
                         crate::BuiltinToolsetPolicy::Workbench => {
-                            "Tidepool.Agent.Contract.installDefaultWorkbench"
+                            "Tidepool.Actors.Workbench.installDefaultWorkbench"
                         }
                         crate::BuiltinToolsetPolicy::AsyncWorkbench => {
-                            "Tidepool.Agent.Contract.installDefaultAsyncWorkbench"
+                            "Tidepool.Actors.Workbench.installDefaultAsyncWorkbench"
                         }
                     }
                     .into(),
@@ -19786,7 +19787,7 @@ pub(crate) mod request_tests {
                     .admit(exomonad_tool::ToolArguments::Raw("input".into()))
                     .unwrap();
                 let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([17; 16]);
-                let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+                let boundary = crate::ContextCheckpointBoundary::Execution {
                     actor_id: context.actor.id.0,
                     incarnation: context.actor.incarnation.0,
                     execution_id: execution.clone(),
@@ -25874,7 +25875,7 @@ pub(crate) mod request_tests {
             .expect("capture independently owned parent Haskell environment");
         let retained_scope = retained.scope();
         let admissions = crate::ActorAdmissionRegistry::new();
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "unfinished-parent".into(),
             "unfinished-parent".into(),
@@ -26144,7 +26145,7 @@ pub(crate) mod request_tests {
             crate::CheckpointSourceLayer::default(),
             context.placement.session,
             scope,
-            tidepool_runtime::session::ContextCheckpointBoundary::external(
+            crate::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "call".into(),
                 "call".into(),

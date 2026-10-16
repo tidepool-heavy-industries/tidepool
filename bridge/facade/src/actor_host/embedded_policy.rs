@@ -55,14 +55,14 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn complete(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.policy.complete_boxed(boundary)
     }
 
     pub(super) fn abort(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.policy.abort_boxed(boundary)
     }
@@ -263,9 +263,9 @@ impl EmbeddedPolicySnapshot {
             )
         })?;
         self.policy
-            .abort_boxed(
-                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
-            )
+            .abort_boxed(exomonad_actor::ContextCheckpointBoundary::Hosted(
+                original.clone(),
+            ))
             .await
             .map(|_| ())
     }

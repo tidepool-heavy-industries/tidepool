@@ -87,6 +87,7 @@ use status_rendering::{
 };
 use workbench_ledger::{WorkbenchBoundaryRecord, WorkbenchExecutions, WorkbenchReplayFailure};
 
+use crate::WorkbenchRequest;
 use parking_lot::Mutex;
 use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
@@ -97,8 +98,7 @@ use tidepool_runtime::session::{
     WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
     WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
     WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    WorkbenchPublicationOutcome, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -184,7 +184,7 @@ pub struct LocalResidentInstallation {
     pub model: Option<crate::Model>,
     pub instructions: Option<String>,
     pub creator: Option<crate::ActorRef>,
-    pub checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+    pub checkpoint_boundary: Option<crate::ContextCheckpointBoundary>,
     pub checkpoint: Option<crate::CheckpointLease>,
     /// Captured when the child is admitted, before release can revoke new users.
     pub checkpoint_attachment: Option<HostedCheckpointAttachment>,
@@ -3069,7 +3069,7 @@ pub struct ResidentKernelBehavior<H, O> {
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     checkpoint_publication: CheckpointPublication,
     active_route_reservation_owner: Option<RequestReservationOwner>,
-    settled_checkpoint_boundaries: Vec<tidepool_runtime::session::ContextCheckpointBoundary>,
+    settled_checkpoint_boundaries: Vec<crate::ContextCheckpointBoundary>,
     /// This actor's last summary-family status roster, for the `changed`
     /// view. One per actor, replaced on each such call.
     roster_snapshot: Mutex<Option<status_rendering::RosterSnapshot>>,
@@ -3150,7 +3150,7 @@ struct WorkbenchFinalization {
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     rejected: bool,
     retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
-    context_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+    context_boundary: Option<crate::ContextCheckpointBoundary>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
 }
 
@@ -3848,14 +3848,14 @@ fn admit_context_authority(
 enum CheckpointPublication {
     Resident,
     Workbench {
-        boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+        boundary: Option<crate::ContextCheckpointBoundary>,
         capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
     },
-    Route(tidepool_runtime::session::ContextCheckpointBoundary),
+    Route(crate::ContextCheckpointBoundary),
 }
 
 impl CheckpointPublication {
-    fn boundary(&self) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
+    fn boundary(&self) -> Option<&crate::ContextCheckpointBoundary> {
         match self {
             Self::Resident => None,
             Self::Workbench { boundary, .. } => boundary.as_ref(),
@@ -3863,7 +3863,7 @@ impl CheckpointPublication {
         }
     }
 
-    fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
+    fn hosted_boundary(&self) -> Option<&crate::ContextCheckpointBoundary> {
         match self {
             Self::Workbench {
                 boundary: Some(boundary),
@@ -4082,13 +4082,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let (request, operation, capture, context_binding) = invocation.into_parts();
         let (mut request, execution) = ensure_workbench_execution_id(request);
         if request.checkpoint_boundary().is_none() {
-            request = request.with_checkpoint_boundary(
-                tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+            request =
+                request.with_checkpoint_boundary(crate::ContextCheckpointBoundary::Execution {
                     actor_id: actor.id.0,
                     incarnation: actor.incarnation.0,
                     execution_id: execution,
-                },
-            );
+                });
         }
         let operation = match operation {
             crate::kernel::WorkbenchToolOperation::Unbound(None) => {
@@ -5787,7 +5786,7 @@ where
         claim: crate::request::RequestReplyClaim,
         result: RootCustody,
         carried_preview: Option<String>,
-        _boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+        _boundary: Option<&crate::ContextCheckpointBoundary>,
         _invocation: Option<&InvocationWork>,
         effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
@@ -10918,20 +10917,18 @@ where
                             installed_tools
                                 .as_ref()
                                 .and_then(crate::InstalledToolLease::tools)
-                                .map(
-                                    |_| tidepool_runtime::session::workbench::WorkbenchToolCall {
-                                        name: effects
-                                            .operation
-                                            .selected()
-                                            .map_or(crate::HASKELL_TOOL, |call| {
-                                                call.selected().endpoint().plan().name()
-                                            })
-                                            .to_string(),
-                                        arguments: serde_json::Value::String(
-                                            request.items[cursor.index].clone(),
-                                        ),
-                                    },
-                                )
+                                .map(|_| crate::WorkbenchToolCall {
+                                    name: effects
+                                        .operation
+                                        .selected()
+                                        .map_or(crate::HASKELL_TOOL, |call| {
+                                            call.selected().endpoint().plan().name()
+                                        })
+                                        .to_string(),
+                                    arguments: serde_json::Value::String(
+                                        request.items[cursor.index].clone(),
+                                    ),
+                                })
                         } else {
                             None
                         };
@@ -11567,7 +11564,7 @@ where
     async fn settle_provider_resources(
         &self,
         kernel: &KernelContext,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Result<(), KernelBehaviorError> {
         if boundary.hosted().is_none() {
             return Ok(());
@@ -11588,7 +11585,7 @@ where
     async fn abort_provider_boundary(
         &mut self,
         kernel: &KernelContext,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> Result<(), KernelBehaviorError> {
         if self.settled_checkpoint_boundaries.contains(&boundary) {
             return self.settle_provider_resources(kernel, &boundary).await;
@@ -12025,7 +12022,7 @@ where
     fn reconcile_workbench_boundary<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>,
@@ -12074,7 +12071,7 @@ where
     fn tool_aborted<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let result = self.abort_provider_boundary(kernel, boundary.clone()).await;
@@ -12092,7 +12089,7 @@ where
     fn tool_completed<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             if !self
@@ -12201,15 +12198,11 @@ where
                 .context
                 .as_ref()
                 .and_then(|context| context.model_operation())
-                .map(|operation| {
-                    tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation.clone())
-                })
-                .unwrap_or_else(|| {
-                    tidepool_runtime::session::ContextCheckpointBoundary::Execution {
-                        actor_id: actor.id.0,
-                        incarnation: actor.incarnation.0,
-                        execution_id: execution.clone(),
-                    }
+                .map(|operation| crate::ContextCheckpointBoundary::Hosted(operation.clone()))
+                .unwrap_or_else(|| crate::ContextCheckpointBoundary::Execution {
+                    actor_id: actor.id.0,
+                    incarnation: actor.incarnation.0,
+                    execution_id: execution.clone(),
                 });
             WorkbenchRequest::for_tool(invocation.name.clone(), arguments)
                 .with_execution_id(execution.clone())
@@ -12437,7 +12430,7 @@ where
                 invocation_context
                     .model_operation()
                     .cloned()
-                    .map(tidepool_runtime::session::ContextCheckpointBoundary::Hosted)
+                    .map(crate::ContextCheckpointBoundary::Hosted)
             });
             if hosted_checkpoint_capture.is_some()
                 && hosted_boundary
@@ -12482,7 +12475,7 @@ where
             self.checkpoint_publication = CheckpointPublication::Workbench {
                 boundary: hosted_boundary.or_else(|| {
                     crate::resident_workbench::execution_control().map(|control| {
-                        tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+                        crate::ContextCheckpointBoundary::Execution {
                             actor_id: context.actor.id.0,
                             incarnation: context.actor.incarnation.0,
                             execution_id: control.execution_id(context.actor),
@@ -12777,7 +12770,7 @@ where
                         .active_route_reservation_owner
                         .replace(reservation_owner.clone());
                     // Route completion settles only checkpoints captured by this callback.
-                    let completion = tidepool_runtime::session::ContextCheckpointBoundary::Route {
+                    let completion = crate::ContextCheckpointBoundary::Route {
                         actor_id: context.actor.id.0,
                         incarnation: context.actor.incarnation.0,
                         watch_id: watch.0,
@@ -15688,7 +15681,7 @@ mod tests {
 
     #[test]
     fn synthetic_route_boundary_cannot_issue_provider_checkpoint() {
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Route {
+        let boundary = crate::ContextCheckpointBoundary::Route {
             actor_id: 1,
             incarnation: 1,
             watch_id: 9,
@@ -15702,7 +15695,7 @@ mod tests {
         }
         .hosted_boundary()
         .is_none());
-        let direct = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+        let direct = crate::ContextCheckpointBoundary::Execution {
             actor_id: 1,
             incarnation: 1,
             execution_id: WorkbenchExecutionId::from_digest([7; 16]),
@@ -15713,7 +15706,7 @@ mod tests {
         }
         .hosted_boundary()
         .is_none());
-        let hosted = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let hosted = crate::ContextCheckpointBoundary::external(
             "thread".into(),
             "request".into(),
             "call".into(),
@@ -16796,7 +16789,7 @@ mod tests {
             ResidentActorWorkbenchError::CompileInfrastructure(expected.clone()),
             ResidentActorWorkbenchError::InvocationCancelled,
         ] {
-            let mut request = tidepool_runtime::session::WorkbenchRequest::from_cell_input(":}");
+            let mut request = crate::WorkbenchRequest::from_cell_input(":}");
             let mut cursor = super::WorkbenchCursor::default();
             let failure = super::install_cell_preparation(&mut request, &mut cursor, Err(error))
                 .expect_err("non-source failure must retain its failure boundary");

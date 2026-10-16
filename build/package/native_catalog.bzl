@@ -29,8 +29,8 @@ def _catalog_sources_impl(ctx):
         ctx.actions.run(
             cmd_args([
                 ctx.attrs.entry_source[RunInfo], "--module", module,
-                "--entry", "Tidepool.Agent.Contract." + entry_name,
-                "--effects", "Tidepool.Agent.Contract.BuiltinDispatcherEffects",
+                "--entry", "Tidepool.Actors.Workbench." + entry_name,
+                "--effects", "Tidepool.Actors.Workbench.BuiltinDispatcherEffects",
                 "--output", source.as_output(),
             ]),
             category = "native_builtin_entry_source", identifier = name,

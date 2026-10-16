@@ -260,7 +260,7 @@ fn extracted_page(response: &Value) -> Result<Value, WebError> {
         .to_string();
     Ok(json!({"url": url, "content": content, "reference": reference}))
 }
-impl tidepool_mcp::InstalledEffectSupport for WebHandler {
+impl exomonad_tool::InstalledEffectSupport for WebHandler {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         vec![exomonad_tool::ActorEffectKey::Web.into()]
     }

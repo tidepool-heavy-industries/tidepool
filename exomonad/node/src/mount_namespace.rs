@@ -414,7 +414,7 @@ impl MountNamespace {
             .unwrap_or_else(|| descriptors.clone());
         #[allow(
             clippy::disallowed_methods,
-            reason = "backs process_scope::spawn_with_stdio/host_command::spawn, the process launcher"
+            reason = "backs process_scope::spawn_with_stdio/HostCommand::spawn, the process launcher"
         )]
         let mut command = Command::new(program);
         // The helper re-exec names this executable by descriptor: the entered

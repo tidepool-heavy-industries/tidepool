@@ -1,5 +1,6 @@
 //! The real resident MCP policy driven directly by the canonical local actor.
 
+use exomonad_actor::WorkbenchRequest;
 use exomonad_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
 };
@@ -12,7 +13,7 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
-    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult, WorkbenchRequest,
+    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;

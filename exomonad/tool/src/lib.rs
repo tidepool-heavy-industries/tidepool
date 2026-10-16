@@ -3,8 +3,10 @@
 
 #[path = "generated/effect_keys.rs"]
 mod effects;
+mod installed_support;
 #[path = "generated/public_profiles.rs"]
 mod public_profiles;
+pub use installed_support::InstalledEffectSupport;
 pub mod surface;
 pub use effects::{ActorEffectKey, HaskellEffectIdentity, ToolEffectKey};
 pub use public_profiles::DEFAULT_ACTOR_EFFECTS;

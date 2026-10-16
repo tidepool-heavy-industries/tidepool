@@ -1,7 +1,7 @@
 //! The production hosted result acknowledgement is scoped to its own execution.
 
 use super::*;
-use tidepool_runtime::session::ContextCheckpointBoundary;
+use exomonad_actor::ContextCheckpointBoundary;
 
 fn boundary(key: &str) -> ContextCheckpointBoundary {
     ContextCheckpointBoundary::external("concurrent-publication".into(), key.into(), key.into())

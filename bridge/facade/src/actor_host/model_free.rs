@@ -186,7 +186,7 @@ impl ModelFreeSession {
             )?)
             .with_child_session_factory(child_session_factory)
             .with_handler_effect_support(
-                tidepool_mcp::InstalledEffectSupport::installed_effect_support,
+                exomonad_tool::InstalledEffectSupport::installed_effect_support,
             )
             .with_image_registry(image_registry);
         // Bootstrap and optional host services are installed before admission,

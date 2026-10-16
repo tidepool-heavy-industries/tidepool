@@ -6,9 +6,9 @@
 
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
-use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 #[cfg(test)]
-use tidepool_runtime::session::WorkbenchRequest;
+use crate::WorkbenchRequest;
+use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_runtime::session::{
     PublicationCancellation, PublicationDecision, PublicationPhase, ResidentHole,
     WorkbenchExecutionId, WorkbenchResponse,
@@ -898,7 +898,7 @@ pub trait HostedCheckpointCapture: Send + Sync {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
 }
 
@@ -1042,7 +1042,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
     fn reconcile_workbench_boxed(
         &self,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        _boundary: crate::ContextCheckpointBoundary,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>>
@@ -1058,17 +1058,11 @@ pub trait ResidentToolEndpoint: Send + Sync {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
     /// Discard an exact call's deferred publication after failed Store settlement.
-    fn abort_boxed(
-        &self,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
-    ) -> ResidentToolFuture {
+    fn abort_boxed(&self, _boundary: crate::ContextCheckpointBoundary) -> ResidentToolFuture {
         Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
     }
     /// Acknowledge the real, durable result of an enclosing model-visible call.
-    fn complete_boxed(
-        &self,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
-    ) -> ResidentToolFuture {
+    fn complete_boxed(&self, _boundary: crate::ContextCheckpointBoundary) -> ResidentToolFuture {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
 }
@@ -1104,10 +1098,7 @@ impl WorkbenchCallKey {
                 .is_some_and(|original| original.call_id == self.0.call_id)
     }
 
-    pub(crate) fn matches_boundary(
-        &self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
-    ) -> bool {
+    pub(crate) fn matches_boundary(&self, boundary: &crate::ContextCheckpointBoundary) -> bool {
         self.0
             .model_operation()
             .is_some_and(|operation| boundary.hosted() == Some(operation))
@@ -1373,7 +1364,7 @@ impl ResidentToolClient {
 
     pub(crate) async fn reconcile_workbench(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
         if boundary.hosted().is_some() {
             let owner = self
@@ -1434,14 +1425,14 @@ impl ResidentToolClient {
 
     pub(crate) async fn abort(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.finalize_provider_operation(boundary, false).await
     }
 
     pub(crate) async fn complete(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.finalize_provider_operation(boundary, true).await
     }
@@ -1452,7 +1443,7 @@ impl ResidentToolClient {
     // owner. An arbitrary unissued operation must still refuse.
     async fn finalize_provider_operation(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
         completed: bool,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let retained = if boundary.hosted().is_some() {
@@ -1605,7 +1596,7 @@ impl ResidentToolClient {
         if let Some(operation) = &issued.control.invocation {
             if let Some(original) = operation.invocation().model_operation() {
                 invocation = invocation.with_checkpoint_boundary(
-                    tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
+                    crate::ContextCheckpointBoundary::Hosted(original.clone()),
                 );
             }
             let execution = issued.control.execution_id(self.actor.identity());
@@ -1890,7 +1881,7 @@ mod tests {
         fn capture(
             &self,
             _name: &str,
-            _boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+            _boundary: &crate::ContextCheckpointBoundary,
         ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
             Ok(HostedCheckpointAttachment::new(Arc::new(())))
         }
@@ -1978,8 +1969,8 @@ mod tests {
 
     #[test]
     fn local_invocations_share_only_the_exact_original_operation_boundary() {
+        use crate::ContextCheckpointBoundary;
         use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
-        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let original = OriginalOperation {
             origin: ConversationOrigin::Embedded {

@@ -58,7 +58,6 @@ tidepool_rust_library(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/mcp:tidepool_mcp",
-        "//exomonad/node:exomonad_node",
         "//exomonad/tool:exomonad_tool",
         "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
@@ -146,7 +145,6 @@ tidepool_rust_isolated_test(
         "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
         "//bridge/testing:tidepool_testing",
-        "//exomonad/node:exomonad_node",
         "//exomonad/tool:exomonad_tool",
         "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
@@ -235,7 +233,6 @@ tidepool_rust_isolated_test(
         "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
         "//bridge/testing:tidepool_testing",
-        "//exomonad/node:exomonad_node",
         "//exomonad/tool:exomonad_tool",
         "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",

@@ -38,7 +38,7 @@ async fn run_execution_identity_history(history: Vec<(Option<[u8; 16]>, bool, bo
             Some(expected.clone()),
             "scheduler and execution must retain one issued identity"
         );
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+        let boundary = crate::ContextCheckpointBoundary::Execution {
             actor_id: actor.identity().id.0,
             incarnation: actor.identity().incarnation.0,
             execution_id: expected,

@@ -11,6 +11,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/tool/Cargo.toml",
         "//bridge/protocol:generated[exomonad_tool_src_generated_effect_keys_rs]": "exomonad/tool/src/generated/effect_keys.rs",
         "//bridge/protocol:generated[exomonad_tool_src_generated_public_profiles_rs]": "exomonad/tool/src/generated/public_profiles.rs",
+        "src/installed_support.rs": "exomonad/tool/src/installed_support.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },
@@ -26,6 +27,8 @@ tidepool_rust_library(
     edition = "2021",
     srcs_filegroup = ":exomonad_tool_sources",
     deps = [
+        "//third-party/rust:frunk",
+        "//third-party/rust:parking_lot",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
     ],
@@ -39,6 +42,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/tool/Cargo.toml",
         "//bridge/protocol:generated[exomonad_tool_src_generated_effect_keys_rs]": "exomonad/tool/src/generated/effect_keys.rs",
         "//bridge/protocol:generated[exomonad_tool_src_generated_public_profiles_rs]": "exomonad/tool/src/generated/public_profiles.rs",
+        "src/installed_support.rs": "exomonad/tool/src/installed_support.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
         "src/surface/properties.rs": "exomonad/tool/src/surface/properties.rs",
@@ -55,6 +59,8 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":exomonad_tool_unit_tests_sources",
     deps = [
+        "//third-party/rust:frunk",
+        "//third-party/rust:parking_lot",
         "//third-party/rust:proptest",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
@@ -71,6 +77,7 @@ filegroup(
     srcs = {
         "exomonad/tool/BUCK": "BUCK",
         "exomonad/tool/Cargo.toml": "Cargo.toml",
+        "exomonad/tool/src/installed_support.rs": "src/installed_support.rs",
         "exomonad/tool/src/lib.rs": "src/lib.rs",
         "exomonad/tool/src/surface.rs": "src/surface.rs",
         "exomonad/tool/src/surface/properties.rs": "src/surface/properties.rs",

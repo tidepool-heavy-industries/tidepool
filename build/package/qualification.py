@@ -782,8 +782,8 @@ def root_entry_source_record(root: Path) -> dict:
 def builtin_entry_source_records(root: Path) -> dict:
     return {name: {"path": path, "producer_target": ROOT_ENTRY_SOURCE_OWNER,
                    "generator_source": ROOT_ENTRY_GENERATOR_SOURCE,
-                   "module": Path(path).stem, "entry": "Tidepool.Agent.Contract." + entry,
-                   "effects": "Tidepool.Agent.Contract.BuiltinDispatcherEffects",
+                   "module": Path(path).stem, "entry": "Tidepool.Actors.Workbench." + entry,
+                   "effects": "Tidepool.Actors.Workbench.BuiltinDispatcherEffects",
                    "sha256": sha256(root / path)}
             for name, (path, entry) in BUILTIN_ENTRY_SOURCES.items()}
 

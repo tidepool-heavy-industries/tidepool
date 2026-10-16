@@ -81,9 +81,6 @@ module Tidepool.Agent.Contract
   , asyncHaskellTools
   , defaultWorkbenchSpec
   , defaultAsyncWorkbenchSpec
-  , installDefaultWorkbench
-  , installDefaultAsyncWorkbench
-  , BuiltinDispatcherEffects
   , SyncEffects
   , raiseSync
   , KnownToolEffects
@@ -155,7 +152,7 @@ import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
-import Tidepool.Inspection (Display (..))
+import Tidepool.Inspection.Display (Display (..))
 import Tidepool.Aeson.Value (Value (..), ToJSON (..), encodeValue, object, (.=))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject, (.:), (.:?), (.!=))
 import Tidepool.Aeson.Schema (JsonSchema (..))
@@ -164,7 +161,6 @@ import Tidepool.Effects.Core (AgentTools (..))
 import Tidepool.Reload
 
 import Tidepool.Agent.ToolEffects
-import Tidepool.Internal.ActorProfiles (ActorEffects)
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -1103,17 +1099,6 @@ defaultAsyncWorkbenchSpec
   :: (KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec (AsyncHaskellTools effects) effects
 defaultAsyncWorkbenchSpec = defaultSpec { specTools = asyncHaskellTools }
-
--- | Build-owned hosted installers for the standard ordered actor row. Their
--- dispatchers are immutable code; every installation still creates actor-local
--- policy state through 'AgentToolsInstallWith'.
-type BuiltinDispatcherEffects = AgentTools ': SyncEffects ActorEffects
-
-installDefaultWorkbench :: Eff BuiltinDispatcherEffects ()
-installDefaultWorkbench = installSpec @ActorEffects defaultWorkbenchSpec
-
-installDefaultAsyncWorkbench :: Eff BuiltinDispatcherEffects ()
-installDefaultAsyncWorkbench = installSpec @ActorEffects defaultAsyncWorkbenchSpec
 
 -- | The entry index the retained dispatcher serves an ordinary tool call at.
 toolCallEntry :: Int

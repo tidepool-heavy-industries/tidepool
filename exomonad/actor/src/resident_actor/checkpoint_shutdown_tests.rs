@@ -1,6 +1,7 @@
 //! Checkpoint retirement keeps the actor shutdown deadline and retry evidence.
 
 use super::*;
+use crate::ContextCheckpointBoundary;
 use crate::{
     ActorCapabilities, ActorPersistencePolicy, ActorPlacement, CheckpointRefusal,
     CheckpointSourceLayer, CleanupComponentOutcome,
@@ -8,7 +9,7 @@ use crate::{
 use std::time::Duration;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::{ContextCheckpointBoundary, ModuleEnv, SessionLib};
+use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
 #[tokio::test(start_paused = true)]
 async fn nonempty_checkpoint_shutdown_retains_uncertainty_and_retry_authority() {

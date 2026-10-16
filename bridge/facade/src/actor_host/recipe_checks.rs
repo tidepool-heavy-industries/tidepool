@@ -440,9 +440,10 @@ impl Driver {
             .await?;
         // Complete the actual admitting tool boundary before another actor is driven.
         let completion = self
-            .pump(endpoint.complete_boxed(
-                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),
-            ))
+            .pump(
+                endpoint
+                    .complete_boxed(exomonad_actor::ContextCheckpointBoundary::Hosted(operation)),
+            )
             .await?;
         let result = result.map_err(|error| {
             Box::new(RecipeTurnFailure::new(
@@ -686,7 +687,15 @@ impl Driver {
                     Some(resources) => Ok(Arc::clone(resources)),
                     None => crate::exomonad::resources::connect_existing(
                         self.resource_policy.clone(),
-                        exomonad_node::command_resources::CommandRunIdentity::new(self.resource_run.clone(), self.session.as_ref().ok_or("recipe session unavailable")?.host_incarnation.incarnation().0)?,
+                        exomonad_node::command_resources::CommandRunIdentity::new(
+                            self.resource_run.clone(),
+                            self.session
+                                .as_ref()
+                                .ok_or("recipe session unavailable")?
+                                .host_incarnation
+                                .incarnation()
+                                .0,
+                        )?,
                     )
                     .await
                     .map(|resources| {

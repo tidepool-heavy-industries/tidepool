@@ -1063,7 +1063,7 @@ pub trait KernelBehavior: Send + 'static {
     fn reconcile_workbench_boundary<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        _boundary: crate::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>> {
         Box::pin(async move { Ok(crate::WorkbenchBoundaryReconciliation::Pending) })
     }
@@ -1074,7 +1074,7 @@ pub trait KernelBehavior: Send + 'static {
     fn tool_completed<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        _boundary: crate::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async { Ok(()) })
     }
@@ -1082,7 +1082,7 @@ pub trait KernelBehavior: Send + 'static {
     fn tool_aborted<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        _boundary: crate::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async { Ok(()) })
     }
@@ -1405,10 +1405,10 @@ impl PendingActorTask {
     fn matches_workbench_boundary(
         &self,
         actor: ActorRef,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> bool {
         match boundary {
-            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(_) => {
+            crate::ContextCheckpointBoundary::Hosted(_) => {
                 let Some(key) = self
                     .control()
                     .and_then(|control| control.invocation.as_ref())
@@ -1419,7 +1419,7 @@ impl PendingActorTask {
                     && self.step().request_execution()
                         == Some(&crate::resident_tools::execution_id(actor, key))
             }
-            tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+            crate::ContextCheckpointBoundary::Execution {
                 actor_id,
                 incarnation,
                 execution_id,
@@ -1428,7 +1428,7 @@ impl PendingActorTask {
                     && *incarnation == actor.incarnation.0
                     && self.step().request_execution() == Some(execution_id)
             }
-            tidepool_runtime::session::ContextCheckpointBoundary::Route { .. } => false,
+            crate::ContextCheckpointBoundary::Route { .. } => false,
         }
     }
 }
@@ -2640,7 +2640,7 @@ fn can_apply_independent_settlement<B: KernelBehavior>(
         | KernelMessage::ReconcileWorkbenchBoundary { boundary, .. } => {
             !matches!(
                 boundary,
-                tidepool_runtime::session::ContextCheckpointBoundary::Route { .. }
+                crate::ContextCheckpointBoundary::Route { .. }
             ) && !state
                 .pending_tasks
                 .values()
@@ -3288,11 +3288,11 @@ fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
             Some(DeferredControl::HostedInvocation)
         }
         KernelMessage::ToolCompleted {
-            boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route { .. },
+            boundary: crate::ContextCheckpointBoundary::Route { .. },
             ..
         }
         | KernelMessage::ReconcileWorkbenchBoundary {
-            boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route { .. },
+            boundary: crate::ContextCheckpointBoundary::Route { .. },
             ..
         } => Some(DeferredControl::RouteSettlement),
         KernelMessage::ToolCompleted { .. }
@@ -4371,10 +4371,11 @@ mod tests {
     use crate::ActorLifecycle;
     use std::sync::Arc;
 
+    use crate::WorkbenchRequest;
     use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use parking_lot::Mutex;
     use tidepool_repr::SessionId;
-    use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
+    use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
     use tokio::sync::{oneshot, Notify};
 
     use super::*;
@@ -4868,7 +4869,7 @@ mod tests {
         fn reconcile_workbench_boundary<'a>(
             &'a mut self,
             _: &'a KernelContext,
-            _: tidepool_runtime::session::ContextCheckpointBoundary,
+            _: crate::ContextCheckpointBoundary,
         ) -> BoxFuture<'a, Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>>
         {
             Box::pin(async move {
@@ -5016,7 +5017,7 @@ mod tests {
         fn tool_completed<'a>(
             &'a mut self,
             _context: &'a KernelContext,
-            _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+            _boundary: crate::ContextCheckpointBoundary,
         ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
             Box::pin(async move {
                 self.calls.lock().push("tool-completed");
@@ -5305,7 +5306,7 @@ mod tests {
             fn capture(
                 &self,
                 _: &str,
-                _: &tidepool_runtime::session::ContextCheckpointBoundary,
+                _: &crate::ContextCheckpointBoundary,
             ) -> Result<crate::HostedCheckpointAttachment, crate::HostedCheckpointCaptureError>
             {
                 Err(crate::HostedCheckpointCaptureError::Unavailable)
@@ -6396,7 +6397,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
+                boundary: crate::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "A".into(),
                     "A".into(),
@@ -6408,7 +6409,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::Execution {
+                boundary: crate::ContextCheckpointBoundary::Execution {
                     actor_id: actor.identity().id.0,
                     incarnation: actor.identity().incarnation.0,
                     execution_id: execution,
@@ -6426,7 +6427,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
+                boundary: crate::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "B".into(),
                     "B".into(),
@@ -6468,7 +6469,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ReconcileWorkbenchBoundary {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route {
+                boundary: crate::ContextCheckpointBoundary::Route {
                     actor_id: actor.identity().id.0,
                     incarnation: actor.identity().incarnation.0,
                     watch_id: 7,
@@ -6482,7 +6483,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
+                boundary: crate::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "B".into(),
                     "B".into(),
@@ -6746,7 +6747,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
+                boundary: crate::ContextCheckpointBoundary::external(
                     "thread".into(),
                     "call".into(),
                     "call".into(),
@@ -6804,7 +6805,7 @@ mod tests {
                 reply: call_tx.into(),
             })
             .unwrap();
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+        let boundary = crate::ContextCheckpointBoundary::external(
             "parked-thread".into(),
             "completed-call".into(),
             "completed-call".into(),

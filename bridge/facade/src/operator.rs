@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use exomonad_actor::WorkbenchRequest;
 use exomonad_actor::{
     ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
 };
@@ -20,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
+use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
 use tokio::{
     net::UnixListener,
     sync::{watch, Mutex},

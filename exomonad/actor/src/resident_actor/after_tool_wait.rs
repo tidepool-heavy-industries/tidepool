@@ -1,7 +1,7 @@
 //! One presentation invocation retains its admitted handler and completed output.
 
 use super::*;
-use tidepool_runtime::session::workbench::WorkbenchToolCall;
+use crate::WorkbenchToolCall;
 
 pub(super) fn result_payload(
     call: &WorkbenchToolCall,

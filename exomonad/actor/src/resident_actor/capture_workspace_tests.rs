@@ -5,14 +5,13 @@ use crate::fork_workspace::{
     PreparedWorkspaceAttachment, WorkspaceAdmission, WorkspaceAdmissionError,
     WorkspaceAdmissionFuture, WorkspaceCustody, WorkspaceSelection,
 };
+use crate::{ContextCheckpointBoundary, WorkbenchRequest};
 use exomonad_tool::{ToolArguments, ToolInvocation};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use tidepool_bridge_effects::{
     WtBranchName, WtGitOid, WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt,
 };
-use tidepool_runtime::session::{
-    insert_preamble_imports, ContextCheckpointBoundary, ModuleEnv, SessionLib, WorkbenchRequest,
-};
+use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
 // Session-scoped fault injection observes real publication without issuing authority.

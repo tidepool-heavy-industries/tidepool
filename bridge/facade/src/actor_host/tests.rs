@@ -2773,9 +2773,7 @@ async fn forest_operator_survives_model_root_recovery() {
                     actor
                         .submit_workbench(
                             exomonad_actor::ActorWorkbenchInvocation::unbound(
-                                tidepool_runtime::session::WorkbenchRequest::from_cell_input(
-                                    source,
-                                ),
+                                exomonad_actor::WorkbenchRequest::from_cell_input(source),
                             ),
                             None,
                             reply.into(),

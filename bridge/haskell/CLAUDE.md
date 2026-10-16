@@ -6,6 +6,11 @@ This directory owns the GHC-to-prepared-STG compiler worker and `lib/Tidepool`, 
 library auto-imported by the MCP surfaces. Toolchain discovery and caching live
 in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 
+`Tidepool.Agent.Contract` owns generic tool specs and imports only the narrow
+`Tidepool.Inspection.Display` classes. Standard actor installers belong in
+`actors/Tidepool/Actors/Workbench.hs`, which imports `Tidepool.Inspection` to
+retain actor response and watch rendering instances.
+
 Compiler templates distinguish the generic preamble import slot from the
 protected primitive default recipe. Installer templates may carry only the
 import marker. `TurnSource` captures the default recipe from its separate

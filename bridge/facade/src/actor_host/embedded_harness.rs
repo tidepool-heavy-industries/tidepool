@@ -934,7 +934,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .complete(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
+            .complete(exomonad_actor::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -943,7 +943,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .abort(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
+            .abort(exomonad_actor::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -1092,7 +1092,7 @@ impl EmbeddedHostedCheckpoint {
         run: &str,
         creator: Option<ActorRef>,
         context_parent: Option<ActorRef>,
-        boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+        boundary: Option<&exomonad_actor::ContextCheckpointBoundary>,
     ) -> Result<(), EmbeddedError> {
         let operation = self.cuts.deferred().operation().ok_or_else(|| {
             EmbeddedError::Binding("inherited hosted context has no captured operation".into())
@@ -1125,7 +1125,7 @@ fn validate_inherited_operation(
     run: &str,
     creator: Option<ActorRef>,
     context_parent: Option<ActorRef>,
-    boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+    boundary: Option<&exomonad_actor::ContextCheckpointBoundary>,
 ) -> Result<(), EmbeddedError> {
     let refused = || {
         EmbeddedError::Binding(
@@ -1136,7 +1136,7 @@ fn validate_inherited_operation(
         return Err(refused());
     }
     let original = boundary
-        .and_then(tidepool_runtime::session::ContextCheckpointBoundary::hosted)
+        .and_then(exomonad_actor::ContextCheckpointBoundary::hosted)
         .filter(|operation| operation.is_complete())
         .ok_or_else(refused)?;
     match (&operation.origin, &original.origin) {
@@ -1178,7 +1178,7 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &exomonad_actor::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
         let original = original_operation(&self.identity, &self.operation)
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
@@ -2709,13 +2709,12 @@ mod tests {
             request_id: "request".into(),
             call_id: "call".into(),
         };
-        let boundary =
-            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone());
+        let boundary = exomonad_actor::ContextCheckpointBoundary::Hosted(original.clone());
         let check =
             |run: &str,
              creator,
              context_parent,
-             boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>| {
+             boundary: Option<&exomonad_actor::ContextCheckpointBoundary>| {
                 validate_inherited_operation(
                     issuer,
                     &parent,
@@ -2764,10 +2763,10 @@ mod tests {
                 ..original
             },
         ] {
-            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Hosted(foreign);
+            let boundary = exomonad_actor::ContextCheckpointBoundary::Hosted(foreign);
             assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
         }
-        let route = tidepool_runtime::session::ContextCheckpointBoundary::Route {
+        let route = exomonad_actor::ContextCheckpointBoundary::Route {
             actor_id: 1,
             incarnation: 1,
             watch_id: 1,

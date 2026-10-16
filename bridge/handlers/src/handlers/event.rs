@@ -1876,7 +1876,7 @@ mod tests {
 
     #[test]
     fn installed_support_distinguishes_active_and_inert_sources() {
-        use tidepool_mcp::InstalledEffectSupport;
+        use exomonad_tool::InstalledEffectSupport;
         struct Active;
         impl ObservationSource for Active {
             fn observe(&mut self, _: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
@@ -3943,7 +3943,7 @@ mod tests {
     }
 }
 
-impl tidepool_mcp::InstalledEffectSupport for RepoEventHandler {
+impl exomonad_tool::InstalledEffectSupport for RepoEventHandler {
     fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
     }

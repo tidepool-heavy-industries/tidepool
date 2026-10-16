@@ -3,6 +3,7 @@ module Main (main, tests) where
 
 import Control.Monad (unless)
 import qualified Tidepool.Actors.Spawn as Spawn
+import Tidepool.Actors.Workbench ()
 import qualified Tidepool.Effects.Core as Core
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
 import Control.Monad.Freer.State (State, get, modify, runState)
@@ -22,6 +23,7 @@ import Tidepool.Aeson.Value (Value (..), ToJSON (toJSON), object, (.=))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Effects.Core (AgentTools (..), Commands, ContextReadWrite (..), Reload)
 import Tidepool.Internal.ActorProfiles (ActorEffects)
+import Tidepool.Inspection.Display (WorkbenchDisplay (..))
 import Tidepool.Test.Runner
 
 data Tools mode = Tools
@@ -327,7 +329,13 @@ endpointIndexTests =
 
 tests :: TestTree
 tests = testGroup "tool profile contract" $
-  [ testCase "prepared spec metadata does not execute handlers or slots and refusal cannot launch" preparedSpecContracts
+  [ testCase "built-in installers retain their actor row and response and watch displays" $ do
+      compileProfile "BuiltinInstallers" Accepted
+      require "actor installer brings the specialized response display"
+        (workbenchDisplay (Reply.ResponseStarting "waiting" :: Reply.ResponseState Int) == ("starting: waiting", False))
+      require "actor installer brings the specialized watch display without forcing its result"
+        (workbenchDisplay (Watch.WatchReady (error "display forced a watched result") :: Watch.WatchState Int) == ("WatchReady", True))
+  , testCase "prepared spec metadata does not execute handlers or slots and refusal cannot launch" preparedSpecContracts
   , testCase "concrete spec preparation requires an input schema dictionary" $ compileProfile "PreparedSpecMissingSchema" (Rejected ["JsonSchema Input"])
   , lookupNavigationTests
   , testCase "receipt projections distinguish terminal failure from observation rejection" receiptFailureProjection

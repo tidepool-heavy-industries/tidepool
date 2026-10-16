@@ -69,7 +69,6 @@ tidepool_rust_library(
     srcs_filegroup = ":tidepool_mcp_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
-        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:parking_lot",
@@ -143,7 +142,6 @@ tidepool_rust_binary(
     srcs_filegroup = ":tidepool_effects_gen_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
-        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:parking_lot",
@@ -230,7 +228,6 @@ tidepool_rust_isolated_test(
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/protocol:tidepool_protocol",
         "//bridge/testing:tidepool_testing",
-        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:parking_lot",
@@ -321,7 +318,6 @@ tidepool_rust_isolated_test(
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/protocol:tidepool_protocol",
         "//bridge/testing:tidepool_testing",
-        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:parking_lot",

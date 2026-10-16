@@ -166,24 +166,18 @@ impl HostActor for AdmissionHost {
     }
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         self.installation
-            .complete(
-                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original_operation(
-                    &self.identity,
-                    operation,
-                )?),
-            )
+            .complete(exomonad_actor::ContextCheckpointBoundary::Hosted(
+                original_operation(&self.identity, operation)?,
+            ))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
         self.installation
-            .abort(
-                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original_operation(
-                    &self.identity,
-                    operation,
-                )?),
-            )
+            .abort(exomonad_actor::ContextCheckpointBoundary::Hosted(
+                original_operation(&self.identity, operation)?,
+            ))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -449,13 +443,13 @@ impl ResidentToolEndpoint for ValidationOnlyEndpoint {
     }
     fn complete_boxed(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.0.complete_boxed(boundary)
     }
     fn abort_boxed(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.0.abort_boxed(boundary)
     }

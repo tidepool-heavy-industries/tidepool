@@ -821,6 +821,7 @@ test-suite model-turn-test
     Tidepool.Actors.Role
     Tidepool.Actors.Spawn
     Tidepool.Actors.Worktree
+    Tidepool.Actors.Workbench
     Tidepool.Agent.Session
     Tidepool.Journal
     Project.Researcher
@@ -1024,6 +1025,7 @@ test-suite automation-helper-contract
     Tidepool.Actors.Role
     Tidepool.Actors.Spawn
     Tidepool.Actors.Worktree
+    Tidepool.Actors.Workbench
     Tidepool.Aeson
     Tidepool.Aeson.FromJSON
     Tidepool.Aeson.KeyMap
@@ -1234,6 +1236,7 @@ test-suite tool-profiles-contract
     QuantitiesContract
     Tidepool.Actor
     Tidepool.Actors.Spawn
+    Tidepool.Actors.Workbench
     Tidepool.Actors.Internal.Agent
     Tidepool.Agent.Session
     LookupNavigationTest

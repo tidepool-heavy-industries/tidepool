@@ -1249,6 +1249,8 @@ dependencies = [
 name = "exomonad-tool"
 version = "0.1.0"
 dependencies = [
+ "frunk",
+ "parking_lot",
  "proptest",
  "serde",
  "serde_json",
@@ -4015,7 +4017,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "camino",
- "exomonad-node",
  "exomonad-tool",
  "exomonad-worktree",
  "frunk",
@@ -4063,7 +4064,6 @@ name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "exomonad-tool",
  "frunk",
  "parking_lot",
  "proptest",
@@ -4121,7 +4121,6 @@ dependencies = [
  "blake3",
  "ciborium",
  "cid",
- "exomonad-tool",
  "frunk",
  "fvm_ipld_blockstore",
  "fvm_ipld_encoding",

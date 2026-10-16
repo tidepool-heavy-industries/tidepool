@@ -749,9 +749,8 @@ async fn seal_overtaking_issued_worker_still_retains_actual_cleanup_executor() {
 
 #[tokio::test]
 async fn tool_abort_validates_original_owner_before_empty_settlement() {
-    use tidepool_runtime::session::{
-        ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
-    };
+    use crate::{ContextCheckpointBoundary, WorkbenchRequest};
+    use tidepool_runtime::session::WorkbenchExecutionId;
 
     let fixture = Fixture::new().await;
     let forest = &fixture.forest;

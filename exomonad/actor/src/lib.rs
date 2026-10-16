@@ -179,6 +179,9 @@ pub use resident_tools::{
     ResidentToolResponse, WorkbenchBoundaryReconciliation, WorkbenchCancellationCause,
     WorkbenchCancellationOutcome, WorkbenchExecutionControl,
 };
+pub use resident_workbench::request::{
+    ContextCheckpointBoundary, WorkbenchRequest, WorkbenchToolCall,
+};
 pub use resident_workbench::{
     ActivationCompileStage, ActorInstallationRecoveryError, ActorMachineRegistry,
     ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease, PersistedActorInstallation,

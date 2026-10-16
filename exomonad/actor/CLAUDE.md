@@ -2,6 +2,8 @@
 
 This crate owns exact-incarnation actor identity, lifecycle and ownership,
 mailboxes, actor-local execution context, and provider-neutral actor sessions.
+The resident workbench owns hosted request envelopes and authenticated checkpoint
+coordinates; generic execution identities and receipts remain in `tidepool-runtime`.
 Machine sessions, JIT continuations, providers, concrete handlers, and
 observability interfaces stay in their owning crates. Ractor is the scheduler;
 `LocalActor` adds Tidepool identity, retained exits, live-value custody, and

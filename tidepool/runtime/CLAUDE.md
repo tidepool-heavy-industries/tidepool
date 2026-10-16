@@ -22,7 +22,9 @@ and retirement are authoritative.
 
 `session::workbench` owns frontend-neutral source classification,
 meta-command tokenization, canonical resident turn templates, and
-ordered cursors that retain completed execution evidence. Frontends own command meaning, execution
+ordered cursors that retain completed execution evidence. Actor request envelopes,
+authenticated tool calls and checkpoint coordinates belong to `exomonad-actor`.
+Frontends own command meaning, execution
 settlement, presentation, provider loops, and lifecycle policy.
 
 An admitted cell publishes its declarations and bindings together on successful

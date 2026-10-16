@@ -18,7 +18,6 @@ imbl.workspace = true
 cid.workspace = true
 fvm_ipld_blockstore.workspace = true
 fvm_ipld_encoding.workspace = true
-exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true
 blake3.workspace = true
 thiserror.workspace = true

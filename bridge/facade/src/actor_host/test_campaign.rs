@@ -104,12 +104,12 @@ pub(super) fn original_tool_call(
     operation: OriginalOperation,
 ) -> (
     ToolInvocationContext,
-    tidepool_runtime::session::ContextCheckpointBoundary,
+    exomonad_actor::ContextCheckpointBoundary,
 ) {
     let invocation = ToolInvocationContext::original(operation.clone());
     (
         invocation,
-        tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),
+        exomonad_actor::ContextCheckpointBoundary::Hosted(operation),
     )
 }
 
@@ -1296,11 +1296,9 @@ pub(super) fn retained_committed_expansion_display_text(
     assert_eq!(operation["displayPublication"], serde_json::Value::Null);
     assert_eq!(operation["id"]["inputUnitIndex"], 0);
     assert_eq!(operation["id"]["effectOrdinal"], 0);
-    assert!(
-        operation["id"]["execution"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-    );
+    assert!(operation["id"]["execution"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
     let row = retained_display_operation_output(store, origin, operation);
     let emission = row.emission();
     assert!(

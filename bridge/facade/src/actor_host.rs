@@ -1871,7 +1871,7 @@ async fn run_owned(
         .map(|inputs| {
             let mut supported = host_context_support();
             supported.extend(
-                tidepool_mcp::InstalledEffectSupport::installed_effect_support(machine.handlers()),
+                exomonad_tool::InstalledEffectSupport::installed_effect_support(machine.handlers()),
             );
             (inputs, source.clone(), supported)
         });
@@ -1908,7 +1908,9 @@ async fn run_owned(
         )?)
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
-        .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
+        .with_handler_effect_support(
+            exomonad_tool::InstalledEffectSupport::installed_effect_support,
+        )
         .with_image_registry(image_registry);
     forest
         .register_recovery_boot(recovery_boot)
@@ -3699,7 +3701,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         tidepool_handlers::WebHandler::default(),
     );
     let mut supported = host_context_support();
-    supported.extend(tidepool_mcp::InstalledEffectSupport::installed_effect_support(&handlers));
+    supported.extend(exomonad_tool::InstalledEffectSupport::installed_effect_support(&handlers));
     let machine = ResidentSession::unbootstrapped(
         handlers,
         CapturedOutput::new(),

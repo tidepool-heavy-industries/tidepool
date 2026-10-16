@@ -152,13 +152,13 @@ impl exomonad_actor::ResidentToolEndpoint for AbandonedDispatchEndpoint {
     }
     fn abort_boxed(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> exomonad_actor::ResidentToolFuture {
         self.inner.abort_boxed(boundary)
     }
     fn complete_boxed(
         &self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: exomonad_actor::ContextCheckpointBoundary,
     ) -> exomonad_actor::ResidentToolFuture {
         self.inner.complete_boxed(boundary)
     }

@@ -16,7 +16,6 @@ path = "src/bin/tidepool-effects-gen.rs"
 test = false
 
 [dependencies]
-exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true

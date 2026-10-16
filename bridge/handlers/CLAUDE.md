@@ -114,7 +114,9 @@ capability boundary, not the filesystem**; an agent wired without the `Exec`
 effect cannot run shell commands at all, but one wired with it can run
 anything the host user can). Exec's actual robustness controls are process-
 level, not filesystem-level: bounded streaming output capture, a timeout, and
-process-group termination on timeout — see `src/handlers/exec.rs`.
+process-group termination on timeout — see `src/handlers/exec.rs`. This owner
+constructs its own synchronous `Command`; a forwarding constructor in another
+launcher would not transfer lifecycle or cleanup ownership.
 
 `FsWriteReq::FsWrite` has **mkdir-p semantics**: missing parent directories are
 created automatically (`std::fs::create_dir_all`) before writing. Parent

@@ -8,8 +8,8 @@ pub(crate) const STATUS_TOOL: &str = "status";
 pub(crate) struct StatusInspectionRequest(serde_json::Value);
 
 impl StatusInspectionRequest {
-    pub(crate) fn into_request(self) -> tidepool_runtime::session::WorkbenchRequest {
-        tidepool_runtime::session::WorkbenchRequest::for_tool(STATUS_TOOL.into(), self.0)
+    pub(crate) fn into_request(self) -> crate::WorkbenchRequest {
+        crate::WorkbenchRequest::for_tool(STATUS_TOOL.into(), self.0)
     }
 }
 

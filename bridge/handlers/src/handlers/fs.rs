@@ -2053,12 +2053,12 @@ mod tests {
     }
 }
 
-impl tidepool_mcp::InstalledEffectSupport for FsReadHandler {
+impl exomonad_tool::InstalledEffectSupport for FsReadHandler {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         vec![exomonad_tool::ActorEffectKey::FsRead.into()]
     }
 }
-impl tidepool_mcp::InstalledEffectSupport for FsWriteHandler {
+impl exomonad_tool::InstalledEffectSupport for FsWriteHandler {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         vec![exomonad_tool::ActorEffectKey::FsWrite.into()]
     }

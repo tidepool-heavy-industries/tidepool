@@ -4,12 +4,13 @@
 
 use super::*;
 use crate::request::{RequestRegistry, ResponseFailure, ResponseObservation, WatchObservation};
+use crate::WorkbenchRequest;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
+use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
 use tokio::sync::{oneshot, Notify};
 
 struct ReplyDriver {

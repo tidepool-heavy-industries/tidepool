@@ -1,6 +1,7 @@
 use super::*;
+use crate::WorkbenchRequest;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tidepool_runtime::session::{WorkbenchRequest, WorkbenchRunStatus};
+use tidepool_runtime::session::WorkbenchRunStatus;
 use tokio::sync::{oneshot, Semaphore};
 
 #[derive(Clone, Copy)]

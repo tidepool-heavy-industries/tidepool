@@ -47,7 +47,7 @@ catalog; no build scratch path becomes a runtime source witness.
 The same renderer produces `TidepoolPreparedWorkbench.hs` and
 `TidepoolPreparedAsyncWorkbench.hs`. They call the two existing default policies
 specialized to the generated standard ordered actor row in
-`Tidepool.Agent.Contract`, with no notebook-driver or workspace imports.
+`Tidepool.Actors.Workbench`, with no notebook-driver or workspace imports.
 `//build/package:native_workbench_entry` and
 `//build/package:native_async_workbench_entry` use the same retained source,
 compiler and production-entry producer as the root entry. Qualification binds

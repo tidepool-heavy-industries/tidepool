@@ -7,12 +7,13 @@
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 
 pub mod lifecycle;
+use crate::WorkbenchRequest;
 pub use lifecycle::{
     ActorAdmissionLease, AdmittedKernelEnvelope, LifecycleHandle, NativeProviderAdmission,
     NativeProviderSettlementError, NativeProviderStartError, NativeProviderTurnLease,
     ProviderIdleProbe,
 };
-use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
+use tidepool_runtime::session::WorkbenchResponse;
 
 /// Exact identity of one actor-owned execution step. The generation
 /// changes for every task in the actor incarnation. The admission generation
@@ -370,7 +371,7 @@ pub(crate) struct WorkbenchInvocationMetadata {
     input: Option<serde_json::Value>,
     verbose: Option<bool>,
     execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
-    checkpoint: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+    checkpoint: Option<crate::ContextCheckpointBoundary>,
 }
 
 impl WorkbenchInvocationMetadata {
@@ -500,7 +501,7 @@ impl ActorWorkbenchInvocation {
 
     pub(crate) fn with_checkpoint_boundary(
         mut self,
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
     ) -> Self {
         self.request = self.request.with_checkpoint_boundary(boundary);
         self
@@ -608,15 +609,15 @@ pub enum KernelMessage {
         reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
     },
     ReconcileWorkbenchBoundary {
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
         reply: RpcReplyPort<crate::WorkbenchBoundaryReconciliation>,
     },
     ToolCompleted {
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     ToolAborted {
-        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: crate::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     /// Drain one mailbox request retained while the resident behavior was
@@ -967,7 +968,7 @@ impl HostedCellPublications {
 
     pub(crate) fn retained_boundary(
         &self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        boundary: &crate::ContextCheckpointBoundary,
     ) -> Result<crate::HostedOperationSettlement, String> {
         let entries = self.0.lock();
         let mut matches = entries

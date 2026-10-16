@@ -157,14 +157,14 @@ pub use workbench::{
     classify_workbench_item, detect_hoisted_declaration_collision, escape_workbench_haskell_string,
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
     run_block_sequence, ActorOutputReference, BlockExecution, BlockSequenceOutcome, CommittedBlock,
-    ContextCheckpointBoundary, MetaCommandLine, ParsedBlock, SourceOrderCollision, WorkSequence,
-    WorkbenchBinding, WorkbenchBindingKind, WorkbenchCellItemKind, WorkbenchCellSourceItem,
-    WorkbenchDiscovery, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchDisplayPublication,
+    MetaCommandLine, ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding,
+    WorkbenchBindingKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery,
+    WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchDisplayPublication,
     WorkbenchDisplayPublicationIdentity, WorkbenchExecutionId, WorkbenchFailureLayer,
     WorkbenchFailurePoint, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
     WorkbenchNotPublishedReason, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

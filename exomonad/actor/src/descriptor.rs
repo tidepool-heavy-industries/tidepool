@@ -82,7 +82,7 @@ pub struct ActorDescriptor {
     prompt_composer: Option<PromptComposer>,
     prompt_reload_preparer: Option<PromptReloadPreparer>,
     fork_budget: Option<(i64, i64)>,
-    checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+    checkpoint_boundary: Option<crate::ContextCheckpointBoundary>,
     checkpoint_token: Option<String>,
     source_layer: std::sync::Arc<[std::path::PathBuf]>,
 }
@@ -283,9 +283,7 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn checkpoint_boundary(
-        &self,
-    ) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
+    pub fn checkpoint_boundary(&self) -> Option<&crate::ContextCheckpointBoundary> {
         self.checkpoint_boundary.as_ref()
     }
 
@@ -301,7 +299,7 @@ impl ActorDescriptor {
     #[must_use]
     pub(crate) fn with_checkpoint_boundary(
         mut self,
-        boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
+        boundary: Option<crate::ContextCheckpointBoundary>,
     ) -> Self {
         self.checkpoint_boundary = boundary;
         self

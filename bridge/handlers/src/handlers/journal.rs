@@ -752,7 +752,7 @@ mod tests {
     }
 }
 
-impl tidepool_mcp::InstalledEffectSupport for JournalHandler {
+impl exomonad_tool::InstalledEffectSupport for JournalHandler {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         vec![exomonad_tool::ActorEffectKey::Journal.into()]
     }

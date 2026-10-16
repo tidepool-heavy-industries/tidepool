@@ -77,15 +77,11 @@ impl ExecHandler {
     }
 
     fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<Proc, ExecError> {
-        // Exec's whole point is running an arbitrary, caller-named host
-        // command (see this crate's CLAUDE.md, "Exec is NOT
-        // filesystem-sandboxed") — it is not a fixed process this crate owns
-        // the lifecycle of. `spawn_and_capture` gives it its own
-        // process-group timeout/kill, which is this handler's substitute for
-        // the launcher's die-with-owner guarantee; `exomonad_node`'s
-        // `host_command::command` is still the one place that builds the
-        // `Command`, matching every other caller in this shape.
-        let mut command: Command = exomonad_node::host_command::command("sh");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Exec owns synchronous process-group supervision and bounded output capture"
+        )]
+        let mut command = Command::new("sh");
         command.arg("-c").arg(cmd).current_dir(dir);
         Self::spawn_and_capture(command, Self::exec_timeout())
     }
@@ -417,10 +413,11 @@ impl ExecHandler {
         if argv.is_empty() {
             return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }
-        // Same reasoning as `run_command` above — an arbitrary caller-named
-        // command with its own process-group timeout/kill, built through the
-        // launcher's synchronous `command` constructor.
-        let mut command: Command = exomonad_node::host_command::command(&argv[0]);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Exec owns synchronous process-group supervision and bounded output capture"
+        )]
+        let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]).current_dir(&self.root);
         Self::spawn_and_capture(command, Self::exec_timeout())
     }
