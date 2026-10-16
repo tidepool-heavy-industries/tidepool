@@ -466,6 +466,81 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
         after.entry_handle_copies - before.entry_handle_copies,
         after.admission_owner_lookups - before.admission_owner_lookups
     );
+
+    let before = inventory.metrics();
+    let expected = ordered_offer_retention(&source, &offers).unwrap();
+    expected.entries();
+    let old = inventory.metrics();
+    let before_batch = inventory.metrics();
+    let actual = retain_native_offers(&source, &offers).unwrap();
+    actual.entries();
+    let batched = inventory.metrics();
+    assert_retention_result_matches(Ok(expected), Ok(actual));
+    let old_visits = old.graph_visits - before.graph_visits;
+    let batch_visits = batched.graph_visits - before_batch.graph_visits;
+    let old_lookups = old.admission_owner_lookups - before.admission_owner_lookups;
+    let batch_lookups = batched.admission_owner_lookups - before_batch.admission_owner_lookups;
+    eprintln!("retention_work_comparison ordered_graph_visits={old_visits} batch_graph_visits={batch_visits} ordered_owner_lookups={old_lookups} batch_owner_lookups={batch_lookups} ordered_entry_copies={} batch_entry_copies={}", old.entry_handle_copies - before.entry_handle_copies, batched.entry_handle_copies - before_batch.entry_handle_copies);
+    assert!(
+        batch_visits < old_visits,
+        "covered offers must not rebuild each cumulative read projection"
+    );
+    assert!(
+        batch_lookups < old_lookups,
+        "covered prefixes must reuse their successful validation"
+    );
+}
+
+#[test]
+fn issued_offer_retention_keeps_first_conflict_and_its_parent_evidence() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let current = product("RetentionConflict", 92);
+    let changed = fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "RetentionConflict",
+            vec![(7, vec![]), (9001, vec![])],
+            93,
+            &BTreeMap::new(),
+            b"different certified interface".to_vec(),
+        ),
+        producer.sha256(),
+    );
+    let changed = recovered_witness_fixtures(&[changed]).remove(0).product;
+    let inventory = ArtifactInventory::default();
+    let current_entry = Arc::new(ArtifactEntry::original(producer.sha256(), current).unwrap());
+    let context = inventory
+        .admit_shared(&inventory.empty_view(), vec![current_entry.clone()])
+        .unwrap();
+    let issue = |source: &ArtifactView, entry: &ArtifactEntry| {
+        let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, source)
+            .unwrap()
+            .unwrap();
+        IssuedNativeOffer::issue(entry.descriptor.id, source, Some(proof)).unwrap()
+    };
+    let current_offer = issue(&context, &current_entry);
+    let other_inventory = ArtifactInventory::default();
+    let changed_entry = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
+    let changed_source = other_inventory
+        .admit_shared(&other_inventory.empty_view(), vec![changed_entry.clone()])
+        .unwrap();
+    let changed_offer = issue(&changed_source, &changed_entry);
+    let offers = vec![
+        current_offer.clone(),
+        current_offer.clone(),
+        changed_offer,
+        current_offer,
+    ];
+    let projection = CompilerInputProjection::from_issued_entries(&[current_entry]).unwrap();
+    let error = ordered_offer_retention(&context, &offers).unwrap_err();
+    let CompileError::ArtifactInventory(error) = error else {
+        panic!("expected typed conflict, got {error:?}");
+    };
+    assert!(matches!(
+        error.failure,
+        crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { .. }
+    ));
+    assert_offer_retention_matches_ordered_fold(&context, &projection, &offers);
 }
 
 #[test]
