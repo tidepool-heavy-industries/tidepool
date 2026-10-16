@@ -12370,6 +12370,16 @@ pub(crate) mod tests {
                 continue;
             }
             let private = result.expect("current product must borrow its issued full dependency");
+            // Program support predates the new private proof issuance. Continue
+            // through that actual handoff rather than preparing from private directly.
+            let (admission, source) =
+                crate::declaration_context::generated_source_admission_fixture(
+                    &root.path().join("continuation-admission"),
+                    &request,
+                );
+            let private = private
+                .for_program_continuation(&output, &[admission], &source)
+                .unwrap();
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()

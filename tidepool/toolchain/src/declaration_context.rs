@@ -8253,7 +8253,9 @@ fn compose_lexical_nodes<'a>(
 }
 
 #[cfg(test)]
-pub(crate) use tests::assert_source_selected_receipt_pairing;
+pub(crate) use tests::{
+    assert_source_selected_receipt_pairing, generated_source_admission_fixture,
+};
 
 #[cfg(test)]
 pub(crate) use native_availability_tests::assert_selected_authored_private_inputs;
@@ -9599,6 +9601,19 @@ mod tests {
         let continued = private
             .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
             .unwrap();
+        assert!(continued
+            .artifacts
+            .entries()
+            .iter()
+            .all(|entry| entry.descriptor.owner != *generated.owner()));
+        assert_eq!(
+            continued.artifacts.capture_graph_selection().roots,
+            support.capture_graph_selection().roots
+        );
+        assert_eq!(
+            continued.artifacts.capture_graph_selection().namespace,
+            support.capture_graph_selection().namespace
+        );
         assert_eq!(
             continued.projection.roles(),
             support_offer(std::slice::from_ref(&hidden))
@@ -12723,6 +12738,24 @@ mod tests {
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
         }
+    }
+
+    pub(crate) fn generated_source_admission_fixture(
+        root: &Path,
+        request: &ExactCompilationRequest,
+    ) -> (ExactSourceAdmission, String) {
+        std::fs::create_dir_all(root).unwrap();
+        let receipt = import_receipt(root, request, "Unadmitted");
+        let mut value = read_receipt(&receipt);
+        value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        write_receipt(&receipt, &value);
+        let admission = request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap();
+        let source = std::fs::read_to_string(root.join("Consumer.hs")).unwrap();
+        (admission, source)
     }
 
     fn import_receipt(root: &Path, request: &ExactCompilationRequest, imported: &str) -> PathBuf {
