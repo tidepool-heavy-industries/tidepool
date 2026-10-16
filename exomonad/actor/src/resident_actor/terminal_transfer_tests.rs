@@ -139,7 +139,6 @@ async fn resumed_reply_requires_publication_and_cannot_succeed_after_retirement(
         let owner = ActorRef::first(crate::ActorId(target.id.0 + 100));
         let requests = &fixture.environment.requests;
         let request = requests.reserve(owner, target);
-        crate::request::test_support::admit_destination(requests, owner, request);
         requests.mark_queued(owner, target, request).unwrap();
         requests.present(target, request).unwrap();
         let claim = requests.begin_reply(target, request).unwrap();
@@ -223,7 +222,6 @@ async fn response_publication_refuses_missing_wrong_and_duplicate_settlement() {
     let owner = ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
     let requests = &fixture.environment.requests;
     let request = requests.reserve(owner, context.actor);
-    crate::request::test_support::admit_destination(requests, owner, request);
     requests.mark_queued(owner, context.actor, request).unwrap();
     requests.present(context.actor, request).unwrap();
     let claim = requests.begin_reply(context.actor, request).unwrap();

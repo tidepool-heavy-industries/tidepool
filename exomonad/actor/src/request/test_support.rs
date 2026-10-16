@@ -410,6 +410,34 @@ pub(crate) fn admit_destination(registry: &RequestRegistry, owner: ActorRef, req
         .unwrap();
 }
 
+#[test]
+fn duplicate_destination_admission_preserves_the_first_issued_destination() {
+    let registry = RequestRegistry::default();
+    let owner = ActorRef::first(crate::ActorId(1));
+    let target = ActorRef::first(crate::ActorId(2));
+    let request = registry.reserve_for_operation(owner, target, "admission".into(), true, None);
+    admit_destination(&registry, owner, request);
+    let original = registry.state.lock().requests[&request]
+        .operation()
+        .unwrap()
+        .destination()
+        .unwrap();
+    let duplicate = fixture().lock().destination(owner, request);
+    assert_eq!(
+        registry.admit_result_destination(owner, request, duplicate),
+        Err(super::ReplyError::Stale)
+    );
+    registry.mark_queued(owner, target, request).unwrap();
+    registry.present(target, request).unwrap();
+    let claim = registry.begin_reply(target, request).unwrap();
+    assert!(Arc::ptr_eq(&original, &claim.destination()));
+    complete_reply(&registry, claim, None);
+    assert_eq!(
+        registry.observe_response(owner, request),
+        Ok(super::ResponseObservation::Ready)
+    );
+}
+
 /// Capture the real compiled installer at the public request preparation
 /// boundary, before submission can publish any request input.
 pub(crate) fn admit_reply_tool_request(

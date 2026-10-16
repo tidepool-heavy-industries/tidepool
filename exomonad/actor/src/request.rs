@@ -1703,6 +1703,8 @@ impl RequestRegistry {
         }
     }
 
+    /// Reserve a test operation with its compiler-issued result destination
+    /// already admitted. Use `reserve_for_operation` to test pre-admission state.
     #[cfg(test)]
     pub(crate) fn reserve(&self, owner: ActorRef, target: ActorRef) -> RequestId {
         self.reserve_labeled(owner, target, "request".into())
