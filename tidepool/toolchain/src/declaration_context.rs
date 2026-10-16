@@ -418,6 +418,31 @@ fn capture_native_original_requirements(
 }
 
 impl OriginalCompilerInputs {
+    /// Complete a physical segment's new-product promises while all of its
+    /// checked type outputs remain in private custody. Item selections carry
+    /// these issued offers; their narrower type roles never reissue the body.
+    pub(crate) fn issue_segment_native_availability(
+        selection: &mut crate::certified_products::CertifiedSourceSelection,
+        baseline: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+    ) -> Result<(), CompileError> {
+        let physical = baseline.inventory().admit_certified_with_demand(
+            baseline,
+            entries,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            selection,
+        )?;
+        let issued = Self::from_selection(selection, &physical)?;
+        let metadata = issued
+            .projection
+            .project_metadata(issued.artifacts.metadata_snapshot())?;
+        let transport =
+            NativeCompilerTransport::issue(&metadata, &issued.artifacts, &issued.native_offers)?;
+        selection
+            .finish_new_product_availability(&metadata.retained, &transport.availability)
+            .map_err(compiler_evidence_failure)
+    }
+
     /// Privately reuse a complete selected authored original matching the
     /// issuing compiler interface and, when present, its exact native role.
     /// Historical native children remain dependencies without receiving names
@@ -500,7 +525,7 @@ impl OriginalCompilerInputs {
             .cloned()
             .collect::<Vec<_>>();
         let mut native_offers = Vec::new();
-        for issued in selection.request_native_availability() {
+        for issued in selection.issued_native_availability() {
             for offer in issued.offers() {
                 if !native_offers.contains(offer) {
                     native_offers.push(offer.clone());
@@ -7908,9 +7933,16 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
         .chain(originals.value_entries())
         .cloned()
         .collect();
+    let offers = originals
+        .source_selection()
+        .issued_native_availability()
+        .flat_map(|availability| availability.offers())
+        .cloned()
+        .collect::<Vec<_>>();
+    let baseline = retain_native_offers(baseline, &offers)?;
     baseline
         .inventory()
-        .bind_segment(baseline, entries, originals.source_selection())
+        .bind_segment(&baseline, entries, originals.source_selection())
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then

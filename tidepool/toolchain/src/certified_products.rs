@@ -364,7 +364,7 @@ impl CertifiedSegmentOriginals {
                 "segment originals contain a target",
             ));
         }
-        let products = certify_products_with_validation(
+        let mut products = certify_products_with_validation(
             candidates,
             &receipt,
             &raw,
@@ -461,6 +461,16 @@ impl CertifiedSegmentOriginals {
                 ),
             ));
         }
+        crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            &mut products.source_selection,
+            &exact.request.compiler_inputs().artifacts,
+            artifact_entries
+                .iter()
+                .chain(&value_entries)
+                .cloned()
+                .collect(),
+        )
+        .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let value_entry_index = value_entries
             .iter()
             .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
@@ -2454,8 +2464,8 @@ enum ReceiptNativeAvailability {
     NewProduct {
         dependencies: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
     },
-    /// Exact requests retain the same immutable fact used by their input wire.
-    Request(Arc<crate::declaration_context::NativeTransportAvailability>),
+    /// An exact request or completed physical product owns these issued offers.
+    Issued(Arc<crate::declaration_context::NativeTransportAvailability>),
 }
 
 impl ReceiptNativeAvailability {
@@ -2464,10 +2474,10 @@ impl ReceiptNativeAvailability {
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         let dependencies = match self {
             Self::NewProduct { dependencies } => dependencies.as_slice(),
-            Self::Request(_) => &[],
+            Self::Issued(_) => &[],
         };
         let offers = match self {
-            Self::Request(availability) => availability.offers(),
+            Self::Issued(availability) => availability.offers(),
             Self::NewProduct { .. } => &[],
         };
         dependencies
@@ -2478,7 +2488,7 @@ impl ReceiptNativeAvailability {
     fn permits(&self, ordinal: u32) -> bool {
         match self {
             Self::NewProduct { .. } => true,
-            Self::Request(availability) => availability.permits(ordinal),
+            Self::Issued(availability) => availability.permits(ordinal),
         }
     }
 }
@@ -2505,6 +2515,45 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn finish_new_product_availability(
+        &mut self,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
+        issued: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            Arc<crate::declaration_context::NativeTransportAvailability>,
+        >,
+    ) -> CertResult<()> {
+        for selected in Arc::make_mut(&mut self.modules).values_mut() {
+            let ReceiptSourceSelection::Native { native, .. } = selected else {
+                continue;
+            };
+            if !matches!(
+                native.availability,
+                ReceiptNativeAvailability::NewProduct { .. }
+            ) {
+                continue;
+            }
+            let mut candidates = issued.iter().filter_map(|(id, availability)| {
+                let entry = metadata.artifacts.get(id)?;
+                let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload
+                else {
+                    return None;
+                };
+                (product.owner() == &native.owner).then_some(availability)
+            });
+            let original = candidates.next().ok_or(CertificationError::Mismatch(
+                "new product lacks issued native availability",
+            ))?;
+            if candidates.next().is_some() {
+                return Err(CertificationError::Mismatch(
+                    "new product has competing issued native availability",
+                ));
+            }
+            native.availability = ReceiptNativeAvailability::Issued(Arc::clone(original));
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_compiler_inputs(
         inputs: &crate::declaration_context::RequestCompilerInputs,
         metadata: &crate::artifact_inventory::CompilerArtifactMetadata,
@@ -2537,19 +2586,19 @@ impl CertifiedSourceSelection {
                 ));
             }
             native.availability =
-                ReceiptNativeAvailability::Request(inputs.native_availability(original).ok_or(
+                ReceiptNativeAvailability::Issued(inputs.native_availability(original).ok_or(
                     CertificationError::Mismatch("request original availability"),
                 )?);
         }
         Ok(selected)
     }
 
-    pub(crate) fn request_native_availability(
+    pub(crate) fn issued_native_availability(
         &self,
     ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
         self.native_selections()
             .filter_map(|native| match &native.availability {
-                ReceiptNativeAvailability::Request(issued) => Some(issued),
+                ReceiptNativeAvailability::Issued(issued) => Some(issued),
                 ReceiptNativeAvailability::NewProduct { .. } => None,
             })
     }
@@ -12266,6 +12315,207 @@ pub(crate) mod tests {
         }
         assert_eq!(observed, 16);
         assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    }
+
+    #[test]
+    fn physical_native_issuance_survives_item_type_projection_without_future_demand() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+            JoinedInterfaceRole, NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+        };
+        let producer_bytes = b"physical-new-product-issuance";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let future_module =
+            tidepool_repr::SessionModule::val(tidepool_repr::Generation(11)).module_name();
+        let future_identity = testing::identity(&future_module, "publishedB");
+        let product = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "PhysicalScaffold",
+                vec![
+                    (0, vec![]),
+                    (
+                        17,
+                        vec![PendingImportOwner::Retained {
+                            identity: future_identity,
+                            generation: 11,
+                        }],
+                    ),
+                ],
+                81,
+                &BTreeMap::new(),
+                b"physical scaffold".to_vec(),
+            ),
+            producer.sha256(),
+        )])
+        .remove(0)
+        .product;
+        let native = Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
+        let future_canonical = fixture_module_interface(
+            producer.sha256(),
+            &product.owner().unit,
+            &future_module,
+            BTreeMap::new(),
+        );
+        let future = Arc::new(ArtifactEntry::interface(
+            crate::recovery_artifacts::CertifiedJoinedInterface::from_certification(
+                producer.sha256(),
+                product.owner().unit.clone(),
+                future_module.clone(),
+                future_canonical.interface_bytes().to_vec(),
+                future_canonical.package_imports_bytes().to_vec(),
+            )
+            .unwrap(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        let entries = vec![native.clone(), future.clone()];
+        let inventory = ArtifactInventory::default();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut physical = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &available.metadata_snapshot(),
+            &PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        let future_owner = (product.owner().unit.clone(), future_module);
+        let mut premature = physical.clone();
+        Arc::make_mut(&mut premature.modules)
+            .remove(&future_owner)
+            .unwrap();
+        let item_view = available.select_roots(vec![native.descriptor.id]).unwrap();
+        assert!(matches!(
+            OriginalCompilerInputs::from_selection(&premature, &item_view),
+            Err(crate::CompileError::ArtifactInventory(error))
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                    dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding { dependent_ordinal: 17, generation: 11, .. }, ..
+                })
+        ));
+        OriginalCompilerInputs::issue_segment_native_availability(
+            &mut physical,
+            &inventory.empty_view(),
+            entries.clone(),
+        )
+        .unwrap();
+        let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
+        let [issued] = physical_availability.as_slice() else {
+            panic!("one physical native product");
+        };
+        let issued = Arc::clone(issued);
+        let proof = issued
+            .offers()
+            .iter()
+            .find_map(|offer| offer.proof())
+            .unwrap()
+            .clone();
+        assert_eq!(proof.issued_group_carriers().unwrap().len(), 2);
+        let before = inventory.metrics();
+        let mut item = physical.clone();
+        Arc::make_mut(&mut item.modules)
+            .remove(&future_owner)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            item.issued_native_availability().next().unwrap(),
+            &issued
+        ));
+        let private = OriginalCompilerInputs::from_selection(&item, &item_view).unwrap();
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes,
+            before.issued_scope_nodes,
+            "an item must carry physical issuance without issuing another graph"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        ))
+        .prepare_compilation_with_private_input(root.path(), producer_bytes, None, Some(private))
+        .unwrap();
+        let inputs = request.compiler_inputs();
+        assert!(inputs
+            .native_availability(native.descriptor.id)
+            .unwrap()
+            .permits(17));
+        assert!(!inputs
+            .artifacts
+            .contains_namespace_artifact(future.descriptor.id));
+        assert!(inputs.artifacts.selected_native_groups().is_empty());
+        assert!(request.groups.is_empty());
+        assert_eq!(
+            proof.issued_group_carriers().unwrap(),
+            inputs
+                .native_original_requirements()
+                .iter()
+                .find(|p| p.original == native.descriptor.id)
+                .unwrap()
+                .issued_group_carriers()
+                .unwrap()
+        );
+        let mut fixed = inventory
+            .bind_segment(&inputs.artifacts, entries, &physical)
+            .unwrap();
+        let source = |ordinal| {
+            let definitions = original_native_group_definitions(&product, ordinal).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: binding.identity.clone(),
+            }
+        };
+        let current = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&[source(0)]),
+                vec![],
+                &item,
+            )
+            .unwrap()
+            .artifacts;
+        assert_eq!(
+            current.selected_native_groups(),
+            BTreeSet::from([NativeGroupKey {
+                artifact: native.descriptor.id,
+                original_ordinal: 0,
+            }])
+        );
+        assert!(!current.artifact_ids().contains(&future.descriptor.id));
+        assert!(
+            inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &current,
+                    NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
+                    vec![],
+                    &item,
+                )
+                .is_err(),
+            "issued availability cannot authorize future item type demand"
+        );
+        let next = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &current,
+                NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
+                vec![future.clone()],
+                &physical,
+            )
+            .unwrap()
+            .artifacts;
+        assert!(next.contains_namespace_artifact(future.descriptor.id));
+        assert_eq!(next.selected_native_groups().len(), 2);
     }
 
     #[test]

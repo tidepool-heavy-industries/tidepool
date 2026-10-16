@@ -102,7 +102,9 @@ without claiming compiler submission, stderr or a worker outcome.
 The physical cell request captures produced value interfaces once. Its private
 inventory may contain later outputs; item views select current and preceding type
 outputs by ordinal, while runtime value authority comes only from completed prior
-items. Final value capture adds source/template authority to the same owned bytes
+items. Complete new-product native offers are issued from that physical custody
+before item type filtering, then carried unchanged into the item selections.
+Final value capture adds source/template authority to the same owned bytes
 and interface certificate. Sparse generation numbers do not determine visibility.
 
 A bound segment retains its physical compiler selection. Its cursor owns the
