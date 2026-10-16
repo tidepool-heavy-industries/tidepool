@@ -944,10 +944,12 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let native = product("CustodyMaterialization", 96);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let context = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .extend_checked_original_products(producer.sha256(), &[native])
-        .unwrap();
+    let context = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(producer.sha256(), &[native])
+            .unwrap(),
+    );
     let scratch = tempfile::tempdir().unwrap();
     let completed = context
         .prepare_compilation(scratch.path(), PRODUCER)
