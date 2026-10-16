@@ -994,30 +994,21 @@ pub(crate) struct NativeTransportAvailability {
 
 #[derive(Clone, Debug)]
 enum NativeTransportMode {
-    FullCarrier(ArtifactBinding),
-    IssuedGroups {
-        groups: BTreeSet<u32>,
-        carrier: Option<ArtifactBinding>,
-    },
+    Full,
+    IssuedGroups(BTreeSet<u32>),
 }
 
 impl NativeTransportAvailability {
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
         match &self.mode {
-            NativeTransportMode::FullCarrier(_) => true,
-            NativeTransportMode::IssuedGroups { groups, .. } => groups.contains(&ordinal),
+            NativeTransportMode::Full => true,
+            NativeTransportMode::IssuedGroups(groups) => groups.contains(&ordinal),
         }
     }
 }
 
-#[derive(Default)]
-struct NativeTransportBuilder {
-    groups: BTreeSet<u32>,
-    carrier: Option<ArtifactBinding>,
-}
-
 /// Transport can own dependency bodies without issuing compiler namespace roles.
-/// All rows, aliases and arena images use this single request-local selection.
+/// Exact issuer bindings remain in the offers; transport records body availability.
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
     availability: BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
@@ -1039,9 +1030,8 @@ impl NativeCompilerTransport {
             .values()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
-            availability.insert(entry.descriptor.id, NativeTransportBuilder::default());
+            availability.insert(entry.descriptor.id, BTreeSet::new());
         }
-        let mut bindings = BTreeMap::new();
         let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
         let issuance: Arc<[NativeCompilerAvailability]> = offers
@@ -1059,33 +1049,18 @@ impl NativeCompilerTransport {
                 .map(|proof| proof.issued_group_carriers(artifacts))
                 .transpose()?
                 .unwrap_or_default();
-            for (group, carrier) in &groups {
-                if let Some(previous) = bindings
-                    .insert((group.binding.artifact, group.original_ordinal), *group)
-                    .filter(|previous| previous != group)
+            // Each offer authenticates its own exact group-to-carrier edges.
+            // Independent offers may retain different bindings for the same body.
+            if matches!(offer, NativeCompilerAvailability::Full(_)) {
+                if !groups
+                    .keys()
+                    .any(|group| group.binding.artifact == offer.original())
                 {
-                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                        ?previous, incoming = ?group, incoming_offer = ?offer.original(),
-                        incoming_owner = ?metadata.retained.artifacts.get(&offer.original())
-                            .map(|entry| &entry.descriptor.owner),
-                        incoming_closure_matches = ?groups.iter().filter(|(candidate, _)| {
-                            candidate.binding.artifact == group.binding.artifact
-                                && candidate.original_ordinal == group.original_ordinal
-                        }).collect::<Vec<_>>(),
-                        owner = ?metadata.retained.artifacts.get(&group.binding.artifact)
-                            .map(|entry| &entry.descriptor.owner),
-                        previous_offers = ?issuance.iter().filter_map(|issued| {
-                            issued.proof().filter(|proof| {
-                                proof.selection.graph_selection().native_groups.contains(&previous)
-                            }).map(|_| issued.original())
-                        }).collect::<Vec<_>>(),
-                        "compiler transport competing exact dependency bindings");
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: group.binding.artifact,
-                        },
-                    ));
+                    return Err(failure("full native offer has no issued carrier"));
                 }
+                full.insert(offer.original());
+            }
+            for group in groups.keys() {
                 let entry = metadata
                     .retained
                     .artifacts
@@ -1107,24 +1082,10 @@ impl NativeCompilerTransport {
                     }
                 }
                 metadata.entries.insert(owner.clone(), entry);
-                let available = availability
+                availability
                     .entry(group.binding.artifact)
-                    .or_insert_with(|| NativeTransportBuilder::default());
-                if available
-                    .carrier
-                    .replace(*carrier)
-                    .is_some_and(|previous| previous != *carrier)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: group.binding.artifact,
-                        },
-                    ));
-                }
-                available.groups.insert(group.original_ordinal);
-            }
-            if matches!(offer, NativeCompilerAvailability::Full(_)) {
-                full.insert(offer.original());
+                    .or_default()
+                    .insert(group.original_ordinal);
             }
         }
         for selected in &projection.retained.selected_native_groups {
@@ -1140,9 +1101,7 @@ impl NativeCompilerTransport {
             let Some(offer) = availability.get(&selected.artifact) else {
                 continue;
             };
-            if !full.contains(&selected.artifact)
-                && !offer.groups.contains(&selected.original_ordinal)
-            {
+            if !full.contains(&selected.artifact) && !offer.contains(&selected.original_ordinal) {
                 return Err(failure(
                     "selected native group is outside issued availability",
                 ));
@@ -1152,26 +1111,19 @@ impl NativeCompilerTransport {
             .into_iter()
             .map(|(id, offer)| {
                 let mode = if full.contains(&id) {
-                    NativeTransportMode::FullCarrier(
-                        offer
-                            .carrier
-                            .ok_or_else(|| failure("full native offer has no issued carrier"))?,
-                    )
+                    NativeTransportMode::Full
                 } else {
-                    NativeTransportMode::IssuedGroups {
-                        groups: offer.groups,
-                        carrier: offer.carrier,
-                    }
+                    NativeTransportMode::IssuedGroups(offer)
                 };
-                Ok((
+                (
                     id,
                     Arc::new(NativeTransportAvailability {
                         mode,
                         issuance: Arc::clone(&issuance),
                     }),
-                ))
+                )
             })
-            .collect::<Result<_, CompileError>>()?;
+            .collect();
         Ok(Self {
             metadata,
             availability,
@@ -7745,30 +7697,16 @@ impl ExactDeclarationContext {
                             .collect::<Vec<_>>();
                         let availability = inputs.native_transport.availability[&selected].as_ref();
                         let mode = match &availability.mode {
-                            NativeTransportMode::FullCarrier(carrier) => {
-                                if carrier.artifact != selected {
-                                    return Err(failure(
-                                        "full native offer carrier differs from payload",
-                                    ));
-                                }
-                                Value::Array(vec![text("full-carrier")])
-                            }
-                            NativeTransportMode::IssuedGroups { groups, carrier } => {
-                                if carrier.is_some_and(|carrier| carrier.artifact != selected) {
-                                    return Err(failure(
-                                        "issued native offer carrier differs from payload",
-                                    ));
-                                }
-                                Value::Array(vec![
-                                    text("issued-groups"),
-                                    Value::Array(
-                                        groups
-                                            .iter()
-                                            .map(|ordinal| Value::Integer((*ordinal).into()))
-                                            .collect(),
-                                    ),
-                                ])
-                            }
+                            NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
+                            NativeTransportMode::IssuedGroups(groups) => Value::Array(vec![
+                                text("issued-groups"),
+                                Value::Array(
+                                    groups
+                                        .iter()
+                                        .map(|ordinal| Value::Integer((*ordinal).into()))
+                                        .collect(),
+                                ),
+                            ]),
                         };
                         Ok(Value::Array(vec![
                             text(&owner.unit),
