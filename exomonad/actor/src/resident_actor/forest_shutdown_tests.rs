@@ -946,11 +946,15 @@ impl KernelBehavior for ForcedRetirementBehavior {
             let requests = &self.inner.environment.requests;
             let owner = ActorRef::first(crate::ActorId(9901));
             let request = requests.reserve(owner, context.identity());
-            requests.mark_queued(owner, context.identity(), request).unwrap();
+            requests
+                .mark_queued(owner, context.identity(), request)
+                .unwrap();
             let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
             assert!(initial.is_empty());
             let unwatched = requests.reserve(owner, context.identity());
-            requests.mark_queued(owner, context.identity(), unwatched).unwrap();
+            requests
+                .mark_queued(owner, context.identity(), unwatched)
+                .unwrap();
             *self.early_request.as_ref().unwrap().lock() = Some((request, unwatched, watch));
             context.retained_exit().request_shutdown(ActorTerminal::new(
                 ActorExitKind::Cancelled,
@@ -1338,6 +1342,15 @@ async fn resident_pre_start_owner_loss_retires_requests_without_start_or_stopped
     .await;
     assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
     assert_eq!(stopped.load(Ordering::Relaxed), 0);
-    assert!(fixture.forest.environment.actors.lock().get(&context.identity()).is_none());
-    assert_eq!(context.retained_exit().get().unwrap().kind, ActorExitKind::Failed);
+    assert!(fixture
+        .forest
+        .environment
+        .actors
+        .lock()
+        .get(&context.identity())
+        .is_none());
+    assert_eq!(
+        context.retained_exit().get().unwrap().kind,
+        ActorExitKind::Failed
+    );
 }
