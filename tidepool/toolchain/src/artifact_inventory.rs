@@ -3474,7 +3474,39 @@ impl ArtifactInventory {
                     },
                 ));
             }
-            for group in &graph.native_groups {
+            // An unprojected issuer supplies authenticated support, not root
+            // intent. Keep its proof intact, but consume only the closure of
+            // groups belonging to current compiler roles. A backedge to the
+            // issuer remains in that closure and must still be compatible.
+            let support_only = matches!(
+                root_intent,
+                ArtifactRootIntent::Offered(..)
+                    | ArtifactRootIntent::PrivateAvailability(..)
+                    | ArtifactRootIntent::Certified(..)
+            ) && namespace_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(original));
+            let support_closure = support_only.then(|| {
+                admitted_closure(
+                    &state,
+                    graph
+                        .native_groups
+                        .iter()
+                        .filter(|group| {
+                            namespace_ids
+                                .as_ref()
+                                .expect("projected namespace")
+                                .contains(&group.binding.artifact())
+                        })
+                        .copied()
+                        .map(InventoryNodeKey::Group),
+                )
+            });
+            for group in graph.native_groups.iter().filter(|group| {
+                support_closure
+                    .as_ref()
+                    .is_none_or(|closure| closure.contains(&InventoryNodeKey::Group(**group)))
+            }) {
                 let key = NativeGroupKey {
                     artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,

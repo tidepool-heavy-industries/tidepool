@@ -168,6 +168,35 @@ impl IssuedNativeOffer {
             .map(Option::unwrap_or_default)
     }
 
+    /// A receipt can carry this proof for one of its dependencies. Consume that
+    /// dependency's exact closure, independently of the proof's original roots.
+    pub(crate) fn dependency_group_carriers(
+        &self,
+        originals: &BTreeSet<ArtifactId>,
+    ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {
+        let groups = self.issued_group_carriers()?;
+        let state = self
+            .0
+            .custody
+            .lease
+            .inventory
+            .0
+            .lock()
+            .expect("inventory lock");
+        let closure = admitted_closure(
+            &state,
+            groups
+                .keys()
+                .filter(|group| originals.contains(&group.binding.artifact()))
+                .copied()
+                .map(InventoryNodeKey::Group),
+        );
+        Ok(groups
+            .into_iter()
+            .filter(|(group, _)| closure.contains(&InventoryNodeKey::Group(*group)))
+            .collect())
+    }
+
     /// Current roles may stop offering an original, or stop qualifying its full
     /// census. Neither change authorizes an alternative ambient proof.
     pub(crate) fn within_projection(
@@ -190,6 +219,9 @@ impl IssuedNativeOffer {
         };
         let role = role.expect("native role");
         if original != self.0.original || role.interface() != self.0.interface {
+            if contributes {
+                return Ok(Some(self.clone()));
+            }
             return Err(failure(
                 "native offer conflicts with selected compiler product or interface",
             ));

@@ -759,6 +759,24 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let b_id = entries[1].descriptor.id;
     let a_id = entries[0].descriptor.id;
     let demand = source_import(&recovered[1].product, 7);
+    // A different selected A is unrelated to the proof that supplied B. Both
+    // alternatives deliberately share canonical interfaces with their peers.
+    let replacement_a = product("ReceiptAncestor", 94);
+    let replacement_b = product("ReceiptDependency", 95);
+    assert_eq!(
+        replacement_a.module_interface(),
+        recovered[0].product.module_interface()
+    );
+    assert_eq!(
+        replacement_b.module_interface(),
+        recovered[1].product.module_interface()
+    );
+    let replacement_a =
+        Arc::new(ArtifactEntry::original(producer.sha256(), replacement_a).unwrap());
+    let replacement_b =
+        Arc::new(ArtifactEntry::original(producer.sha256(), replacement_b).unwrap());
+    assert_ne!(replacement_a.descriptor.id, a_id);
+    assert_ne!(replacement_b.descriptor.id, b_id);
     let b = base.select_roots(vec![b_id]).unwrap();
     let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let b_metadata = b_projection
@@ -817,7 +835,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .roots
         .iter()
         .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
-    let groups = admitted.native_groups_for_target(None, &[demand]).unwrap();
+    let groups = admitted
+        .native_groups_for_target(None, std::slice::from_ref(&demand))
+        .unwrap();
     assert_eq!(
         groups
             .iter()
@@ -831,6 +851,92 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             original_ordinal: 9001
         }])
         .is_err());
+
+    let context = |view, projection| {
+        ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            inventory: view,
+            compiler_projection: projection,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        })
+    };
+    let selected_a = inventory
+        .admit_shared_with_demand(
+            &b,
+            vec![replacement_a.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let selected_projection = b_projection
+        .merge(&CompilerInputProjection::from_issued_entries(&[replacement_a.clone()]).unwrap())
+        .unwrap();
+    let request = ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&context(selected_a, selected_projection), Some(&private))
+        .unwrap();
+    assert!(request
+        .metadata
+        .entries
+        .values()
+        .any(|entry| entry.descriptor.id == replacement_a.descriptor.id));
+    assert!(!request.native_transport.availability.contains_key(&a_id));
+    let offers = request
+        .native_transport
+        .availability
+        .values()
+        .flat_map(|availability| availability.offers().iter().cloned())
+        .collect::<Vec<_>>();
+    let selected = inventory
+        .admit_projected_with_native_offers(
+            &request.artifacts,
+            vec![],
+            &request.projection,
+            &offers,
+        )
+        .unwrap();
+    let graph = selected.capture_graph_selection();
+    assert!(graph
+        .namespace
+        .iter()
+        .any(|binding| binding.artifact == replacement_a.descriptor.id));
+    assert!(graph
+        .namespace
+        .iter()
+        .all(|binding| binding.artifact != a_id));
+    assert!(graph
+        .roots
+        .iter()
+        .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
+    assert_eq!(
+        selected
+            .native_groups_for_target(None, &[demand])
+            .unwrap()
+            .iter()
+            .map(|group| (group.binding.artifact(), group.original_ordinal))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(b_id, 7)])
+    );
+    assert!(!request.native_transport.availability[&b_id].permits(9001));
+
+    let conflicting = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![replacement_b.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let conflicting_projection =
+        CompilerInputProjection::from_issued_entries(&[replacement_b]).unwrap();
+    assert!(
+        ProtectedScaffoldRequirements::default()
+            .compiler_inputs(
+                &context(conflicting, conflicting_projection),
+                Some(&private)
+            )
+            .is_err(),
+        "a different selected B must still refuse B's exact support"
+    );
 }
 
 #[test]

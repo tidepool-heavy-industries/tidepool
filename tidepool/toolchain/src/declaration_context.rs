@@ -840,9 +840,14 @@ impl OriginalCompilerInputs {
         let projection = self.projection.merge(&other.projection)?;
         let artifacts = self.artifacts.merge(&other.artifacts)?;
         projection.validate(&artifacts)?;
+        // This joins alternatives, rather than selecting a caller namespace.
+        // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
-        native_offers.extend(other.native_offers.iter().cloned());
-        let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
+        for offer in &other.native_offers {
+            if !native_offers.contains(offer) {
+                native_offers.push(offer.clone());
+            }
+        }
         Ok(Self {
             projection,
             artifacts,
@@ -922,7 +927,11 @@ impl NativeCompilerTransport {
         let mut issuance =
             BTreeMap::<ArtifactId, Vec<crate::artifact_inventory::IssuedNativeOffer>>::new();
         for offer in offers {
-            let groups = offer.issued_group_carriers()?;
+            let groups = if offered_roots.contains(&offer.original()) {
+                offer.issued_group_carriers()?
+            } else {
+                offer.dependency_group_carriers(&offered_roots)?
+            };
             if !offered_roots.contains(&offer.original())
                 && !groups
                     .keys()
