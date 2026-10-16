@@ -4064,6 +4064,7 @@ name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "exomonad-tool",
  "frunk",
  "parking_lot",
  "proptest",
