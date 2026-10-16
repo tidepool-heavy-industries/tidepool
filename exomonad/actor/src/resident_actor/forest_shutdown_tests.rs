@@ -935,17 +935,36 @@ struct ForcedRetirementBehavior {
     context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
     shutdowns: Arc<AtomicUsize>,
     stopped: Arc<AtomicUsize>,
+    refuse_before_start: bool,
+    early_request: Option<Arc<Mutex<Option<(crate::RequestId, crate::RequestId, crate::WatchId)>>>>,
 }
 
 impl KernelBehavior for ForcedRetirementBehavior {
     fn observe_exit(&mut self, context: &KernelContext) {
         self.inner.observe_exit(context);
+        if self.refuse_before_start {
+            let requests = &self.inner.environment.requests;
+            let owner = ActorRef::first(crate::ActorId(9901));
+            let request = requests.reserve(owner, context.identity());
+            requests.mark_queued(owner, context.identity(), request).unwrap();
+            let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
+            assert!(initial.is_empty());
+            let unwatched = requests.reserve(owner, context.identity());
+            requests.mark_queued(owner, context.identity(), unwatched).unwrap();
+            *self.early_request.as_ref().unwrap().lock() = Some((request, unwatched, watch));
+            context.retained_exit().request_shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "stop before resident startup",
+            ));
+            assert!(self.context.take().unwrap().send(context.clone()).is_ok());
+        }
     }
 
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
     ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        assert!(!self.refuse_before_start, "retired actor must bypass start");
         let send = self.context.take().unwrap();
         Box::pin(async move {
             let result = self.inner.start(context).await;
@@ -1029,6 +1048,9 @@ impl KernelBehavior for ForcedRetirementBehavior {
         ),
     > {
         self.shutdowns.fetch_add(1, Ordering::Relaxed);
+        if self.refuse_before_start {
+            panic!("lose pre-start shutdown ownership");
+        }
         Box::pin(std::future::pending())
     }
 
@@ -1044,14 +1066,15 @@ impl KernelBehavior for ForcedRetirementBehavior {
 
 async fn assert_forced_request_retirement(
     fixture: &mut Fixture,
-    target: &LocalActorRef,
+    target: ActorRef,
+    retained_exit: &crate::RetainedActorExit,
     request: crate::RequestId,
     unwatched: crate::RequestId,
     watch: crate::WatchId,
     owner: ActorRef,
 ) {
     use crate::request::{ResponseFailure, ResponseObservation};
-    let terminal = tokio::time::timeout(Duration::from_secs(2), target.terminal().wait())
+    let terminal = tokio::time::timeout(Duration::from_secs(2), retained_exit.wait())
         .await
         .expect("forced actor must publish its retained exit");
     let mut watches = 0;
@@ -1091,7 +1114,7 @@ async fn assert_forced_request_retirement(
     publish_request_retirement(
         &fixture.forest.environment.requests,
         &fixture.forest.environment.deployments,
-        target.identity(),
+        target,
         &terminal,
     )
     .await;
@@ -1152,6 +1175,8 @@ async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
             context: Some(send),
             shutdowns: shutdowns.clone(),
             stopped: stopped.clone(),
+            refuse_before_start: false,
+            early_request: None,
         },
         forest.incarnation,
         forest.directory.clone(),
@@ -1172,7 +1197,16 @@ async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
             reply: reply.into(),
         })
         .unwrap();
-    assert_forced_request_retirement(&mut fixture, &actor, request, unwatched, watch, owner).await;
+    assert_forced_request_retirement(
+        &mut fixture,
+        actor.identity(),
+        actor.terminal(),
+        request,
+        unwatched,
+        watch,
+        owner,
+    )
+    .await;
     task.await.unwrap();
     assert!(actor
         .terminal()
@@ -1228,6 +1262,8 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
                 context: Some(send),
                 shutdowns: shutdowns.clone(),
                 stopped: stopped.clone(),
+                refuse_before_start: false,
+                early_request: None,
             },
         )
         .await
@@ -1242,10 +1278,66 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
         .await
         .unwrap();
     task.await.unwrap();
-    assert_forced_request_retirement(&mut fixture, &child, request, unwatched, watch, owner).await;
+    assert_forced_request_retirement(
+        &mut fixture,
+        child.identity(),
+        child.terminal(),
+        request,
+        unwatched,
+        watch,
+        owner,
+    )
+    .await;
     let terminal = child.terminal().get().unwrap();
     assert_eq!(terminal.kind, ActorExitKind::Cancelled);
     assert_eq!(terminal.summary, "owner actor stopped");
     assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
     assert_eq!(stopped.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn resident_pre_start_owner_loss_retires_requests_without_start_or_stopped() {
+    let mut fixture = Fixture::new();
+    let placement = fixture
+        .forest
+        .environment
+        .runner
+        .provision_root_scope(fixture.forest.session)
+        .await
+        .unwrap();
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let early_request = Arc::new(Mutex::new(None));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let result = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        ForcedRetirementBehavior {
+            inner: fixture.behavior(ActorDescriptor::new("pre-start-loss", placement)),
+            context: Some(send),
+            shutdowns: shutdowns.clone(),
+            stopped: stopped.clone(),
+            refuse_before_start: true,
+            early_request: Some(early_request.clone()),
+        },
+        fixture.forest.incarnation,
+        fixture.forest.directory.clone(),
+    )
+    .await;
+    assert!(result.is_err(), "pre-start shutdown panic must fail spawn");
+    let context = receive.await.unwrap();
+    let (request, unwatched, watch) = early_request.lock().take().unwrap();
+    assert_forced_request_retirement(
+        &mut fixture,
+        context.identity(),
+        &context.retained_exit(),
+        request,
+        unwatched,
+        watch,
+        ActorRef::first(crate::ActorId(9901)),
+    )
+    .await;
+    assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
+    assert_eq!(stopped.load(Ordering::Relaxed), 0);
+    assert!(fixture.forest.environment.actors.lock().get(&context.identity()).is_none());
+    assert_eq!(context.retained_exit().get().unwrap().kind, ActorExitKind::Failed);
 }
