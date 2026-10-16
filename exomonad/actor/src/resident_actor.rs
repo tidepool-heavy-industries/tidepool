@@ -5125,35 +5125,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         render_watches_view(launched_at, &overview)
     }
 
-    /// The what-is-live status view: collectors and the command jobs they
-    /// watch (finished or not), and persistent bindings with the session
-    /// generation that defines them, the exact source of their defining
-    /// cell, the execution id that submitted it, and any same-session name
-    /// the source mentions that is no longer live.
-    ///
-    /// `bindings` is fetched by the caller through
-    /// `ResidentActorWorkbench::live_bindings` — the only part of this view
-    /// that needs the live machine; everything else here reads
-    /// `self.environment.commands` (command jobs) and
-    /// `self.workbench_executions` (this actor's own replay journal),
-    /// neither of which this view creates. See `status_rendering` for the
-    /// pure helpers this leans on.
-    ///
-    /// Source drift (is what is running still what is on disk) is published
-    /// from `tidepool`'s composition root into
-    /// `ActorRuntimeObservation::source_drift`, since the data — the source
-    /// layer's active/disk revision, the checkout's Git state, and the
-    /// frozen workspace's — lives in `exomonad_host::exomonad::source` and
-    /// `tidepool` depends on `exomonad-actor` (see `tidepool/Cargo.toml`),
-    /// never the reverse. See `status_rendering::render_source_drift_section`.
-    /// One piece is left out rather than
-    /// guessed at even there: no build script or embedded string anywhere in
-    /// this system records the running binary's build revision, so the
-    /// checkout row reports Git's own head and dirty files and says plainly
-    /// that the binary-revision comparison is unavailable, rather than
-    /// inventing one. Which agent-spec revision each actor activated is
-    /// omitted for a similar reason: no such tracking exists in
-    /// `exomonad-actor` today, and this view does not invent any.
     fn operation_references_text(
         &self,
         after: Option<&crate::status_tool::OperationReferenceCursor>,
@@ -5185,6 +5156,34 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         serde_json::json!({"source":"actor_native_journal","operations":operations,"total":total,"limit":32,"next_after":next_after,"state":"not_queried"}).to_string()
     }
 
+    /// The what-is-live status view: collectors and the command jobs they
+    /// watch (finished or not), and persistent bindings with the session
+    /// generation that defines them, the exact source of their defining
+    /// cell, the execution id that submitted it, and any same-session name
+    /// the source mentions that is no longer live.
+    ///
+    /// `bindings` is fetched by the caller through
+    /// `ResidentActorWorkbench::live_bindings` — the only part of this view
+    /// that needs the live machine; everything else here reads
+    /// `self.environment.commands` (command jobs) and
+    /// `self.workbench_executions` (this actor's own replay journal),
+    /// neither of which this view creates. See `status_rendering` for the
+    /// pure helpers this leans on.
+    ///
+    /// Source drift (is what is running still what is on disk) is published
+    /// from `exomonad-host`'s composition root into
+    /// `ActorRuntimeObservation::source_drift`, since the data — the source
+    /// layer's active/disk revision, the checkout's Git state, and the
+    /// frozen workspace's — lives in `exomonad_host::exomonad::source` and
+    /// `exomonad-host` depends on `exomonad-actor`,
+    /// never the reverse. See `status_rendering::render_source_drift_section`.
+    /// One piece is left out rather than
+    /// guessed at even there: no build script or embedded string anywhere in
+    /// this system records the running binary's build revision, so the
+    /// checkout row reports Git's own head and dirty files and says plainly
+    /// that the binary-revision comparison is unavailable, rather than
+    /// inventing one. Source-layer identities and issued/active notebook
+    /// generations come from the explicit revisions refresh owner.
     async fn live_status_text(
         &self,
         kernel: &KernelContext,
