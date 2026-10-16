@@ -237,10 +237,16 @@ using the compiler request's exact issued availability. Carry that evidence into
 issuance before validation; do not attach it afterward or reconstruct it from
 all retained artifacts. Temporary private issuance must restore the caller's
 namespace and executable roots while retaining the exact dependency bindings.
+Adding issued offer custody preserves the receiving namespace exactly. Historical
+canonical interfaces may coexist in separate authenticated scopes; uniqueness
+applies to selected compiler roles, not every retained payload. Compiler input
+joins carry each surviving role's issuer binding rather than resolving equal
+payload IDs against the receiving inventory.
 
 Resolve carried selections through the owner's preferred-input path before
 deriving fallbacks from current executable roots. Classify a supplied proof using
-its own carrier and group graph against the selected canonical binding. Broader
+its own carrier and group graph against the selected canonical binding for that
+request. Broader
 custody cannot supply missing groups or veto an exact proof. Ambient discovery
 belongs only to the absence of a supplied or selected proof.
 
@@ -250,7 +256,10 @@ or execution selection does not reissue body availability. Requests consume
 carried offers; they do not census broader context custody. Context snapshot v3
 records exact offer selections and Empty/Partial/Full mode. Reopening authenticates
 those references and preserves the recorded mode, even when a partial graph can
-now qualify as complete. Older snapshots require regeneration.
+now qualify as complete. Recorded Full validates its complete exact carrier and
+canonical edge in its issuing graph, including proofs with no compiler namespace.
+Current request compatibility remains a separate check after restoration.
+Older snapshots require regeneration.
 
 Compiler transport combines authenticated body availability while retaining each
 offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct
