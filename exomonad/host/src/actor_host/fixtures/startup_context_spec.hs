@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 
-module AgentSpec (agentSpec, emptySpec, absentSpec) where
+module StartupSpec (agentSpec, emptySpec, absentSpec) where
 
 import Control.Monad.Freer (Eff, Members)
 import GHC.Generics (Generic)
@@ -50,13 +50,13 @@ prepare
   :: Members '[FsRead, FsWrite, Jev] effects
   => StartupInput -> Eff effects ContextSeed
 prepare input = do
-  created <- E.writeCheckedIf Nothing "startup-witness.txt" (startupOperation input)
+  created <- E.writeCheckedIf Nothing ".exomonad/state/startup-witness.txt" (startupOperation input)
   case created of
     Right (Written _ _) -> pure ()
     Right (WriteConflict _ _ _) -> pure ()
     Left issue -> error (show issue)
     Right other -> error (show other)
-  memory <- E.readFile "startup-memory.txt"
+  memory <- E.readFile ".exomonad/state/startup-memory.txt"
   body <- case memory of
     Right text -> pure text
     Left issue -> error (show issue)

@@ -76,8 +76,8 @@ caller seed independently and keep all activating input outside the conversation
 until publication completes. Startup currently refuses forms, helper launch,
 actor attachment and actor request/receive/await continuations at their typed
 continuation boundaries. Filesystem operations use the actual granted handlers;
-the current fresh-child composer shares its state-rooted filesystem handler with
-root and does not establish workspace isolation. Jev uses the existing service
+the current fresh-child composer shares its workspace-rooted filesystem handler
+with root and does not establish workspace isolation. Jev uses the existing service
 while the supervisor continues. Qualifying other startup effects needs execution
 evidence through their actual services; effect membership alone is no support
 claim. Root has no caller seed; only fresh child admission issues one, so legacy

@@ -42,14 +42,14 @@ fn configure_startup(config: &mut super::ActorHostConfig, entry: &str, memory: &
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("state")).unwrap();
     std::fs::write(
-        authored.join("AgentSpec.hs"),
+        authored.join("StartupSpec.hs"),
         include_str!("fixtures/startup_context_spec.hs"),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
         project.haskell.source_roots = vec![".".into()];
-        project.haskell.modules = vec!["AgentSpec".into()];
-        project.haskell.spec = Some(format!("AgentSpec.{entry}"));
+        project.haskell.modules = vec!["StartupSpec".into()];
+        project.haskell.spec = Some(format!("StartupSpec.{entry}"));
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
