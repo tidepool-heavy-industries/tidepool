@@ -2263,6 +2263,20 @@ fn replay_native_transport_history(
             }
             NativeCustodyOp::Capture { right } => {
                 let index = usize::from(right);
+                // Namespace restoration below must not repair lost proof nodes.
+                // Observe exact custody before rejoining any source payloads.
+                for required in 0..if has_ambient_full { 2 } else { 1 } {
+                    assert_eq!(
+                        proofs[required].issued_group_carriers(&expanded).unwrap(),
+                        expected[required]
+                    );
+                }
+                if has_ambient_full {
+                    assert!(ambient_proof
+                        .qualify_availability(&expanded)
+                        .unwrap()
+                        .is_some());
+                }
                 let capture_projection = CompilerInputProjection::from_issued_entries(&[
                     entries[0].clone(),
                     entries[index + 1].clone(),
