@@ -724,3 +724,147 @@ fn snapshot_treats_discovered_paths_literally() {
     }
     assert_source_untouched(&before, &capture_source_state(repo.git(), repo.path()));
 }
+
+#[test]
+#[cfg(unix)]
+fn snapshot_refuses_invalid_utf8_aliases_before_any_mutation() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::MetadataExt;
+
+    // The two names collapse to the same String under lossy decoding. Exercise
+    // every classification, including ignored names that still cross the decoder.
+    for classification in ["untracked", "staged", "unstaged", "ignored"] {
+        let repo = TestRepo::init().unwrap();
+        repo.writer().commit_file("seed", "seed", "seed").unwrap();
+        let invalid = OsString::from_vec(b"bad-\xff".to_vec());
+        let valid = "bad-\u{fffd}";
+        assert_eq!(invalid.to_string_lossy(), valid);
+        let write_pair = |contents| {
+            std::fs::write(repo.path().join(&invalid), contents).unwrap();
+            std::fs::write(repo.path().join(valid), "distinct valid file").unwrap();
+        };
+        if classification == "ignored" {
+            repo.writer()
+                .commit_file(".gitignore", "bad-*\n", "ignore")
+                .unwrap();
+        }
+        write_pair("invalid file");
+        if matches!(classification, "staged" | "unstaged") {
+            repo.git()
+                .try_run(
+                    repo.path(),
+                    &[
+                        OsStr::new("add"),
+                        OsStr::new("--"),
+                        invalid.as_os_str(),
+                        OsStr::new(valid),
+                    ],
+                )
+                .unwrap();
+        }
+        if classification == "unstaged" {
+            repo.git()
+                .try_run(repo.path(), &["commit", "-qm", "raw paths"])
+                .unwrap();
+            write_pair("modified invalid file");
+        }
+        let files = || {
+            std::fs::read_dir(repo.path())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), entry.path())
+                })
+                .filter(|(name, _)| name != ".git")
+                .map(|(name, path)| (name, std::fs::read(path).unwrap()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let index_path = repo.path().join(".git/index");
+        let before_index = std::fs::read(&index_path).unwrap();
+        let before_metadata = std::fs::metadata(&index_path).unwrap();
+        let before_files = files();
+        let before_refs = repo.git().stdout_bytes(repo.path(), &["show-ref"]).unwrap();
+        let before_objects = repo
+            .git()
+            .stdout_bytes(repo.path(), &["count-objects", "-v"])
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let index_dir = scratch.path().join("not-created");
+        let error = snapshot_source(
+            repo.git(),
+            repo.path(),
+            &WorktreeId::from_raw("invalid-utf8"),
+            &index_dir,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, WorktreeError::StorageFailure { detail, .. } if detail.contains("not valid UTF-8")),
+            "{classification}: {error}"
+        );
+        assert!(
+            !index_dir.exists(),
+            "refusal must precede temporary index creation"
+        );
+        assert_eq!(std::fs::read(&index_path).unwrap(), before_index);
+        let after_metadata = std::fs::metadata(index_path).unwrap();
+        assert_eq!(
+            (after_metadata.mtime(), after_metadata.mtime_nsec()),
+            (before_metadata.mtime(), before_metadata.mtime_nsec())
+        );
+        assert_eq!(files(), before_files);
+        assert_eq!(
+            repo.git().stdout_bytes(repo.path(), &["show-ref"]).unwrap(),
+            before_refs
+        );
+        assert_eq!(
+            repo.git()
+                .stdout_bytes(repo.path(), &["count-objects", "-v"])
+                .unwrap(),
+            before_objects
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn snapshot_grouped_untracked_directory_preserves_non_utf8_descendants() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let repo = TestRepo::init().unwrap();
+    repo.writer().commit_file("seed", "seed", "seed").unwrap();
+    std::fs::create_dir(repo.path().join("untracked")).unwrap();
+    let invalid = OsString::from_vec(b"untracked/bad-\xff".to_vec());
+    let valid = "untracked/bad-\u{fffd}";
+    std::fs::write(repo.path().join(&invalid), "invalid name content").unwrap();
+    std::fs::write(repo.path().join(valid), "valid name content").unwrap();
+    let before_index = std::fs::read(repo.path().join(".git/index")).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    // Normal status groups this directory. Git receives its exact UTF-8 name
+    // and recursively captures raw descendant names without decoding them.
+    let receipt = snapshot_source(
+        repo.git(),
+        repo.path(),
+        &WorktreeId::from_raw("grouped-paths"),
+        scratch.path(),
+    )
+    .unwrap();
+    assert_eq!(receipt.captured_paths, ["untracked/"]);
+    for (path, contents) in [
+        (invalid, "invalid name content"),
+        (OsString::from(valid), "valid name content"),
+    ] {
+        let mut object = OsString::from(format!("{}:", receipt.snapshot_commit));
+        object.push(path);
+        assert_eq!(
+            repo.git()
+                .stdout_bytes(repo.path(), &[OsString::from("show"), object])
+                .unwrap(),
+            contents.as_bytes()
+        );
+    }
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/index")).unwrap(),
+        before_index
+    );
+}

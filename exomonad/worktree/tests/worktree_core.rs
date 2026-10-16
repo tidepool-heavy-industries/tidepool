@@ -1484,3 +1484,99 @@ fn binding_table_waits_for_release_without_stealing_live_ownership() {
     drop(second);
     BindingTable::open(&base_anchor, "bindings").unwrap();
 }
+
+#[test]
+fn dirty_summary_one_pass_matches_two_query_status_with_directory_grouping() {
+    use exomonad_worktree::git::parse_porcelain_v1_z;
+    use std::collections::BTreeSet;
+    let repo = TestRepo::init().unwrap();
+    let w = repo.writer();
+    w.commit_file(".gitignore", "ignored-dir/\n*.ignored\n", "ignore")
+        .unwrap();
+    w.commit_file("rename-source", "rename\n", "rename seed")
+        .unwrap();
+    let original = "original\n".repeat(100);
+    w.commit_file("copy-source", &original, "copy seed")
+        .unwrap();
+    repo.git()
+        .try_run(repo.path(), &["config", "status.renames", "copies"])
+        .unwrap();
+    let odd_destination = "renamed\n\t雪\\\"";
+    repo.git()
+        .try_run(repo.path(), &["mv", "rename-source", odd_destination])
+        .unwrap();
+    w.write_file("copied", &original).unwrap();
+    w.write_file(
+        "copy-source",
+        &format!("changed\n{}", "original\n".repeat(99)),
+    )
+    .unwrap();
+    w.stage("copied").unwrap();
+    w.stage("copy-source").unwrap();
+    w.write_file("copy-source", "unstaged change").unwrap();
+    for path in [
+        "ignored-dir/a",
+        "ignored-dir/b",
+        "root.ignored",
+        "untracked-dir/file",
+        "untracked-dir/child.ignored",
+        "mixed/child.ignored",
+        "-[literal]\n雪",
+    ] {
+        w.write_file(path, "bytes").unwrap();
+    }
+    let git = repo.git();
+    let ordinary = git
+        .stdout_bytes(
+            repo.path(),
+            &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+        )
+        .unwrap();
+    let ignored = git
+        .stdout_bytes(
+            repo.path(),
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+                "--ignored=matching",
+            ],
+        )
+        .unwrap();
+    let ordinary = parse_porcelain_v1_z(&ordinary).unwrap();
+    assert!(ordinary
+        .iter()
+        .any(|e| e.x == 'C' && e.orig_path == Some("copy-source")));
+    assert!(ordinary
+        .iter()
+        .any(|e| e.x == 'R' && e.path == odd_destination));
+    let mut expected = exomonad_worktree::DirtySummary::default();
+    let mut staged = BTreeSet::new();
+    let mut unstaged = BTreeSet::new();
+    for e in ordinary {
+        if (e.x, e.y) == ('?', '?') {
+            expected.untracked.push(e.path.to_owned());
+        } else {
+            if e.x != ' ' {
+                staged.insert(e.path.to_owned());
+                staged.extend(e.orig_path.map(str::to_owned));
+            }
+            if e.y != ' ' {
+                unstaged.insert(e.path.to_owned());
+                unstaged.extend(e.orig_path.map(str::to_owned));
+            }
+        }
+    }
+    expected.staged = staged.into_iter().collect();
+    expected.unstaged = unstaged.into_iter().collect();
+    expected.untracked.sort();
+    expected.ignored_excluded = parse_porcelain_v1_z(&ignored)
+        .unwrap()
+        .iter()
+        .filter(|e| (e.x, e.y) == ('!', '!'))
+        .count();
+    assert_eq!(expected.ignored_excluded, 4);
+    assert!(expected.untracked.contains(&"untracked-dir/".to_owned()));
+    assert_eq!(inspect::dirty_summary(git, repo.path()).unwrap(), expected);
+}

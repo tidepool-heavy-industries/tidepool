@@ -81,6 +81,75 @@ impl GitOutput {
     }
 }
 
+/// One porcelain v1 entry. With `-z`, the destination precedes the optional
+/// original path of a rename/copy. Paths are exact repository-relative UTF-8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusEntry<'a> {
+    pub x: char,
+    pub y: char,
+    pub path: &'a str,
+    pub orig_path: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GitStatusError {
+    #[error("malformed porcelain v1 status: {0}")]
+    Malformed(&'static str),
+    #[error("Git status path is not valid UTF-8: {0:02x?}")]
+    NonUtf8Path(Vec<u8>),
+}
+
+/// Decode the byte protocol before any path enters a text-based consumer.
+/// Refuse incomplete records and invalid UTF-8 rather than merging distinct
+/// filesystem names through replacement characters.
+pub fn parse_porcelain_v1_z(bytes: &[u8]) -> Result<Vec<StatusEntry<'_>>, GitStatusError> {
+    use GitStatusError::Malformed;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let body = bytes
+        .strip_suffix(&[0])
+        .ok_or(Malformed("missing final NUL"))?;
+    fn path_text(path: &[u8]) -> Result<&str, GitStatusError> {
+        if path.is_empty() {
+            return Err(Malformed("empty path"));
+        }
+        std::str::from_utf8(path).map_err(|_| GitStatusError::NonUtf8Path(path.to_vec()))
+    }
+    let mut fields = body.split(|byte| *byte == 0);
+    let mut entries = Vec::new();
+    while let Some(record) = fields.next() {
+        if record.len() < 4 || record[2] != b' ' {
+            return Err(Malformed("invalid record header"));
+        }
+        let (x, y) = (record[0], record[1]);
+        let ordinary = |byte| b" MADRCUT".contains(&byte);
+        if !((ordinary(x) && ordinary(y) && (x != b' ' || y != b' '))
+            || (x == b'?' && y == b'?')
+            || (x == b'!' && y == b'!'))
+        {
+            return Err(Malformed("invalid status code"));
+        }
+        let path = path_text(&record[3..])?;
+        let orig_path = if [x, y].iter().any(|byte| matches!(byte, b'R' | b'C')) {
+            Some(path_text(
+                fields
+                    .next()
+                    .ok_or(Malformed("missing rename/copy source"))?,
+            )?)
+        } else {
+            None
+        };
+        entries.push(StatusEntry {
+            x: x as char,
+            y: y as char,
+            path,
+            orig_path,
+        });
+    }
+    Ok(entries)
+}
+
 std::thread_local! {
     static ACTIVE_BACKINGS: std::cell::RefCell<Vec<ScopeBacking>> = const { std::cell::RefCell::new(Vec::new()) };
     static SCOPED_IDENTITIES: std::cell::RefCell<Vec<ScopedIdentity>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1162,57 +1231,6 @@ pub mod inspect {
         Ok(PathBuf::from(out.trimmed()))
     }
 
-    /// One parsed `git status --porcelain=v1 -z` entry. `x`/`y` are the index
-    /// and worktree status columns; `path` is repository-relative.
-    struct StatusEntry<'a> {
-        x: char,
-        y: char,
-        path: &'a str,
-        /// The pre-rename/copy path (`R`/`C` entries only). Load-bearing for
-        /// the snapshot: staging only the NEW path into the temp index leaves
-        /// the OLD path present from `read-tree HEAD`, so the synthetic tree
-        /// would resurrect a file the rename removed.
-        orig_path: Option<&'a str>,
-    }
-
-    /// Parse `-z` porcelain v1 output into entries, consuming the extra
-    /// `orig_path` field a rename/copy (`R`/`C` in either column) appends —
-    /// otherwise every entry after the first rename would misalign.
-    fn parse_porcelain_z(stdout: &str) -> Vec<StatusEntry<'_>> {
-        let mut parts: Vec<&str> = stdout.split('\0').collect();
-        if parts.last() == Some(&"") {
-            parts.pop();
-        }
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < parts.len() {
-            let entry = parts[i];
-            i += 1;
-            if entry.len() < 3 {
-                continue;
-            }
-            let bytes = entry.as_bytes();
-            let x = bytes[0] as char;
-            let y = bytes[1] as char;
-            let path = &entry[3..];
-            let orig_path = if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
-                // Rename/copy entries carry an extra orig_path field.
-                let orig = parts.get(i).copied();
-                i += 1;
-                orig
-            } else {
-                None
-            };
-            out.push(StatusEntry {
-                x,
-                y,
-                path,
-                orig_path,
-            });
-        }
-        out
-    }
-
     /// The source's dirty state, read without changing anything.
     ///
     /// Lives here rather than in [`crate::snapshot`] because BOTH the clean
@@ -1221,29 +1239,38 @@ pub mod inspect {
     /// apart would let a source be refused by one and captured differently by
     /// the other.
     ///
-    /// Two reads: the first (no `--ignored`) classifies staged/unstaged/
-    /// untracked; the second (`--ignored=matching`) counts ignored paths
-    /// without asking the first read to carry a flag it does not need.
+    /// One byte-preserving observation classifies ordinary entries and counts
+    /// ignored entries, retaining Git's normal untracked-directory grouping.
     pub fn dirty_summary(
         git: &GitCli,
         source: &Path,
     ) -> Result<crate::error::DirtySummary, WorktreeError> {
         use std::collections::BTreeSet;
 
-        let out = git.try_read(
+        let out = git.stdout_bytes(
             source,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+                "--ignored=matching",
+            ],
         )?;
+        let entries = super::parse_porcelain_v1_z(&out)
+            .map_err(|error| crate::storage::storage_failure(source, error))?;
 
         let mut staged = BTreeSet::new();
         let mut unstaged = BTreeSet::new();
         let mut untracked = BTreeSet::new();
-        for e in parse_porcelain_z(&out.stdout) {
+        let mut ignored_excluded = 0;
+        for e in entries {
             if e.x == '?' && e.y == '?' {
                 untracked.insert(e.path.to_string());
                 continue;
             }
             if e.x == '!' && e.y == '!' {
+                ignored_excluded += 1;
                 continue;
             }
             if e.x != ' ' {
@@ -1261,21 +1288,6 @@ pub mod inspect {
                 }
             }
         }
-
-        let ignored_out = git.try_read(
-            source,
-            &[
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=normal",
-                "--ignored=matching",
-            ],
-        )?;
-        let ignored_excluded = parse_porcelain_z(&ignored_out.stdout)
-            .into_iter()
-            .filter(|e| e.x == '!' && e.y == '!')
-            .count();
 
         Ok(crate::error::DirtySummary {
             staged: staged.into_iter().collect(),
@@ -1867,5 +1879,93 @@ mod admission_tests {
                 .trimmed(),
             "changed"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{parse_porcelain_v1_z, GitStatusError};
+
+    #[test]
+    fn porcelain_preserves_paths_and_rename_copy_sources() {
+        let entries = parse_porcelain_v1_z(
+            "R  renamed\n\t雪\0old\0 C copied\0source\0?? -[literal]\\\"\0!! ignored/\0".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].path, "renamed\n\t雪");
+        assert_eq!(entries[0].orig_path, Some("old"));
+        assert_eq!(entries[1].orig_path, Some("source"));
+        assert_eq!(entries[2].path, "-[literal]\\\"");
+        assert_eq!((entries[3].x, entries[3].y), ('!', '!'));
+        assert!(parse_porcelain_v1_z(b"").unwrap().is_empty());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn porcelain_roundtrips_utf8_paths(
+            paths in proptest::collection::vec("[^\\x00]{1,48}", 1..12),
+            rename in proptest::bool::ANY,
+        ) {
+            let mut bytes = Vec::new();
+            for path in &paths {
+                bytes.extend_from_slice(if rename { b"R  " } else { b"?? " });
+                bytes.extend_from_slice(path.as_bytes());
+                bytes.push(0);
+                if rename {
+                    bytes.extend_from_slice(b"source-");
+                    bytes.extend_from_slice(path.as_bytes());
+                    bytes.push(0);
+                }
+            }
+            let decoded = parse_porcelain_v1_z(&bytes).unwrap();
+            proptest::prop_assert_eq!(decoded.len(), paths.len());
+            for (entry, path) in decoded.iter().zip(&paths) {
+                proptest::prop_assert_eq!(entry.path, path);
+                proptest::prop_assert_eq!(entry.orig_path.map(str::to_owned), rename.then(|| format!("source-{path}")));
+            }
+        }
+    }
+
+    #[test]
+    fn porcelain_refuses_malformed_or_truncated_records() {
+        for bytes in [
+            &b"M  file"[..],
+            &b"\0"[..],
+            &b"M \0"[..],
+            &b"M\t file\0"[..],
+            &b"   file\0"[..],
+            &b"?M file\0"[..],
+            &b"!  file\0"[..],
+            &b"XX file\0"[..],
+            &b"?? \0"[..],
+            &b"R  new\0"[..],
+            &b" C new\0\0"[..],
+            &b"R  new\0old"[..],
+            &b"?? file\0\0"[..],
+        ] {
+            assert!(
+                matches!(
+                    parse_porcelain_v1_z(bytes),
+                    Err(GitStatusError::Malformed(_))
+                ),
+                "accepted {bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn porcelain_refuses_invalid_utf8_in_every_path_position() {
+        for bytes in [
+            &b"?? bad-\xff\0"[..],
+            &b"!! bad-\xff\0"[..],
+            &b"R  bad-\xff\0old\0"[..],
+            &b"C  new\0bad-\xff\0"[..],
+        ] {
+            assert!(matches!(
+                parse_porcelain_v1_z(bytes),
+                Err(GitStatusError::NonUtf8Path(_))
+            ));
+        }
     }
 }

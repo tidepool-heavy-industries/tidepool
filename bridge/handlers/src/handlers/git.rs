@@ -1,4 +1,4 @@
-use exomonad_worktree::git::GitCli;
+use exomonad_worktree::git::{parse_porcelain_v1_z, GitCli, GitStatusError};
 use std::path::PathBuf;
 use tidepool_bridge_effects::{GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry};
 
@@ -68,42 +68,22 @@ impl GitHandler {
     }
 
     fn parse_status_output(bytes: &[u8]) -> Result<Vec<GitStatusEntry>, GitError> {
-        let fields = Self::nul_fields(bytes)?;
-        let mut entries = Vec::new();
-        let mut index = 0;
-        while index < fields.len() {
-            let record = fields[index];
-            if record.len() < 4 || record[2] != b' ' {
-                return Err(Self::malformed("invalid porcelain v1 status record"));
-            }
-            let valid = |byte| b" MADRCU?!T".contains(&byte);
-            if !valid(record[0]) || !valid(record[1]) || (record[0] == b' ' && record[1] == b' ') {
-                return Err(Self::malformed("invalid porcelain v1 status code"));
-            }
-            let path = Self::path_text(&record[3..])?;
-            if path.is_empty() {
-                return Err(Self::malformed(
-                    "porcelain v1 status record has an empty path",
-                ));
-            }
-            entries.push(GitStatusEntry {
-                path,
-                state: String::from_utf8(vec![record[0], record[1]]).unwrap(),
-            });
-            index += 1;
-            // With -z, a rename/copy record is followed by the source path;
-            // the path embedded in the status record is the destination.
-            if record[0] == b'R' || record[1] == b'R' || record[0] == b'C' || record[1] == b'C' {
-                if index >= fields.len() || fields[index].is_empty() {
-                    return Err(Self::malformed(
-                        "porcelain v1 rename is missing its source path",
-                    ));
+        parse_porcelain_v1_z(bytes)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| GitStatusEntry {
+                        path: entry.path.to_owned(),
+                        state: format!("{}{}", entry.x, entry.y),
+                    })
+                    .collect()
+            })
+            .map_err(|error| match error {
+                GitStatusError::Malformed(detail) => Self::malformed(detail),
+                GitStatusError::NonUtf8Path(bytes) => {
+                    GitError::GitNonUtf8Path(format!("path bytes: {bytes:02x?}"))
                 }
-                let _source = Self::path_text(fields[index])?;
-                index += 1;
-            }
-        }
-        Ok(entries)
+            })
     }
 
     fn parse_count(raw: &[u8]) -> Result<(i64, bool), GitError> {
