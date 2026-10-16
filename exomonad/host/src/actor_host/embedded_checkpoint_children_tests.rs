@@ -84,6 +84,7 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
                 "checkpoint-scope-setup",
                 "True",
             );
+            let expected_operation = after_setup.operation("checkpoint-parent-capture-failure");
             after_setup.call(
                 "checkpoint-parent-capture-failure",
                 &tidepool_testing::fixture_source(
@@ -91,13 +92,72 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
                 ),
             );
             let after_failure = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            for retained in [
+            after_failure.assert_failure(
+                "checkpoint-parent-capture-failure",
                 "expected checkpoint capture execution failure",
-                "Committed (capture context checkpoint)",
-                "Committed (cast)",
-            ] {
-                after_failure.assert_failure("checkpoint-parent-capture-failure", retained);
-            }
+            );
+            let failed = after_failure.settled_output("checkpoint-parent-capture-failure");
+            let failure = &failed["failure"];
+            assert_eq!(failure["class"], "runtime", "{failed}");
+            assert_eq!(failure["phase"], "run", "{failed}");
+            assert_eq!(
+                failure["originalOperation"],
+                serde_json::to_value(expected_operation).unwrap(),
+                "{failed}",
+            );
+            use tidepool_runtime::session::{
+                WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchItemStatus,
+                WorkbenchNotPublishedReason, WorkbenchOperationDisposition, WorkbenchOperationId,
+                WorkbenchOperationReceipt, WorkbenchPublicationOutcome,
+            };
+            assert_eq!(
+                failure["publication"],
+                serde_json::to_value(WorkbenchPublicationOutcome::NotPublished {
+                    reason: WorkbenchNotPublishedReason::Failed,
+                })
+                .unwrap(),
+                "{failed}",
+            );
+            let [item] = failure["items"].as_array().unwrap().as_slice() else {
+                panic!("one failed input unit must retain its receipts: {failed}");
+            };
+            assert_eq!(item["index"], 0, "{failed}");
+            assert_eq!(
+                item["status"],
+                serde_json::to_value(WorkbenchItemStatus::Rejected).unwrap(),
+                "{failed}",
+            );
+            assert_eq!(
+                item["failureLayer"],
+                serde_json::to_value(WorkbenchFailureLayer::Effect).unwrap(),
+                "{failed}",
+            );
+            let operations = item["operations"].as_array().unwrap();
+            let [capture, _] = operations.as_slice() else {
+                panic!("exact capture and cast receipts required: {failed}");
+            };
+            let execution: WorkbenchExecutionId =
+                serde_json::from_value(capture["id"]["execution"].clone()).unwrap();
+            let expected_receipts = ["capture context checkpoint", "cast"]
+                .into_iter()
+                .enumerate()
+                .map(|(effect_ordinal, effect)| WorkbenchOperationReceipt {
+                    display: None,
+                    display_publication: None,
+                    id: WorkbenchOperationId {
+                        execution: execution.clone(),
+                        input_unit_index: 0,
+                        effect_ordinal,
+                    },
+                    effect: effect.to_owned(),
+                    disposition: WorkbenchOperationDisposition::Committed,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                item["operations"],
+                serde_json::to_value(expected_receipts).unwrap(),
+                "{failed}",
+            );
             after_failure.call(
                 "checkpoint-parent-admit-stored-children",
                 &format!(
