@@ -579,6 +579,20 @@ global compiler submissions. The ordered cold capture control retains its
 original history. These cohorts use the same counted runner and frozen inputs;
 only provider replies are scripted.
 
+`harness-performance-persona` measures retained source inspection, context reads,
+five conditional assistant-text edits and read-back through that same host route.
+It repeats the inspection/read probes after four cells retain 32 typed values.
+The five source messages are synthetic assistant messages recorded by the real
+provider/store boundary; the context owner issues their edit targets. Read-back
+checks the committed transaction, exact target contents and preservation of
+unrelated visible fields. This is a bounded history inspired by the Persona
+trace, not an exact reconstruction of its private conversation or accumulated
+artifact graph. First-use and repeated phases retain their inventory history;
+no shared cache is deleted. The reporter partitions sequential workbench phase
+boundaries and keeps nested preparation/snapshot/install spans separate from
+those totals. UTC trace intervals and process-monotonic call counters are
+distinct observations. A passing workload establishes behavior, not a speedup.
+
 The CLI's `prepare` followed by `init` already selects the completed deployment.
 Fresh fixture preparation measures the initial preparation cost; it does not
 represent preparation repeated on every application launch.

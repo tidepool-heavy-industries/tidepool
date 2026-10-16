@@ -7363,13 +7363,18 @@ where
     ) -> Result<PendingPreparedInstall, ResidentError> {
         self.state
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
-        let checked = checked_turn_plan(
-            code.certification.as_ref(),
-            code.prepared(),
-            code.table(),
-            &mode.as_mode(),
-        )?;
-        let provenance = self.provenance_for(&code)?;
+        let checked =
+            tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.check")
+                .in_scope(|| {
+                    checked_turn_plan(
+                        code.certification.as_ref(),
+                        code.prepared(),
+                        code.table(),
+                        &mode.as_mode(),
+                    )
+                })?;
+        let provenance = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.provenance")
+            .in_scope(|| self.provenance_for(&code))?;
         let (constructor_table, _sites, prepared, certification) = code.into_parts();
         if let Some(generation) = mode.generation() {
             // Claim the value-module identity before the turn runs.
@@ -7381,13 +7386,11 @@ where
         // a variant for exactly this precondition.
         let lexical_scope = self.run_context.lexical_scope;
         let snapshot = if let Some(certification) = certification.as_ref() {
-            let admitted_public = self
-                .state
-                .public_visibility_snapshot_in(lexical_scope)
+            let admitted_public = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.visibility")
+                .in_scope(|| self.state.public_visibility_snapshot_in(lexical_scope))
                 .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
-            let resolved =
-                self.state
-                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            let resolved = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
+                .in_scope(|| self.state.resolve_certification_in(lexical_scope, &prepared, certification))?;
             PendingPreparedSource::Certified {
                 prepared,
                 resolved,
@@ -7449,6 +7452,7 @@ where
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
         let install_started = std::time::Instant::now();
         let mut checked_completion = None;
+        let install_span = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install", inclusive = true).entered();
         let (program, source_keys) = match source {
             ReadyPreparedSource::Legacy { snapshot, image } => {
                 match self.state.revalidate_and_install_prepared(
@@ -7466,9 +7470,8 @@ where
                 target,
                 demanded,
             } => {
-                if self
-                    .state
-                    .public_visibility_snapshot_in(lexical_scope)
+                if tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.visibility")
+                    .in_scope(|| self.state.public_visibility_snapshot_in(lexical_scope))
                     .as_ref()
                     != Some(&admitted_public)
                 {
@@ -7480,10 +7483,10 @@ where
                 {
                     return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
                 }
-                checked_completion = checked
-                    .map(|checked| checked.start(&self.state, lexical_scope))
-                    .transpose()?;
-                self.install_certified_turn_in(
+                checked_completion = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.check")
+                    .in_scope(|| checked.map(|checked| checked.start(&self.state, lexical_scope)).transpose())?;
+                tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.certified", inclusive = true)
+                    .in_scope(|| self.install_certified_turn_in(
                     lexical_scope,
                     &constructor_table,
                     target,
@@ -7491,9 +7494,10 @@ where
                     &resolved.source_evidence,
                     demanded,
                     &resolved.inherited_needed,
-                )?
+                ))?
             }
         };
+        drop(install_span);
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
