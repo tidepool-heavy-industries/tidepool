@@ -3664,17 +3664,9 @@ impl ExactProductAdmission<'_> {
         {
             required.extend(owners.iter().cloned());
         }
-        let mut context = ExactDeclarationContext::from_authenticated_execution(
-            self.request.producer_sha256,
-            artifacts,
+        let support = crate::artifact_inventory::CompilerSourceSupport::new(
             projection,
-            lexical,
-            self.source.generated_source_owner()?,
-            &required.into_iter().collect::<Vec<_>>(),
-        )?;
-        context.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
-            context.facts.compiler_support.projection.clone(),
-            context.facts.compiler_support.artifacts.clone(),
+            artifacts.clone(),
             inherited
                 .facts
                 .compiler_support
@@ -3682,6 +3674,13 @@ impl ExactProductAdmission<'_> {
                 .iter()
                 .chain(inputs.native_offers.iter())
                 .cloned(),
+        )?;
+        let context = ExactDeclarationContext::from_authenticated_execution_support(
+            self.request.producer_sha256,
+            support,
+            lexical,
+            self.source.generated_source_owner()?,
+            &required.into_iter().collect::<Vec<_>>(),
         )?;
         Ok(Arc::new(context))
     }
@@ -5824,24 +5823,32 @@ impl ExactDeclarationContext {
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
+        let support = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+            projection,
+            artifacts.clone(),
+        )?;
+        Self::from_authenticated_execution_support(
+            producer,
+            support,
+            lexical,
+            target,
+            required_instance_owners,
+        )
+    }
+
+    fn from_authenticated_execution_support(
+        producer: [u8; 32],
+        support: crate::artifact_inventory::CompilerSourceSupport,
+        lexical: Vec<ExactLexicalNode>,
+        target: ExactModuleIdentity,
+        required_instance_owners: &[ExactModuleIdentity],
+    ) -> Result<Self, CompileError> {
         let mut context = Self::new(&[], &[], Vec::new())?;
         context = context.admit_producer(producer)?;
-        for descriptor in artifacts.descriptors() {
+        for descriptor in support.artifacts.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
-        {
-            let updated = artifacts.clone();
-            context = context.rebuild(|facts| facts.compiler_support.artifacts = updated);
-        }
-        {
-            let updated = projection;
-            context = context.rebuild(|facts| facts.compiler_support.projection = updated);
-        }
-        context.facts.compiler_support =
-            crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
-                context.facts.compiler_support.projection.clone(),
-                artifacts.clone(),
-            )?;
+        context = context.rebuild(|facts| facts.compiler_support = support);
         context
             .facts
             .compiler_support
@@ -15843,6 +15850,78 @@ mod tests {
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
         Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+    }
+
+    #[test]
+    fn execution_support_keeps_carried_partial_availability_and_instance_origin() {
+        use crate::artifact_inventory::{
+            CompilerSourceSupport, IssuedNativeOffer, NativeOriginalRequirement,
+        };
+        let producer = [2; 32];
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture_with_interface(
+                "ExecutionSupport",
+                vec![(7, vec![]), (9001, vec![])],
+                122,
+                &BTreeMap::new(),
+                b"execution support".to_vec(),
+            ),
+            producer,
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let entry = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
+            .unwrap()
+            .unwrap();
+        let full =
+            IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, Some(proof.clone())).unwrap();
+        let partial = full
+            .within_projection(&projection, &inventory.empty_view())
+            .unwrap()
+            .unwrap();
+        assert!(!partial.is_full());
+        assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
+        let target = entry.descriptor.owner.clone();
+        let support = CompilerSourceSupport::new(projection, artifacts, [partial.clone()]).unwrap();
+        let context = ExactDeclarationContext::from_authenticated_execution_support(
+            producer,
+            support.clone(),
+            vec![ExactLexicalNode {
+                owner: target.clone(),
+                imports: vec![],
+            }],
+            target.clone(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            context.compiler_source_support().native_offers(),
+            &[partial]
+        );
+        assert!(!context.compiler_source_support().native_offers()[0].is_full());
+        assert_eq!(context.original_instance_target().unwrap(), &target);
+        assert_eq!(
+            context.artifact_view().capture_graph_selection(),
+            support.artifacts.capture_graph_selection()
+        );
+        assert!(
+            ExactDeclarationContext::from_authenticated_execution_support(
+                [99; 32],
+                support,
+                vec![],
+                target,
+                &[],
+            )
+            .is_err(),
+            "carried support cannot change its producer"
+        );
     }
 
     #[test]

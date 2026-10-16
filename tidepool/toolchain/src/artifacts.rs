@@ -2816,11 +2816,7 @@ impl SelectedModuleCandidateOffer {
             &generated,
         )?;
         let sealed = output.products.as_ref().expect("program output was sealed");
-        let private = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &sealed.source_selection,
-            &sealed.artifact_view,
-        )?
-        .for_program_continuation(
+        let private = sealed.original_compiler_inputs().for_program_continuation(
             &support,
             source_segment.admissions(),
             &output.source,
@@ -3011,10 +3007,7 @@ impl SelectedModuleCandidateOffer {
             interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
-            compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &sealed.source_selection,
-                &sealed.artifact_view,
-            )?,
+            compiler_input: sealed.original_compiler_inputs().clone(),
         }))
     }
 }
@@ -3112,6 +3105,7 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    original_compiler_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
     // Issued for this exact output before support selection; later program
     // items cannot enlarge an earlier item's original instance environment.
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
@@ -3126,6 +3120,14 @@ pub struct SealedTurnProducts {
     pub(crate) retained_core_products: certified_products::CertifiedRetainedCoreProducts,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
     pub checked: Option<CheckedNativeProof>,
+}
+
+impl SealedTurnProducts {
+    fn original_compiler_inputs(&self) -> &crate::declaration_context::OriginalCompilerInputs {
+        self.original_compiler_inputs
+            .as_deref()
+            .expect("exact output retains its issued compiler inputs")
+    }
 }
 
 /// One compiler-issued checked native purpose. Its original proof remains the
@@ -3792,13 +3794,24 @@ fn seal_turn_outputs_with_validation(
             None
         };
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
-    let original_execution = match exact.as_ref() {
-        Some(admission) => Some(admission.original_execution_context(
-            &crate::declaration_context::OriginalCompilerInputs::from_selection(
+    let original_compiler_inputs = exact
+        .as_ref()
+        .map(|_| {
+            crate::declaration_context::OriginalCompilerInputs::from_selection(
                 &certified.source_selection,
                 &artifact_view,
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
+    let original_execution = match exact.as_ref() {
+        Some(admission) => Some(
+            admission.original_execution_context(
+                original_compiler_inputs
+                    .as_deref()
+                    .expect("exact output compiler inputs"),
             )?,
-        )?),
+        ),
         None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
@@ -3894,6 +3907,7 @@ fn seal_turn_outputs_with_validation(
         module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
     Ok(Some(SealedTurnProducts {
+        original_compiler_inputs,
         artifact_view,
         typed_entry,
         target_native_selection,
