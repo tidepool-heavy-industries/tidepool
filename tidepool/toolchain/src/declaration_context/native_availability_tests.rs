@@ -3958,9 +3958,12 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
     let changed = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
     let competing = CompilerInputProjection::from_issued_entries(&[changed]).unwrap();
     let error = full.within_projection(&competing, &artifacts).unwrap_err();
+    let CompileError::ExtractFailed(message) = error else {
+        panic!("the native inventory must refuse the competing role: {error:?}");
+    };
     assert_eq!(
-        error.to_string(),
-        failure("native offer conflicts with selected compiler product or interface").to_string()
+        message,
+        "artifact inventory: native offer conflicts with selected compiler product or interface"
     );
 }
 
