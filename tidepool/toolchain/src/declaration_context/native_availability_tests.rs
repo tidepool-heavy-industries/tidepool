@@ -951,11 +951,22 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         occurrence: "x".into(),
         record_parent: None,
     };
+    let partial_identity = tidepool_repr::execution_schema::SymbolIdentity {
+        module: "Tidepool.Session.Val.G2".into(),
+        occurrence: "y".into(),
+        ..identity.clone()
+    };
     let mixed = dependent_product(
         "AdvertisedRetained",
         100,
         vec![
-            (7, vec![]),
+            (
+                7,
+                vec![crate::certified_products::PendingImportOwner::Retained {
+                    identity: partial_identity.clone(),
+                    generation: 2,
+                }],
+            ),
             (
                 9001,
                 vec![crate::certified_products::PendingImportOwner::Retained {
@@ -995,8 +1006,15 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         occurrence: identity.occurrence,
         record_parent: identity.record_parent,
     };
-    for (label, offer, expected) in [
-        ("full", private.native_offers[0].clone(), Some(1)),
+    let partial_key = tidepool_extract_cmd::SymbolIdentity {
+        unit: partial_identity.unit,
+        module: partial_identity.module,
+        namespace: partial_identity.namespace,
+        occurrence: partial_identity.occurrence,
+        record_parent: partial_identity.record_parent,
+    };
+    for (label, offer, expected, partial_expected) in [
+        ("full", private.native_offers[0].clone(), Some(1), Some(2)),
         (
             "partial",
             IssuedNativeOffer::issue(
@@ -1009,10 +1027,12 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
             )
             .unwrap(),
             None,
+            Some(2),
         ),
         (
             "empty",
             IssuedNativeOffer::issue(original, &private.artifacts, None).unwrap(),
+            None,
             None,
         ),
     ] {
@@ -1054,6 +1074,11 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
             decoded.retained_generations().get(&key).copied(),
             expected,
             "{label}"
+        );
+        assert_eq!(
+            decoded.retained_generations().get(&partial_key).copied(),
+            partial_expected,
+            "{label} permitted partial import"
         );
         assert_eq!(request.groups.len(), 0);
         let mut preview = tidepool_extract_cmd::ExtractCmd::with_bin(
