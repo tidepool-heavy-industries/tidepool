@@ -23530,6 +23530,17 @@ pub(crate) mod request_tests {
         renderer_values: bool,
     ) -> ActivationSessionFixture {
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
+        let _source_closure_trace =
+            (std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")).then(|| {
+                tracing::subscriber::set_default(
+                    tracing_subscriber::fmt()
+                        .with_env_filter(tracing_subscriber::EnvFilter::new(
+                            "tidepool::certified_products::source_closure_trace=debug",
+                        ))
+                        .with_test_writer()
+                        .finish(),
+                )
+            });
         let (_, mut context, _, _) = host_mount_fixture();
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
