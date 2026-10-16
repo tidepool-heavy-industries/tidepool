@@ -11690,9 +11690,16 @@ pub(crate) mod tests {
         for mode in ["canonical", "issued", "full"] {
             let inventory = ArtifactInventory::default();
             let view = if mode == "full" {
-                inventory
+                let complete = inventory
                     .admit_shared(&inventory.empty_view(), vec![entry.clone()])
-                    .unwrap()
+                    .unwrap();
+                let interfaces = complete
+                    .interface_projection(&[entry.descriptor.owner.clone()])
+                    .unwrap();
+                let roles = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                let available = interfaces.with_compiler_projection(&roles).unwrap();
+                assert!(available.selected_native_groups().is_empty());
+                available
             } else {
                 inventory
                     .admit_recovery_selection(
@@ -11806,6 +11813,16 @@ pub(crate) mod tests {
                             .map_err(|error| format!("admission: {error:?}"))
                     });
                 let expected = mode == "full" || (mode == "issued" && ordinal == 7);
+                if expected {
+                    let mut exact = view.selected_native_groups();
+                    exact.insert(NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: ordinal,
+                    });
+                    if outcome.as_ref().is_ok_and(|actual| actual != &exact) {
+                        unexpected.push(format!("mode={mode} ordinal={ordinal} expected_groups={exact:?} actual={outcome:?}"));
+                    }
+                }
                 if outcome.is_ok() != expected {
                     unexpected.push(format!("mode={mode} ordinal={ordinal} expected_accept={expected} actual={outcome:?}"));
                 }
