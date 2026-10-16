@@ -22,6 +22,26 @@ explicit final stage. Change its evidence, actions and thresholds for your task.
 Real observation needs a configured Jev provider and credentials; inspection,
 policy comparison, reconstruction and replay need no credentials or new calls.
 
+`keyedDistribution` uses exhaustive handlers for heterogeneous static alternatives
+and a runtime candidate family. Its handlers are deliberately reordered; labels
+connect them to the original offers. Each reported mass stays beside its key and
+original typed payload, including zero masses in authored order. It does not
+filter to contenders or normalize. `fullDistribution` keeps the same payloads
+without keys. `distributionMetadata` projects keys, masses, source addresses and
+excerpts into ordinary data without demanding or executing their carried actions.
+
+The final cell binds `evidenceFor sourceIdentity`. Supply the exact selected
+source/module identity from the source owner when retaining its result. The
+resulting `decisionEvidence` envelope includes the original request input and
+raw outcomes through `Jev.Recording`, the complete metadata distribution,
+evaluation failure when present, and the separately observed continuation result.
+A zero-record archive can reflect preparation failure; inspect `evaluation_failure`
+as well. Keep the original Evaluation for typed failures and live payloads.
+Serialize this ordinary envelope with the normal JSON/filesystem operations when
+needed; never serialize functions or treat a selected action as executed. The
+caller owns the destination and publication guarantee, just as for the archive
+recipe below.
+
 `jev-lookup-example.hs` additionally needs `Lookup` and `Reflect`. Capture retains
 the original candidate pool, packing omissions, complete ranking Evaluation and
 bounded exact view-fenced expansion. Reassessment is a dependent request over

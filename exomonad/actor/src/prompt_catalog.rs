@@ -145,6 +145,9 @@ pub(crate) fn workbench_doc(
         ))),
         "request" | "requests" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/request.md"))),
         "agents" | "agent-work" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/agents.md"))),
+        "model-call" => Ok(Cow::Borrowed(include_str!(
+            "../../prompts/docs/model-call.md"
+        ))),
         "jev" => workbench_doc("exomonad-jev", workspace_modules),
         "exomonad-jev/references/recent-changes.md" => Ok(Cow::Borrowed(JEV_RECENT_CHANGES)),
         "actors" | "actor" | "record" => {
@@ -171,7 +174,7 @@ pub(crate) fn workbench_doc(
         }
         "help" | "topics" => {
             let mut body = String::from(
-                "Exomonad topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
+                "Exomonad topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, model-call, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
                  Use `doc <skill-name>` to read a bundled skill without filesystem access. Jev reference: `doc exomonad-jev/references/recent-changes.md`. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
             );
             if !workspace_modules.is_empty() {
@@ -189,7 +192,7 @@ pub(crate) fn workbench_doc(
                 message.push_str(&format!("; use `doc {skill}` to read the bundled skill"));
             }
             message.push_str(
-                "; topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
+                "; topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, model-call, jev, actors; `doc topics` lists the workspace skills"
             );
             if !workspace_modules.is_empty() {
                 message.push_str(&format!(
@@ -233,6 +236,7 @@ mod tests {
             "cleanup",
             "recovery",
             "jev",
+            "model-call",
             "actors",
         ] {
             assert!(!workbench_doc(topic, &[]).unwrap().trim().is_empty());
@@ -322,6 +326,29 @@ mod tests {
             std::fs::read_to_string(root.join("exomonad-jev/references/recent-changes.md"))
                 .unwrap(),
         );
+        // Derive the inventory from the shipped manifest so new registrations
+        // cannot silently point at sources omitted from the pinned package.
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join("checks/usage-examples.json")).unwrap(),
+        )
+        .unwrap();
+        let examples = manifest["examples"].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let paths = std::iter::once(example["source"].as_str().unwrap()).chain(
+                example["prerequisites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|path| path.as_str().unwrap()),
+            );
+            for path in paths {
+                assert!(
+                    workspace.join(path).is_file(),
+                    "missing registered source {path}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -212,6 +212,18 @@ outcome worth branching on. `J.handle answer handlers` eliminates a choice
 exhaustively with no policy at all, for when the program follows the winner
 whatever it is.
 
+For the full heterogeneous distribution, use `J.choiceWeights answer handlers`.
+Its exhaustive handlers receive the original typed payloads; handler order is
+independent of offer order. `J.weighted` returns every reported mass in authored
+order, including zero masses. Carry each key beside its payload in the handler;
+project ordinary source/excerpt metadata when displaying or saving actions.
+`J.contenders` instead applies a mass floor and sorts contenders by mass.
+`Examples.JevComposedWorkflow.keyedDistribution` and the registered
+`checks/jev-batch-example.hs` show the full projection and a separate execution
+stage. Their `decisionEvidence` reuses `Jev.Recording` for exact input and raw
+observations, alongside caller-supplied selected source identity, distribution
+metadata and actual execution outcomes; functions remain Haskell values.
+
 A policy sets three floors: mass, margin and confidence. `J.lenient`,
 `J.careful` and `J.strict` provide increasing thresholds; choose them against
 actual decisions and outcomes. Policy constructors are abstract;

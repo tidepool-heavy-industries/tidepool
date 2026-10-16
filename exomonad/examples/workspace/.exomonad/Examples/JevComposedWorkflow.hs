@@ -61,8 +61,51 @@ observeBatch intent = J.runQuery . batchQuestions intent
 -- Includes zero-mass alternatives and the original typed evidence/action rows.
 -- The returned weights are reported masses; normalize explicitly if needed.
 fullDistribution :: J.Chosen (EvidenceAlternatives a) -> J.Weights (EvidenceSelection a)
-fullDistribution answer = J.choiceWeights answer
-  (#none id J..| #insufficient id J..| #candidate (\_ row -> Selected row))
+fullDistribution = fmap snd . keyedDistribution
+
+-- Heterogeneous static alternatives and a runtime row family become one typed
+-- distribution. Handlers are deliberately reordered: labels match them to the
+-- offers. The runtime key and original payload travel together, including zero
+-- masses; no function is rendered, serialized or sequenced here.
+keyedDistribution :: J.Chosen (EvidenceAlternatives a)
+  -> J.Weights (Text, EvidenceSelection a)
+keyedDistribution answer = J.choiceWeights answer
+  (#candidate (\key row -> (key, Selected row))
+    J..| #insufficient (\selection -> ("insufficient", selection))
+    J..| #none (\selection -> ("none", selection)))
+
+-- Ordinary metadata is safe to display or record while the original action
+-- remains in keyedDistribution. A row key is not an execution authority.
+distributionMetadata :: J.Chosen (EvidenceAlternatives a)
+  -> [(Text, Double, [(Text, Text)])]
+distributionMetadata answer =
+  [(key, mass, case selection of
+      Selected row -> [("kind", "candidate"), ("evidence_key", evidenceKey row),
+        ("source", evidenceSource row), ("excerpt", evidenceExcerpt row)]
+      NoUsefulEvidence -> [("kind", "none")]
+      InsufficientEvidence -> [("kind", "insufficient")])
+    | (mass, (key, selection)) <- J.weighted (keyedDistribution answer)]
+
+-- Supply the exact selected source identity and observed execution outcomes.
+-- The existing Jev archive owns request/input, occurrences and raw outcomes;
+-- this application envelope adds only serializable decision metadata. It does
+-- not claim that a selected continuation ran or that writeFile is durable.
+decisionEvidence :: Text -> Text -> [Continuation effects] -> [(Text, Text)]
+  -> J.Evaluation (BatchAnswer effects) -> Value
+decisionEvidence sourceIdentity intent rows outcomes evaluation = object
+  [ "source_identity" .= sourceIdentity
+  , "input" .= object
+      [ "intent" .= intent
+      , "evidence" .= [(evidenceKey row, evidenceSource row, evidenceExcerpt row) | row <- rows]
+      ]
+  , "observation_archive" .= Recording.archiveValue
+      (Recording.recordingArchive (J.recordings evaluation))
+  , "distribution" .= either (const Nothing)
+      (Just . distributionMetadata . fst) (J.result evaluation)
+  , "evaluation_failure" .= either (Just . Text.pack . show)
+      (const Nothing) (J.result evaluation)
+  , "execution_outcomes" .= outcomes
+  ]
 
 compareBatchPolicies :: J.Policy first -> J.Policy second
   -> J.Chosen (EvidenceAlternatives a)

@@ -103,7 +103,7 @@
         "Jev/Operators.hs",
         "Jev/Recording.hs"
       ],
-      "requirements": "Run the cells in order with Jev and Console. Requires the workspace pinned Jev.Core source root and matched Tidepool runtime; native JSON intrinsics are not ordinary GHC execution. Only the explicit runSelection stage executes a continuation. Real observations require a configured Jev provider; policy comparison does not. See checks/jev-composition.md."
+      "requirements": "Run the cells in order with Jev and Console. Requires pinned Jev.Core and matched Tidepool runtime. keyedDistribution uses reordered exhaustive handlers over heterogeneous alternatives and keeps original payloads, keys and zero masses. distributionMetadata projects source/excerpt metadata without executing actions. Only the separate runSelection stage executes. Retain decisionEvidence with actual source identity and observed outcomes; Jev.Recording owns request/input/raw observations. See checks/jev-composition.md."
     },
     {
       "module": "Jev.Operators",
@@ -257,6 +257,46 @@
         "checks/jev-recording-save-example.hs"
       ],
       "requirements": "First run checks/jev-recording-save-example.hs. Edit a continuation payload in Examples/JevComposedWorkflow.hs and publish changed source through ordinary source reload before reconstructing this program. Requires FsRead and Console, pinned Jev.Core source root and matched Tidepool native JSON runtime. Replay makes zero provider calls; no Jev credential is needed. Payload-only changes are accepted; changed question/evidence/model is refused. See checks/jev-composition.md."
+    },
+    {
+      "module": "Tidepool.Model",
+      "name": "invokeModel",
+      "namespace": "value",
+      "source": "checks/model-call-example.hs",
+      "prerequisites": [
+        "Examples/ModelCallWorkflow.hs"
+      ],
+      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+    },
+    {
+      "module": "Tidepool.Model",
+      "name": "textTurn",
+      "namespace": "value",
+      "source": "checks/model-call-example.hs",
+      "prerequisites": [
+        "Examples/ModelCallWorkflow.hs"
+      ],
+      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+    },
+    {
+      "module": "Tidepool.Model",
+      "name": "withModel",
+      "namespace": "value",
+      "source": "checks/model-call-example.hs",
+      "prerequisites": [
+        "Examples/ModelCallWorkflow.hs"
+      ],
+      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+    },
+    {
+      "module": "Tidepool.Model",
+      "name": "withLimits",
+      "namespace": "value",
+      "source": "checks/model-call-example.hs",
+      "prerequisites": [
+        "Examples/ModelCallWorkflow.hs"
+      ],
+      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
     }
   ]
 }
