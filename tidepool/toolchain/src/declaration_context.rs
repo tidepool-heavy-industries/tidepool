@@ -1066,6 +1066,12 @@ impl NativeCompilerTransport {
                 {
                     tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         ?previous, incoming = ?group, incoming_offer = ?offer.original(),
+                        incoming_owner = ?metadata.retained.artifacts.get(&offer.original())
+                            .map(|entry| &entry.descriptor.owner),
+                        incoming_closure_matches = ?groups.iter().filter(|(candidate, _)| {
+                            candidate.binding.artifact == group.binding.artifact
+                                && candidate.original_ordinal == group.original_ordinal
+                        }).collect::<Vec<_>>(),
                         owner = ?metadata.retained.artifacts.get(&group.binding.artifact)
                             .map(|entry| &entry.descriptor.owner),
                         previous_offers = ?issuance.iter().filter_map(|issued| {

@@ -22,3 +22,8 @@ integration cohort installs the source-selected notebook policy and checks
 acknowledgement, cancellation, reload refusal, uncertainty, and cleanup through
 the real actor. Unit-only checks cannot exercise dynamic Haskell preparation or
 the installed tool surface.
+
+The named notebook cohort already supplies its exact selectors. To investigate
+one case, use `just test-target exomonad-actor actor --exact FULL_TEST_NAME
+--expected-count 1`; do not append another selector to the cohort command.
+Runner argument rejection is zero executed tests, not a test failure.

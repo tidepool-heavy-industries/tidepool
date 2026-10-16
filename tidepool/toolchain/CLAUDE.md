@@ -236,6 +236,14 @@ issuance before validation; do not attach it afterward or reconstruct it from
 all retained artifacts. Temporary private issuance must restore the caller's
 namespace and executable roots while retaining the exact dependency bindings.
 
+Resolve carried selections through the owner's preferred-input path before
+deriving fallbacks from current executable roots. Appending the carried proof
+after deriving a fallback retains two choices; it does not replace the fallback.
+Exercise different carried and currently selected bindings for the same original
+through private issuance and request preparation. Include duplicate carried
+proofs, absence of a carried proof, and genuinely conflicting explicit proofs.
+An inventory-only test cannot establish this downstream preference contract.
+
 Changes here need a history crossing offer, dependent-product admission, private
 handoff and subsequent compilation. Cover full availability with no selected
 groups, valid subset imports, unavailable dependencies and independently issued
