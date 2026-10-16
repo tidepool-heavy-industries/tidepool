@@ -131,13 +131,14 @@ pub(crate) fn declaration() -> HostedTool {
                 "view": {
                     "type": "string",
                     "enum": ["changed", "summary", "all", "revisions", "detailed", "recovery", "lineage", "trace", "bindings", "live", "watches", "operation"]
+                },
+                "operation": operation_schema(),
+                "after": {
+                    "type":"object", "properties": {
+                        "stage":{"type":"string","enum":["unfinalized","retained"]},
+                        "operation":operation_schema()
+                    }, "required":["stage","operation"], "additionalProperties":false
                 }
-, "operation": operation_schema(), "after": {
-    "type":"object", "properties": {
-        "stage":{"type":"string","enum":["unfinalized","retained"]},
-        "operation":operation_schema()
-    }, "required":["stage","operation"], "additionalProperties":false
-}
             },
             "additionalProperties": false
         }),

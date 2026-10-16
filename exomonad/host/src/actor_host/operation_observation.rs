@@ -183,8 +183,7 @@ mod tests {
                     .unwrap()
                     .expect("status did not queue behind sleep")
                     .unwrap();
-                let receipt: serde_json::Value =
-                    serde_json::from_str(after.output("inspect-operation")).unwrap();
+                let receipt = after.settled_output("inspect-operation");
                 let model: OperationObservation = serde_json::from_str(
                     receipt["items"][0]["output"]
                         .as_str()

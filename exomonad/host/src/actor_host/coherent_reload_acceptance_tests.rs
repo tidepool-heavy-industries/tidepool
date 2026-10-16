@@ -403,12 +403,12 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 .await
                 .unwrap();
             assert_true_page(host, &round.settled_output("bind-a"));
-            let baseline = super::tests::dispatch_status(old_request.as_ref(), "revisions").await;
+            let baseline = super::test_campaign::dispatch_status(old_request.as_ref(), "revisions").await;
             assert_eq!(baseline["status"], "committed");
             let observed_a = installation.runtime_observation.snapshot().source_drift.layer.current().expect("explicit baseline capture").sample.clone();
             observe_gate.arm();
             let refresh_policy = old_request.clone();
-            let refresh = tokio::spawn(async move { super::tests::dispatch_status(refresh_policy.as_ref(), "revisions").await });
+            let refresh = tokio::spawn(async move { super::test_campaign::dispatch_status(refresh_policy.as_ref(), "revisions").await });
             host.context.while_root_live("source observation captured generation A", observe_gate.entered.notified()).await.unwrap();
             let operation = round.operation("publish-b");
             round.sync_call_named(
@@ -435,7 +435,7 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
             assert!(matches!(installation.runtime_observation.snapshot().source_drift.layer,
                 exomonad_actor::SourceObservation::Unavailable { last_known: Some(previous), .. } if previous.sample == observed_a),
                 "capture A cannot publish current after generation B");
-            let current_observation = super::tests::dispatch_status(old_request.as_ref(), "revisions").await;
+            let current_observation = super::test_campaign::dispatch_status(old_request.as_ref(), "revisions").await;
             assert_eq!(current_observation["status"], "committed");
             let observed_b = installation.runtime_observation.snapshot().source_drift.layer.current().unwrap().sample.clone();
             assert_eq!(observed_b.issued_notebook_generation, old_request.request_generation().map(|id| id.get()));
