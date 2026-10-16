@@ -1097,7 +1097,7 @@ pub(super) fn campaign_trace_profile() -> &'static str {
 fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscriber::EnvFilter {
     let directives = match profile {
         CampaignTraceProfile::Minimal => {
-            "warn,exomonad_host::actor_host::startup=info,exomonad_harness::timing=debug,\
+            "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
                       exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
                       tidepool_extract_cmd::endpoint=info,exomonad_actor::resident_tools=info,\
                       exomonad_actor::resident_workbench=info,\
@@ -1108,7 +1108,7 @@ fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscribe
                       tidepool_runtime::activation_renderer_install=info,exomonad::content=off"
         }
         CampaignTraceProfile::Full => {
-            "warn,exomonad_host::actor_host::startup=info,tidepool_runtime::compile=info,\
+            "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
              tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
              exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
              tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
@@ -2773,6 +2773,45 @@ mod tests {
             harness::item::ToolExecution::Asynchronous
         );
         assert!(turn.usage.reported);
+    }
+
+    #[test]
+    fn campaign_trace_profiles_retain_applied_profile_and_startup_spans() {
+        for profile in [CampaignTraceProfile::Minimal, CampaignTraceProfile::Full] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("startup.jsonl");
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_ansi(false)
+                .with_env_filter(campaign_trace_filter_for(profile))
+                .with_span_events(profile.span_events())
+                .with_writer(std::sync::Mutex::new(std::fs::File::create(&path).unwrap()))
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let startup =
+                    tracing::info_span!(target: "tidepool::actor_host::startup", "host_run");
+                startup.in_scope(|| {
+                    AppliedCampaignTrace {
+                        profile,
+                        writer: None,
+                    }
+                    .emit()
+                });
+            });
+            let captured = std::fs::read_to_string(path).unwrap();
+            let rows: Vec<Value> = captured
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let applied = rows
+                .iter()
+                .find(|row| row["fields"]["message"] == "campaign trace profile applied")
+                .expect("the applied profile must reach the startup trace consumer");
+            assert_eq!(applied["target"], "tidepool::actor_host::startup");
+            assert_eq!(applied["fields"]["profile"], profile.name());
+            assert_eq!(applied["fields"]["filter_contract"], 1);
+            assert_eq!(applied["span"]["name"], "host_run");
+        }
     }
 
     #[test]

@@ -268,11 +268,11 @@ Additional focused execution targets include:
 | Target | Execution boundary |
 | --- | --- |
 | `//tidepool/runtime:runtime_admission_tests` | Three counted admission tests; no compiler worker |
-| `//bridge/facade:facade_source_revision_tests` | Five counted source publication/recovery tests; no compiler or browser resources |
-| `//bridge/facade:facade_process_tests` | Six counted framing and process cleanup tests |
-| `//bridge/facade:facade_host_tests` | Three real host tests; compiler and browser assets |
-| `//bridge/facade:facade_late_output_test` | One retained-output/compaction test |
-| `//bridge/facade:facade_browser_test` | One explicitly selected ignored Chromium journey |
+| `//exomonad/host:facade_source_revision_tests` | Five counted source publication/recovery tests; no compiler or browser resources |
+| `//exomonad/host:facade_process_tests` | Six counted framing and process cleanup tests |
+| `//exomonad/host:facade_host_tests` | Three real host tests; compiler and browser assets |
+| `//exomonad/host:facade_late_output_test` | One retained-output/compaction test |
+| `//exomonad/host:facade_browser_test` | One explicitly selected ignored Chromium journey |
 | `//bridge/haskell:planned_declaration` | Original declaration/interface authority suite |
 | `//bridge/haskell:source_boot_product_reuse` | SOURCE/boot product reuse and invalidation suite |
 
@@ -282,11 +282,11 @@ report commands.
 
 Target availability is not a passing acceptance result. In particular, the
 real host/browser gates remain subject to the evidence ledger. Runtime and
-facade execution groups share their package's linked `*_unit_tests` binary;
+host execution groups share their package's linked `*_unit_tests` binary;
 that binary target is build-only. The counted wrappers refuse missing names,
 zero matches and wrong counts, run each selected case in its own process, and
 own timeout/cancellation cleanup. Run `buck2 test` on the execution targets.
-`//bridge/facade:tidepool_unit_tests_all` is the explicit broad nonignored action;
+`//exomonad/host:exomonad_host_unit_tests_all` is the explicit broad nonignored action;
 do not use it for routine spot checks.
 
 Haskell test fixture trees are declared filegroups copied into private scratch

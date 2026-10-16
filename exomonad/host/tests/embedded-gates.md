@@ -93,7 +93,7 @@ it does not claim a scripted provider drove that call.
 
 ## Matched inputs and execution
 
-Build the current `//bridge/facade:tidepool_unit_tests` and its declared compiler,
+Build the current `//exomonad/host:exomonad_host_unit_tests` and its declared compiler,
 stdlib and browser resources in the admitted root Buck lane. Use the native
 no-Codex profile. Freeze the executable and all inputs before execution, retain
 source and harness revisions plus hashes, and preserve shared daemons.

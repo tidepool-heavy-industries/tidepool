@@ -27,9 +27,9 @@ run_native() {
 # Rust owners each contain one real test; the prepared contract preserves eight
 # runtime cases and source capture keeps its four host assertions diagnostic.
 status=0
-run_native //bridge/facade:facade_prepared_recipe_contract_test --expected-count 1 --jobs 1 \
+run_native //exomonad/host:facade_prepared_recipe_contract_test --expected-count 1 --jobs 1 \
   --output-dir "$output/prepared-runtime" || status=1
-run_native //bridge/facade:facade_recipe_source_capture_test --expected-count 1 --jobs 1 \
+run_native //exomonad/host:facade_recipe_source_capture_test --expected-count 1 --jobs 1 \
   --output-dir "$output/source-capture" || status=1
 # The shared Tasty owner discovers named leaves and rejects an empty selection.
 for target in native_helper_contract pinned_source_contract automation_helper_contract browser_scenario_contract; do

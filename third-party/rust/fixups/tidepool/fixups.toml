@@ -1,2 +1,2 @@
-# First-party facade build script is owned by //bridge/facade:facade_generated.
+# First-party facade build script is owned by //bridge/facade:tidepool_build_script_run.
 buildscript.run = false

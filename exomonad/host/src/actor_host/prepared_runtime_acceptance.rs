@@ -458,7 +458,7 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
     let _release = WritableOnDrop(directory.path().to_owned());
     let observations = SetupTrace::new(files.path().join("unused-quotation-counter"));
     tracing_subscriber::registry().with(observations.clone())
-        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,exomonad_host::actor_host::startup=info"))
+        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info"))
         .try_init().expect("isolated cohort owns its observer");
     let prepared = prepare_workspace(repository.path(), Arc::clone(&directory))
         .await
@@ -678,7 +678,7 @@ async fn prepared_children_execute_original_native_probe(
     tracing_subscriber::registry()
         .with(observations.clone())
         .with(tracing_subscriber::fmt::layer().json().with_ansi(false))
-        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,exomonad_host::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_runtime::activation_renderer=info,tidepool_runtime::session::resident=info,tidepool_codegen::prepared_compile=info,tidepool_codegen::image_install=info"))
+        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_runtime::activation_renderer=info,tidepool_runtime::session::resident=info,tidepool_codegen::prepared_compile=info,tidepool_codegen::image_install=info"))
         .try_init().expect("one isolated measurement process owns its subscriber");
     let settings = hosted_test_settings(&files, 2);
     let authored_settings = settings.clone();
