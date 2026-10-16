@@ -515,9 +515,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .cloned()
             .unwrap();
         assert_eq!(
-            dependency(issued, &input.artifacts),
+            dependency(&issued, &input.artifacts),
             expected,
             "carried availability chooses the private dependency before selected-state fallback"
         );
@@ -539,9 +540,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .cloned()
             .unwrap();
         assert_eq!(
-            dependency(retained, &request.compiler_inputs().artifacts),
+            dependency(&retained, &request.compiler_inputs().artifacts),
             expected
         );
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
@@ -1197,6 +1199,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .native_original_requirements()
         .iter()
         .find(|requirement| requirement.original == authored_id)
+        .cloned()
         .unwrap();
     assert_eq!(&retained.selection, &proof.selection);
     assert!(request
