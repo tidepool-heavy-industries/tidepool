@@ -1060,10 +1060,20 @@ impl NativeCompilerTransport {
                 .transpose()?
                 .unwrap_or_default();
             for (group, carrier) in &groups {
-                if bindings
+                if let Some(previous) = bindings
                     .insert((group.binding.artifact, group.original_ordinal), *group)
-                    .is_some_and(|previous| previous != *group)
+                    .filter(|previous| previous != group)
                 {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        ?previous, incoming = ?group, incoming_offer = ?offer.original(),
+                        owner = ?metadata.retained.artifacts.get(&group.binding.artifact)
+                            .map(|entry| &entry.descriptor.owner),
+                        previous_offers = ?issuance.iter().filter_map(|issued| {
+                            issued.proof().filter(|proof| {
+                                proof.selection.graph_selection().native_groups.contains(&previous)
+                            }).map(|_| issued.original())
+                        }).collect::<Vec<_>>(),
+                        "compiler transport competing exact dependency bindings");
                     return Err(admission_failure(
                         ArtifactInventoryFailure::BindingAmbiguity {
                             artifact: group.binding.artifact,
