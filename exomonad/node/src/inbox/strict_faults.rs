@@ -39,7 +39,7 @@ fn fault_child() {
         return;
     }
     let inbox = open().unwrap();
-    if case == "append" || case == "migration" {
+    if case == "append" || case == "prepublication" {
         enable();
         let expected = if case == "append" {
             InboxWriteOperation::Append
@@ -94,7 +94,7 @@ fn fault_child() {
         ));
         disable();
         assert_eq!(
-            read_cursor::<String>(&cursor).unwrap().0.receipts[&row.sequence].phase,
+            read_cursor::<String>(&cursor).unwrap().unwrap().receipts[&row.sequence].phase,
             DeliveryPhase::InFlight
         );
         drop(inbox);
@@ -168,7 +168,7 @@ fn strict_inbox_faults_propagate_without_retry() {
         ("fresh-rows-ancestor", "rows"),
         ("fresh-cursor-ancestor", "cursor"),
         ("append", "rows/new/deep"),
-        ("migration", "cursor/new/deep"),
+        ("prepublication", "cursor/new/deep"),
         ("fence", "cursor/new/deep"),
         ("compaction", "rows/new/deep"),
         ("reopen-rows", "rows/new/deep/rows.jsonl"),

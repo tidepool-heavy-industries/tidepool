@@ -1,9 +1,8 @@
 //! One durable single-consumer queue and its bounded receipt evidence.
 //!
 //! Receipt context stays in the original row and, after acknowledgement, in the
-//! existing checkpoint. The checkpoint is upgraded before the first tracked row;
-//! old binaries deliberately cannot read that shape. This type assumes one open
-//! owner per pair of paths, just as the append/ack queue did before receipts.
+//! existing checkpoint. A current checkpoint is persisted before the first tracked
+//! row. This type assumes one open owner per pair of paths.
 //! The owner also controls both hierarchies against concurrent rename/removal;
 //! symlink entries, targets and target ancestry must already be durable.
 
@@ -15,7 +14,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{self, SyncPolicy, TailPolicy};
-use tidepool_repr::version_ladder::{self, MigrationError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(deserialize = "T: Deserialize<'de>, R: Deserialize<'de>"))]
@@ -112,13 +110,6 @@ struct VersionedCheckpoint<R> {
     checkpoint: InboxCheckpoint<R>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyCheckpoint {
-    sequence: u64,
-    watermarks: BTreeMap<String, u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxWriteOperation {
     Append,
@@ -164,7 +155,6 @@ pub const MAX_TOTAL_RECEIPT_CONTEXT_BYTES: usize = 65536;
 
 struct InboxState<T, R> {
     checkpoint: InboxCheckpoint<R>,
-    versioned: bool,
     next_sequence: u64,
     compacted_through: u64,
     pending: VecDeque<DurableEnvelope<T, R>>,
@@ -267,7 +257,9 @@ where
         create_parent(anchor, relative_rows.as_ref())?;
         create_parent(anchor, relative_cursor.as_ref())?;
         // Reject an unsupported checkpoint before repairing any row tail.
-        let (mut checkpoint, versioned) = read_cursor::<R>(&cursor_path)?;
+        let checkpoint = read_cursor::<R>(&cursor_path)?;
+        let checkpoint_present = checkpoint.is_some();
+        let mut checkpoint = checkpoint.unwrap_or_default();
         let rows = read_rows::<T, R>(&rows_path)?;
         // Reopening visible bytes after uncertain I/O is reconciliation, not proof
         // they reached storage. Stabilize both surviving files (including any
@@ -332,9 +324,9 @@ where
             }
             match &row.receipt_context {
                 Some(context) => {
-                    if !versioned {
+                    if !checkpoint_present {
                         return Err(InboxError::Corrupt(
-                            "tracked row requires upgraded checkpoint".into(),
+                            "tracked row requires a prepublication checkpoint".into(),
                         ));
                     }
                     context_bytes(context)?;
@@ -374,7 +366,6 @@ where
             cursor_path,
             state: Mutex::new(InboxState {
                 checkpoint,
-                versioned,
                 next_sequence,
                 compacted_through: first.map_or(cursor, |sequence| sequence.saturating_sub(1)),
                 pending: rows
@@ -531,10 +522,9 @@ where
                 };
                 checkpoint.receipts.remove(&oldest);
             }
-            // Persist migration/eviction before an old reader could see a tracked row.
-            self.persist(&mut state, &checkpoint, true)?;
+            // Persist prepublication evidence and eviction before publishing a tracked row.
+            self.persist(&mut state, &checkpoint)?;
             state.checkpoint = checkpoint;
-            state.versioned = true;
         }
         let append = self.append_row(&line);
         self.check_write(&mut state, InboxWriteOperation::Append, append)?;
@@ -638,7 +628,7 @@ where
             .get_mut(&sequence)
             .ok_or(InboxError::ReceiptUnavailable { sequence })?
             .phase = DeliveryPhase::InFlight;
-        self.persist(&mut state, &checkpoint, true)?;
+        self.persist(&mut state, &checkpoint)?;
         state.checkpoint = checkpoint;
         Ok(DeliveryAttempt {
             inbox: self,
@@ -764,7 +754,7 @@ where
             }
             checkpoint.sequence = sequence;
         }
-        self.persist(&mut state, &checkpoint, true)?;
+        self.persist(&mut state, &checkpoint)?;
         state.checkpoint = checkpoint;
         self.discard_acknowledged(&mut state)
     }
@@ -797,8 +787,7 @@ where
         }
         let mut checkpoint = state.checkpoint.clone();
         checkpoint.sequence = sequence;
-        let versioned = state.versioned;
-        self.persist(&mut state, &checkpoint, versioned)?;
+        self.persist(&mut state, &checkpoint)?;
         state.checkpoint = checkpoint;
         self.discard_acknowledged(&mut state)
     }
@@ -832,19 +821,11 @@ where
         &self,
         state: &mut InboxState<T, R>,
         checkpoint: &InboxCheckpoint<R>,
-        versioned: bool,
     ) -> Result<(), InboxError> {
-        let bytes = if versioned {
-            serde_json::to_vec(&VersionedCheckpoint {
-                version: 2,
-                checkpoint: checkpoint.clone(),
-            })
-        } else {
-            serde_json::to_vec(&LegacyCheckpoint {
-                sequence: checkpoint.sequence,
-                watermarks: checkpoint.watermarks.clone(),
-            })
-        }
+        let bytes = serde_json::to_vec(&VersionedCheckpoint {
+            version: 2,
+            checkpoint: checkpoint.clone(),
+        })
         .map_err(corrupt)?;
         let result = self.write_checkpoint(&bytes);
         self.check_write(state, InboxWriteOperation::Checkpoint, result)
@@ -936,26 +917,8 @@ fn stabilize_existing_file(path: &Path) -> Result<(), std::io::Error> {
     tidepool_atomic_write::sync_parent_directory(path)
         .map_err(|error| std::io::Error::new(error.source.kind(), error))
 }
-fn migrate_legacy(value: serde_json::Value) -> Result<serde_json::Value, MigrationError> {
-    let legacy = if let Some(sequence) = value.as_u64() {
-        LegacyCheckpoint {
-            sequence,
-            ..Default::default()
-        }
-    } else {
-        serde_json::from_value::<LegacyCheckpoint>(value)
-            .map_err(|error| MigrationError(error.to_string()))?
-    };
-    Ok(
-        serde_json::json!({"version": 1, "checkpoint": {"sequence": legacy.sequence, "watermarks": legacy.watermarks, "receipts": {}}}),
-    )
-}
-fn migrate_v1(mut value: serde_json::Value) -> Result<serde_json::Value, MigrationError> {
-    value["version"] = serde_json::json!(2);
-    Ok(value)
-}
 /// A read-only view of a durable inbox checkpoint: the delivery cursor and
-/// any retained receipt evidence. Reuses the same parsing and migration path
+/// any retained receipt evidence. Reuses the same current-format parsing path
 /// as [`DurableInbox::open`], but never repairs or writes anything, so it is
 /// safe for a reader that does not own the inbox files.
 pub struct CheckpointView<R> {
@@ -964,39 +927,29 @@ pub struct CheckpointView<R> {
 }
 
 /// Reads the checkpoint at `path` without repairing or writing it. Missing
-/// files read as an empty, unversioned checkpoint, matching `DurableInbox::open`.
+/// files read as an empty checkpoint, matching `DurableInbox::open`.
 pub fn read_checkpoint<R: DeserializeOwned>(path: &Path) -> Result<CheckpointView<R>, InboxError> {
-    let (checkpoint, _versioned) = read_cursor::<R>(path)?;
+    let checkpoint = read_cursor::<R>(path)?.unwrap_or_default();
     Ok(CheckpointView {
         sequence: checkpoint.sequence,
         receipts: checkpoint.receipts,
     })
 }
 
-fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<(InboxCheckpoint<R>, bool), InboxError> {
-    let value = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(corrupt)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((InboxCheckpoint::default(), false));
-        }
+fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<Option<InboxCheckpoint<R>>, InboxError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if let Some(version) = value.get("version") {
-        if version
-            .as_u64()
-            .and_then(|number| u32::try_from(number).ok())
-            .is_none()
-        {
-            return Err(InboxError::Corrupt("invalid checkpoint version".into()));
-        }
+    let stored: VersionedCheckpoint<R> = serde_json::from_slice(&bytes).map_err(corrupt)?;
+    if stored.version != 2 {
+        return Err(InboxError::Corrupt(format!(
+            "unsupported checkpoint version {}; expected 2",
+            stored.version
+        )));
     }
-    let found = version_ladder::found_version(&value);
-    let versioned = value.get("version").is_some();
-    let value =
-        version_ladder::migrate_to_current(value, found, 0, 2, &[migrate_legacy, migrate_v1])
-            .map_err(corrupt)?;
-    let stored: VersionedCheckpoint<R> = serde_json::from_value(value).map_err(corrupt)?;
-    Ok((stored.checkpoint, versioned))
+    Ok(Some(stored.checkpoint))
 }
 fn read_rows<T: DeserializeOwned, R: DeserializeOwned>(
     path: &Path,

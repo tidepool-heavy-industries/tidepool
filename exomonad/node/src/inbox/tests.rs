@@ -85,7 +85,11 @@ fn a_cursor_beyond_the_log_is_corruption_not_silent_message_loss() {
     let (_dir, rows, cursor, inbox) = inbox();
     inbox.publish("one".into()).unwrap();
     drop(inbox);
-    std::fs::write(&cursor, "2").unwrap();
+    std::fs::write(
+        &cursor,
+        br#"{"version":2,"checkpoint":{"sequence":2,"watermarks":{},"receipts":{}}}"#,
+    )
+    .unwrap();
     assert!(matches!(
         open_paths::<String, ()>(&rows, &cursor),
         Err(InboxError::Corrupt(_))
@@ -111,24 +115,42 @@ fn acknowledged_prefixes_compact_without_resetting_sequence_identity() {
 }
 
 #[test]
-fn legacy_numeric_cursor_migrates_on_acknowledgement() {
+fn unsupported_checkpoints_are_rejected_before_tail_repair_without_mutation() {
     let (_dir, rows, cursor, inbox) = inbox();
-    let first = inbox.publish("first".into()).unwrap();
-    let second = inbox.publish("second".into()).unwrap();
+    inbox.publish("first".into()).unwrap();
+    inbox.acknowledge(1).unwrap();
+    let current = std::fs::read(&cursor).unwrap();
     drop(inbox);
-    std::fs::write(&cursor, first.sequence.to_string()).unwrap();
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rows)
+        .unwrap()
+        .write_all(b"{\"sequence\":")
+        .unwrap();
+    let retained_rows = std::fs::read(&rows).unwrap();
+    for unsupported in [
+        b"1".as_slice(),
+        br#"{"sequence":1,"watermarks":{}}"#,
+        br#"{"version":1,"checkpoint":{"sequence":1,"watermarks":{},"receipts":{}}}"#,
+        br#"{"version":3,"checkpoint":{"sequence":1,"watermarks":{},"receipts":{}}}"#,
+    ] {
+        std::fs::write(&cursor, unsupported).unwrap();
+        assert!(matches!(
+            open_paths::<String, ()>(&rows, &cursor),
+            Err(InboxError::Corrupt(_))
+        ));
+        assert!(matches!(
+            read_checkpoint::<()>(&cursor),
+            Err(InboxError::Corrupt(_))
+        ));
+        assert_eq!(std::fs::read(&cursor).unwrap(), unsupported);
+        assert_eq!(std::fs::read(&rows).unwrap(), retained_rows);
+    }
+    std::fs::write(&cursor, current).unwrap();
     let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
-    assert_eq!(reopened.pending().unwrap().len(), 1);
-    reopened.acknowledge(second.sequence).unwrap();
-    assert!(std::fs::read_to_string(&cursor).unwrap().starts_with('{'));
-    drop(reopened);
-    assert!(
-        open_paths::<String, ()>(&rows, &cursor)
-            .unwrap()
-            .pending()
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(reopened.cursor(), 1);
+    assert_eq!(reopened.publish("next".into()).unwrap().sequence, 2);
 }
 
 #[test]
@@ -140,12 +162,10 @@ fn publication_watermark_survives_reopen_ack_and_compaction() {
         .unwrap();
     drop(inbox);
     let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
-    assert!(
-        reopened
-            .publish_latest("actor-thread".into(), 10, "replay".into())
-            .unwrap()
-            .is_none()
-    );
+    assert!(reopened
+        .publish_latest("actor-thread".into(), 10, "replay".into())
+        .unwrap()
+        .is_none());
     assert_eq!(reopened.pending().unwrap().len(), 1);
     reopened.acknowledge(first.sequence).unwrap();
     for _ in 1..COMPACT_ACKNOWLEDGED_ROWS {
@@ -155,30 +175,22 @@ fn publication_watermark_survives_reopen_ack_and_compaction() {
     assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
     drop(reopened);
     let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
-    assert!(
-        reopened
-            .publish_latest("actor-thread".into(), 9, "delayed".into())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        reopened
-            .publish_latest("actor-thread".into(), 10, "replay".into())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        reopened
-            .publish_latest("actor-thread".into(), 11, "new failure".into())
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        reopened
-            .publish_latest("another-incarnation".into(), 10, "independent".into())
-            .unwrap()
-            .is_some()
-    );
+    assert!(reopened
+        .publish_latest("actor-thread".into(), 9, "delayed".into())
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .publish_latest("actor-thread".into(), 10, "replay".into())
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .publish_latest("actor-thread".into(), 11, "new failure".into())
+        .unwrap()
+        .is_some());
+    assert!(reopened
+        .publish_latest("another-incarnation".into(), 10, "independent".into())
+        .unwrap()
+        .is_some());
 }
 
 fn tracked() -> (
@@ -203,36 +215,28 @@ fn phase(inbox: &DurableInbox<String, String>, sequence: u64) -> DeliveryPhase {
 }
 
 #[test]
-fn tracked_migration_is_opt_in_and_old_readers_reject_before_rows_are_published() {
+fn current_checkpoint_precedes_tracked_publication_and_missing_evidence_refuses_reopen() {
     let (_dir, rows, cursor, inbox) = tracked();
-    let legacy = inbox.publish("legacy".into()).unwrap();
-    inbox.acknowledge(legacy.sequence).unwrap();
-    assert!(serde_json::from_slice::<LegacyCheckpoint>(&std::fs::read(&cursor).unwrap()).is_ok());
+    let untracked = inbox.publish("untracked".into()).unwrap();
+    inbox.acknowledge(untracked.sequence).unwrap();
+    let checkpoint: VersionedCheckpoint<String> =
+        serde_json::from_slice(&std::fs::read(&cursor).unwrap()).unwrap();
+    assert_eq!(checkpoint.version, 2);
     let row = inbox
         .publish_tracked("tracked".into(), "sender".into())
         .unwrap();
-    let checkpoint = std::fs::read(&cursor).unwrap();
-    #[derive(Deserialize)]
-    #[allow(dead_code)]
-    struct OldCheckpoint {
-        sequence: u64,
-        watermarks: BTreeMap<String, u64>,
-    }
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    #[allow(dead_code)]
-    enum OldCursor {
-        Numeric(u64),
-        Object(OldCheckpoint),
-    }
-    assert!(serde_json::from_slice::<OldCursor>(&checkpoint).is_err());
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&checkpoint).unwrap()["version"],
-        2
-    );
     drop(inbox);
     let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Accepted);
+    drop(reopened);
+    std::fs::remove_file(&cursor).unwrap();
+    let retained = std::fs::read(&rows).unwrap();
+    assert!(
+        matches!(open_paths::<String, String>(&rows, &cursor), Err(InboxError::Corrupt(detail))
+        if detail.contains("prepublication checkpoint"))
+    );
+    assert!(!cursor.exists());
+    assert_eq!(std::fs::read(&rows).unwrap(), retained);
 }
 
 #[test]
@@ -800,11 +804,9 @@ fn redelivery_keeps_payload_and_provenance_and_fences_the_retired_sequence() {
     assert_eq!(phase(&inbox, redelivered.sequence), DeliveryPhase::Accepted);
     assert_eq!(inbox.cursor(), stuck.sequence);
     assert!(inbox.begin_tracked_delivery(stuck.sequence).is_err());
-    assert!(
-        inbox
-            .redeliver_withdrawn(stuck.sequence, &context, true)
-            .is_err()
-    );
+    assert!(inbox
+        .redeliver_withdrawn(stuck.sequence, &context, true)
+        .is_err());
     drop(inbox);
 
     let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
