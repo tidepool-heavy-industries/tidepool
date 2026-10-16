@@ -31,8 +31,15 @@ pub(crate) fn validate_consumed_native_namespace(
 
 /// One availability issuance and exactly the graph custody supporting it.
 /// Propagation can retain or narrow this owner, never rediscover another proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct IssuedNativeOffer(Arc<NativeOfferFacts>);
+
+impl PartialEq for IssuedNativeOffer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.snapshot_facts() == other.snapshot_facts()
+    }
+}
+impl Eq for IssuedNativeOffer {}
 
 #[derive(Debug, PartialEq, Eq)]
 struct NativeOfferFacts {

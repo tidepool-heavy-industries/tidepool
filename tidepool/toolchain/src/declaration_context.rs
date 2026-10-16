@@ -519,6 +519,13 @@ impl OriginalCompilerInputs {
                 native_offers,
             })
         };
+        let carried = carried.filter(|input| {
+            input
+                .projection
+                .roles()
+                .iter()
+                .any(|role| role.original().is_some())
+        });
         if configured.is_empty() {
             return Ok(carried);
         }
@@ -5646,6 +5653,22 @@ impl ExactDeclarationContext {
                 .merge(&issued)?;
             self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
+        let incoming = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+            issued.clone(),
+            self.facts.compiler_support.artifacts.clone(),
+        )?;
+        let offers = self
+            .facts
+            .compiler_support
+            .native_offers
+            .iter()
+            .cloned()
+            .chain(incoming.native_offers().iter().cloned());
+        self.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            self.facts.compiler_support.projection.clone(),
+            self.facts.compiler_support.artifacts.clone(),
+            offers,
+        )?;
         self.finish()
     }
 
@@ -8490,7 +8513,7 @@ mod tests {
         assert_context_observation_wire(&base);
         assert_eq!(
             hex(&base.semantic_sha256()),
-            "2a876d7c68aec718c8d2e1e4ee033729e2dc09734f42289d8808affd256f3ae7"
+            "38c954e31cc17c0b3ea10155e2490d5b3d8155009a7374ba19ac49b53bef0c91"
         );
         let mut complete = base.clone();
         complete = complete.rebuild(|facts| {
@@ -8501,7 +8524,7 @@ mod tests {
         assert_context_observation_wire(&complete);
         assert_eq!(
             hex(&complete.semantic_sha256()),
-            "50bd3d77e4717562be500a7062fe14110271812469fcb774509c7d056a0437c3"
+            "79cefd269cead0be57b9b3d3b4369ee4965a3fdd56479c79f67f11c406e3e497"
         );
         let mut missing = base.clone();
         missing = missing.rebuild(|facts| {
@@ -8514,7 +8537,7 @@ mod tests {
         assert_context_observation_wire(&missing);
         assert_eq!(
             hex(&missing.semantic_sha256()),
-            "73808193ddf0821edf5d002b0a70d83ad48299f2f630d525191c6323801dbaf4"
+            "bdb20f1087c6e7392613622f3e4860c8e3a4a317e1feaa4a2c916298db958f8d"
         );
         let reversed = {
             let mut context = missing.clone();

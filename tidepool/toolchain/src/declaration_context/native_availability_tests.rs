@@ -1722,28 +1722,6 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let full = inventory
         .admit_shared(&inventory.empty_view(), entries.clone())
         .unwrap();
-    let owners = entries
-        .iter()
-        .map(|entry| entry.descriptor.owner.clone())
-        .collect::<Vec<_>>();
-    let narrowed = full.interface_projection(&owners).unwrap();
-    let projection = CompilerInputProjection::from_interface_view(&narrowed).unwrap();
-    let context = Arc::new(ExactDeclarationContext::from_facts(
-        DeclarationContextFacts {
-            producer: producer.sha256(),
-            compiler_support: fixture_compiler_support(projection, narrowed),
-            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-            template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-        },
-    ));
-    let before = context.as_ref().clone();
-    assert!(context
-        .facts
-        .compiler_support
-        .artifacts
-        .selected_native_groups()
-        .is_empty());
     let authored_id = entries
         .iter()
         .find(|entry| entry.descriptor.owner.module == module)
@@ -1771,10 +1749,44 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let proof = crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
         authored_id,
         canonical,
-        &context.facts.compiler_support.artifacts,
+        &full,
     )
     .unwrap()
     .expect("complete authored census was issued before demotion");
+    let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
+        authored_id,
+        &full,
+        Some(proof.clone()),
+    )
+    .unwrap();
+    assert!(offer.is_full());
+    let owners = entries
+        .iter()
+        .map(|entry| entry.descriptor.owner.clone())
+        .collect::<Vec<_>>();
+    let narrowed = full.interface_projection(&owners).unwrap();
+    let projection = CompilerInputProjection::from_interface_view(&narrowed).unwrap();
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                projection,
+                narrowed,
+                [offer],
+            )
+            .unwrap(),
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    let before = context.as_ref().clone();
+    assert!(context
+        .facts
+        .compiler_support
+        .artifacts
+        .selected_native_groups()
+        .is_empty());
     let groups = &proof.selection.graph_selection().native_groups;
     assert!(groups
         .iter()
@@ -4021,6 +4033,15 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
     let right = issue("EmptyRight", 90);
     let left_offer = IssuedNativeOffer::issue(entry.descriptor.id, &left, None).unwrap();
     let right_offer = IssuedNativeOffer::issue(entry.descriptor.id, &right, None).unwrap();
+    assert_eq!(
+        left_offer.custody(),
+        right_offer.custody(),
+        "payload/group view equality cannot identify issuance"
+    );
+    assert_ne!(
+        left_offer, right_offer,
+        "scoped Empty facts survive live offer deduplication"
+    );
     assert_ne!(
         left_offer.custody().capture_graph_selection(),
         right_offer.custody().capture_graph_selection()
@@ -4128,4 +4149,121 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         .iter()
         .all(|role| role.original().is_none()));
     assert!(restored.artifact_view().selected_native_groups().is_empty());
+}
+
+#[test]
+fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawal() {
+    use crate::artifact_inventory::{CompilerSourceSupport, IssuedNativeOffer};
+    use crate::exact_context::{hydrate_context, Materializer};
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), product("BoundOffer", 91)).unwrap());
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let initial = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            artifacts,
+        )
+        .unwrap(),
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let acquire = |context: &ExactDeclarationContext, path: &Path| {
+        std::fs::create_dir_all(path).unwrap();
+        let (products, interfaces) = context
+            .materialize_recovery_products_and_interfaces(path)
+            .unwrap();
+        let graph = context.snapshot().graph_selection().unwrap();
+        RecoveredArtifactInventory::capture_bound(
+            path,
+            &products,
+            &interfaces,
+            &[],
+            &[],
+            &context.artifact_view().descriptors(),
+            &graph.bindings,
+            &context.artifact_view().binding_dependencies(),
+        )
+        .unwrap()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let captured = acquire(&initial, &root.path().join("initial"));
+    let issued = captured
+        .context_all_groups(&[entry.descriptor.id], Vec::new())
+        .unwrap();
+    assert!(issued.facts.compiler_support.native_offers()[0].is_full());
+    assert_eq!(issued.artifact_view().selected_native_groups().len(), 2);
+    let projection = issued.facts.compiler_support.projection.clone();
+    let artifacts = issued
+        .artifact_view()
+        .interface_projection(&[entry.descriptor.owner.clone()])
+        .unwrap()
+        .with_compiler_projection(&projection)
+        .unwrap();
+    assert!(artifacts.selected_native_groups().is_empty());
+    let full = issued.facts.compiler_support.native_offers()[0].clone();
+    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
+    for (index, offer) in [full, empty].into_iter().enumerate() {
+        let support =
+            CompilerSourceSupport::new(projection.clone(), artifacts.clone(), [offer.clone()])
+                .unwrap()
+                .source_support(&BTreeSet::from([entry.descriptor.owner.clone()]))
+                .unwrap();
+        assert_eq!(support.native_offers()[0].is_full(), index == 0);
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: support,
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        assert!(context.artifact_view().selected_native_groups().is_empty());
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let receipt = materializer
+            .materialize_context(None, &context.snapshot())
+            .unwrap();
+        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let receipt = hydrate_context(&store, receipt.root()).unwrap();
+        let recovered = acquire(&context, &root.path().join(format!("recovered-{index}")));
+        let mut restored = recovered.context_with_snapshot(receipt.snapshot()).unwrap();
+        restored.bind_snapshot_baseline(&receipt).unwrap();
+        assert_eq!(
+            restored.facts.compiler_support.native_offers()[0].snapshot_facts(),
+            offer.snapshot_facts()
+        );
+        assert!(restored.artifact_view().selected_native_groups().is_empty());
+        assert!(restored.lexical_graph().is_empty());
+        let request = ExactCompileContext::new(Arc::new(restored))
+            .prepare_compilation(&root.path().join(format!("request-{index}")), PRODUCER)
+            .unwrap();
+        assert_eq!(
+            wire_mode(&request, "BoundOffer"),
+            if index == 0 {
+                full_mode()
+            } else {
+                issued_mode(&[])
+            }
+        );
+        let availability =
+            &request.compiler_inputs().native_transport.availability[&entry.descriptor.id];
+        for ordinal in [7, 9001] {
+            assert_eq!(availability.permits(ordinal), index == 0);
+        }
+        assert!(request
+            .context()
+            .artifact_view()
+            .selected_native_groups()
+            .is_empty());
+    }
 }
