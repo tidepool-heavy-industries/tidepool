@@ -17,6 +17,40 @@
         }
       }
     },
+    "exomonad-host": {
+      "binaries": {
+        "exomonad": {
+          "build": "//exomonad/host:exomonad",
+          "test": "//exomonad/host:exomonad_unit_tests",
+          "test_build": "//exomonad/host:exomonad_unit_tests_binary"
+        },
+        "exomonad-view-helper": {
+          "build": "//exomonad/host:exomonad-view-helper"
+        }
+      },
+      "directory": "exomonad/host",
+      "integration": {
+        "exomonad_action_surface": {
+          "test": "//exomonad/host:exomonad_action_surface",
+          "test_build": "//exomonad/host:exomonad_action_surface_binary"
+        },
+        "exomonad_namespace_entry": {
+          "test": "//exomonad/host:exomonad_namespace_entry",
+          "test_build": "//exomonad/host:exomonad_namespace_entry_binary"
+        },
+        "exomonad_workspace_check": {
+          "test": "//exomonad/host:exomonad_workspace_check",
+          "test_build": "//exomonad/host:exomonad_workspace_check_binary"
+        }
+      },
+      "libraries": {
+        "exomonad_host": {
+          "build": "//exomonad/host:exomonad_host",
+          "test": "//exomonad/host:exomonad_host_unit_tests_all",
+          "test_build": "//exomonad/host:exomonad_host_unit_tests"
+        }
+      }
+    },
     "exomonad-model": {
       "binaries": {},
       "directory": "exomonad/model",
@@ -97,14 +131,6 @@
     },
     "tidepool": {
       "binaries": {
-        "exomonad": {
-          "build": "//bridge/facade:exomonad",
-          "test": "//bridge/facade:exomonad_unit_tests",
-          "test_build": "//bridge/facade:exomonad_unit_tests_binary"
-        },
-        "exomonad-view-helper": {
-          "build": "//bridge/facade:exomonad-view-helper"
-        },
         "tidepool": {
           "build": "//bridge/facade:tidepool_bin"
         },
@@ -117,25 +143,13 @@
         "bridge_decl_guard": {
           "test": "//bridge/facade:bridge_decl_guard",
           "test_build": "//bridge/facade:bridge_decl_guard_binary"
-        },
-        "exomonad_action_surface": {
-          "test": "//bridge/facade:exomonad_action_surface",
-          "test_build": "//bridge/facade:exomonad_action_surface_binary"
-        },
-        "exomonad_namespace_entry": {
-          "test": "//bridge/facade:exomonad_namespace_entry",
-          "test_build": "//bridge/facade:exomonad_namespace_entry_binary"
-        },
-        "exomonad_workspace_check": {
-          "test": "//bridge/facade:exomonad_workspace_check",
-          "test_build": "//bridge/facade:exomonad_workspace_check_binary"
         }
       },
       "libraries": {
         "tidepool": {
           "build": "//bridge/facade:tidepool",
-          "test": "//bridge/facade:tidepool_unit_tests_all",
-          "test_build": "//bridge/facade:tidepool_unit_tests"
+          "test": "//bridge/facade:tidepool_unit_tests",
+          "test_build": "//bridge/facade:tidepool_unit_tests_binary"
         }
       }
     },

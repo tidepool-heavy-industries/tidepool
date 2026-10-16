@@ -272,7 +272,7 @@ tidepool_prepared_corpus(
     source = "test-prepared-stg/ProjectWorkCandidate.hs",
     module = "ProjectWorkCandidate",
     targets_file = "test-prepared-stg/ProjectWorkCandidateTargets",
-    source_roots = [("//bridge/facade:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS,
+    source_roots = [("//exomonad/host:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS,
     visibility = ["PUBLIC"],
 )
 
@@ -286,7 +286,7 @@ tidepool_native_oracle(
     corpus = ":corpus_project_work_candidate",
     module = "ProjectWorkCandidate",
     source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
-    source_roots = [("//bridge/facade:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_project_work_candidate", ""), (":native_oracle_sources", "")],
+    source_roots = [("//exomonad/host:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_project_work_candidate", ""), (":native_oracle_sources", "")],
     classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
     nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
     contract = True,

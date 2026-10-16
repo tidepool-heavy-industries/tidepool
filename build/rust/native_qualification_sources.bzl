@@ -17,6 +17,7 @@ NATIVE_QUALIFICATION_TREES = [
     ("//build/testing/browser:qualification_inputs", ""),
     ("//exomonad/actor:native_qualification_inputs", ""),
     ("//exomonad/examples/workspace:qualification_inputs", ""),
+    ("//exomonad/host:native_qualification_inputs", ""),
     ("//exomonad/jev-integration:native_qualification_inputs", ""),
     ("//exomonad/model:native_qualification_inputs", ""),
     ("//exomonad/node:native_qualification_inputs", ""),

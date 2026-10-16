@@ -1485,9 +1485,9 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name in {"tidepool", "exomonad-host"}:
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
-load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs", "exomonad_host_build_inputs")
+load("//build/rust:facade_build_inputs.bzl", "{source_inputs_rule}")
 load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
-''')
+'''.replace("{source_inputs_rule}", "exomonad_host_build_inputs" if package_name == "exomonad-host" else "tidepool_facade_build_inputs"))
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
     dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True)
     unit_deps, unit_named = dev_deps, dev_named

@@ -241,8 +241,8 @@ protocol_generated(
         "exomonad/actor/src/generated/reflect.rs",
         "exomonad/actor/src/generated/context_read_write.rs",
         "exomonad/actor/src/generated/mod.rs",
-        "bridge/facade/src/generated/recipe_check.rs",
-        "bridge/facade/src/generated/mod.rs",
+        "exomonad/host/src/generated/recipe_check.rs",
+        "exomonad/host/src/generated/mod.rs",
     ],
     visibility = ["PUBLIC"],
 )

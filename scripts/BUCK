@@ -48,6 +48,7 @@ native_source_snapshot(
         ("//build/rust:qualification_inputs", ""),
         ("//build/package:qualification_inputs", ""),
         ("//bridge/facade:native_qualification_inputs", ""),
+        ("//exomonad/host:native_qualification_inputs", ""),
     ],
 )
 
