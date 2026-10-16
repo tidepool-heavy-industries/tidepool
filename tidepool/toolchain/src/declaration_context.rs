@@ -801,10 +801,13 @@ impl OriginalCompilerInputs {
         let unissued = entries
             .iter()
             .filter(|entry| {
-                !native_availability.iter().any(|offer| {
-                    offer.original() == entry.descriptor.id
-                        && matches!(offer, NativeCompilerAvailability::Full(_))
-                })
+                // An authenticated zero-body product exposes no callable group.
+                // Preserve its bounded empty offer, not an invented full proof.
+                !entry.native_group_ordinals.is_empty()
+                    && !native_availability.iter().any(|offer| {
+                        offer.original() == entry.descriptor.id
+                            && matches!(offer, NativeCompilerAvailability::Full(_))
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
