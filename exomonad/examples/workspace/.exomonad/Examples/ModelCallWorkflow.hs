@@ -29,8 +29,13 @@ sol = Model.invokeModel (noToolsTurn Model.Sol)
 
 -- Reuse an ordinary base-row program inside a synchronous notebook. Callbacks
 -- would still use that base row; this particular turn offers no callbacks.
-synchronousLuna :: Text -> Eff (SyncEffects '[Model.ModelCall]) (Model.ModelResult Text)
-synchronousLuna input = raiseSync (luna input :: Eff '[Model.ModelCall] (Model.ModelResult Text))
+synchronousLuna :: (Member Model.ModelCall effects, AsyncEffects effects)
+  => Text -> Eff (SyncEffects effects) (Model.ModelResult Text)
+synchronousLuna = raiseSync . luna
+
+synchronousSol :: (Member Model.ModelCall effects, AsyncEffects effects)
+  => Text -> Eff (SyncEffects effects) (Model.ModelResult Text)
+synchronousSol = raiseSync . sol
 
 -- Keep the original ModelResult bound: this presentation includes the receipt
 -- on both success and failure, without converting a typed failure into success.
