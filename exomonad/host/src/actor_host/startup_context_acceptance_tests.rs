@@ -2,8 +2,8 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    actor_output_origin, commit_workspace, committed_display_text, hosted_script_provider,
-    hosted_test_settings, next_hosted_script_round, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    actor_output_origin, commit_workspace, hosted_script_provider, hosted_test_settings,
+    next_hosted_script_round, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use exomonad_actor::{InitialContextObservation, InitialContextState, JevCallFailure};
 use harness::transport::ResponsesRequest;
@@ -299,6 +299,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     let scenario_attachment = attachment.clone();
     host.run_scenario(|host| {
         Box::pin(async move {
+            let origin =
+                actor_output_origin(host.runtime.run_identity(), host.context.actor.identity());
             let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
             exercise_durable_attachment(&scenario_attachment, &retained).await;
@@ -347,9 +349,11 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 include_str!("fixtures/startup_context_refresh.hs"),
             );
             let refreshed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            assert_eq!(
-                committed_display_text(&refreshed.settled_output("startup-refresh")),
-                "True"
+            refreshed.assert_authored_value(
+                &host.runtime.store(),
+                &origin,
+                "startup-refresh",
+                "True",
             );
             assert_request_user_texts(
                 host,
@@ -365,9 +369,11 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 include_str!("fixtures/startup_context_refresh_again.hs"),
             );
             let repeated = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            assert_eq!(
-                committed_display_text(&repeated.settled_output("startup-refresh-again")),
-                "True"
+            repeated.assert_authored_value(
+                &host.runtime.store(),
+                &origin,
+                "startup-refresh-again",
+                "True",
             );
             assert_request_user_texts(
                 host,
