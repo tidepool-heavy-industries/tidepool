@@ -137,7 +137,21 @@ impl IssuedNativeOffer {
         .descriptor
         .id;
         let (body, custody) = match proof {
-            None => (NativeOfferBody::Empty, source.inventory().empty_view()),
+            None => {
+                let state = source.lease.inventory.0.lock().expect("inventory lock");
+                let binding =
+                    source.resolve_binding(original, &source.read_projection(&state).nodes)?;
+                drop(state);
+                let custody = source.inventory().retain(
+                    Vec::new(),
+                    vec![ArtifactBindingNode::Artifact(binding)],
+                    Vec::new(),
+                    Vec::new(),
+                );
+                let mut custody = source.retain_projected_materializations(custody)?;
+                custody.replace_namespace(&BTreeMap::new());
+                (NativeOfferBody::Empty, custody)
+            }
             Some(proof) => {
                 if proof.original != original {
                     return Err(failure("native offer proof names another original"));
@@ -177,6 +191,71 @@ impl IssuedNativeOffer {
             body,
             custody,
         })))
+    }
+
+    pub(crate) fn snapshot_facts(&self) -> crate::exact_context::NativeOfferSnapshotFacts {
+        use crate::exact_context::{NativeOfferSnapshotBody, NativeOfferSnapshotFacts};
+        NativeOfferSnapshotFacts {
+            original: self.0.original,
+            interface: self.0.interface,
+            owner: self.0.owner.clone(),
+            body: match &self.0.body {
+                NativeOfferBody::Empty => NativeOfferSnapshotBody::Empty,
+                NativeOfferBody::Partial(proof) => {
+                    NativeOfferSnapshotBody::Partial(proof.selection.clone())
+                }
+                NativeOfferBody::Full { proof, .. } => {
+                    NativeOfferSnapshotBody::Full(proof.selection.clone())
+                }
+            },
+        }
+    }
+
+    /// Restore the recorded availability class against authenticated recovered
+    /// custody. Successful qualification cannot upgrade a partial issuance.
+    pub(crate) fn restore_snapshot(
+        facts: &crate::exact_context::NativeOfferSnapshotFacts,
+        source: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        use crate::exact_context::NativeOfferSnapshotBody;
+        let selection = match &facts.body {
+            NativeOfferSnapshotBody::Empty => None,
+            NativeOfferSnapshotBody::Partial(selection)
+            | NativeOfferSnapshotBody::Full(selection) => Some(selection.clone()),
+        };
+        let mut offer = Self::issue(
+            facts.original,
+            source,
+            selection.map(|selection| NativeOriginalRequirement {
+                original: facts.original,
+                selection,
+            }),
+        )?;
+        if offer.0.interface != facts.interface || offer.0.owner != facts.owner {
+            return Err(failure(
+                "recovered native offer differs from its original interface or owner",
+            ));
+        }
+        match &facts.body {
+            NativeOfferSnapshotBody::Full(_) if !offer.is_full() => {
+                return Err(failure("recovered full native offer no longer qualifies"));
+            }
+            NativeOfferSnapshotBody::Partial(_) => {
+                let proof = offer
+                    .proof()
+                    .expect("partial snapshot retains proof")
+                    .clone();
+                offer = Self(Arc::new(NativeOfferFacts {
+                    original: offer.0.original,
+                    interface: offer.0.interface,
+                    owner: offer.0.owner.clone(),
+                    body: NativeOfferBody::Partial(proof),
+                    custody: offer.0.custody.clone(),
+                }));
+            }
+            _ => {}
+        }
+        Ok(offer)
     }
 
     pub(crate) fn original(&self) -> ArtifactId {
@@ -234,6 +313,30 @@ impl IssuedNativeOffer {
             .into_iter()
             .filter(|(group, _)| closure.contains(&InventoryNodeKey::Group(*group)))
             .collect())
+    }
+
+    /// Source support preserves the issuer's availability while selecting only
+    /// offers related to its canonical roles or exact native dependencies.
+    pub(crate) fn is_relevant_to_support(
+        &self,
+        projection: &CompilerInputProjection,
+    ) -> Result<bool, CompileError> {
+        if projection
+            .snapshot_roles()
+            .get(&self.0.owner)
+            .is_some_and(|role| role.interface() == self.0.interface)
+        {
+            return Ok(true);
+        }
+        let originals = projection
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        Ok(self
+            .issued_group_carriers()?
+            .keys()
+            .any(|group| originals.contains(&group.binding.artifact())))
     }
 
     /// Current roles may stop offering an original, or stop qualifying its full

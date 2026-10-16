@@ -160,8 +160,7 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedAuthoredDeclaration {
     product: CertifiedRecoveryProduct,
-    artifacts: crate::artifact_inventory::ArtifactView,
-    compiler_projection: crate::artifact_inventory::CompilerInputProjection,
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     lexical_exports: Vec<DeclarationExport>,
     introduced_exports: Vec<DeclarationExport>,
     instances: InstanceInventory,
@@ -397,6 +396,12 @@ fn source_lexical_surface_inner(
 }
 
 impl CertifiedAuthoredDeclaration {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.compiler_support
+    }
+
     /// Preserve strict shared-source traversal while excluding only certified
     /// session implementation anchors from lexical selection.
     pub fn shared_source_lexical_surface(
@@ -411,7 +416,10 @@ impl CertifiedAuthoredDeclaration {
             .original_home_imports()
             .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
             .collect();
-        let implementations = self.artifacts.source_implementation_roles();
+        let implementations = self
+            .compiler_support
+            .artifacts
+            .source_implementation_roles();
         let mut inherited_by_owner = std::collections::BTreeMap::new();
         for node in inherited.iter().chain(&self.source_lexical_imports) {
             if inherited_by_owner
@@ -439,10 +447,11 @@ impl CertifiedAuthoredDeclaration {
     pub(crate) fn compiler_input_projection(
         &self,
     ) -> &crate::artifact_inventory::CompilerInputProjection {
-        &self.compiler_projection
+        &self.compiler_support.projection
     }
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
-        self.artifacts
+        self.compiler_support
+            .artifacts
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -454,7 +463,7 @@ impl CertifiedAuthoredDeclaration {
             .collect()
     }
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
-        &self.artifacts
+        &self.compiler_support.artifacts
     }
     pub fn lexical_exports(&self) -> &[DeclarationExport] {
         &self.lexical_exports
@@ -704,6 +713,19 @@ fn certify_authored_declaration_inner(
         }),
         &source_imports,
     )?;
+    let issued_inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        compiled
+            .source_selection
+            .as_ref()
+            .expect("validated source selection"),
+        &compiled.artifact_view,
+    )?;
+    let artifact_context = Arc::new(
+        artifact_context
+            .as_ref()
+            .clone()
+            .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
+    );
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         planned::admit_authored_artifact_closure(
             &originals,
@@ -788,8 +810,15 @@ fn certify_authored_declaration_inner(
         authored_compiler_projection(&artifact_context, &artifacts, selected)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        artifacts,
-        compiler_projection,
+        compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+            compiler_projection,
+            artifacts,
+            artifact_context
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .cloned(),
+        )?,
         lexical_exports: inventory.exports,
         introduced_exports,
         instances: inventory.instances,

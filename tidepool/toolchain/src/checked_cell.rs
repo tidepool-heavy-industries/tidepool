@@ -1298,8 +1298,7 @@ pub struct CheckedValueArtifact {
     certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     artifact_view: crate::artifact_inventory::ArtifactView,
     // Exact type/source selection; full native custody above grants no compiler role.
-    compiler_artifact_view: crate::artifact_inventory::ArtifactView,
-    compiler_projection: crate::artifact_inventory::CompilerInputProjection,
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
     directory: Arc<ValueInterfaceDirectory>,
@@ -1726,11 +1725,14 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate,
-            compiler_projection: context
-                .compiler_input_projection()
-                .interface_only()
-                .within_view(&artifact_view),
-            compiler_artifact_view: artifact_view.clone(),
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                context
+                    .compiler_input_projection()
+                    .interface_only()
+                    .within_view(&artifact_view),
+                artifact_view.clone(),
+                [],
+            )?,
             artifact_view,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -2142,7 +2144,7 @@ impl CheckedValueInputs {
         };
         let crate::declaration_context::RetainedValueSourceSurface {
             artifacts: artifact_view,
-            compiler_artifacts: compiler_artifact_view,
+            compiler_support: retained_support,
             lexical: source_lexical,
         } = match support {
             Some(support) => support.retain_output(&certificate)?,
@@ -2162,6 +2164,7 @@ impl CheckedValueInputs {
             Some(retained) => retained.retain_in(&artifact_view)?,
             None => artifact_view,
         };
+        let compiler_artifact_view = retained_support.artifacts().clone();
         let compiler_artifact_view = match &template_imports {
             Some(retained) => retained.retain_in(&compiler_artifact_view)?,
             None => compiler_artifact_view,
@@ -2186,8 +2189,11 @@ impl CheckedValueInputs {
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
             artifact_view,
-            compiler_artifact_view,
-            compiler_projection,
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                compiler_projection,
+                compiler_artifact_view,
+                retained_support.native_offers().iter().cloned(),
+            )?,
             source_lexical,
             template_imports,
             directory: self.directory.clone(),
@@ -2197,10 +2203,15 @@ impl CheckedValueInputs {
 }
 
 impl CheckedValueArtifact {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.compiler_support
+    }
     pub(crate) fn compiler_input_projection(
         &self,
     ) -> &crate::artifact_inventory::CompilerInputProjection {
-        &self.compiler_projection
+        &self.compiler_support.projection
     }
     pub fn owner(&self) -> tidepool_repr::SessionModule {
         self.interface.owner
@@ -2215,7 +2226,7 @@ impl CheckedValueArtifact {
         &self.artifact_view
     }
     pub(crate) fn compiler_artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
-        &self.compiler_artifact_view
+        &self.compiler_support.artifacts
     }
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
         &self.source_lexical

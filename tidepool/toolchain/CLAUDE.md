@@ -244,6 +244,14 @@ its own carrier and group graph against the selected canonical binding. Broader
 custody cannot supply missing groups or veto an exact proof. Ambient discovery
 belongs only to the absence of a supplied or selected proof.
 
+`CompilerSourceSupport` carries issued roles, graph custody and immutable native
+offers together through context publication and retained values. Narrowing type
+or execution selection does not reissue body availability. Requests consume
+carried offers; they do not census broader context custody. Context snapshot v3
+records exact offer selections and Empty/Partial/Full mode. Reopening authenticates
+those references and preserves the recorded mode, even when a partial graph can
+now qualify as complete. Older snapshots require regeneration.
+
 Compiler transport combines authenticated body availability while retaining each
 offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct
 issuance scopes; transport neither selects nor collapses those bindings. Full

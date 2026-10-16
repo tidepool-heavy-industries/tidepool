@@ -72,6 +72,7 @@ pub trait SnapshotKey: Ord + Clone + Serialize + DeserializeOwned {
 }
 
 impl SnapshotKey for u64 {}
+impl SnapshotKey for [u8; 32] {}
 impl SnapshotKey for String {}
 impl SnapshotKey for ArtifactId {}
 impl SnapshotKey for ArtifactSelectionId {}
@@ -967,6 +968,127 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
     }
 }
 
+/// Availability is an issuance fact independent of compiler roles and execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeOfferSnapshotBody {
+    Empty,
+    Partial(crate::artifact_inventory::ExactArtifactSelection),
+    Full(crate::artifact_inventory::ExactArtifactSelection),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeOfferSnapshotFacts {
+    pub(crate) original: ArtifactId,
+    pub(crate) interface: ArtifactId,
+    pub(crate) owner: ExactModuleIdentity,
+    pub(crate) body: NativeOfferSnapshotBody,
+}
+impl NativeOfferSnapshotFacts {
+    pub(crate) fn identity(&self) -> Result<[u8; 32], crate::CompileError> {
+        use sha2::{Digest, Sha256};
+        let (mode, selection) = match &self.body {
+            NativeOfferSnapshotBody::Empty => (0u8, None),
+            NativeOfferSnapshotBody::Partial(selection) => {
+                (1u8, Some(selection.observation_digest()?))
+            }
+            NativeOfferSnapshotBody::Full(selection) => {
+                (2u8, Some(selection.observation_digest()?))
+            }
+        };
+        let bytes = fvm_ipld_encoding::to_vec(&(
+            self.original,
+            self.interface,
+            &self.owner,
+            mode,
+            selection,
+        ))
+        .map_err(|error| {
+            crate::CompileError::ExtractFailed(format!("native offer identity: {error}"))
+        })?;
+        let mut digest = Sha256::new();
+        digest.update(b"Tidepool native offer fact v1\0");
+        digest.update(bytes);
+        Ok(digest.finalize().into())
+    }
+    pub(crate) fn restore(
+        &self,
+        source: &crate::artifact_inventory::ArtifactView,
+    ) -> Result<crate::artifact_inventory::IssuedNativeOffer, crate::CompileError> {
+        crate::artifact_inventory::IssuedNativeOffer::restore_snapshot(self, source)
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum NativeOfferBodyWire {
+    Empty,
+    Partial { selection: SelectionRoot },
+    Full { selection: SelectionRoot },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeOfferWire {
+    original: ArtifactId,
+    interface: ArtifactId,
+    owner: ExactModuleIdentity,
+    body: NativeOfferBodyWire,
+}
+#[derive(Clone, Copy, Debug)]
+struct NativeOfferCodec;
+impl SnapshotValueCodec<NativeOfferSnapshotFacts> for NativeOfferCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        facts: &NativeOfferSnapshotFacts,
+    ) -> Result<Cid, SnapshotError> {
+        let body = match &facts.body {
+            NativeOfferSnapshotBody::Empty => NativeOfferBodyWire::Empty,
+            NativeOfferSnapshotBody::Partial(selection)
+            | NativeOfferSnapshotBody::Full(selection) => {
+                let base = store.selection_base.clone();
+                let selection = store
+                    .materialize_selection(base.as_ref(), selection.snapshot())?
+                    .root;
+                match &facts.body {
+                    NativeOfferSnapshotBody::Partial(_) => {
+                        NativeOfferBodyWire::Partial { selection }
+                    }
+                    _ => NativeOfferBodyWire::Full { selection },
+                }
+            }
+        };
+        store.materialize_value(&NativeOfferWire {
+            original: facts.original,
+            interface: facts.interface,
+            owner: facts.owner.clone(),
+            body,
+        })
+    }
+    fn decode<BS: Blockstore>(
+        store: &BS,
+        cid: Cid,
+    ) -> Result<NativeOfferSnapshotFacts, SnapshotError> {
+        let wire: NativeOfferWire = read_value(store, &cid)?;
+        let body = match wire.body {
+            NativeOfferBodyWire::Empty => NativeOfferSnapshotBody::Empty,
+            NativeOfferBodyWire::Partial { selection } => NativeOfferSnapshotBody::Partial(
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    hydrate_selection(store, &selection)?.snapshot,
+                ),
+            ),
+            NativeOfferBodyWire::Full { selection } => NativeOfferSnapshotBody::Full(
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    hydrate_selection(store, &selection)?.snapshot,
+                ),
+            ),
+        };
+        Ok(NativeOfferSnapshotFacts {
+            original: wire.original,
+            interface: wire.interface,
+            owner: wire.owner,
+            body,
+        })
+    }
+}
+
 /// Exact compiler facts. Source-instance authority remains with the live
 /// declaration/transaction owner and is deliberately absent from this snapshot.
 #[derive(Clone, Debug, Default)]
@@ -975,8 +1097,12 @@ pub struct ExactContextSnapshot {
     pub(crate) selection: Arc<ExactSelectionSnapshot>,
     pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
     pub(crate) lexical: ExactLexicalSnapshot,
+    pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
 }
 impl ExactContextSnapshot {
+    pub(crate) fn native_offers(&self) -> impl Iterator<Item = &NativeOfferSnapshotFacts> {
+        self.offers.values()
+    }
     pub fn empty() -> Self {
         Self::default()
     }
@@ -1113,6 +1239,7 @@ struct ContextDescriptor {
     selection: SelectionRoot,
     roles: SnapshotMapRoot,
     lexical: SnapshotMapRoot,
+    offers: SnapshotMapRoot,
 }
 #[derive(Clone, Debug)]
 pub struct MaterializedContext {
@@ -1121,6 +1248,7 @@ pub struct MaterializedContext {
     selection: MaterializedSelection,
     roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
+    offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
 }
 impl MaterializedContext {
     pub fn root(&self) -> &ContextRoot {
@@ -1147,18 +1275,24 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.lexical),
             &next.lexical.facts,
         )?;
+        let offers = self.materialize_map_with::<_, _, NativeOfferCodec>(
+            base.map(|base| &base.offers),
+            &next.offers,
+        )?;
         let descriptor = ContextDescriptor {
-            version: 2,
+            version: 3,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
             lexical: lexical.root.clone(),
+            offers: offers.root.clone(),
         };
         let root = if base.is_some_and(|base| {
             base.snapshot.producer == next.producer
                 && base.selection.root == selection.root
                 && base.roles.root == roles.root
                 && base.lexical.root == lexical.root
+                && base.offers.root == offers.root
         }) {
             base.expect("equal context implies base").root.clone()
         } else {
@@ -1170,6 +1304,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             selection,
             roles,
             lexical,
+            offers,
         })
     }
 }
@@ -1178,7 +1313,7 @@ pub fn hydrate_context<BS: Blockstore>(
     root: &ContextRoot,
 ) -> Result<MaterializedContext, SnapshotError> {
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 2 {
+    if descriptor.version != 3 {
         return Err(malformed("context encoding version"));
     }
     let selection = hydrate_selection(store, &descriptor.selection)?;
@@ -1192,10 +1327,17 @@ pub fn hydrate_context<BS: Blockstore>(
     {
         return Err(malformed("lexical key differs from fact owner"));
     }
+    let offers = hydrate_map_with::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
+    for (identity, fact) in offers.facts.iter() {
+        if *identity != fact.identity().map_err(malformed)? {
+            return Err(malformed("native offer key differs from fact identity"));
+        }
+    }
     let snapshot = ExactContextSnapshot {
         producer: descriptor.producer,
         selection: selection.snapshot.clone(),
         roles: roles.facts.clone(),
+        offers: offers.facts.clone(),
         lexical: ExactLexicalSnapshot {
             facts: lexical.facts.clone(),
             rows: Arc::new(OnceLock::new()),
@@ -1207,6 +1349,7 @@ pub fn hydrate_context<BS: Blockstore>(
         selection,
         roles,
         lexical,
+        offers,
     })
 }
 
