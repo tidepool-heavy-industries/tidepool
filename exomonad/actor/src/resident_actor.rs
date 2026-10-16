@@ -622,6 +622,8 @@ impl ResidentActorRecord {
 
 const DEFAULT_DISPLAY_CHARACTER_ALLOWANCE: i64 = 8192;
 const DISPLAY_METADATA_BYTE_LIMIT: usize = 8192;
+// Existing named-tool wire allowance, independent of effect display evidence.
+const NAMED_TOOL_PRESENTATION_BYTES: usize = 28 * 1024;
 
 /// Reserve the output separator and four UTF-8 bytes per character so an
 /// accepted page fits the existing transport allowance without truncation.
@@ -9674,7 +9676,7 @@ where
                             // Effect evidence remains in operation receipts and
                             // their retained command/display owners.
                             unit.command_output.clear();
-                            *unit.display_remaining = 28usize * 1024;
+                            *unit.display_remaining = NAMED_TOOL_PRESENTATION_BYTES;
                             let runner = self.environment.runner.clone();
                             let context = context.clone();
                             current.native_start =
@@ -10778,7 +10780,7 @@ where
                             cursor.unit = WorkbenchUnitState::default();
                             // Leave room for a later stop/error receipt without hiding offered command output.
                             let display_budget = if request.tool_call().is_some() {
-                                28usize * 1024
+                                NAMED_TOOL_PRESENTATION_BYTES
                             } else {
                                 60usize * 1024
                             };
