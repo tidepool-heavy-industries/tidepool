@@ -2487,6 +2487,7 @@ impl ArtifactInventory {
             entries: closed_entries,
             issuing_ids,
             dependencies: OnceLock::new(),
+            metadata: OnceLock::new(),
         };
         commit.commit(&mut state);
         scope_proof::install(&mut state, prepared_proofs);
@@ -2537,6 +2538,7 @@ impl ArtifactInventory {
                 entries: previous.entries.clone(),
                 issuing_ids: previous.issuing_ids.clone(),
                 dependencies: OnceLock::new(),
+                metadata: OnceLock::new(),
             })
         };
         let totals = (
@@ -3489,7 +3491,8 @@ struct ViewReadProjection {
     nodes: imbl::OrdSet<InventoryNodeKey>,
     entries: imbl::Vector<Arc<ArtifactEntry>>,
     issuing_ids: imbl::OrdSet<ArtifactId>,
-    dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
+    dependencies: OnceLock<Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>>,
+    metadata: OnceLock<Arc<RetainedArtifactMetadata>>,
 }
 impl ViewLease {
     fn lock_materialization(
@@ -3781,27 +3784,15 @@ pub struct ArtifactView {
 
 /// One retained closure observed under the inventory lock. Entries are ordered
 /// by exact owner; dependency tuples keep their canonical wire order.
-pub(crate) struct ArtifactMetadataSnapshot {
+pub(crate) struct RetainedArtifactMetadata {
     pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub artifacts: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     pub ambiguous_native_owners: BTreeSet<ExactModuleIdentity>,
-    dependencies: Vec<(ArtifactId, ArtifactId, ArtifactDependency)>,
+    dependencies: Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
     pub(crate) selected_native_groups: BTreeSet<NativeGroupKey>,
 }
 
-impl ArtifactMetadataSnapshot {
-    pub(crate) fn materialization_key(&self) -> [u8; 32] {
-        digest(
-            &serde_json::to_vec(&(
-                self.entries
-                    .values()
-                    .map(|entry| entry.descriptor.id)
-                    .collect::<Vec<_>>(),
-                &self.selected_native_groups,
-            ))
-            .expect("compiler projection materialization key"),
-        )
-    }
+impl RetainedArtifactMetadata {
     pub(crate) fn validate_native_selection(&self) -> Result<(), CompileError> {
         if let Some(owner) = self.ambiguous_native_owners.first() {
             return Err(admission_failure(
@@ -3823,10 +3814,42 @@ impl ArtifactMetadataSnapshot {
         descriptors.sort_by_key(|descriptor| (&descriptor.owner, descriptor.id));
         descriptors
     }
-    pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
-        self.dependencies.clone()
+    pub fn dependencies(&self) -> &[(ArtifactId, ArtifactId, ArtifactDependency)] {
+        self.dependencies.as_slice()
     }
 }
+/// A role-selected compiler namespace over immutable retained custody.
+pub(crate) struct CompilerArtifactMetadata {
+    pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    retained: Arc<RetainedArtifactMetadata>,
+}
+
+impl std::ops::Deref for CompilerArtifactMetadata {
+    type Target = RetainedArtifactMetadata;
+    fn deref(&self) -> &Self::Target {
+        &self.retained
+    }
+}
+
+impl CompilerArtifactMetadata {
+    pub(crate) fn materialization_key(&self) -> [u8; 32] {
+        digest(
+            &serde_json::to_vec(&(
+                self.entries
+                    .values()
+                    .map(|entry| entry.descriptor.id)
+                    .collect::<Vec<_>>(),
+                &self.selected_native_groups,
+            ))
+            .expect("compiler projection materialization key"),
+        )
+    }
+    pub(crate) fn validate_native_selection(&self) -> Result<(), CompileError> {
+        // Construction checks every role against the retained exact artifacts.
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for ArtifactView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArtifactView")
@@ -3938,6 +3961,7 @@ impl ArtifactView {
                 nodes,
                 entries: entries.into_iter().collect(),
                 dependencies: OnceLock::new(),
+                metadata: OnceLock::new(),
             }
         })
     }
@@ -3945,18 +3969,18 @@ impl ArtifactView {
     fn read_dependencies(
         &self,
         state: &InventoryState,
-    ) -> &Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
+    ) -> &Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>> {
         let projection = self.read_projection(state);
         projection
             .dependencies
-            .get_or_init(|| projected_dependencies(state, &projection.nodes))
+            .get_or_init(|| Arc::new(projected_dependencies(state, &projection.nodes)))
     }
 
     /// Private materialization belongs to this immutable graph view. Failed
     /// preparation leaves no retained entry; descendants borrow completed owners.
     pub(crate) fn retain_materialization(
         &self,
-        metadata: &ArtifactMetadataSnapshot,
+        metadata: &CompilerArtifactMetadata,
         prepare: impl FnOnce(
             Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         ) -> Result<
@@ -4028,7 +4052,7 @@ impl ArtifactView {
 
     pub(crate) fn retained_materialization(
         &self,
-        metadata: &ArtifactMetadataSnapshot,
+        metadata: &CompilerArtifactMetadata,
     ) -> Result<
         Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         CompileError,
@@ -4039,47 +4063,49 @@ impl ArtifactView {
             .get(&metadata.materialization_key())
             .cloned())
     }
-    pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
+    pub(crate) fn metadata_snapshot(&self) -> Arc<RetainedArtifactMetadata> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         let projection = self.read_projection(&state);
-        let selected_native_groups = native_groups(self.selected_nodes(&state));
-        let mut entries = BTreeMap::new();
-        let mut artifacts = BTreeMap::new();
-        let dependencies = self.read_dependencies(&state).clone();
-        let mut natives = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
-        for entry in &projection.entries {
-            let id = entry.descriptor.id;
-            let owner = entry.descriptor.owner.clone();
-            if entry.is_native() {
-                natives.entry(owner).or_default().push(id);
-            } else {
-                entries.insert(owner, id);
+        Arc::clone(projection.metadata.get_or_init(|| {
+            let selected_native_groups = native_groups(self.selected_nodes(&state));
+            let mut entries = BTreeMap::new();
+            let mut artifacts = BTreeMap::new();
+            let dependencies = self.read_dependencies(&state).clone();
+            let mut natives = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
+            for entry in &projection.entries {
+                let id = entry.descriptor.id;
+                let owner = entry.descriptor.owner.clone();
+                if entry.is_native() {
+                    natives.entry(owner).or_default().push(id);
+                } else {
+                    entries.insert(owner, id);
+                }
+                artifacts.insert(id, Arc::clone(entry));
             }
-            artifacts.insert(id, Arc::clone(entry));
-        }
-        let mut ambiguous_native_owners = BTreeSet::new();
-        for (owner, ids) in natives {
-            if ids.len() == 1 {
-                entries.insert(owner, ids[0]);
-            } else {
-                ambiguous_native_owners.insert(owner);
+            let mut ambiguous_native_owners = BTreeSet::new();
+            for (owner, ids) in natives {
+                if ids.len() == 1 {
+                    entries.insert(owner, ids[0]);
+                } else {
+                    ambiguous_native_owners.insert(owner);
+                }
             }
-        }
-        let entries = entries
-            .into_iter()
-            .map(|(owner, id)| (owner, Arc::clone(&artifacts[&id])))
-            .collect::<BTreeMap<_, _>>();
-        state
-            .entry_handle_copies
-            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
-        ArtifactMetadataSnapshot {
-            entries,
-            artifacts,
-            dependencies,
-            ambiguous_native_owners,
-            selected_native_groups,
-        }
+            let entries = entries
+                .into_iter()
+                .map(|(owner, id)| (owner, Arc::clone(&artifacts[&id])))
+                .collect::<BTreeMap<_, _>>();
+            state
+                .entry_handle_copies
+                .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
+            Arc::new(RetainedArtifactMetadata {
+                entries,
+                artifacts,
+                dependencies,
+                ambiguous_native_owners,
+                selected_native_groups,
+            })
+        }))
     }
 
     /// Observe issued roots independently of retained native byte custody.
@@ -4165,7 +4191,7 @@ impl ArtifactView {
 
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        self.read_dependencies(&state).clone()
+        self.read_dependencies(&state).as_ref().clone()
     }
     pub fn selected_native_groups(&self) -> BTreeSet<NativeGroupKey> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
@@ -5517,7 +5543,9 @@ mod tests {
             CompilerTransactionClose,
         };
         let view = ArtifactInventory::default().empty_view();
-        let metadata = view.metadata_snapshot();
+        let metadata = CompilerInputProjection::default()
+            .project_metadata(view.metadata_snapshot())
+            .unwrap();
         let held = view.lease.materialization.lock().unwrap();
         let cancellation = CompilerTransactionCancellation::new();
         let (entered, observed) = std::sync::mpsc::channel();
@@ -9833,7 +9861,7 @@ mod tests {
                 }).collect::<BTreeSet<_>>();
                 proptest::prop_assert_eq!(view.roots().iter().copied().collect::<BTreeSet<_>>(), selected_roots.clone());
                 proptest::prop_assert_eq!(view.selected_native_groups(), expected_groups.clone());
-                proptest::prop_assert_eq!(view.metadata_snapshot().selected_native_groups, expected_groups);
+                proptest::prop_assert_eq!(&view.metadata_snapshot().selected_native_groups, &expected_groups);
                 if selected_roots.is_empty() {
                     proptest::prop_assert!(view.namespace().is_empty());
                     for original in &fixture.originals {
@@ -10996,6 +11024,22 @@ mod tests {
         assert!(view
             .entries_for_owners(std::iter::once(original_owner.clone()))
             .is_err());
+        assert!(metadata.validate_native_selection().is_err());
+        let compiler = CompilerInputProjection::from_issued_entries(&[Arc::new(first.clone())])
+            .unwrap()
+            .project_metadata(Arc::clone(&metadata))
+            .unwrap();
+        assert!(compiler.validate_native_selection().is_ok());
+        assert_eq!(
+            compiler.entries[&original_owner].descriptor.id,
+            first.descriptor.id
+        );
+        assert!(Arc::ptr_eq(&compiler.retained, &metadata));
+        assert!(metadata.validate_native_selection().is_err());
+        assert!(view
+            .metadata_snapshot()
+            .ambiguous_native_owners
+            .contains(&original_owner));
         let carrier = match &first.payload {
             ArtifactPayload::Original(product) => {
                 ArtifactEntry::canonical(product.module_interface().unwrap().clone())
@@ -12096,6 +12140,57 @@ mod tests {
     }
 
     #[test]
+    fn detached_metadata_retains_only_its_closure_and_clones_share_observation() {
+        let inventory = ArtifactInventory::default();
+        let parent = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![entry("Kept", &[]), entry("Unrelated", &[])],
+            )
+            .unwrap();
+        let parent_metadata = parent.metadata_snapshot();
+        let parent_observation = Arc::downgrade(&parent_metadata);
+        let kept = parent_metadata
+            .entries
+            .values()
+            .find(|entry| entry.descriptor.owner.module == "Kept")
+            .unwrap()
+            .descriptor
+            .id;
+        let unrelated = parent_metadata
+            .entries
+            .values()
+            .find(|entry| entry.descriptor.owner.module == "Unrelated")
+            .unwrap();
+        let unrelated_payload = Arc::downgrade(unrelated);
+        let selected = parent.select_roots(vec![kept]).unwrap();
+        let metadata = selected.metadata_snapshot();
+        let clone = selected.clone();
+        let warm = inventory.metrics();
+        for _ in 0..4 {
+            assert!(Arc::ptr_eq(&metadata, &clone.metadata_snapshot()));
+        }
+        assert_eq!(
+            inventory.metrics().entry_handle_copies,
+            warm.entry_handle_copies
+        );
+        assert!(!Arc::ptr_eq(&metadata, &parent_metadata));
+        let lease = Arc::downgrade(&selected.lease);
+        let reads = Arc::downgrade(&selected.reads);
+        drop(parent_metadata);
+        drop(parent);
+        assert!(parent_observation.upgrade().is_none());
+        assert!(unrelated_payload.upgrade().is_none());
+        drop(selected);
+        drop(clone);
+        assert!(lease.upgrade().is_none());
+        assert!(reads.upgrade().is_none());
+        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(metadata.artifacts.len(), 1);
+        assert!(metadata.artifacts.contains_key(&kept));
+    }
+
+    #[test]
     fn metadata_snapshot_preserves_canonical_typed_edges_in_one_closure() {
         let inventory = ArtifactInventory::default();
         let original =
@@ -12137,6 +12232,7 @@ mod tests {
             expected_descriptors,
         );
         assert_eq!(metadata.dependencies(), expected_dependencies);
+        assert!(Arc::ptr_eq(&metadata, &view.clone().metadata_snapshot()));
         let after = inventory.metrics();
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
