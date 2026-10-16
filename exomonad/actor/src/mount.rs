@@ -519,6 +519,16 @@ pub trait ActorSourceLayers: Send + Sync {
         ))
     }
 
+    /// Locate a module in this issued graph without consulting draft paths or
+    /// reading its body. A returned revision supports `readSourceModule`.
+    fn locate_module(
+        &self,
+        _source: &CheckpointSourceLayer,
+        _module: &str,
+    ) -> Result<Option<String>, SourceInspectionError> {
+        Ok(None)
+    }
+
     fn revision(
         &self,
         _source: &CheckpointSourceLayer,

@@ -307,6 +307,12 @@ instance Display LookupHit where
      ("query", displayTree (hitQuery hit)), ("name", displayTree (hitName hit)),
      ("module", displayTree (hitModule hit)), ("status", TextLeaf (hitStatus hit)),
      ("sections", TextLeaf (T.pack (show (hitSections hit))))]
+numberedExcerpt :: LookupExcerpt -> Text
+numberedExcerpt excerpt = T.concat
+  [T.pack (show number) <> ": " <> line
+  | (number, line) <- zip [first..] (retainedLines (excerptText excerpt))]
+  where first = case excerptLines excerpt of Just (LookupLines start _) -> start; Nothing -> 1
+
 instance Display LookupExcerpt where
   displayTree excerpt = Constructor "LookupExcerpt"
     [("batch", displayTree (excerptBatchIdentity excerpt)), ("view", displayTree (excerptView excerpt)), ("address", TextLeaf (T.pack (show (excerptAddress excerpt)))),
@@ -315,7 +321,7 @@ instance Display LookupExcerpt where
      ("availability", TextLeaf (T.pack (show (excerptAvailability excerpt)))), ("quality", TextLeaf (T.pack (show (excerptQuality excerpt)))),
      ("locator", displayTree (excerptLocator excerpt)), ("sourceIdentity", displayTree (excerptSourceIdentity excerpt)),
      ("lines", TextLeaf (T.pack (show (excerptLines excerpt)))), ("extent", TextLeaf (T.pack (show (excerptExtent excerpt)))),
-     ("unavailable", displayTree (excerptUnavailable excerpt)), ("text", TextLeaf (excerptText excerpt))]
+     ("unavailable", displayTree (excerptUnavailable excerpt)), ("text", TextLeaf (numberedExcerpt excerpt))]
 instance Display LookupSelectionIssue where displayTree = TextLeaf . T.pack . show
 instance Display LookupCaptureExcerpt where
   displayTree excerpt = Constructor "LookupCaptureExcerpt"

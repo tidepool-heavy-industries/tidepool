@@ -599,6 +599,43 @@ pub(crate) fn note_request_only_bindings(batch: &mut LookupBatch) {
     }
 }
 
+/// Enrich only identities confirmed by the issued source owner. Lookup's
+/// declaration module is not evidence of an editable filesystem location.
+pub(crate) fn attach_source_locators(
+    batch: &mut LookupBatch,
+    mut locate: impl FnMut(&str) -> Result<Option<String>, crate::SourceInspectionError>,
+) {
+    let mut observations = std::collections::BTreeMap::new();
+    for result in &mut batch.results {
+        let entries = match &mut result.outcome {
+            LookupOutcome::Found(entries, _) | LookupOutcome::Ambiguous(entries, _) => entries,
+            _ => continue,
+        };
+        for entry in entries {
+            if !matches!(&entry.origin, LookupOrigin::ModuleExport) {
+                continue;
+            }
+            let Some(module) = entry.module.as_deref() else {
+                continue;
+            };
+            let observation = observations
+                .entry(module.to_owned())
+                .or_insert_with(|| locate(module));
+            let detail = match observation {
+                Ok(Some(revision)) => format!(
+                    "Captured source (requires Source): readSourceModule {module:?}; issued revision {revision}. Draft files may differ."
+                ),
+                Ok(None) => continue,
+                Err(error) => format!("Captured source locator unavailable: {error}"),
+            };
+            entry.contract = Some(match entry.contract.take() {
+                Some(contract) => format!("{contract}\n{detail}"),
+                None => detail,
+            });
+        }
+    }
+}
+
 pub(crate) fn execute(
     request: LookupRequest,
     view: String,
@@ -1417,6 +1454,71 @@ mod tests {
             references: vec![],
         }
     }
+    #[test]
+    fn captured_source_routes_use_owner_identity_and_preserve_absence_and_failure() {
+        let make_entry = |module: &str| LookupEntry {
+            name: "work".into(),
+            module: Some(module.into()),
+            declaration: "work :: Int".into(),
+            kind: LookupKind::Value,
+            availability: LookupAvailability::Available,
+            origin: LookupOrigin::ModuleExport,
+            quality: LookupQuality::Exact,
+            usage: None,
+            contract: Some("Original contract".into()),
+            example: None,
+        };
+        let mut batch = LookupBatch {
+            identity: "capture".into(),
+            view: "view".into(),
+            issue: None,
+            candidates: vec![],
+            search_receipt: LookupSearchReceipt::new("view".into(), false),
+            results: vec![LookupResult {
+                query: "work".into(),
+                outcome: LookupOutcome::Found(
+                    vec![
+                        make_entry("Captured.Work"),
+                        make_entry("Captured.Work"),
+                        make_entry("Installed.Library"),
+                        make_entry("Broken.Source"),
+                    ],
+                    false,
+                ),
+            }],
+        };
+        let mut observed = Vec::new();
+        attach_source_locators(&mut batch, |module| {
+            observed.push(module.to_owned());
+            match module {
+                "Captured.Work" => Ok(Some("issued-original".into())),
+                "Installed.Library" => Ok(None),
+                _ => Err(crate::SourceInspectionError::Unavailable(
+                    "owner refused".into(),
+                )),
+            }
+        });
+        assert_eq!(
+            observed,
+            ["Captured.Work", "Installed.Library", "Broken.Source"]
+        );
+        let LookupOutcome::Found(entries, _) = &batch.results[0].outcome else {
+            panic!("found")
+        };
+        assert!(entries[0]
+            .contract
+            .as_ref()
+            .unwrap()
+            .contains("readSourceModule \"Captured.Work\"; issued revision issued-original"));
+        assert_eq!(entries[0].contract, entries[1].contract);
+        assert_eq!(entries[2].contract.as_deref(), Some("Original contract"));
+        assert!(entries[3]
+            .contract
+            .as_ref()
+            .unwrap()
+            .contains("locator unavailable: source unavailable: owner refused"));
+    }
+
     #[test]
     fn qualified_module_parent_names_and_references_share_inspection() {
         let calls = Cell::new(0);

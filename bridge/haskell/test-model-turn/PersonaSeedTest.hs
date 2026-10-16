@@ -115,13 +115,15 @@ personaSeedTests = testGroup "persona seed"
           companionBase = toolEffectNames (Proxy @Spec.PersonaEffects)
           helperBase = toolEffectNames (Proxy @Spec.HelperEffects)
       mapM_ (\effect -> assertBool ("companion: " ++ show effect) (effect `elem` companion))
-        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser"]
+        ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "ResourceScopes", "FsWrite", "AskUser", "ModelCall"]
       mapM_ (\effect -> assertBool ("helper: " ++ show effect) (effect `elem` helper))
         ["ContextReadWrite", "Actor", "AgentLaunch", "Replies", "Watches", "Web", "Jev"]
       mapM_ (\effect -> assertBool ("excluded: " ++ show effect) (effect `notElem` companion && effect `notElem` helper))
         ["Commands", "Http"]
       assertBool "default helper returns findings rather than writing shared memory or mounting human forms"
         ("FsWrite" `notElem` helper && "AskUser" `notElem` helper)
+      assertBool "bounded model calls are enabled for the companion only"
+        ("ModelCall" `elem` companionBase && "ModelCall" `notElem` helperBase)
       mapM_ (\effect -> assertBool ("invocation-only: " ++ show effect)
         (effect `notElem` companionBase && effect `notElem` helperBase))
         ["ContextReadWrite", "Reload"]

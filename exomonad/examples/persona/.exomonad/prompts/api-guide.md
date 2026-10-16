@@ -138,6 +138,7 @@ Lookup names such as `Files.readFile` or `Persona.Web.search` for their declarat
 | Agent requests, Await and settlement | `doc exomonad-agent-work`, `doc request` |
 | Stateful actors and mailbox constraints | `doc exomonad-define-actors` |
 | Resource ownership and cleanup receipts | `doc exomonad-cleanup` |
+| Bounded text or typed model calls | `doc model-call` |
 | Semantic judgments and continuations | `doc exomonad-jev` |
 | Optional Git delivery and review | `doc exomonad-project-work`, `doc exomonad-review` |
 
@@ -145,3 +146,8 @@ Optional inherited compositions and ancestor suggestions are ordinary files:
 `.exomonad/prompts/references/companion-compositions.md` and
 `.exomonad/prompts/references/typesafe-compositions.md`. Read them with
 `Files.readFile` when useful. They are possibilities, not standing direction.
+
+The root notebook admits `ModelCall`; helpers retain their separately declared
+effect row. `doc model-call` gives the complete NoTools Luna example and a Sol
+variant. Typed selection resolves against frozen workspace policy; credentials
+and an actual successful provider receipt remain separate observations.

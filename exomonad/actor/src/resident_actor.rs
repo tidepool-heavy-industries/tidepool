@@ -6001,6 +6001,11 @@ where
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
         let interaction_control = effect_owner.interaction_control();
+        let lookup_source = environment.source_layers.clone().zip(
+            effect_owner
+                .issued_snapshot()
+                .map(|issued| issued.installation().source().clone()),
+        );
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
@@ -6285,6 +6290,7 @@ where
                         request,
                         environment.usage_pointers.clone(),
                         control.clone(),
+                        lookup_source,
                     )
                     .await
             }),

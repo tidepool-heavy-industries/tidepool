@@ -697,11 +697,11 @@ impl ExomonadSourceReload {
         Ok(Self::wire(&graph.revision))
     }
 
-    pub(super) fn read_issued(
+    fn issued_module_path(
         &self,
         source: &CheckpointSourceLayer,
         module: &str,
-    ) -> std::result::Result<(String, String), SourceInspectionError> {
+    ) -> std::result::Result<Option<(PathBuf, blake3::Hash)>, SourceInspectionError> {
         use exomonad_actor::ActorSourceLayers;
         self.validate_source_authority(source)
             .map_err(SourceInspectionError::Unavailable)?;
@@ -716,21 +716,44 @@ impl ExomonadSourceReload {
                 else {
                     continue;
                 };
-                let path = root.join(relative);
-                let bytes = std::fs::read(&path).map_err(|error| {
-                    SourceInspectionError::Unreadable(format!("{}: {error}", path.display()))
-                })?;
-                if blake3::hash(&bytes) != *expected {
-                    return Err(SourceInspectionError::Unreadable(
-                        "issued immutable source changed".into(),
-                    ));
-                }
-                return Ok((
-                    self.revision_issued(source)?.identity,
-                    String::from_utf8(bytes)
-                        .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?,
+                return Ok(Some((root.join(relative), *expected)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn locate_issued(
+        &self,
+        source: &CheckpointSourceLayer,
+        module: &str,
+    ) -> std::result::Result<Option<String>, SourceInspectionError> {
+        self.issued_module_path(source, module)?
+            .map(|_| {
+                self.revision_issued(source)
+                    .map(|revision| revision.identity)
+            })
+            .transpose()
+    }
+
+    pub(super) fn read_issued(
+        &self,
+        source: &CheckpointSourceLayer,
+        module: &str,
+    ) -> std::result::Result<(String, String), SourceInspectionError> {
+        if let Some((path, expected)) = self.issued_module_path(source, module)? {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                SourceInspectionError::Unreadable(format!("{}: {error}", path.display()))
+            })?;
+            if blake3::hash(&bytes) != expected {
+                return Err(SourceInspectionError::Unreadable(
+                    "issued immutable source changed".into(),
                 ));
             }
+            return Ok((
+                self.revision_issued(source)?.identity,
+                String::from_utf8(bytes)
+                    .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?,
+            ));
         }
         Err(SourceInspectionError::Unreadable(format!(
             "module {module} is absent from issued revision {}",

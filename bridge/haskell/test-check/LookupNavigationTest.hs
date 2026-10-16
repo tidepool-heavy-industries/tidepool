@@ -38,6 +38,18 @@ assert label value = unless value (fail label)
 lookupNavigationTests :: TestTree
 lookupNavigationTests = testGroup "retained lookup navigation"
   [lookupPackingTests
+  ,testCase "numbered display preserves captured text and usable continuations" $ do
+     let captured = retainLookupCapture (batch "first\r\n\r\nλ\nlast") Nothing
+         selection = LookupCaptureSelection PrimaryLookup
+           (LookupSelection (LookupAddress 1 1 Example) (Just (LookupLines 2 3)))
+     case selectLookupCapture captured selection of
+       Left issue -> fail (show issue)
+       Right value -> do
+         let (rendered, _) = displayWith 65536 value
+         assert "line labels retain captured addresses" ("2: " `T.isInfixOf` rendered && "3: λ" `T.isInfixOf` rendered)
+         assert "semantic text remains exact" (excerptText (captureExcerpt value) == "\r\nλ\n")
+         assert "continuations remain directly reusable" (map (fmap (excerptText . captureExcerpt))
+           (selectLookupCaptureMany captured (captureContinuations value)) == [Right "first\r\n", Right "last"])
   ,testCase "literal search counts overlaps and bounded contexts retain reusable exact ranges" $ do
      let source = "🙂ααα\r\n" <> T.replicate 20000 "x" <> "αα"
          primary = batch "primary"

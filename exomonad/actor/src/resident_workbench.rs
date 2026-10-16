@@ -7548,6 +7548,10 @@ where
         request: crate::lookup::LookupRequest,
         usage: crate::UsagePointerTable,
         execution_control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        captured_source: Option<(
+            crate::ActorSourceLayerResolver,
+            crate::CheckpointSourceLayer,
+        )>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self
             .access
@@ -7746,6 +7750,11 @@ where
                     || !effect_alias_unchanged
                 {
                     answer.invalidate_changed_view();
+                }
+                if let Some((owner, captured)) = captured_source {
+                    crate::lookup::attach_source_locators(&mut answer, |module| {
+                        owner.locate_module(&captured, module)
+                    });
                 }
                 session
                     .resume_classified(hole, answer, settlement)
@@ -16845,6 +16854,7 @@ pub(crate) mod request_tests {
                         real_lookup_request(varied_lookup_queries()),
                         crate::UsagePointerTable::default(),
                         None,
+                        None,
                     )
                     .await
             }));
@@ -17156,6 +17166,7 @@ pub(crate) mod request_tests {
                     real_lookup_request(varied_lookup_queries()),
                     crate::UsagePointerTable::default(),
                     None,
+                    None,
                 ),
             )
             .await
@@ -17268,6 +17279,7 @@ pub(crate) mod request_tests {
                         real_lookup_request(varied_lookup_queries()),
                         crate::UsagePointerTable::default(),
                         Some(task_cancellation),
+                        None,
                     ),
                 )
                 .await

@@ -14,7 +14,7 @@ import qualified Tidepool.File as File
 import qualified Persona.FileTools as Files
 import qualified Tidepool.Lookup.Tools as LookupTools
 import Tidepool.Effects.Core
-  ( AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
+  ( AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
   , Actor, ActorContext, AgentLaunch, AgentInspection
   , AgentControl, Notifications, ResourceScopes, BoundWorktree )
 import Tidepool.Agent.Reply (Replies)
@@ -24,7 +24,7 @@ import qualified Persona.Orientation as Orientation
 -- These base rows are delegable. Sync supplies invocation-only context editing
 -- and reload; child grants retain only the effects listed here.
 type PersonaEffects =
-  '[AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
+  '[AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web, ModelCall
    , Actor, ActorContext, AgentLaunch, AgentInspection
    , AgentControl, Notifications, ResourceScopes, BoundWorktree, Replies, Watches]
 -- Helpers can explore, compose and curate their own context. Findings return

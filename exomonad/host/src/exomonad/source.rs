@@ -1394,6 +1394,14 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         self.read_issued(source, module)
     }
 
+    fn locate_module(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        module: &str,
+    ) -> std::result::Result<Option<String>, exomonad_actor::SourceInspectionError> {
+        self.locate_issued(source, module)
+    }
+
     fn revision(
         &self,
         source: &exomonad_actor::CheckpointSourceLayer,
@@ -2427,6 +2435,15 @@ mod tests {
             .unwrap()
             .1
             .contains("work = 1"));
+        assert_eq!(
+            reload.locate_issued(&selected, "Project.Work").unwrap(),
+            Some(reload.revision_issued(&selected).unwrap().identity)
+        );
+        assert_eq!(
+            reload.locate_issued(&selected, "Missing.Module").unwrap(),
+            None
+        );
+        assert!(reload.locate_issued(&selected, "../Project.Work").is_err());
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
