@@ -772,6 +772,7 @@ rust_filegroup(
         "src/actor_host/fixtures/child_attachment_alias_failure.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "src/actor_host/fixtures/choice_probe.hs": "exomonad/host/src/actor_host/fixtures/choice_probe.hs",
         "src/actor_host/fixtures/coherent_recovery_bind_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "src/actor_host/fixtures/coherent_recovery_extra_b.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs",
         "src/actor_host/fixtures/coherent_recovery_initializer.hs": "exomonad/host/src/actor_host/fixtures/coherent_recovery_initializer.hs",
@@ -2661,6 +2662,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/child_attachment_alias_failure.hs": "src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "exomonad/host/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "exomonad/host/src/actor_host/fixtures/choice_probe.hs": "src/actor_host/fixtures/choice_probe.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_bind_b.hs": "src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_extra_b.hs": "src/actor_host/fixtures/coherent_recovery_extra_b.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_recovery_initializer.hs": "src/actor_host/fixtures/coherent_recovery_initializer.hs",
@@ -3372,6 +3374,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f76616c69645f726571756573742e6873",
     src = "src/actor_host/fixtures/child_attachment_valid_request.hs",
     out = "child_attachment_valid_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f63686f6963655f70726f62652e6873",
+    src = "src/actor_host/fixtures/choice_probe.hs",
+    out = "choice_probe.hs",
     visibility = ["PUBLIC"],
 )
 
