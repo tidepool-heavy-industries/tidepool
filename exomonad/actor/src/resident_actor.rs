@@ -13586,14 +13586,6 @@ pub struct ResidentForest<H, O> {
     incarnation: crate::Incarnation,
 }
 
-#[derive(Default)]
-struct PreparedRootAdmission {
-    replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
-    identity: Option<ActorRef>,
-    launch_worktrees: Vec<String>,
-    worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
-}
-
 impl<H, O> ResidentForest<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -14612,8 +14604,7 @@ where
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        self.admit_prepared_root(descriptor, outcome, Default::default())
-            .await
+        self.admit_prepared_root(descriptor, outcome).await
     }
 
     /// Admit an initial durable root with the directory's original reserved identity.
@@ -14886,42 +14877,28 @@ where
         &self,
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
-        recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
-        let PreparedRootAdmission {
-            replay,
-            identity,
-            launch_worktrees,
-            worktree_custody,
-        } = recovery;
         if descriptor.placement().session != self.session
-            || (identity.is_none()
-                && (descriptor.supervisor_parent().is_some()
-                    || descriptor.context_parent().is_some()))
+            || descriptor.supervisor_parent().is_some()
+            || descriptor.context_parent().is_some()
         {
             return Err(refuse(
                 "forest root must be independent and belong to the forest machine",
             ));
         }
-        let reservation = match identity {
-            Some(identity) => self.directory.claim_exact(identity).await,
-            None => self.directory.reserve(self.incarnation).await,
-        }
-        .map_err(|error| refuse(&error.to_string()))?;
+        let reservation = self
+            .directory
+            .reserve(self.incarnation)
+            .await
+            .map_err(|error| refuse(&error.to_string()))?;
         let environment = self.environment.clone();
         let directory = self.directory.clone();
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
                 let _ = ticket.placement_prepared(descriptor.placement());
-                let mut behavior =
-                    ResidentKernelBehavior::prepared(descriptor, environment, outcome);
-                behavior.launch_worktrees = launch_worktrees;
-                behavior.worktree_custody = worktree_custody;
-                if let Some(replay) = replay {
-                    behavior.workbench_executions = replay;
-                }
+                let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
                 let result = crate::local_actor::spawn_reserved_local_actor(
                     None,
                     behavior,
