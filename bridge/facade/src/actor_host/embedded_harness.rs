@@ -1798,8 +1798,20 @@ impl Provider for EmbeddedDispatcher {
                         }
                     };
                 let initial_context = Arc::new(move || Ok(observed_initial_context.clone()));
-                let binding =
-                    EmbeddedContextBinding::new(invocation, snapshot, resolver, initial_context);
+                let binding = match EmbeddedContextBinding::new(
+                    invocation,
+                    snapshot,
+                    resolver,
+                    initial_context,
+                    self.store.clone(),
+                ) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        return unavailable_context_completion(JobOutput::Completed(Err(
+                            error.into()
+                        )))
+                    }
+                };
                 let binding = match self.snapshot.request_reply_activation() {
                     Some(activation) => match binding.with_request_reply(
                         activation,

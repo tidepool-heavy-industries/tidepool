@@ -10,7 +10,9 @@ do
   if any (ContextText.isInfixOf "native-trim-own-call") (toListOf C.visibleTexts current)
     then error "getContext included its own call" >> pure ()
     else pure ()
-  C.putContext (over C.editableTexts trimResult current)
+  C.ContextStaged _ <- C.stageContext (C.contextPatch
+    [C.replaceText target updated | target <- C.textTargets current,
+      let updated = trimResult (C.targetText target), updated /= C.targetText target])
   C.setNextModel "test-model"
   C.setNextEffort C.High
   Right captured <- checkpoint "curated parent snapshot"

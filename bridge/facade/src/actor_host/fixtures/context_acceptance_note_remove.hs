@@ -6,8 +6,10 @@ do
     [first, second]
       | C.contextVisibleTextReference first /= C.contextVisibleTextReference second
         && C.contextVisibleTextRemovable first && C.contextVisibleTextRemovable second ->
-          case C.removeText (C.contextVisibleTextReference first) current of
-            Left _ -> error "issued authored note refused removal"
-            Right removed -> C.putContext removed
+          case filter ((== C.contextVisibleTextReference first) . C.unitReference) (C.unitTargets current) of
+            [target] -> do
+              C.ContextStaged _ <- C.stageContext (C.contextPatch [C.removeUnit target])
+              pure ()
+            _ -> error "issued authored note refused removal"
     _ -> error "authored notes lost their independent issued identities"
   pure True

@@ -13,7 +13,7 @@
 -- Actor readiness and typed request admission are independent operations.
 module ContextWorkflow where
 
-import Control.Lens (over, traversed, (^..))
+import Control.Lens (traversed, (^..))
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -40,42 +40,36 @@ trimBuildOutput original
         (T.takeEnd 800 original)
   | otherwise = original
 
--- Select only an admitted full tool-result body. Message text can also be
--- edited through `editableTexts`, but tool source/input and function arguments
--- have no editable selector.
-trimToolResult :: ContextBlock -> ContextBlock
-trimToolResult native@Native {contextNativeTexts = visibleTexts} =
-  native {contextNativeTexts = map trimVisible visibleTexts}
-  where
-    trimVisible visibleText@C.ContextVisibleText
-      { contextVisibleTextSelector = C.ToolResultText
-      , contextVisibleTextEditable = True
-      , contextVisibleTextText = original
-      } = visibleText {contextVisibleTextText = trimBuildOutput original}
-    trimVisible visibleText = visibleText
-trimToolResult block = block
+-- Build changes only for eligible tool-result fields, retaining each exact
+-- selector and issued content version. No effect occurs while building a patch.
+trimToolResults :: Context -> [ContextChange]
+trimToolResults current =
+  [ replaceText target updated
+  | target <- textTargets current
+  , targetSelector target == ToolResultText
+  , let updated = trimBuildOutput (targetText target)
+  , updated /= targetText target
+  ]
 
--- Use the traversal only when the intended edit spans every eligible body;
--- use the native selector above when the edit is limited to tool results.
-trimEveryLongVisibleText :: Int -> Text -> Context -> Context
-trimEveryLongVisibleText limit reason = over editableTexts trimLong
-  where
-    trimLong original
-      | T.length original > limit =
-          C.trimText reason (T.takeEnd limit original)
-      | otherwise = original
+trimEveryLongVisibleText :: Int -> Text -> Context -> ContextPatch
+trimEveryLongVisibleText limit reason current = contextPatch
+  [ replaceText target (C.trimText reason (T.takeEnd limit original))
+  | target <- textTargets current
+  , let original = targetText target
+  , T.length original > limit
+  ]
 
--- Used as the body of a synchronous compiled tool or synchronous notebook
--- cell. Both the history edit and next-effort choice commit on whole-cell
--- success. Same-model continuation keeps opaque reasoning unchanged.
-curateChild :: Member ContextReadWrite effects => Eff effects ()
+-- One synchronous cell stages one batch. A staged handle identifies pending
+-- work; inspect it in a later cell for the terminal receipt.
+curateChild :: Member ContextReadWrite effects => Eff effects ContextStageResult
 curateChild = do
-  modifyContext
-    ( over contextBlocks
-        (<> [Text Nothing User ("Child finding: " <> sharedFinding) []])
-        . over contextBlocks (map trimToolResult)
-    )
-  C.setNextEffort C.High
+  current <- getContext
+  staged <- stageContext (contextPatch
+    (trimToolResults current ++ [appendNote ("Child finding: " <> sharedFinding) []]))
+  case staged of
+    ContextStaged _ -> C.setNextEffort C.High
+    ContextStageRefused _ -> pure ()
+  pure staged
 
 -- Model and effort are staged by the same synchronous effect. Use a model
 -- change only for a context/model combination the runtime has qualified;
@@ -85,6 +79,7 @@ stageNextModelAndEffort alias = do
   setNextModel alias
   C.setNextEffort C.High
 
+-- Call after the editing cell has succeeded and its transaction is committed.
 -- The caller supplies the actual installed tool definition. Each refusal keeps
 -- its concrete spawned actor, when present, available for explicit recovery.
 data ContextDelegation
@@ -93,15 +88,14 @@ data ContextDelegation
   | ContextRequested AgentRef (Request Text)
   deriving (Show)
 
-curateAndDelegate
-  :: ( Member ContextReadWrite effects, Member AgentLaunch effects, Member Replies effects
+delegateCuratedContext
+  :: ( Member AgentLaunch effects, Member Replies effects
      , KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects
      , HasInstalledAgentApi tools childEffects
      )
   => AgentSpec tools childEffects
   -> Eff effects (Either CheckpointRefusal ([ContextDelegation], Either CheckpointRefusal ()))
-curateAndDelegate actualSpec = do
-  curateChild
+delegateCuratedContext actualSpec = do
   captured <- checkpoint "curated context"
   case captured of
     Left issue -> pure (Left issue)
@@ -119,21 +113,31 @@ curateAndDelegate actualSpec = do
       admitted <- request @Text actor input defaultRequestOptions
       pure (either (ContextRequestRefused actor) (ContextRequested actor) admitted)
 
--- Read the transcript as bounded structural data, trim eligible tool-result
--- bodies, and convert selected nonopaque completed exchanges to notes with
--- their provenance. The optic receives full eligible text, never a preview.
+-- Preview one version-bound batch before staging it. This targets only full
+-- eligible bodies and appends an assistant note; it keeps native structure.
 inspectAndCurate
   :: Member ContextReadWrite effects
-  => Eff effects Context
+  => Eff effects (Either [ContextProblem] (ContextPreview, ContextStageResult))
 inspectAndCurate = do
   before <- getContext
-  let completed =
-        [ reference
-        | block <- before ^.. contextBlocks . traversed
-        , NativeProvenance reference <- [blockProvenance block]
-        , blockKind block == NativeEvidence CompletedExchange
-        ]
-  modifyContext (toNotes completed . over contextBlocks (map trimToolResult))
+  let patch = contextPatch
+        (trimToolResults before ++ [appendNote ("Child finding: " <> sharedFinding) []])
+  case previewContext before patch of
+    Left problems -> pure (Left problems)
+    Right preview -> do
+      staged <- stageContext patch
+      pure (Right (preview, staged))
+
+-- Convert whole removable exchanges separately from field edits: removing a
+-- unit and editing one of its fields in the same batch is an invalid overlap.
+completedNotes :: Context -> Either [ContextProblem] ContextPatch
+completedNotes before = toNotes
+  [ reference
+  | block <- before ^.. contextBlocks . traversed
+  , NativeProvenance reference <- [blockProvenance block]
+  , blockKind block == NativeEvidence CompletedExchange
+  , reference `elem` map unitReference (unitTargets before)
+  ] before
 
 -- Jev judges each packet containing the original slice once. The returned
 -- values come from the original rows, never from model-written replacements.

@@ -4,7 +4,11 @@ use std::sync::Arc;
 use exomonad_actor::{CellExit, ContextReq, HostedContextBinding};
 use exomonad_tool::ToolInvocationContext;
 use harness::{
-    context::{ContextDraft, ContextSnapshot},
+    context::{
+        ContextDraft, ContextPatch, ContextProblem, ContextProblemCode, ContextReference,
+        ContextSnapshot, ContextTextAuthorship, ContextTextSelector, ContextTransaction,
+        ContextTransactionDraft, ContextTransactionStatus,
+    },
     model::Effort,
     provider::{ContextDisposition, InvocationCompletionSource, ProviderCompletion},
     turn::JobOutput,
@@ -20,10 +24,26 @@ pub(super) type InitialContextObserver = Arc<
 
 pub(super) type ModelResolver = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
+type TransactionIssuer =
+    Arc<dyn Fn(&ContextPatch) -> Result<ContextTransaction, String> + Send + Sync>;
+type TransactionObserver =
+    Arc<dyn Fn(&ContextTransaction) -> Result<ContextTransactionStatus, String> + Send + Sync>;
+type OriginalTextObserver = Arc<
+    dyn Fn(
+            &ContextReference,
+            &ContextTextSelector,
+        ) -> Result<Result<String, ContextProblem>, String>
+        + Send
+        + Sync,
+>;
+
 pub(super) struct EmbeddedContextBinding {
     invocation: ToolInvocationContext,
     model: ModelResolver,
     initial_context: InitialContextObserver,
+    transaction_issuer: TransactionIssuer,
+    transaction_observer: TransactionObserver,
+    original_text: OriginalTextObserver,
     state: Arc<Mutex<DraftState>>,
     request_reply: Option<EmbeddedRequestReply>,
 }
@@ -39,6 +59,8 @@ struct DraftState {
     lifecycle: DraftLifecycle,
     draft: ContextDraft,
     changed: bool,
+    staged: Option<(ContextPatch, ContextTransaction)>,
+    authorship: Vec<ContextTextAuthorship>,
 }
 
 enum DraftLifecycle {
@@ -68,22 +90,53 @@ impl EmbeddedContextBinding {
         snapshot: &ContextSnapshot,
         model: ModelResolver,
         initial_context: InitialContextObserver,
-    ) -> Self {
-        Self {
+        store: Arc<harness::store::Store>,
+    ) -> Result<Self, String> {
+        let inspection = store
+            .inspect_context(snapshot)
+            .map_err(|error| error.to_string())?;
+        let issuing_snapshot = Arc::new(snapshot.clone());
+        let original_snapshot = issuing_snapshot.clone();
+        let issuing_store = store.clone();
+        let transaction_issuer = Arc::new(move |patch: &ContextPatch| {
+            issuing_store
+                .context_transaction(&issuing_snapshot, patch)
+                .map_err(|error| error.to_string())
+        });
+        let identity = snapshot.operation.origin.clone();
+        let observing_store = store.clone();
+        let transaction_observer = Arc::new(move |transaction: &ContextTransaction| {
+            observing_store
+                .context_transaction_status(&identity, transaction)
+                .map_err(|error| error.to_string())
+        });
+        let original_text = Arc::new(
+            move |reference: &ContextReference, selector: &ContextTextSelector| {
+                store
+                    .original_context_text(&original_snapshot, reference, selector)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        Ok(Self {
             invocation,
             model,
             initial_context,
+            transaction_issuer,
+            transaction_observer,
+            original_text,
             request_reply: None,
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
-                    document: snapshot.document.clone(),
+                    document: inspection.document,
                     next_model: None,
                     next_effort: None,
                 },
                 changed: false,
+                staged: None,
+                authorship: inspection.authorship,
             })),
-        }
+        })
     }
 
     pub(super) fn with_request_reply(
@@ -144,12 +197,22 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
         };
         let full_success =
             exit.permits_context_commit() && matches!(&output, JobOutput::Completed(Ok(_)));
-        let context =
-            if full_success && state.changed && matches!(draft, DraftEligibility::Retained) {
-                ContextDisposition::Draft(state.draft.clone())
-            } else {
-                ContextDisposition::Unedited
+        let context = if let Some((patch, _)) = &state.staged {
+            let transaction = ContextTransactionDraft {
+                patch: patch.clone(),
+                next_model: state.draft.next_model.clone(),
+                next_effort: state.draft.next_effort,
             };
+            if full_success && matches!(draft, DraftEligibility::Retained) {
+                ContextDisposition::Transaction(transaction)
+            } else {
+                ContextDisposition::Discarded(transaction)
+            }
+        } else if full_success && state.changed && matches!(draft, DraftEligibility::Retained) {
+            ContextDisposition::Draft(state.draft.clone())
+        } else {
+            ContextDisposition::Unedited
+        };
         Some(ProviderCompletion {
             output_format: super::embedded_harness::native_output_format(&output),
             activation_terminal: self
@@ -243,11 +306,14 @@ impl HostedContextBinding for EmbeddedContextBinding {
         principal: PrincipalId,
         _: DataConTable,
     ) -> DeferredEffect {
-        let state = self.state.clone();
+        let shared_state = self.state.clone();
         let model = self.model.clone();
         let initial_context = self.initial_context.clone();
+        let transaction_issuer = self.transaction_issuer.clone();
+        let transaction_observer = self.transaction_observer.clone();
+        let original_text = self.original_text.clone();
         DeferredEffect::blocking(move || {
-            let mut state = state.lock();
+            let mut state = shared_state.lock();
             match &state.lifecycle {
                 DraftLifecycle::Active {
                     principal: owner, ..
@@ -262,14 +328,96 @@ impl HostedContextBinding for EmbeddedContextBinding {
                 ContextReq::GetInitialContextWith => initial_context()
                     .map(Response::new)
                     .map_err(EffectError::Handler),
-                ContextReq::GetContextWith => Ok(Response::new(super::context_wire::to_wire(
-                    &state.draft.document,
-                ))),
-                ContextReq::PutContextWith(document) => {
-                    state.draft.document = super::context_wire::from_wire(document)
-                        .map_err(|error| EffectError::Handler(error.to_string()))?;
-                    state.changed = true;
-                    Ok(Response::new(()))
+                ContextReq::GetContextWith => {
+                    let mut inspection = harness::context::inspect_context(&state.draft.document);
+                    inspection.authorship.clone_from(&state.authorship);
+                    Ok(Response::new(super::context_wire::inspection_to_wire(
+                        &inspection,
+                    )))
+                }
+                ContextReq::StageContextWith(patch) => {
+                    let patch = match super::context_wire::patch_from_wire(patch) {
+                        Ok(patch) => patch,
+                        Err(error) => {
+                            return Ok(Response::new(super::context_wire::stage_refused(vec![
+                                ContextProblem {
+                                    code: ContextProblemCode::InvalidPatch,
+                                    reference: None,
+                                    detail: error.to_string(),
+                                },
+                            ])))
+                        }
+                    };
+                    if let Some((existing, transaction)) = &state.staged {
+                        return Ok(Response::new(if existing == &patch {
+                            super::context_wire::stage_accepted(transaction)
+                        } else {
+                            super::context_wire::stage_refused(vec![ContextProblem {
+                                code: ContextProblemCode::AlreadyStaged,
+                                reference: None,
+                                detail: "this invocation already staged a different context batch"
+                                    .into(),
+                            }])
+                        }));
+                    }
+                    if let Err(problems) =
+                        harness::context::check_context_patch(&state.draft.document, &patch)
+                    {
+                        return Ok(Response::new(super::context_wire::stage_refused(problems)));
+                    }
+                    drop(state);
+                    let transaction = transaction_issuer(&patch).map_err(EffectError::Handler)?;
+                    let mut state = shared_state.lock();
+                    if !matches!(state.lifecycle, DraftLifecycle::Active { principal: owner, .. } if owner == principal)
+                    {
+                        return Err(EffectError::Handler(
+                            "context authority closed while preparing its batch".into(),
+                        ));
+                    }
+                    if let Some((existing, existing_transaction)) = &state.staged {
+                        return Ok(Response::new(if existing == &patch {
+                            super::context_wire::stage_accepted(existing_transaction)
+                        } else {
+                            super::context_wire::stage_refused(vec![ContextProblem {
+                                code: ContextProblemCode::AlreadyStaged,
+                                reference: None,
+                                detail: "this invocation already staged a different context batch"
+                                    .into(),
+                            }])
+                        }));
+                    }
+                    state.staged = Some((patch, transaction.clone()));
+                    Ok(Response::new(super::context_wire::stage_accepted(
+                        &transaction,
+                    )))
+                }
+                ContextReq::InspectContextTransactionWith(transaction) => {
+                    let transaction = super::context_wire::transaction_from_wire(transaction);
+                    if state
+                        .staged
+                        .as_ref()
+                        .is_some_and(|(_, staged)| staged == &transaction)
+                    {
+                        return Ok(Response::new(super::context_wire::status_to_wire(
+                            ContextTransactionStatus::Staged,
+                        )?));
+                    }
+                    drop(state);
+                    let status =
+                        transaction_observer(&transaction).map_err(EffectError::Handler)?;
+                    Ok(Response::new(super::context_wire::status_to_wire(status)?))
+                }
+                ContextReq::InspectOriginalTextWith(reference, selector) => {
+                    let reference = super::context_wire::reference_from_wire(reference);
+                    let selector = match super::context_wire::selector_from_wire(selector) {
+                        Ok(selector) => selector,
+                        Err(error) => return Ok(Response::new(tidepool_bridge_effects::OriginalTextObservation::OriginalTextUnsupported(error.to_string()))),
+                    };
+                    drop(state);
+                    Ok(Response::new(match original_text(&reference, &selector) {
+                        Ok(observed) => super::context_wire::original_to_wire(observed),
+                        Err(detail) => tidepool_bridge_effects::OriginalTextObservation::OriginalTextUnavailable(detail),
+                    }))
                 }
                 ContextReq::SetNextModelWith(selection) => {
                     let resolved = model(&selection).map_err(EffectError::Handler)?;
@@ -344,6 +492,21 @@ mod tests {
             initial_context: Arc::new(|| {
                 Ok(tidepool_bridge_effects::InitialContextObservation::InitialContextAbsent)
             }),
+            transaction_issuer: Arc::new(|patch| {
+                Ok(ContextTransaction {
+                    raw: serde_json::to_string(patch).unwrap(),
+                })
+            }),
+            transaction_observer: Arc::new(|_| {
+                Ok(ContextTransactionStatus::Unknown("not retained".into()))
+            }),
+            original_text: Arc::new(|_, _| {
+                Ok(Err(ContextProblem {
+                    code: ContextProblemCode::Missing,
+                    reference: None,
+                    detail: "not retained".into(),
+                }))
+            }),
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
@@ -352,6 +515,8 @@ mod tests {
                     next_effort: None,
                 },
                 changed: true,
+                staged: None,
+                authorship: vec![],
             })),
         }
     }
@@ -367,6 +532,193 @@ mod tests {
             panic!("context service must retain its blocking request owner");
         };
         work.into_inner().unwrap()()
+    }
+
+    fn note_patch(text: &str) -> ContextReq {
+        ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
+            changes: vec![tidepool_bridge_effects::ContextChange::AppendContextNote {
+                text: text.into(),
+                sources: vec![],
+            }],
+        })
+    }
+
+    #[test]
+    fn one_batch_stages_idempotently_and_self_inspection_never_waits_for_publication() {
+        let mut binding = binding();
+        let shared_state = binding.state.clone();
+        binding.transaction_issuer = Arc::new(move |patch| {
+            assert!(
+                shared_state.try_lock().is_some(),
+                "issuance must run outside draft lock"
+            );
+            Ok(ContextTransaction {
+                raw: serde_json::to_string(patch).unwrap(),
+            })
+        });
+        binding.transaction_observer =
+            Arc::new(|_| panic!("own staged transaction must not query Store"));
+        let execution = WorkbenchExecutionId::from_digest([21; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(&binding, note_patch("first"), principal).unwrap();
+        let staged = binding.state.lock().staged.clone().unwrap();
+        prepare_result(&binding, note_patch("first"), principal).unwrap();
+        assert_eq!(binding.state.lock().staged, Some(staged.clone()));
+        // Refusal is ordinary returned data; it cannot replace the first batch.
+        prepare_result(&binding, note_patch("second"), principal).unwrap();
+        assert_eq!(binding.state.lock().staged, Some(staged.clone()));
+        prepare_result(
+            &binding,
+            ContextReq::InspectContextTransactionWith(
+                tidepool_bridge_effects::ContextTransaction { raw: staged.1.raw },
+            ),
+            principal,
+        )
+        .unwrap();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let ContextDisposition::Transaction(transaction) = completion.context else {
+            panic!("successful full invocation must retain the exact staged batch");
+        };
+        assert_eq!(transaction.patch, staged.0);
+        assert_eq!(transaction.next_model.as_deref(), Some("staged-model"));
+        assert_eq!(transaction.next_effort, None);
+    }
+
+    #[test]
+    fn failed_and_cancelled_cells_retain_staged_association_for_store_reconciliation() {
+        for cause in [CellExitCause::Failed, CellExitCause::Cancelled] {
+            let binding = binding();
+            let execution = WorkbenchExecutionId::from_digest([22; 16]);
+            let principal = PrincipalId::new(1, 1);
+            binding
+                .admit(&execution, &binding.invocation, principal)
+                .unwrap();
+            prepare_result(&binding, note_patch("retained identity"), principal).unwrap();
+            let patch = binding.state.lock().staged.as_ref().unwrap().0.clone();
+            if cause == CellExitCause::Cancelled {
+                binding.cancel();
+            }
+            binding.finish(CellExit {
+                execution,
+                cause,
+                cleanup_confirmed: true,
+            });
+            let completion = binding
+                .completion(JobOutput::Completed(Err("later statement failed".into())))
+                .unwrap();
+            assert!(!completion.full_success);
+            let ContextDisposition::Discarded(discarded) = completion.context else {
+                panic!(
+                    "discarding mutation must preserve its association for terminal observation"
+                );
+            };
+            assert_eq!(discarded.patch, patch);
+        }
+    }
+
+    #[test]
+    fn immediate_stage_refusal_does_not_poison_explicit_choice_publication() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([24; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("choice-after-refusal".into()),
+            principal,
+        )
+        .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
+                changes: vec![tidepool_bridge_effects::ContextChange::ReplaceContextText {
+                    reference: tidepool_bridge_effects::ContextReference {
+                        raw: "missing".into(),
+                    },
+                    selector: tidepool_bridge_effects::ContextTextSelector::MessageText { part: 0 },
+                    expected: "a".repeat(64),
+                    text: "never staged".into(),
+                }],
+            }),
+            principal,
+        )
+        .unwrap();
+        assert!(binding.state.lock().staged.is_none());
+        prepare_result(
+            &binding,
+            ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+            principal,
+        )
+        .unwrap();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let ContextDisposition::Draft(draft) = completion.context else {
+            panic!("unaccepted batch must leave explicit standalone choice publication eligible");
+        };
+        assert_eq!(draft.next_model.as_deref(), Some("choice-after-refusal"));
+        assert_eq!(draft.next_effort, Some(Effort::High));
+        assert!(draft.document.blocks.is_empty());
+    }
+
+    #[test]
+    fn observation_callbacks_run_without_holding_invocation_draft_lock() {
+        let mut binding = binding();
+        let shared_state = binding.state.clone();
+        binding.transaction_observer = Arc::new(move |_| {
+            assert!(shared_state.try_lock().is_some());
+            Ok(ContextTransactionStatus::Unknown(
+                "no terminal evidence".into(),
+            ))
+        });
+        let shared_state = binding.state.clone();
+        binding.original_text = Arc::new(move |_, _| {
+            assert!(shared_state.try_lock().is_some());
+            Ok(Ok("original".into()))
+        });
+        let execution = WorkbenchExecutionId::from_digest([23; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::InspectContextTransactionWith(
+                tidepool_bridge_effects::ContextTransaction {
+                    raw: "prior-operation".into(),
+                },
+            ),
+            principal,
+        )
+        .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::InspectOriginalTextWith(
+                tidepool_bridge_effects::ContextReference {
+                    raw: "prior-text".into(),
+                },
+                tidepool_bridge_effects::ContextTextSelector::MessageText { part: 0 },
+            ),
+            principal,
+        )
+        .unwrap();
     }
 
     #[test]

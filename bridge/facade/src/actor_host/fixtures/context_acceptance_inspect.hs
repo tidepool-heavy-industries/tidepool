@@ -2,6 +2,6 @@ import qualified Tidepool.Agent.Context as C
 import qualified ContextWorkflow as Workflow
 C.getContext
 do
-  _ <- Workflow.inspectAndCurate
-  Workflow.curateChild
+  Right (_, C.ContextStaged _) <- Workflow.inspectAndCurate
+  C.setNextEffort C.High
   C.getContext

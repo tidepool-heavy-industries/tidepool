@@ -7,7 +7,7 @@ do
   if any (ContextText.isInfixOf "context-own-call-sentinel") (toListOf C.visibleTexts current)
     then error "getContext included its own call" >> pure ()
     else pure ()
-  C.putContext (over C.contextBlocks (<> [C.Text Nothing C.User "parent-curated" []]) current)
+  C.ContextStaged _ <- C.stageContext (C.contextPatch [C.appendNote "parent-curated" []])
   C.setNextModel "parent-curated-model"
   Right captured <- checkpoint "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir

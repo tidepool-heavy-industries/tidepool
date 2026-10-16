@@ -114,6 +114,8 @@
     "bridge/facade/src/actor_host/fixtures/context_acceptance_note_setup.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_parent.hs",
     "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
+    "bridge/facade/src/actor_host/fixtures/context_transaction_readback.hs",
+    "bridge/facade/src/actor_host/fixtures/context_transaction_stage.hs",
     "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs",
     "bridge/facade/src/actor_host/fixtures/deferred_reply_late.hs",
     "bridge/facade/src/actor_host/fixtures/deferred_reply_sibling.hs",

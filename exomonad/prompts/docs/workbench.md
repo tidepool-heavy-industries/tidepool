@@ -50,8 +50,12 @@ lifecycle. Only an explicit synchronous profile can include
 `ContextReadWrite`, which provides context
 editing, `setNextModel`, and `setNextEffort`.
 
-Context, next-model, and next-effort edits staged by a synchronous cell commit
-together only when the whole cell succeeds. A failed cell does not commit those edits, but it
+An accepted context batch and explicit next-model/effort choices in a synchronous
+cell commit together only when the whole cell succeeds. A terminal transaction
+rejection rolls them back together. A patch never changes model or effort by
+itself, and choice-only cells remain supported. A stage refusal accepts no
+transaction: it leaves separately requested choices and any first accepted batch
+intact. A failed cell does not commit its staged edits, but it
 cannot undo external effects already issued, such as a command or provider
 request. Captured contexts are snapshots. To use a completed edit as another actor’s
 starting context, explicitly capture and pass that context. `setNextModel` takes `Text`: the
@@ -66,29 +70,49 @@ the Store retains the originals. Incomplete or unauthenticated opaque exchanges
 and incompatible compaction prevent a model switch rather than silently discard
 evidence.
 
-Repeated context reads in one invocation see its staged edits. Saving a
-`Context` binding saves data, not edit authority: passing that value to
-`putContext` in a later synchronous invocation can intentionally replace that
-invocation's editable visible prefix. The candidate must preserve current
-protected and opaque groups; a stale snapshot missing required groups is
-refused. This restores data, not authority. The current call, pending operation
-identities/pairing and later arrivals remain protected. Each visible body has
-its own editability flag, so an eligible result body can be edited without
-changing its group's protected structure. After completion, an editing
-exchange's admitted visible message/result bodies become eligible in a later
-cell. Native Haskell tool input/source and function arguments remain pinned;
-grouping stays protected while each visible body follows its own editable flag. Retained
-helpers make later calls shorter but do not make their source editable.
-`editableTexts` uses full visible text, never bounded previews. Use
-`C.trimText reason retainedText` to keep exact source beside an ordinary
-`[Trimmed: reason]` marker. `toNotes` preserves provenance for selected
-nonopaque completed exchanges; opaque group removal is refused. Authored notes
-inside native groups keep independent identities: use `C.referencedTexts` to
-inspect the issued removal flag and `C.removeText reference` to remove exactly
-one occurrence. Text equality does not identify an occurrence. Read current
-context after publication to obtain its reference. `getInitialContext` reports
-the historical startup publication; it does not assert that text is still active
-or replace other authored notes when memory is refreshed.
+`C.getContext` reads the active committed projection, including full visible
+text and owner-issued content versions. Repeated reads in one cell keep that
+committed base. `contextBlocks` is read-only; `visibleTexts` and `referencedTexts`
+inspect bodies, exact references and selectors. `contextAuthorship` is a read-only
+getter of the immutable canonical original occurrence's role/type and
+authored-note flag for each exact field; Unknown remains explicit. It does not
+attribute replacement text to the original author. The later editing transaction
+receipt records that edit separately. `editableTexts` is a read-only
+fold over eligible bodies. Tool source/input and function arguments stay pinned.
+
+Build one batch with `C.contextPatch`: use `C.replaceText target body` on targets
+from `C.textTargets current`, `C.removeUnit unit` on `C.unitTargets current`, and
+`C.appendNote body sources` for assistant notes. Targets retain exact references,
+selectors and content versions; they grant no authority. Removal targets cover
+whole eligible completed exchanges and independently removable notes. Opaque
+and protected groups remain protected. `C.toNotes` builds a pure patch for
+selected removable exchanges. A group removal and a nested field edit overlap
+and must not appear in the same batch.
+
+`C.previewContext current patch` returns typed problems or a rich projected
+document with changed targets and before/after character counts. It checks known
+fields and versions without effects. Preview authorship retains the original
+inspection observation, not newly issued metadata for the proposed document;
+appended notes have no reference yet. It does not predict provider tokens or
+cache reuse. `display` shows bounded text previews, references and versions.
+`C.stageContext patch` returns `C.ContextStageRefused problems` or
+`C.ContextStaged transaction`. One cell stages one batch. A staged identifier is
+pending work; inspect it in a later cell with `C.inspectContextTransaction` to
+observe `C.ContextTransactionCommitted receipt`, rejection, cancellation or
+unavailability. The receipt names the actual head, generation, change flag and
+new note references. A refused second stage leaves the first batch intact.
+Saved inspections preserve versions and data, never future edit authority.
+Current content versions detect changed targets while accepting an unchanged
+target across unrelated commits, including a return to identical content.
+
+Use `C.trimText reason retainedText` to keep exact source with an ordinary
+`[Trimmed: reason]` marker. `C.inspectOriginalText reference selector` observes an
+authorized retained original, even after its removal, distinguishing available,
+missing, denied, unsupported and unavailable results; it does not browse the
+whole original history. `getInitialContext` reports historical startup evidence.
+Refreshing it requires a new inspection and replacement of that exact issued
+reference; unrelated notes remain independent. Capture context for another actor
+after the editing cell commits.
 
 Same-model continuation forwards opaque reasoning unchanged, although edited
 facts may make earlier conclusions stale. Unsupported cross-model opaque history

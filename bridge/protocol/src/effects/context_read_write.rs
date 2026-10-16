@@ -28,13 +28,14 @@ pub fn context_read_write() -> Effect {
         req_enum: "ContextReadWriteReq",
         decl_fn: "context_read_write_decl",
         description: &[
-            "Transactional editing of the admitted synchronous tool's typed context document, next model and reasoning effort. ",
+            "Targeted transactional edits to the admitted synchronous tool's committed context projection, next model and reasoning effort. ",
             "Use `Tidepool.Agent.Context` to curate the next inference's evidence or select its model; `reflect` only reads recorded conversation data. ",
-            "Context edits stage together and commit on whole-cell success; external effects already issued are not rolled back on failure. ",
+            "Accepted context batches and explicit next-model/effort choices commit together on whole-cell success; a terminal rejection rolls them back together. External effects already issued are not rolled back. ",
+            "A stage refusal accepts no transaction and leaves separately requested choices and any accepted batch intact. A patch never changes model or effort; choice-only cells remain supported. ",
             "Context references and native blocks retain host-owned evidence provenance, while system and developer instructions remain host-controlled. ",
-            "Saving a context value preserves data, not future edit authority; restoration must pass the current protected-structure checks. ",
+            "Saving an inspection preserves data and content versions, not authority; stage one version-bound patch and inspect its retained terminal receipt. ",
             "For curation followed by delegation, complete the synchronous context edit before capturing that context for `spawnSubagent`. Context and workspace are independent choices; see `exomonad-agent-work`. ",
-            "Only an explicitly admitted synchronous profile can carry this effect; see `doc workbench` for edit and restore rules.",
+            "Only an explicitly admitted synchronous profile can carry this effect; see `doc workbench` for patch and receipt rules.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -54,17 +55,25 @@ pub fn context_read_write() -> Effect {
                 "GetContextWith",
                 "get_context_with",
                 vec![],
-                HsType::Named("ContextDocument"),
+                HsType::Named("ContextInspection"),
             ),
             verb(
-                "PutContextWith",
-                "put_context_with",
-                vec![bridged_arg(
-                    "document",
-                    "ContextDocument",
-                    HsType::Named("ContextDocument"),
-                )],
-                HsType::Unit,
+                "StageContextWith",
+                "stage_context_with",
+                vec![bridged_arg("patch", "ContextPatch", HsType::Named("ContextPatch"))],
+                HsType::Named("ContextStageResult"),
+            ),
+            verb(
+                "InspectContextTransactionWith",
+                "inspect_context_transaction_with",
+                vec![bridged_arg("transaction", "ContextTransaction", HsType::Named("ContextTransaction"))],
+                HsType::Named("ContextTransactionStatus"),
+            ),
+            verb(
+                "InspectOriginalTextWith",
+                "inspect_original_text_with",
+                vec![bridged_arg("reference", "ContextReference", HsType::Named("ContextReference")), bridged_arg("selector", "ContextTextSelector", HsType::Named("ContextTextSelector"))],
+                HsType::Named("OriginalTextObservation"),
             ),
             verb(
                 "SetNextModelWith",
@@ -99,8 +108,8 @@ pub fn context_read_write() -> Effect {
                 body: HelperBody::Nullary,
             },
             Helper {
-                name: "putContext",
-                ctor: Some("PutContextWith"),
+                name: "stageContext",
+                ctor: Some("StageContextWith"),
                 substrate: false,
                 doc: &[],
                 body: HelperBody::Pointfree,
@@ -129,6 +138,81 @@ pub fn context_read_write() -> Effect {
 
 fn type_defs() -> Vec<TypeDef> {
     vec![
+        record("ContextTextVersion", vec![
+            field("contextTextVersionReference", "reference", HsType::Named("ContextReference")),
+            field("contextTextVersionSelector", "selector", HsType::Named("ContextTextSelector")),
+            field("contextTextVersionDigest", "digest", HsType::Text),
+        ]),
+        record("ContextUnitVersion", vec![
+            field("contextUnitVersionReference", "reference", HsType::Named("ContextReference")),
+            field("contextUnitVersionDigest", "digest", HsType::Text),
+        ]),
+        sum("ContextTextAuthor", &["ContextAuthorUser", "ContextAuthorAssistant", "ContextAuthorTool", "ContextAuthorSystem", "ContextAuthorDeveloper", "ContextAuthorUnknown"], &["Immutable canonical original occurrence role/type; Unknown remains explicit. Replacement overlays do not change this attribution; later edits retain separate transaction receipts."]),
+        record("ContextTextAuthorship", vec![
+            field("contextAuthorshipReference", "reference", HsType::Named("ContextReference")),
+            field("contextAuthorshipSelector", "selector", HsType::Named("ContextTextSelector")),
+            field("contextAuthorshipAuthor", "author", HsType::Named("ContextTextAuthor")),
+            field("contextAuthorshipNote", "authored_note", HsType::Bool),
+        ]),
+        record("ContextInspection", vec![
+            field("contextInspectionDocument", "document", HsType::Named("ContextDocument")),
+            field("contextInspectionTextVersions", "text_versions", HsType::list(HsType::Named("ContextTextVersion"))),
+            field("contextInspectionUnitVersions", "unit_versions", HsType::list(HsType::Named("ContextUnitVersion"))),
+            field("contextInspectionAuthorship", "authorship", HsType::list(HsType::Named("ContextTextAuthorship"))),
+        ]),
+        record("ContextPatch", vec![field("contextPatchChanges", "changes", HsType::list(HsType::Named("ContextChange")))]),
+        variants("ContextChange", vec![
+            SumVariant { ctor: "ReplaceContextText", fields: VariantFields::Named(vec![
+                field("contextChangeReference", "reference", HsType::Named("ContextReference")),
+                field("contextChangeSelector", "selector", HsType::Named("ContextTextSelector")),
+                field("contextChangeExpected", "expected", HsType::Text),
+                field("contextChangeText", "text", HsType::Text),
+            ]), doc: &[] },
+            SumVariant { ctor: "RemoveContextUnit", fields: VariantFields::Named(vec![
+                field("contextChangeReference", "reference", HsType::Named("ContextReference")),
+                field("contextChangeExpected", "expected", HsType::Text),
+            ]), doc: &[] },
+            SumVariant { ctor: "AppendContextNote", fields: VariantFields::Named(vec![
+                field("contextChangeText", "text", HsType::Text),
+                field("contextChangeSources", "sources", HsType::list(HsType::Named("ContextReference"))),
+            ]), doc: &[] },
+        ]),
+        sum("ContextProblemCode", &["ContextProblemStale", "ContextProblemMissing", "ContextProblemAmbiguous", "ContextProblemDenied", "ContextProblemInvalidPatch", "ContextProblemAlreadyStaged", "ContextProblemIneligible", "ContextProblemUnsupportedSelector"], &["Typed context patch refusal; rendered detail never controls behavior."]),
+        record("ContextProblem", vec![
+            field("contextProblemCode", "code", HsType::Named("ContextProblemCode")),
+            field("contextProblemReference", "reference", HsType::maybe(HsType::Named("ContextReference"))),
+            field("contextProblemDetail", "detail", HsType::Text),
+        ]),
+        TypeDef {
+            name: "ContextTransaction", wire_rust: Some("ContextTransaction"), haskell_module: Some("Tidepool.Effects.Core"),
+            shape: TypeShape::Identity { payload: IdentityPayload::Text, hs_binder: "transaction", rust_field: "raw", validation: Validation::None },
+            json: JsonInstance::Transparent, derives: WIRE, domain: None,
+            doc: &["Owner-issued transaction identifier; possession does not grant observation authority."],
+        },
+        record("ContextTransactionReceipt", vec![
+            field("contextReceiptHead", "head", HsType::Text),
+            field("contextReceiptGeneration", "generation", HsType::Int),
+            field("contextReceiptChanged", "changed", HsType::Bool),
+            field("contextReceiptAppended", "appended", HsType::list(HsType::Named("ContextReference"))),
+        ]),
+        variants("ContextTransactionStatus", vec![
+            startup_variant("ContextTransactionStaged", vec![]),
+            startup_variant("ContextTransactionCommitted", vec![HsType::Named("ContextTransactionReceipt")]),
+            startup_variant("ContextTransactionRejected", vec![HsType::list(HsType::Named("ContextProblem"))]),
+            startup_variant("ContextTransactionCancelled", vec![]),
+            startup_variant("ContextTransactionUnknown", vec![HsType::Text]),
+        ]),
+        variants("ContextStageResult", vec![
+            startup_variant("ContextStaged", vec![HsType::Named("ContextTransaction")]),
+            startup_variant("ContextStageRefused", vec![HsType::list(HsType::Named("ContextProblem"))]),
+        ]),
+        variants("OriginalTextObservation", vec![
+            startup_variant("OriginalTextAvailable", vec![HsType::Text]),
+            startup_variant("OriginalTextMissing", vec![]),
+            startup_variant("OriginalTextDenied", vec![HsType::Text]),
+            startup_variant("OriginalTextUnavailable", vec![HsType::Text]),
+            startup_variant("OriginalTextUnsupported", vec![HsType::Text]),
+        ]),
         TypeDef {
             name: "InitialContextIdentity",
             wire_rust: Some("InitialContextIdentity"),
@@ -411,5 +495,156 @@ fn sum(
         derives: WIRE,
         domain: None,
         doc,
+    }
+}
+
+fn record(name: &'static str, fields: Vec<RecordField>) -> TypeDef {
+    TypeDef {
+        name,
+        wire_rust: Some(name),
+        haskell_module: Some("Tidepool.Effects.Core"),
+        shape: TypeShape::Record { fields },
+        json: JsonInstance::None,
+        derives: WIRE,
+        domain: None,
+        doc: &[],
+    }
+}
+
+fn variants(name: &'static str, variants: Vec<SumVariant>) -> TypeDef {
+    TypeDef {
+        name,
+        wire_rust: Some(name),
+        haskell_module: Some("Tidepool.Effects.Core"),
+        shape: TypeShape::Sum { variants },
+        json: JsonInstance::None,
+        derives: WIRE,
+        domain: None,
+        doc: &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_surface_exposes_targeted_staging_and_separate_observation() {
+        let effect = context_read_write();
+        assert_eq!(effect.validate(), Ok(()));
+        let signatures: Vec<_> = effect
+            .verbs
+            .iter()
+            .map(|verb| (verb.ctor, &verb.ret))
+            .collect();
+        assert_eq!(
+            signatures,
+            vec![
+                (
+                    "GetInitialContextWith",
+                    &HsType::Named("InitialContextObservation")
+                ),
+                ("GetContextWith", &HsType::Named("ContextInspection")),
+                ("StageContextWith", &HsType::Named("ContextStageResult")),
+                (
+                    "InspectContextTransactionWith",
+                    &HsType::Named("ContextTransactionStatus")
+                ),
+                (
+                    "InspectOriginalTextWith",
+                    &HsType::Named("OriginalTextObservation")
+                ),
+                ("SetNextModelWith", &HsType::Unit),
+                ("SetNextEffortWith", &HsType::Unit),
+            ]
+        );
+        let original = &effect.verbs[4];
+        assert_eq!(
+            original
+                .args
+                .iter()
+                .map(|arg| (arg.name, &arg.ty))
+                .collect::<Vec<_>>(),
+            vec![
+                ("reference", &HsType::Named("ContextReference")),
+                ("selector", &HsType::Named("ContextTextSelector"))
+            ]
+        );
+    }
+
+    #[test]
+    fn inspection_keeps_content_once_and_patch_requires_versions() {
+        let definitions = type_defs();
+        let fields = |name| match &definitions
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap()
+            .shape
+        {
+            TypeShape::Record { fields } => fields
+                .iter()
+                .map(|field| (field.rust_name, field.ty.clone()))
+                .collect::<Vec<_>>(),
+            _ => panic!("expected record"),
+        };
+        assert_eq!(
+            fields("ContextInspection"),
+            vec![
+                ("document", HsType::Named("ContextDocument")),
+                (
+                    "text_versions",
+                    HsType::list(HsType::Named("ContextTextVersion"))
+                ),
+                (
+                    "unit_versions",
+                    HsType::list(HsType::Named("ContextUnitVersion"))
+                ),
+                (
+                    "authorship",
+                    HsType::list(HsType::Named("ContextTextAuthorship"))
+                ),
+            ]
+        );
+        assert_eq!(
+            fields("ContextTextVersion"),
+            vec![
+                ("reference", HsType::Named("ContextReference")),
+                ("selector", HsType::Named("ContextTextSelector")),
+                ("digest", HsType::Text),
+            ]
+        );
+        assert_eq!(
+            fields("ContextTextAuthorship"),
+            vec![
+                ("reference", HsType::Named("ContextReference")),
+                ("selector", HsType::Named("ContextTextSelector")),
+                ("author", HsType::Named("ContextTextAuthor")),
+                ("authored_note", HsType::Bool),
+            ]
+        );
+        let change = definitions
+            .iter()
+            .find(|definition| definition.name == "ContextChange")
+            .unwrap();
+        let TypeShape::Sum { variants } = &change.shape else {
+            panic!("expected patch sum")
+        };
+        let VariantFields::Named(replacement) = &variants[0].fields else {
+            panic!("expected named replacement")
+        };
+        assert_eq!(
+            replacement
+                .iter()
+                .map(|field| field.rust_name)
+                .collect::<Vec<_>>(),
+            vec!["reference", "selector", "expected", "text"]
+        );
+        let VariantFields::Named(note) = &variants[2].fields else {
+            panic!("expected named note")
+        };
+        assert_eq!(
+            note.iter().map(|field| field.rust_name).collect::<Vec<_>>(),
+            vec!["text", "sources"]
+        );
     }
 }

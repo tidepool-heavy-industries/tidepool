@@ -5,10 +5,13 @@ Use declared hosted `lookup`; otherwise `LookupApi.lookupRaw` with
 
 `haskell` is asynchronous; `haskell_sync` waits with the same effects.
 Only synchronous profiles admit `ContextReadWrite` (`setNextModel`, `setNextEffort`).
-Edits commit together on success; external effects are not undone.
+Accepted edits and explicit model/effort choices commit or reject together.
+Stage refusal preserves prior intent; patches never change settings by themselves.
+External effects are not undone.
 Capture completed context explicitly for another agent.
-`visibleTexts` includes notes inside native groups. `referencedTexts` exposes
-issued identities and removal flags; `removeText reference` removes one eligible
-occurrence. `editableTexts` exposes full eligible bodies; tool source/input and
-arguments stay pinned. Same-model continuation keeps opaque reasoning.
-See `doc workbench` for `trimText`, restore and removal rules.
+`getContext` reads committed context. Build one version-bound patch with
+`textTargets`/`replaceText`, `unitTargets`/`removeUnit`, and `appendNote`.
+`previewContext` is pure; `stageContext` returns staged or refused data.
+Inspect the transaction in a later cell for its terminal receipt.
+Read-only folds expose full bodies; tool source/input and arguments stay pinned.
+See `doc workbench` for versions, exact originals, notes and removal rules.
