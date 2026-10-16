@@ -595,6 +595,13 @@ impl OriginalCompilerInputs {
             .into_values()
             .flatten()
             .collect::<Vec<_>>();
+        for offer in &native_availability {
+            if let Some(proof) = offer.proof() {
+                if !native_original_requirements.contains(proof) {
+                    native_original_requirements.push(proof.clone());
+                }
+            }
+        }
         let complete = selection
             .complete_native_products(artifacts)
             .map_err(compiler_evidence_failure)?;
@@ -616,13 +623,6 @@ impl OriginalCompilerInputs {
         } else {
             artifacts.clone()
         };
-        for offer in &native_availability {
-            if let Some(proof) = offer.proof() {
-                if !native_original_requirements.contains(proof) {
-                    native_original_requirements.push(proof.clone());
-                }
-            }
-        }
         for role in projection.roles() {
             if let Some(original) = role.original() {
                 if !native_availability
@@ -722,7 +722,7 @@ impl OriginalCompilerInputs {
                 preferred.push(proof.clone());
             }
         }
-        let native_original_requirements =
+        let mut native_original_requirements =
             capture_native_original_requirements(&projection, inventory, &preferred)?;
         let effective = baseline.merge(&projection)?;
         // Available code retains custody without selecting executable groups.
@@ -734,6 +734,36 @@ impl OriginalCompilerInputs {
                 &effective,
                 &native_original_requirements,
             )?;
+        let issued = artifacts.inventory().admit_private_complete_products(
+            &artifacts,
+            entries.clone(),
+            &effective,
+            &preferred,
+        )?;
+        for entry in &entries {
+            if entry.native_group_ordinals.is_empty() {
+                continue;
+            }
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
+            let proof =
+                crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
+                    entry.descriptor.id,
+                    canonical,
+                    &issued,
+                )?
+                .ok_or_else(|| {
+                    failure("complete private product lacks its issued dependency closure")
+                })?;
+            if !native_original_requirements.contains(&proof) {
+                native_original_requirements.push(proof);
+            }
+        }
+        artifacts = issued.retain_original_custody(&artifacts)?;
         let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
         let originals = metadata
             .retained
@@ -847,42 +877,6 @@ impl OriginalCompilerInputs {
         .map_err(compiler_evidence_failure)?;
         let mut native_availability =
             capture_native_availability(&projection, &artifacts, &native_original_requirements)?;
-        let unissued = entries
-            .iter()
-            .filter(|entry| {
-                // An authenticated zero-body product exposes no callable group.
-                // Preserve its bounded empty offer, not an invented full proof.
-                !entry.native_group_ordinals.is_empty()
-                    && !native_availability.iter().any(|offer| {
-                        offer.original() == entry.descriptor.id
-                            && matches!(offer, NativeCompilerAvailability::Full(_))
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !unissued.is_empty() {
-            // Explicit full offers have just passed complete dependency validation.
-            // Issue their exact graph once through the ordinary admission owner,
-            // then retain that proof privately without adding executable roots.
-            let issued = artifacts
-                .inventory()
-                .admit_shared(&artifacts, unissued.clone())?;
-            for entry in unissued {
-                let ArtifactPayload::Original(product) = &entry.payload else {
-                    unreachable!()
-                };
-                let canonical =
-                    ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-                        .descriptor
-                        .id;
-                let proof = crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
-                    entry.descriptor.id, canonical, &issued,
-                )?.ok_or_else(|| failure("explicit native availability lacks its complete issued carrier"))?;
-                native_availability.retain(|offer| offer.original() != entry.descriptor.id);
-                native_availability.push(NativeCompilerAvailability::Full(proof));
-            }
-            artifacts = issued.retain_original_custody(&artifacts)?;
-        }
         let mut native_original_requirements = native_original_requirements;
         for availability in &native_availability {
             if let Some(proof) = availability.proof() {

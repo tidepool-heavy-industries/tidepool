@@ -798,12 +798,14 @@ enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
     Projected(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
+    PrivateAvailability(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
 }
 
 impl ArtifactRootIntent<'_> {
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
+            Self::PrivateAvailability(_, proofs) => proofs.to_vec(),
             Self::Certified(selection) => {
                 selection.native_original_requirements().cloned().collect()
             }
@@ -3115,6 +3117,24 @@ impl ArtifactInventory {
         )
         .map(|admission| admission.artifacts)
     }
+    /// Issue complete private products using only the request's exact external
+    /// dependency proofs. This temporary view does not publish execution demand.
+    pub(crate) fn admit_private_complete_products(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        availability: &[NativeOriginalRequirement],
+    ) -> Result<ArtifactView, CompileError> {
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            NativeArtifactDemand::AllGroups,
+            ArtifactRootIntent::PrivateAvailability(projection, availability),
+        )
+        .map(|admission| admission.artifacts)
+    }
+
     fn admit_shared_with_intent(
         &self,
         parent: &ArtifactView,
@@ -3287,7 +3307,8 @@ impl ArtifactInventory {
                     .artifact_ids_from_entries(&selected)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             ),
-            ArtifactRootIntent::Projected(projection, _) => {
+            ArtifactRootIntent::Projected(projection, _)
+            | ArtifactRootIntent::PrivateAvailability(projection, _) => {
                 projection.entries_from_artifacts(&selected)?;
                 let ids = projection
                     .roles()
@@ -3469,6 +3490,21 @@ impl ArtifactInventory {
             }
         }
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
+        if matches!(root_intent, ArtifactRootIntent::PrivateAvailability(..)) {
+            let (_, complete_closure) =
+                owners.planned_edges(&state, &selected, &groups, NativeClosureStage::Admission)?;
+            for external in complete_closure.difference(&groups) {
+                if !required_groups.contains_key(external) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: external.artifact,
+                            original_ordinal: external.original_ordinal,
+                        },
+                    ));
+                }
+            }
+        }
+
         let mut selected_groups = native_groups(parent_nodes);
         selected_groups.extend(groups.iter().copied());
         if let Some(ids) = &namespace_ids {
