@@ -448,8 +448,8 @@ not an ordinary readable working tree until restoration finishes. Inspect a
 child's committed work through the shared Git namespace and typed observation.
 
 [Copy admission](../../exomonad/node/src/copy_admission.rs) serializes cooperating
-copies on a filesystem; [source import](../../bridge/facade/src/actor_host/workspace.rs),
-[compaction](../../bridge/facade/src/actor_host/overlay_resource.rs) and worktree
+copies on a filesystem; [source import](../../exomonad/host/src/actor_host/workspace.rs),
+[compaction](../../exomonad/host/src/actor_host/overlay_resource.rs) and worktree
 restoration acquire it before materializing files. It does not bound later writes
 or total durable retention. Before claiming bounded storage across repeated runs,
 retain a repeated fork/retire/cleanup inventory and restart restoration evidence,

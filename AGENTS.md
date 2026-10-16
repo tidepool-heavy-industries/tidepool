@@ -15,8 +15,8 @@ providers, scheduling, resources, persistence, and argument parsing.
    Prepare and retain this revision's selected pinned Nix tools with
    `bash scripts/buck2-configure.sh --tests`, which publishes Buck configuration
    only after realizing and rooting its selected outputs. Include `--browser`
-   when building or testing the `tidepool` facade or assembling a runtime bundle:
-   the facade test target declares browser inputs even when the selected case
+   when building or testing the `exomonad-host` package or assembling a runtime bundle:
+   the host test target declares browser inputs even when the selected case
    does not open a browser. A test filter does not narrow build dependencies. See
    `docs/swarm-builds.md` for the source outputs, bind mount and resource
    admission requirements.
@@ -225,7 +225,8 @@ without weakening identity checks or reflexively raising every limit.
 - `exomonad-model`: provider-neutral conversations. Provider tool-call parsing
   belongs to the pinned Harness runtime.
 - `exomonad-actor`: actor identity, lifecycle, mailbox, and resident workbench.
-- `tidepool`: the public facade and the Exomonad runtime and binaries.
+- `tidepool`: the generic public facade, standard library and utility binaries.
+- `exomonad-host`: Exomonad host composition, operator interfaces and binaries.
 - `exomonad-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
@@ -285,16 +286,16 @@ reports evidence; it does not merge, prune, move branches or block pushes.
 
 | Mechanism | Owning source |
 |---|---|
-| Exomonad CLI, actor launch composition, prompt assembly | `bridge/facade/src/exomonad.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
+| Exomonad CLI, actor launch composition, prompt assembly | `exomonad/host/src/exomonad.rs`, `exomonad/host/src/actor_host.rs`, `exomonad/host/src/actor_host/prompt_catalog.rs` |
 | Shipped resident instructions and shared API guide | `exomonad/prompts/` |
 | Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.exomonad/skills/`, `.agents/skills/` |
 | Agent spec discovery, reload, and the after-tool hook | `exomonad/actor/src/{agent_spec,after_tool}.rs`, reload publication in `exomonad/actor/src/resident_actor/owned_workbench/reload.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Reload.hs` and `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
 | Comparing two declared tool surfaces | `exomonad/tool/src/surface.rs` |
-| Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/exomonad/source.rs` |
+| Source layers: capture, typecheck, atomic publication, drift | `exomonad/host/src/exomonad/source.rs` |
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |
-| Run trace (structured JSONL under `.exomonad/logs/`) | `bridge/facade/src/exomonad.rs` |
+| Run trace (structured JSONL under `.exomonad/logs/`) | `exomonad/host/src/exomonad.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `exomonad-actor` |
-| Native provider transport and actor attachment | `bridge/facade/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport and tool-call parsing in pinned Harness |
+| Native provider transport and actor attachment | `exomonad/host/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport and tool-call parsing in pinned Harness |
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |

@@ -157,11 +157,11 @@ pub fn recipe_generated_files() -> Vec<GeneratedFile> {
     let effects = vec![effects::recipe_check::recipe_check()];
     let mut files = effects
         .iter()
-        .map(|effect| gen::suspension_req_rs::file(effect, "bridge/facade"))
+        .map(|effect| gen::suspension_req_rs::file(effect, "exomonad/host"))
         .collect::<Vec<_>>();
     files.push(gen::suspension_req_rs::module_index(
         &effects,
-        "bridge/facade",
+        "exomonad/host",
     ));
     files
 }

@@ -4552,7 +4552,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// or `SettlementChanged` notice is not merely observer traffic: the
     /// `deployments` consumer is the sole path that turns a durably-settled
     /// reply into a row in the owning actor's own inbox (see
-    /// `publish_inbox_event_for` in `bridge/facade/src/actor_host.rs`).
+    /// `publish_inbox_event_for` in `exomonad/host/src/actor_host.rs`).
     /// `try_send(...).ok()` on a full channel would silently discard a
     /// settled reply with nothing left to reconstruct it from but a manual
     /// `status` poll. Use the bounded channel's real backpressure
@@ -5135,7 +5135,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// from `tidepool`'s composition root into
     /// `ActorRuntimeObservation::source_drift`, since the data — the source
     /// layer's active/disk revision, the checkout's Git state, and the
-    /// frozen workspace's — lives in `tidepool::exomonad::source` and
+    /// frozen workspace's — lives in `exomonad_host::exomonad::source` and
     /// `tidepool` depends on `exomonad-actor` (see `tidepool/Cargo.toml`),
     /// never the reverse. See `status_rendering::render_source_drift_section`.
     /// One piece is left out rather than

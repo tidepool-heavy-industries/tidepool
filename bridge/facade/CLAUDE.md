@@ -1,28 +1,11 @@
-# tidepool — facade crate + composition-root binaries
+# tidepool — generic facade and utilities
 
-**Charter.** Belongs: the `cargo install tidepool` utility and Exomonad binaries,
-the independent compile reporter, and library re-exports of the workspace's
-other crates. The facade also embeds the pinned `exomonad/harness` runtime;
-`exomonad/web` remains outside the supported workspace build. Effect/session
-logic lives in the maintained crates this one wires together (`tidepool-mcp`,
-`tidepool-handlers`, and `tidepool-runtime`).
+This package re-exports Tidepool compiler, heap, effect, runtime and declaration
+APIs. It owns the build-bound Haskell stdlib, the toolchain stamp utility and
+`tidepool-compile-report`. Source-bundle mechanics belong to
+`tidepool-toolchain::source_bundle`.
 
-`src/exomonad.rs` owns CLI/project defaults, tmux startup, and environment
-forwarding. `src/actor_host.rs` composes actor runtime, worktrees, provider
-launch, and the hosted workbench; extend these owners instead of adding
-launchers. Provider transport belongs to the pinned Harness runtime, actor
-identity and authority to `exomonad-actor`, and compilation/resident-machine
-mechanics to `tidepool-runtime`.
-
-Workspace source capture, inspection and drift observations exclude the exact
-`.exomonad/state` tree used for durable memory, including when `.exomonad` is
-a declared source root. Other authored directories named `state` remain inputs.
-
-Native Codex goals are unavailable to every Exomonad actor. Worker launch resolution fills
-omitted effort from host configuration and preserves explicit overrides. The
-prompt catalog freezes one shared base and API guide at startup; do not
-specialize that prefix by role or append dynamic binding inventories. Fork
-exact parent context at the specified boundary, and keep candidate publication,
-accepted integration, delivered baseline, and checked recipient incorporation
-distinct. Active-update admission, presentation, and incorporation are also
-separate; preserve unavailable and unconfirmed outcomes. Use the provider transport owner's opt-in tracing for cache diagnostics.
+Exomonad host composition, provider transport, operator interfaces, run maps,
+actor sources, scaffolding and browser assets belong to `exomonad/host`.
+Do not add host re-exports or dependencies here. The generic library and utility
+builds must remain independently usable without those inputs.

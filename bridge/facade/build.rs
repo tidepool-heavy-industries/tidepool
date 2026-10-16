@@ -1,272 +1,48 @@
-//! Embed complete Haskell source trees into the installed binaries. Generated
-//! `&[(relative_path, contents)]` tables cover the Tidepool library and Exomonad's
-//! interactive actor surface without hand-maintained file lists. Only `.hs`
-//! sources are included; build artifacts and test-only probes are excluded.
-//!
-//! The same mechanism carries project-owned defaults for `exomonad new`.
-//! Reusable workspace sources are cloned when the command runs.
+//! Embed only the standard library owned by the generic Tidepool facade.
 
 use std::path::{Path, PathBuf};
 
-mod scaffold_gitlink {
-    include!("src/exomonad/scaffold_gitlink.rs");
-}
-
 fn main() {
-    // Shared target directories must not reuse another checkout's source paths.
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
-    #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-
-    // Release builds embed the full source trees. Dev builds keep only their
-    // content identity in the binary; both modes watch source edits so a new
-    // run cannot silently pair an old binary with a changed Haskell library.
     println!("cargo:rerun-if-env-changed=TIDEPOOL_EMBED_HASKELL");
-    let embed =
-        std::env::var_os("TIDEPOOL_EMBED_HASKELL").as_deref() == Some(std::ffi::OsStr::new("1"));
     println!("cargo:rerun-if-env-changed=TIDEPOOL_BUILD_SOURCE_ROOT");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let workspace = std::env::var_os("TIDEPOOL_BUILD_SOURCE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(&manifest).join("../.."));
-
-    #[allow(clippy::expect_used, reason = "haskell/lib must exist at build time")]
-    let stdlib_root = workspace
+    let root = workspace
         .join("bridge/haskell/lib")
         .canonicalize()
-        .expect("haskell/lib must exist relative to the tidepool crate");
-    #[allow(
-        clippy::expect_used,
-        reason = "haskell/actors must exist at build time"
-    )]
-    let actor_root = workspace
-        .join("bridge/haskell/actors")
-        .canonicalize()
-        .expect("haskell/actors must exist relative to the tidepool crate");
-
-    if embed {
-        // The embed root is `haskell/lib` itself (not `haskell/lib/Tidepool`),
-        // so every top-level module namespace under it — `Tidepool.*` and
-        // `Jev.*` alike — is embedded with no per-namespace registration. A
-        // module's relative path under `haskell/lib` is its embedded path
-        // verbatim, matching the `-ihaskell/lib` GHC search root actors compile
-        // against.
-        emit_bundle(
-            &stdlib_root,
-            "../haskell/lib",
-            "",
+        .expect("Haskell stdlib source root");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let identity = if std::env::var_os("TIDEPOOL_EMBED_HASKELL").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        tidepool_toolchain::source_bundle::emit_bundle(
+            &root,
             "EMBEDDED_STDLIB",
-            "embedded_stdlib.rs",
-        );
-
-        emit_bundle(
-            &actor_root,
-            "../haskell/actors",
-            "",
-            "EMBEDDED_EXOMONAD_HASKELL",
-            "embedded_exomonad_haskell.rs",
-        );
-        emit_dev_source_identity(None);
+            &output.join("embedded_stdlib.rs"),
+        )
+        .expect("emit standard library source bundle");
+        None
     } else {
-        emit_empty_bundle("EMBEDDED_STDLIB", "embedded_stdlib.rs");
-        emit_empty_bundle("EMBEDDED_EXOMONAD_HASKELL", "embedded_exomonad_haskell.rs");
-        // A dev binary embeds no source bytes, but must still remember which
-        // checkout bytes it was built against. Watching both roots makes an
-        // edit rebuild the binary rather than silently changing a live run.
-        println!("cargo:rerun-if-changed={}", stdlib_root.display());
-        println!("cargo:rerun-if-changed={}", actor_root.display());
-        let identity = tidepool_toolchain::cache::source_roots_identity(
-            b"tidepool-facade-dev-source-identity",
-            &[stdlib_root, actor_root],
+        tidepool_toolchain::source_bundle::write_if_changed(
+            &output.join("embedded_stdlib.rs"),
+            "pub static EMBEDDED_STDLIB: &[(&str, &str)] = &[];\n",
         )
-        .expect("read complete dev Haskell source identity");
-        emit_dev_source_identity(Some(&identity));
-    }
-
-    let browser_source = workspace.join("build/harness-browser-source-identity.json");
-    println!("cargo:rerun-if-changed={}", browser_source.display());
-    let identity = std::fs::read(&browser_source)
-        .expect("declared Harness browser source identity must exist at build time");
-    let browser_identity = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"))
-        .join("harness-browser-source-identity.json");
-    std::fs::write(browser_identity, identity)
-        .expect("bind declared Harness browser source identity to this binary");
-    emit_scaffold_package(workspace);
-}
-
-fn emit_dev_source_identity(identity: Option<&str>) {
-    let output = format!(
-        "// @generated by build.rs — Haskell source identity bound to this binary.\n\
-         pub(crate) const DEV_SOURCE_IDENTITY: Option<&str> = {identity:?};\n"
-    );
-    let dest =
-        Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("dev_source_identity.rs");
-    write_if_changed(&dest, &output).expect("write dev Haskell source identity");
-}
-
-/// Dev-build stand-in for [`emit_bundle`]: same generated symbol and type, no
-/// entries. The separate source identity still watches both trees and changes
-/// when their Haskell sources change.
-fn emit_empty_bundle(symbol: &str, output: &str) {
-    let out = format!(
-        "// @generated by build.rs — TIDEPOOL_EMBED_HASKELL is unset; sources are read from the checkout at runtime.\n\
-         pub static {symbol}: &[(&str, &str)] = &[];\n"
-    );
-    #[allow(
-        clippy::unwrap_used,
-        reason = "OUT_DIR is always set by cargo when running a build script"
-    )]
-    let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join(output);
-    #[allow(clippy::expect_used, reason = "write generated empty source bundle")]
-    write_if_changed(&dest, &out).expect("write generated empty source bundle");
-}
-
-/// The project-owned files `exomonad new` writes, alongside the URL for the
-/// generic workspace repository it clones.
-fn emit_scaffold_package(repository: PathBuf) {
-    println!("cargo:rerun-if-changed=src/exomonad/scaffold_gitlink.rs");
-    let gitlink = repository.join("build/native-workspace-gitlink.json");
-    println!("cargo:rerun-if-changed={}", gitlink.display());
-    let revision = scaffold_gitlink::read_workspace_revision(&gitlink).unwrap_or_else(|error| {
-        panic!(
-            "read declared workspace gitlink {}: {error}",
-            gitlink.display()
+        .expect("emit empty source bundle");
+        println!("cargo:rerun-if-changed={}", root.display());
+        Some(
+            tidepool_toolchain::cache::source_roots_identity(
+                b"tidepool-stdlib-dev-source-identity",
+                &[root],
+            )
+            .expect("read standard library source identity"),
         )
-    });
-    let template = repository.join("exomonad/examples/workspace/.exomonad");
-    let mut entries = Vec::new();
-    for name in ["AgentSpec.hs", "WORKBENCH.md"] {
-        let path = template.join(name);
-        if !path.is_file() {
-            panic!("required scaffold input is missing: {}", path.display());
-        }
-        println!("cargo:rerun-if-changed={}", path.display());
-        entries.push((name.to_owned(), path));
-    }
-    // This package currently ships the prompt tree. Cargo watches it
-    // recursively, covering edits, additions, and removals without watching
-    // unrelated workspace files. Optional plans are not part of this package.
-    let prompts = template.join("prompts");
-    if !prompts.is_dir() {
-        panic!("required scaffold input is missing: {}", prompts.display());
-    }
-    println!("cargo:rerun-if-changed={}", prompts.display());
-    let mut prompt_entries = Vec::new();
-    collect_all(&prompts, &prompts, &mut prompt_entries);
-    entries.extend(
-        prompt_entries
-            .into_iter()
-            .map(|(relative, path)| (format!("prompts/{relative}"), path)),
-    );
-    entries.sort();
-    let entries: Vec<(String, PathBuf)> = entries
-        .into_iter()
-        .map(|(relative, path)| (format!(".exomonad/{relative}"), path))
-        .collect();
-
-    let mut out = String::from(
-        "// @generated by build.rs — the package `exomonad new` scaffolds.\n\
-         pub(crate) static SCAFFOLD_PACKAGE: &[(&str, &str)] = &[\n",
-    );
-    for (relative, path) in &entries {
-        println!("cargo:rerun-if-changed={}", path.display());
-        let contents = std::fs::read_to_string(path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        out.push_str(&format!("    ({relative:?}, {contents:?}),\n"));
-    }
-    out.push_str("];\n");
-
-    let example_flake = repository.join("exomonad/examples/workspace/flake.nix");
-    println!("cargo:rerun-if-changed={}", example_flake.display());
-    out.push_str(&format!(
-        "/// The jev-dsl revision `exomonad/examples/workspace/flake.nix` pins.\n\
-         pub(crate) static JEV_DSL_URL: &str = {:?};\n",
-        jev_dsl_url(&example_flake)
-    ));
-    out.push_str(&format!(
-        "pub(crate) static DEFAULT_WORKSPACE_URL: &str = {:?};\n",
-        "https://github.com/tidepool-heavy-industries/exomonad-default-workspace.git"
-    ));
-    out.push_str(&format!(
-        "/// The declared `.exomonad/workspace` Gitlink.\n\
-         pub(crate) const DEFAULT_WORKSPACE_REV: &str = {revision:?};\n"
-    ));
-
-    #[allow(
-        clippy::unwrap_used,
-        reason = "OUT_DIR is always set by cargo when running a build script"
-    )]
-    let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("scaffold_package.rs");
-    #[allow(clippy::expect_used, reason = "write generated scaffold package")]
-    write_if_changed(&dest, &out).expect("write generated scaffold package");
-}
-
-fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
-    if std::fs::read(path).is_ok_and(|existing| existing == contents.as_bytes()) {
-        return Ok(());
-    }
-    std::fs::write(path, contents)
-}
-
-/// The pinned jev-dsl flake URL, read out of the example workspace's own
-/// `flake.nix` so the revision exists in exactly one place.
-fn jev_dsl_url(flake: &Path) -> String {
-    let text = std::fs::read_to_string(flake)
-        .unwrap_or_else(|error| panic!("read {}: {error}", flake.display()));
-    text.lines()
-        .find_map(|line| {
-            let (_, rest) = line.split_once("url = \"")?;
-            let (url, _) = rest.split_once('"')?;
-            url.contains("jev-dsl").then(|| url.to_owned())
-        })
-        .unwrap_or_else(|| panic!("no jev-dsl input url in {}", flake.display()))
-}
-
-fn collect_all(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    #[allow(clippy::expect_used, reason = "read_dir")]
-    for entry in std::fs::read_dir(dir).expect("read_dir") {
-        #[allow(clippy::expect_used, reason = "dir entry")]
-        let path = entry.expect("dir entry").path();
-        if path.is_dir() {
-            collect_all(root, &path, out);
-        } else {
-            #[allow(clippy::expect_used, reason = "under root")]
-            let relative = path
-                .strip_prefix(root)
-                .expect("under root")
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push((relative, path));
-        }
-    }
-}
-
-fn emit_bundle(root: &Path, watch_root: &str, prefix: &str, symbol: &str, output: &str) {
-    let manifest = tidepool_toolchain::cache::shipped_haskell_source_manifest(root)
-        .unwrap_or_else(|error| panic!("inspect embedded sources at {}: {error}", root.display()));
-
-    let mut out = format!(
-        "// @generated by build.rs — embedded Haskell sources.\n\
-         pub static {symbol}: &[(&str, &str)] = &[\n"
-    );
-    for (relative, _) in manifest.files() {
-        let rel = relative.to_string_lossy().replace('\\', "/");
-        println!("cargo:rerun-if-changed={watch_root}/{rel}");
-        #[allow(clippy::expect_used, reason = "read an embedded Haskell source")]
-        let source = std::fs::read_to_string(root.join(relative)).expect("read embedded source");
-        out.push_str(&format!(
-            "    ({:?}, {source:?}),\n",
-            format!("{prefix}{rel}")
-        ));
-    }
-    out.push_str("];\n");
-    // Rerun if files are added/removed under the tree.
-    println!("cargo:rerun-if-changed={watch_root}");
-
-    #[allow(
-        clippy::unwrap_used,
-        reason = "OUT_DIR is always set by cargo when running a build script"
-    )]
-    let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join(output);
-    #[allow(clippy::expect_used, reason = "write generated source bundle")]
-    write_if_changed(&dest, &out).expect("write generated source bundle");
+    };
+    tidepool_toolchain::source_bundle::write_if_changed(
+        &output.join("dev_source_identity.rs"),
+        &format!("pub(crate) const DEV_SOURCE_IDENTITY: Option<&str> = {identity:?};\n"),
+    )
+    .expect("emit standard library source identity");
 }

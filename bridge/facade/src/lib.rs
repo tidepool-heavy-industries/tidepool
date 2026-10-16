@@ -5,20 +5,16 @@
 //!
 //! This crate serves two roles:
 //!
-//! - **Binary** (`cargo install tidepool`): an MCP server.
+//! - **Binary** (`cargo install tidepool`): toolchain stamp utilities.
 //! - **Library**: re-exports the project's crates. Start with
 //!   [`compile_haskell`] to load a prepared-STG program, then run it with
 //!   [`compile_and_run`] and your effect handlers.
 //!
 //! See the repo-root `CLAUDE.md` for the crate map.
 
-pub mod actor_host;
 pub mod compile_report;
-pub mod exomonad;
 pub mod haskell_sources;
 
-pub mod model_turn;
-pub mod run_map;
 pub use tidepool_bridge as bridge;
 pub use tidepool_bridge_derive as bridge_derive;
 pub use tidepool_codegen as codegen;
@@ -34,36 +30,3 @@ pub use tidepool_bridge::{FromHaskell, ToHaskell};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_repr::DataConTable;
 pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, RuntimeError};
-
-pub mod operator;
-
-mod generated;
-
-#[cfg(test)]
-mod transport_test_support {
-    use exomonad_actor::{
-        ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
-    };
-
-    pub(crate) trait ResidentToolEndpointTestExt {
-        fn dispatch_json_boxed(
-            &self,
-            invocation: exomonad_tool::ToolInvocation,
-        ) -> ResidentToolFuture;
-    }
-
-    impl<T: ResidentToolEndpoint + ?Sized> ResidentToolEndpointTestExt for T {
-        fn dispatch_json_boxed(
-            &self,
-            invocation: exomonad_tool::ToolInvocation,
-        ) -> ResidentToolFuture {
-            let future: ResidentToolDispatchFuture = self.dispatch_boxed(invocation);
-            Box::pin(async move {
-                future
-                    .await?
-                    .into_json()
-                    .map_err(ResidentToolError::Encoding)
-            })
-        }
-    }
-}

@@ -2,7 +2,7 @@
 
 This file guides contributors; it is not part of the shipped model prompt.
 
-- `../../bridge/facade/src/actor_host/prompt_catalog.rs` owns prompt composition and
+- `../../exomonad/host/src/actor_host/prompt_catalog.rs` owns prompt composition and
   catalog identity. `base.md` plus `api-guide.md` form the shared base selection; workspace
   `[prompts].api_guide` may select a profile guide, and `agent.md` supplies the
   developer instruction. Each actor generation captures the composed workspace
@@ -62,8 +62,8 @@ This file guides contributors; it is not part of the shipped model prompt.
 
 Executable guide and reflection fences use `haskell source=<identity>`. Their
 authored notebook sources live in
-`../../bridge/facade/src/actor_host/fixtures/api-guide/`; `PublishedExample` in
-`../../bridge/facade/src/actor_host/documentation_tests.rs` binds each identity to
+`../../exomonad/host/src/actor_host/fixtures/api-guide/`; `PublishedExample` in
+`../../exomonad/host/src/actor_host/documentation_tests.rs` binds each identity to
 the source executed by the resident consumer tests. Change the authored source
 and published fence together. The source equality gate tolerates reordered
 fences and prose edits, and rejects missing, duplicate, or unknown identities.

@@ -7,9 +7,9 @@ fallback copy.
 
 | Artifact | Owner | Purpose |
 |---|---|---|
-| `base.md` | `tidepool::actor_host` | Shared Exomonad model instructions |
-| `api-guide.md` | `tidepool::actor_host` | Shared core API reference appended to the base |
-| `agent.md` | `tidepool::actor_host` | One task-neutral developer instruction for every actor |
+| `base.md` | `exomonad_host::actor_host` | Shared Exomonad model instructions |
+| `api-guide.md` | `exomonad_host::actor_host` | Shared core API reference appended to the base |
+| `agent.md` | `exomonad_host::actor_host` | One task-neutral developer instruction for every actor |
 | `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
 
 Hosted tool descriptions are owned by their declarations: `status` and `reload`

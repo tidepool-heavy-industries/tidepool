@@ -376,7 +376,8 @@ See [AGENTS.md](AGENTS.md) for contributor guidance.
 | Prepared execution and resident state | [`tidepool/codegen/`](tidepool/codegen/), [`tidepool/runtime/`](tidepool/runtime/) |
 | Actors and workbench | [`exomonad/actor/`](exomonad/actor/) |
 | Managed worktrees | [`exomonad/worktree/`](exomonad/worktree/) |
-| Public facade and Exomonad host | [`bridge/facade/`](bridge/facade/), [`tidepool/`](tidepool/) |
+| Generic public facade and utilities | [`bridge/facade/`](bridge/facade/), [`tidepool/`](tidepool/) |
+| Exomonad host and binaries | [`exomonad/host/`](exomonad/host/) |
 
 Use focused checks while developing:
 

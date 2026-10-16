@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "exomonad/jev-integration",
+    "exomonad/host",
     "exomonad/actor",
     "exomonad/model",
     "exomonad/node",
@@ -53,6 +54,8 @@ authors = ["Inanna Malick <inanna@recursion.wtf>"]
 rust-version = "1.89"
 
 [workspace.dependencies]
+tidepool = { version = "0.1.0", path = "bridge/facade" }
+exomonad-host = { version = "0.1.0", path = "exomonad/host" }
 exomonad-actor = { version = "0.1.0", path = "exomonad/actor" }
 tidepool-atomic-write = { path = "bridge/atomic-write" }
 tidepool-bignum = { version = "0.1.0", path = "tidepool/bignum" }

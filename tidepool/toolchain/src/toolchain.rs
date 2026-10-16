@@ -733,7 +733,7 @@ pub struct StdlibFallbacks {
 /// started at its top.
 ///
 /// The one walk-up primitive shared by every in-repo tree locator (the
-/// stdlib root here, the actors root in `bridge/facade`); do not hand-copy
+/// stdlib root here, the actors root in `exomonad/host`); do not hand-copy
 /// this loop for a new candidate tree.
 pub fn walk_up_for(
     start: &Path,

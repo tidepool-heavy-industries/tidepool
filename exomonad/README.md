@@ -46,3 +46,6 @@ For the resident actor and request model, see the
 [operator interface](docs/operator-http.md) describes attachment and status.
 The example [workspace guide](examples/workspace/README.md) describes its
 project-specific modules and checks.
+
+Host composition, provider attachment, operator interfaces and the Exomonad
+binaries live in [`host/`](host/). The generic Tidepool facade remains independent.

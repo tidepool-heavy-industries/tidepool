@@ -178,7 +178,7 @@ pub enum InboundNext {
 ///
 /// Part of the what-is-live status view's source-drift rows
 /// (`resident_actor::live_status_text`). The data lives in
-/// `tidepool::exomonad::source`, which this crate cannot depend on (`tidepool`
+/// `exomonad_host::exomonad::source`, which this crate cannot depend on (`tidepool`
 /// depends on `exomonad-actor`, never the reverse); `tidepool`'s composition
 /// root publishes this into the observation channel instead. Observation
 /// state records whether a sample is current, pending, unavailable, or has

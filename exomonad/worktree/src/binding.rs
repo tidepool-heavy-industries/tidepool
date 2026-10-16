@@ -40,7 +40,7 @@ impl AgentRef {
     /// manufacturing cleanup evidence. A `runtime` shared by two runs would
     /// therefore let the next run's actor 0 inherit the previous run's retained
     /// ownership. The actor host passes its run id (see
-    /// `tidepool::actor_host::runtime_namespace`).
+    /// `exomonad_host::actor_host::runtime_namespace`).
     pub fn exact_actor(runtime: &str, identity: u64, incarnation: u64) -> Self {
         Self(format!("actor:{runtime}:{identity}:{incarnation}"))
     }

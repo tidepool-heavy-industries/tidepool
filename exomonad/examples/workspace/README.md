@@ -11,7 +11,7 @@ template. Generic Haskell modules and skills come from the committed
 `.exomonad/workspace` Gitlink, retained in the release's original Git bundle.
 To ship a generic skill change, commit it in `exomonad-default-workspace`, then
 update this repository's Gitlink and `DEFAULT_WORKSPACE_REV` in
-`bridge/facade/src/exomonad/scaffold.rs`. Regenerate the native graph with
+`exomonad/host/src/exomonad/scaffold.rs`. Regenerate the native graph with
 `scripts/buck2-first-party.py` to record that Gitlink in
 `build/native-workspace-gitlink.json`. Publish the workspace commit before
 publishing its parent pin. The native skill-discovery and scaffold controls read

@@ -1,0 +1,96 @@
+//! The standalone configuration checker uses its embedded library and performs
+//! no actor/provider startup, even when invoked from a development checkout.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
+)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "integration test: launches the real binary/process fixtures directly, not through the production launcher"
+)]
+use std::fs;
+use std::process::Command;
+
+#[test]
+fn check_uses_embedded_sources_and_rejects_invalid_workspace_modules() {
+    assert!(
+        !exomonad_host::haskell_sources::EMBEDDED_EXOMONAD_HASKELL.is_empty(),
+        "embedded workspace proof requires TIDEPOOL_EMBED_HASKELL=1"
+    );
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("app");
+    let authored = workspace.join(".exomonad");
+    fs::create_dir_all(authored.join("Project")).unwrap();
+    fs::write(
+        authored.join("config.toml"),
+        "[defaults]\nmodel = 'gpt-6-sol'\neffort = 'low'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Contract']\n",
+    )
+    .unwrap();
+    fs::write(
+        authored.join("Project/Contract.hs"),
+        "module Project.Contract where\ndata Contract = Checked\n",
+    )
+    .unwrap();
+    let development = root.path().join("development");
+    fs::create_dir_all(development.join("haskell/lib/Tidepool")).unwrap();
+    fs::write(
+        development.join("haskell/lib/Tidepool/Prelude.hs"),
+        "this development library must never enter the frozen Exomonad program\n",
+    )
+    .unwrap();
+    let check = |override_library: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_exomonad"));
+        command
+            .current_dir(&development)
+            .args(["check", "--workspace"])
+            .arg(&workspace)
+            .env(
+                "EXOMONAD_INTERACTIVE_CODEX_BIN",
+                root.path().join("no-provider"),
+            );
+        if override_library {
+            command.env("TIDEPOOL_PRELUDE_DIR", root.path().join("missing-library"));
+        } else {
+            command.env_remove("TIDEPOOL_PRELUDE_DIR");
+        }
+        command.output().unwrap()
+    };
+    for override_library in [false, true] {
+        let output = check(override_library);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Workspace definitions compile:"));
+    }
+    fs::write(
+        authored.join("Project/Contract.hs"),
+        "module Project.Contract where\nvalue :: Int\nvalue = True\n",
+    )
+    .unwrap();
+    let rejected = check(false);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("Contract.hs"));
+    for runtime in ["sessions", "runtime", "logs", "build"] {
+        assert!(!authored.join(runtime).exists(), "check created {runtime}");
+    }
+}
+
+#[test]
+fn host_cli_permanent_admission_refusal_does_not_allocate_an_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_exomonad"))
+        .args(["host", "--run-id", "invalid-run", "--run-root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(exomonad_host::exomonad::HOST_BOOT_REFUSAL_EXIT),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.path().join("host-incarnation.json").exists());
+}

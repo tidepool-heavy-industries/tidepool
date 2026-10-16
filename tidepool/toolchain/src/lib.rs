@@ -36,6 +36,7 @@ pub(crate) mod owned_input_arena;
 pub mod paths;
 pub mod prepared_artifact;
 pub mod recovery_artifacts;
+pub mod source_bundle;
 pub mod timing;
 pub mod toolchain;
 mod turn_observations;

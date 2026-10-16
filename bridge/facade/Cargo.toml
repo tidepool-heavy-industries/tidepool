@@ -18,71 +18,30 @@ path = "src/main.rs"
 test = false
 
 [[bin]]
-name = "exomonad"
-path = "src/bin/exomonad.rs"
-
-[[bin]]
-name = "exomonad-view-helper"
-path = "src/bin/exomonad-view-helper.rs"
-test = false
-
-[[bin]]
 name = "tidepool-compile-report"
 path = "src/bin/tidepool-compile-report.rs"
 test = false
 
 [dependencies]
-async-trait = "0.1"
-tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-heap.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
-tidepool-bridge-effects.workspace = true
 tidepool-effect.workspace = true
 tidepool-codegen.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true
 tidepool-mcp.workspace = true
-tidepool-handlers.workspace = true
-exomonad-worktree.workspace = true
-exomonad-model.workspace = true
-exomonad-actor.workspace = true
-exomonad-tool.workspace = true
-harness.workspace = true
-exomonad-node.workspace = true
-tidepool-atomic-write.workspace = true
-tidepool-extract-cmd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-toml = "1.1"
-tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net", "io-util", "time"] }
-tracing.workspace = true
-tracing-appender.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 clap.workspace = true
-axum.workspace = true
 glob.workspace = true
-frunk.workspace = true
-futures-util.workspace = true
-uuid.workspace = true
-blake3.workspace = true
-rustix = { version = "1", features = ["fs"] }
 thiserror.workspace = true
-parking_lot.workspace = true
-rusqlite.workspace = true
-
-
-reqwest.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
-tidepool-testing.workspace = true
-tokio-tungstenite = "0.29"
+tempfile.workspace = true
 
 [build-dependencies]
-serde.workspace = true
-serde_json.workspace = true
 tidepool-toolchain.workspace = true
 
 [lints]
