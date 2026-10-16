@@ -12411,13 +12411,14 @@ pub(crate) mod tests {
             panic!("one physical native product");
         };
         let issued = Arc::clone(issued);
-        let proof = issued
+        let issued_groups = issued
             .offers()
             .iter()
-            .find_map(|offer| offer.proof())
+            .find(|offer| offer.proof().is_some())
             .unwrap()
-            .clone();
-        assert_eq!(proof.issued_group_carriers().unwrap().len(), 2);
+            .issued_group_carriers()
+            .unwrap();
+        assert_eq!(issued_groups.len(), 2);
         let before = inventory.metrics();
         let mut item = physical.clone();
         Arc::make_mut(&mut item.modules)
@@ -12450,13 +12451,13 @@ pub(crate) mod tests {
         assert!(inputs.artifacts.selected_native_groups().is_empty());
         assert!(request.groups.is_empty());
         assert_eq!(
-            proof.issued_group_carriers().unwrap(),
+            issued_groups,
             inputs
                 .native_original_requirements()
                 .iter()
                 .find(|p| p.original == native.descriptor.id)
                 .unwrap()
-                .issued_group_carriers()
+                .issued_group_carriers(&inputs.artifacts)
                 .unwrap()
         );
         let mut fixed = inventory
