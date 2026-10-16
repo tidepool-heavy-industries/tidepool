@@ -26,4 +26,3 @@ installDefaultWorkbench = installSpec @ActorEffects defaultWorkbenchSpec
 
 installDefaultAsyncWorkbench :: Eff BuiltinDispatcherEffects ()
 installDefaultAsyncWorkbench = installSpec @ActorEffects defaultAsyncWorkbenchSpec
-
