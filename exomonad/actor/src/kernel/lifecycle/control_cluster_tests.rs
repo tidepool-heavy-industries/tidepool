@@ -309,6 +309,13 @@ async fn external_failure_retirement_race(refuse_admission: bool) {
             .unwrap(),
         Ok(crate::ExternalFailureDisposition::AlreadyTerminal)
     );
+    assert_eq!(
+        actor
+            .report_external_failure(external_failure_probe())
+            .await,
+        Ok(crate::ExternalFailureDisposition::AlreadyTerminal),
+        "a duplicate late report reuses the same terminal"
+    );
     assert_eq!(actor.terminal().get(), Some(original));
     assert!(
         actor.terminal().cleanup().is_none(),
