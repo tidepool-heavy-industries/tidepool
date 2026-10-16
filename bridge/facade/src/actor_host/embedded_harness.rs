@@ -908,77 +908,33 @@ impl HostActor for EmbeddedHostActor {
         self.round_control.active_round()
     }
 
+    async fn output_retained(&self, operation: &OperationId) -> Result<(), String> {
+        let canonical = self
+            .store
+            .inspect_embedded_result(&self.identity, operation)
+            .map_err(|error| error.to_string())?
+            .ok_or("canonical retained operation is missing")?;
+        if canonical.0["type"] != "function_call_output" {
+            return Ok(());
+        }
+        let text = canonical.0["output"]
+            .as_str()
+            .ok_or("canonical output has no text body")?;
+        let value = serde_json::from_str(text)
+            .map_err(|error| format!("canonical output cannot be projected: {error}"))?;
+        if let Some(projected) = super::embedded_policy::project_model_json(
+            value,
+            serde_json::to_value(operation).map_err(|error| error.to_string())?,
+        ) {
+            self.store
+                .publish_model_output_projection(operation, projected)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
-        if let Some(canonical) = self
-            .store
-            .replay_output_operation(operation)
-            .map_err(|error| error.to_string())?
-        {
-            let has_native_receipts = canonical.0["output"]
-                .as_str()
-                .map(|text| {
-                    serde_json::from_str::<Value>(text)
-                        .map(|value| {
-                            value.get("items").is_some()
-                                || value.get("result").is_some()
-                                || value.get("receipt").is_some()
-                        })
-                        .unwrap_or(true)
-                })
-                .unwrap_or(false);
-            if has_native_receipts
-                && canonical.0["type"] == "function_call_output"
-                && self
-                    .store
-                    .model_output_projection(operation)
-                    .map_err(|error| error.to_string())?
-                    .is_none()
-            {
-                let context = embedded_invocation_context(&self.identity, operation)
-                    .map_err(|error| error.to_string())?;
-                let owner = self
-                    .installation
-                    .retained_operation(context)
-                    .map_err(|error| error.to_string())?;
-                let reply = owner
-                    .reply()
-                    .ok_or("native operation has no retained result for presentation")?;
-                let identity =
-                    serde_json::to_value(operation).map_err(|error| error.to_string())?;
-                let projected = match reply {
-                    Ok(response) => {
-                        super::embedded_policy::project_model_response(response, identity.clone())
-                            .map_err(|error| error.to_string())?
-                    }
-                    Err(failure) => {
-                        let failure = provider_tool_error(
-                            ResidentToolError::Invocation(failure),
-                            Some(operation),
-                        )
-                        .into_tool_failure();
-                        super::embedded_policy::project_model_json(
-                            failure.output_value(),
-                            identity.clone(),
-                        )
-                        .ok_or("native failure has no canonical presentation receipt")?
-                    }
-                };
-                let projected = match owner.terminal() {
-                    exomonad_actor::HostedOperationTerminal::Settled(
-                        WorkbenchCancellationOutcome::Cancelled { .. },
-                    ) => json!({"error":"job cancelled","receipt":projected}),
-                    exomonad_actor::HostedOperationTerminal::Settled(
-                        WorkbenchCancellationOutcome::Unconfirmed { .. }
-                        | WorkbenchCancellationOutcome::UnknownEvaluation { .. },
-                    ) => json!({"error":"cancellation unconfirmed","receipt":projected}),
-                    _ => projected,
-                };
-                self.store
-                    .publish_model_output_projection(operation, projected)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
         self.installation
             .complete(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await

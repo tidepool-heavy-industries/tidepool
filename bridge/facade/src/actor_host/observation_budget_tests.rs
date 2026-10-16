@@ -404,8 +404,19 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
     campaign.run_scenario(|campaign| Box::pin(async move {
         for name in ["throwing", "oversized"] {
             let policy = campaign.root_installation.policy.clone();
+            let call_id = uuid::Uuid::new_v4().to_string();
+            let (context, completion) = super::test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::External { thread_id:"retention-test".into() },
+                request_id:call_id.clone(), call_id,
+            });
+            let invocation = exomonad_tool::ToolInvocation {
+                context:Some(context), name:name.into(), arguments:exomonad_tool::ToolArguments::Structured(serde_json::json!("input")),
+            };
+            let retry = invocation.clone();
             let mut running = tokio::spawn(async move {
-                dispatch_structured_tool(policy.as_ref(), name, serde_json::json!("input")).await
+                let response = policy.dispatch_json_boxed(invocation).await.unwrap();
+                policy.complete_boxed(completion).await.unwrap();
+                response
             });
             let expected = "canonical semantic result λ".repeat(8000);
             let backend = TestCommands::completed(&expected);
@@ -418,6 +429,8 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
             assert_eq!(response["items"][0]["value"], expected);
             assert_eq!(response["items"][0]["presentation"]["status"], "failed");
             assert!(response["items"][0]["output"].as_str().unwrap().len() < 4096);
+            let repeated = campaign.root_installation.policy.dispatch_json_boxed(retry).await.unwrap();
+            assert_eq!(repeated, response, "an exact transport retry observes the same retained outcome");
             assert_eq!(backend.executions(), 1);
         }
     })).await;

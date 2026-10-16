@@ -67,13 +67,6 @@ impl EmbeddedPolicyInstallation {
         self.policy.abort_boxed(boundary)
     }
 
-    pub(super) fn retained_operation(
-        &self,
-        context: ToolInvocationContext,
-    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
-        self.policy.retained_operation(context)
-    }
-
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
         let request_activation = policy
@@ -281,17 +274,6 @@ impl EmbeddedPolicySnapshot {
     ) -> Result<exomonad_actor::WorkbenchCancellationOutcome, ResidentToolError> {
         self.policy.cancel_workbench_boxed(context, cause).await
     }
-}
-
-pub(super) fn project_model_response(
-    mut response: tidepool_runtime::session::WorkbenchResponse,
-    operation: Value,
-) -> Result<Value, serde_json::Error> {
-    for item in &mut response.items {
-        item.value = None;
-    }
-    let value = serde_json::to_value(response)?;
-    Ok(project_model_json(value.clone(), operation).unwrap_or(value))
 }
 
 /// Ordinary model output follows the authored presentation. The exact operation
