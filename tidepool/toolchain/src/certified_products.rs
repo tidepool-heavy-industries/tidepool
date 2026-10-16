@@ -906,6 +906,19 @@ pub(crate) fn original_native_group_definitions(
     Some(witness.group(original_ordinal)?.group().definitions())
 }
 
+/// Exact import identities authenticated with one immutable original body.
+/// Reading these facts neither admits that body nor supplies retained values.
+pub(crate) fn original_native_group_imports(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    original_ordinal: u32,
+) -> Option<&[PendingImportOwner]> {
+    let witness = product.original_native()?;
+    if !witness.matches_original(product) {
+        return None;
+    }
+    Some(witness.group(original_ordinal)?.imports())
+}
+
 fn retain_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<PendingCertifiedGroup>,

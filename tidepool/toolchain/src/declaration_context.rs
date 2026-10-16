@@ -905,6 +905,40 @@ struct NativeCompilerTransport {
 }
 
 impl NativeCompilerTransport {
+    /// An advertised body can be demanded by this compilation even if it was
+    /// not an executable root of the inherited view. Preserve its authenticated
+    /// historical identities so a missing value reaches the runtime resolver.
+    /// These tags grant neither native availability nor retained heap roots.
+    fn retained_generation_tags(
+        &self,
+        mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
+    ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
+        for (original, availability) in &self.availability {
+            let entry = self
+                .metadata
+                .retained
+                .artifacts
+                .get(original)
+                .ok_or_else(|| failure("advertised native original is outside request custody"))?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("advertised native artifact is not an original"));
+            };
+            for ordinal in entry
+                .native_group_ordinals
+                .iter()
+                .filter(|ordinal| availability.permits(**ordinal))
+            {
+                let imports =
+                    crate::certified_products::original_native_group_imports(product, *ordinal)
+                        .ok_or_else(|| {
+                            failure("advertised native body lacks authenticated imports")
+                        })?;
+                retained = certified_retained_generation_tags(retained, imports.iter())?;
+            }
+        }
+        Ok(retained)
+    }
+
     fn issue(
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
@@ -3747,6 +3781,14 @@ impl ExactCompilationRequest {
             request.retained_generations(),
             self.groups.iter().flat_map(PendingCertifiedGroup::imports),
         )?;
+        let retained = match retained_policy {
+            RetainedGenerationPolicy::PreserveCertifiedDemand => self
+                .inputs
+                .compiler
+                .native_transport
+                .retained_generation_tags(retained)?,
+            RetainedGenerationPolicy::PureActivationPreview => retained,
+        };
         // These authenticated tags keep original native demands intact through
         // projection. They grant neither lexical imports nor live heap roots.
         for (identity, generation) in retained {

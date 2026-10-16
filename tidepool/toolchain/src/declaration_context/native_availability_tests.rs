@@ -940,6 +940,142 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
 }
 
 #[test]
+fn advertised_unselected_body_preserves_historical_generation_identity_only() {
+    use crate::artifact_inventory::{
+        ExactArtifactSelection, IssuedNativeOffer, NativeGroupKey, NativeOriginalRequirement,
+    };
+    let identity = tidepool_repr::execution_schema::SymbolIdentity {
+        unit: "main".into(),
+        module: "Tidepool.Session.Val.G1".into(),
+        namespace: "value".into(),
+        occurrence: "x".into(),
+        record_parent: None,
+    };
+    let mixed = dependent_product(
+        "AdvertisedRetained",
+        100,
+        vec![
+            (7, vec![]),
+            (
+                9001,
+                vec![crate::certified_products::PendingImportOwner::Retained {
+                    identity: identity.clone(),
+                    generation: 1,
+                }],
+            ),
+        ],
+    );
+    let mixed = recovered_witness_fixtures(&[mixed]).remove(0).product;
+    let context = type_context(std::slice::from_ref(&mixed));
+    let private = OriginalCompilerInputs::from_native_availability(
+        &context,
+        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
+        &[mixed],
+    )
+    .unwrap();
+    let original = private.native_offers[0].original();
+    assert!(private.native_offers[0].is_full());
+    let inventory = private.artifacts.inventory();
+    let partial_view = inventory
+        .admit_recovery_selection(
+            &inventory.empty_view(),
+            vec![private.artifacts.metadata_snapshot().artifacts[&original].clone()],
+            &BTreeSet::from([NativeGroupKey {
+                artifact: original,
+                original_ordinal: 7,
+            }]),
+        )
+        .unwrap();
+    let baseline_roots = private.artifacts.capture_graph_selection().roots;
+    let root = tempfile::tempdir().unwrap();
+    let key = tidepool_extract_cmd::SymbolIdentity {
+        unit: identity.unit,
+        module: identity.module,
+        namespace: identity.namespace,
+        occurrence: identity.occurrence,
+        record_parent: identity.record_parent,
+    };
+    for (label, offer, expected) in [
+        ("full", private.native_offers[0].clone(), Some(1)),
+        (
+            "partial",
+            IssuedNativeOffer::issue(
+                original,
+                &partial_view,
+                Some(NativeOriginalRequirement {
+                    original,
+                    selection: ExactArtifactSelection::capture(&partial_view),
+                }),
+            )
+            .unwrap(),
+            None,
+        ),
+        (
+            "empty",
+            IssuedNativeOffer::issue(original, &private.artifacts, None).unwrap(),
+            None,
+        ),
+    ] {
+        let mut input = private.clone();
+        input.native_offers = vec![offer];
+        let request = ExactCompileContext::new(context.clone())
+            .prepare_compilation_with_private_input(
+                &root.path().join(label),
+                PRODUCER,
+                None,
+                Some(input),
+            )
+            .unwrap();
+        assert!(
+            request.groups.is_empty(),
+            "no native executable demand was selected"
+        );
+        assert_eq!(
+            request
+                .compiler_inputs()
+                .artifacts
+                .capture_graph_selection()
+                .roots,
+            baseline_roots
+        );
+        let mut command = tidepool_extract_cmd::ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused-fixture-extractor"),
+        );
+        command.input("unused-fixture-input.hs");
+        request
+            .apply_to(
+                &mut command,
+                RetainedGenerationPolicy::PreserveCertifiedDemand,
+            )
+            .unwrap();
+        let decoded =
+            tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes()).unwrap();
+        assert_eq!(
+            decoded.retained_generations().get(&key).copied(),
+            expected,
+            "{label}"
+        );
+        assert_eq!(request.groups.len(), 0);
+        let mut preview = tidepool_extract_cmd::ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused-fixture-extractor"),
+        );
+        preview.input("unused-fixture-input.hs");
+        request
+            .apply_to(
+                &mut preview,
+                RetainedGenerationPolicy::PureActivationPreview,
+            )
+            .unwrap();
+        assert!(
+            tidepool_extract_cmd::ExtractRequest::decode(&preview.request_bytes())
+                .unwrap()
+                .retained_generations()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     use crate::artifact_inventory::{
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
