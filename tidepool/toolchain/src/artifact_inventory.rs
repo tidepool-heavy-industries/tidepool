@@ -4375,17 +4375,17 @@ fn validate_issued_selection(
             );
             let missing_owned = expected
                 .iter()
-                .filter(|node| !owned.contains(node))
+                .filter(|node| !owned.contains(*node))
                 .take(8)
                 .collect::<Vec<_>>();
             let missing_closure = expected
                 .iter()
-                .filter(|node| !closure.contains(node))
+                .filter(|node| !closure.contains(*node))
                 .take(8)
                 .collect::<Vec<_>>();
             let extra_closure = closure
                 .iter()
-                .filter(|node| !expected.contains(node))
+                .filter(|node| !expected.contains(*node))
                 .take(8)
                 .collect::<Vec<_>>();
             tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
