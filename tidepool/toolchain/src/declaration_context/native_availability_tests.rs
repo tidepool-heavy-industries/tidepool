@@ -3677,13 +3677,15 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 vec![],
                 &selection,
             );
+            let admitted = admitted.map(|_| ());
             if ordinal == Some(demanded) {
                 assert!(admitted.is_ok());
             } else {
                 assert!(
-                    matches!(admitted, Err(CompileError::ArtifactInventory(error))
+                    matches!(&admitted, Err(CompileError::ArtifactInventory(error))
                     if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
-                        if artifact == entry.descriptor.id && original_ordinal == demanded))
+                        if artifact == entry.descriptor.id && original_ordinal == demanded)),
+                    "offer={ordinal:?}, demand={demanded}, actual={admitted:?}"
                 );
             }
         }
