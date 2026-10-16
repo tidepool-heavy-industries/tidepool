@@ -10,7 +10,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use exomonad_actor::{ActorExitKind, ActorTerminal, KernelInvocationFailure, LocalActorRef};
+use exomonad_actor::{
+    ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
+};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
