@@ -1817,6 +1817,13 @@ async fn assert_forced_request_retirement(
     let terminal = tokio::time::timeout(Duration::from_secs(2), retained_exit.wait())
         .await
         .expect("forced actor must publish its retained exit");
+    let failure = match terminal.kind {
+        ActorExitKind::Failed => ResponseFailure::TargetFailed(terminal.summary.clone()),
+        ActorExitKind::Cancelled => ResponseFailure::TargetCancelled(terminal.summary.clone()),
+        kind @ (ActorExitKind::Completed | ActorExitKind::Interrupted) => {
+            panic!("forced retirement requires Failed or Cancelled, got {kind:?}")
+        }
+    };
     let mut watches = 0;
     let mut settlements = 0;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -1838,11 +1845,6 @@ async fn assert_forced_request_retirement(
     })
     .await
     .expect("forced exit must publish request retirement without resident shutdown");
-    let failure = match terminal.kind {
-        ActorExitKind::Failed => ResponseFailure::TargetFailed(terminal.summary.clone()),
-        ActorExitKind::Cancelled => ResponseFailure::TargetCancelled(terminal.summary.clone()),
-        ActorExitKind::Completed => panic!("expected forced retirement"),
-    };
     assert_eq!(
         fixture
             .forest
