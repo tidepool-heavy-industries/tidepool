@@ -3784,6 +3784,7 @@ pub struct ArtifactView {
 
 /// One retained closure observed under the inventory lock. Entries are ordered
 /// by exact owner; dependency tuples keep their canonical wire order.
+#[derive(Clone, Debug)]
 pub(crate) struct RetainedArtifactMetadata {
     pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub artifacts: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
@@ -3821,14 +3822,7 @@ impl RetainedArtifactMetadata {
 /// A role-selected compiler namespace over immutable retained custody.
 pub(crate) struct CompilerArtifactMetadata {
     pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    retained: Arc<RetainedArtifactMetadata>,
-}
-
-impl std::ops::Deref for CompilerArtifactMetadata {
-    type Target = RetainedArtifactMetadata;
-    fn deref(&self) -> &Self::Target {
-        &self.retained
-    }
+    pub(crate) retained: Arc<RetainedArtifactMetadata>,
 }
 
 impl CompilerArtifactMetadata {
@@ -3839,14 +3833,10 @@ impl CompilerArtifactMetadata {
                     .values()
                     .map(|entry| entry.descriptor.id)
                     .collect::<Vec<_>>(),
-                &self.selected_native_groups,
+                &self.retained.selected_native_groups,
             ))
             .expect("compiler projection materialization key"),
         )
-    }
-    pub(crate) fn validate_native_selection(&self) -> Result<(), CompileError> {
-        // Construction checks every role against the retained exact artifacts.
-        Ok(())
     }
 }
 
@@ -11029,7 +11019,6 @@ mod tests {
             .unwrap()
             .project_metadata(Arc::clone(&metadata))
             .unwrap();
-        assert!(compiler.validate_native_selection().is_ok());
         assert_eq!(
             compiler.entries[&original_owner].descriptor.id,
             first.descriptor.id
