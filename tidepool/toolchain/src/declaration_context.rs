@@ -854,15 +854,11 @@ impl OriginalCompilerInputs {
             };
             if let Some(previous) = private_closures.get(&closure.original()) {
                 if previous != &closure {
-                    return Err(crate::artifact_inventory::ArtifactInventoryError {
-                        failure:
-                            crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity {
-                                artifact: closure.original(),
-                            },
-                        diagnostic_artifacts: None,
-                        owner_conflict: None,
-                    }
-                    .into());
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: closure.original(),
+                        },
+                    ));
                 }
             } else {
                 private_closures.insert(closure.original(), closure);
