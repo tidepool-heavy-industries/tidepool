@@ -2343,6 +2343,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             result_reader: self.result_reader.clone(),
+            operation_reader: self.operation_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
