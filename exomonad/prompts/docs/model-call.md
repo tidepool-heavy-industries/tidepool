@@ -15,9 +15,10 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 supplies the same recipe with typed `Sol`. Model tiers resolve through the
 admitted host policy.
 
-In an ordinary asynchronous notebook, call `ModelExample.luna input`. In a
-synchronous notebook, call `ModelExample.synchronousLuna input`: its compiled
-implementation uses `raiseSync` on an ordinary `Eff '[ModelCall]` program.
+In an ordinary asynchronous program, call `ModelExample.luna input` or
+`ModelExample.sol input`. In a synchronous notebook, use the corresponding
+`synchronousLuna` or `synchronousSol` helper. They lift the ordinary program
+through `raiseSync` while retaining the caller's ambient effect row.
 The shared source module lists its imports and extensions. Load it from the
 selected source root before running the registered cells. Each invocation is
 fresh model work; changing the tier and invoking again makes another request.
