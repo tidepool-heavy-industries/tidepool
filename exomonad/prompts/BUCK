@@ -55,6 +55,12 @@ export_file(
 )
 
 export_file(
+    name = "doc_model_call",
+    src = "docs/model-call.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "doc_recovery",
     src = "docs/recovery.md",
     visibility = ["PUBLIC"],

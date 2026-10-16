@@ -477,6 +477,7 @@ EXTERNAL_SOURCE_LABELS = {
     "exomonad/prompts/docs/deadline.md": "//exomonad/prompts:doc_deadline",
     "exomonad/prompts/docs/jev.md": "//exomonad/prompts:doc_jev",
     "exomonad/prompts/docs/lineage.md": "//exomonad/prompts:doc_lineage",
+    "exomonad/prompts/docs/model-call.md": "//exomonad/prompts:doc_model_call",
     "exomonad/prompts/docs/recovery.md": "//exomonad/prompts:doc_recovery",
     "exomonad/prompts/docs/refinement.md": "//exomonad/prompts:doc_refinement",
     "exomonad/prompts/docs/reflect.md": "//exomonad/prompts:doc_reflect",
