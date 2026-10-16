@@ -532,6 +532,13 @@ impl ConcurrentResident {
         markers: &[&str],
         layers: Option<exomonad_actor::ActorSourceLayerResolver>,
     ) -> Self {
+        if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_writer(std::io::stderr)
+                .try_init()
+                .expect("one test tracing subscriber");
+        }
         eval_harness::require_extract();
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
