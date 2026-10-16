@@ -9670,6 +9670,11 @@ where
                             // The native structural value is complete before the same
                             // continuation can demand its pure presenter.
                             *unit.semantic_value = Some(value);
+                            // A named tool's presenter owns its ordinary body.
+                            // Effect evidence remains in operation receipts and
+                            // their retained command/display owners.
+                            unit.command_output.clear();
+                            *unit.display_remaining = 28usize * 1024;
                             let runner = self.environment.runner.clone();
                             let context = context.clone();
                             current.native_start =

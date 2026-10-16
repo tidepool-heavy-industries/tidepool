@@ -21,7 +21,7 @@ data RetentionTools effects mode = RetentionTools
 
 answer :: Member Cmd.Commands effects => Text -> Eff effects Text
 answer _ = do
-  job <- Cmd.quiet (Cmd.run (Cmd.argv ["cat", "sources.txt"]))
+  job <- Cmd.run (Cmd.argv ["cat", "sources.txt"])
   pure (either (const "") id (Cmd.stdout job))
 
 agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Cmd.Commands effects)

@@ -429,7 +429,10 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
             assert_eq!(response["status"], "committed", "{response}");
             assert_eq!(response["items"][0]["value"], expected_semantic);
             assert_eq!(response["items"][0]["presentation"]["status"], if name == "wide" { "published" } else { "failed" });
-            assert!(response["items"][0]["output"].as_str().unwrap().len() < 4096);
+            let presentation = response["items"][0]["output"].as_str().unwrap();
+            assert!(presentation.len() < 4096);
+            if name == "wide" { assert_eq!(presentation, "wide result retained"); }
+            assert!(!presentation.contains("stdout"), "effect display must not prefix the authored presentation");
             let repeated = campaign.root_installation.policy.dispatch_json_boxed(retry).await.unwrap();
             assert_eq!(repeated, response, "an exact transport retry observes the same retained outcome");
             assert_eq!(backend.executions(), 1);
