@@ -544,6 +544,91 @@ fn issued_offer_retention_keeps_first_conflict_and_its_parent_evidence() {
 }
 
 #[test]
+fn issued_offer_retention_preserves_materialization_parent_precedence() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let inventory = ArtifactInventory::default();
+    let entry = Arc::new(
+        ArtifactEntry::original(producer.sha256(), product("RetentionFiles", 94)).unwrap(),
+    );
+    let source = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+            projection.clone(),
+            source.clone(),
+            [],
+        )
+        .unwrap(),
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
+        .unwrap()
+        .unwrap();
+    let offers = (0..4)
+        .map(|_| {
+            IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof.clone())).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut completed = Vec::new();
+    for offer in &offers {
+        let metadata = projection
+            .project_metadata(offer.custody().metadata_snapshot())
+            .unwrap();
+        let owner = offer
+            .custody()
+            .retain_materialization(&metadata, |parents| {
+                context.materialize_retained_artifacts(
+                    &metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                )
+            })
+            .unwrap();
+        completed.push(owner);
+    }
+    let observe_parents = |view: &ArtifactView| {
+        let metadata = projection
+            .project_metadata(view.metadata_snapshot())
+            .unwrap();
+        let mut observed = None;
+        let result = view.retain_materialization(&metadata, |parents| {
+            observed = Some(parents);
+            Err(failure(
+                "observe inherited materialization owners without publishing a result",
+            ))
+        });
+        assert!(result.is_err());
+        observed.expect("new merge has no completed local materialization")
+    };
+    for order in [vec![0, 1, 2, 3], vec![3, 2, 1, 0], vec![1, 0, 1, 3, 2, 0]] {
+        let selected = order
+            .iter()
+            .map(|index| offers[*index].clone())
+            .collect::<Vec<_>>();
+        let expected = ordered_offer_retention(&source, &selected).unwrap();
+        let actual = retain_native_offers(&source, &selected).unwrap();
+        let expected_parents = observe_parents(&expected);
+        let actual_parents = observe_parents(&actual);
+        assert_eq!(actual_parents.len(), expected_parents.len());
+        assert_eq!(actual_parents.len(), completed.len());
+        for (actual, expected) in actual_parents.iter().zip(&expected_parents) {
+            assert!(
+                Arc::ptr_eq(actual, expected),
+                "exact completed file owner and precedence must match the ordered fold"
+            );
+            assert!(actual.directory().path().exists());
+        }
+        assert_retention_result_matches(Ok(expected), Ok(actual));
+    }
+}
+
+#[test]
 fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallback() {
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
 
