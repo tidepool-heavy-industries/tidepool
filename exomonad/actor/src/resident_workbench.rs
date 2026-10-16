@@ -1705,6 +1705,21 @@ impl InstalledToolsAvailability {
 }
 
 impl InstalledToolsState {
+    /// Keep the publication check and observation publication under the same
+    /// installation lock; a reload cannot slip between them.
+    pub(crate) fn with_current_generation<T>(
+        &self,
+        expected: &Arc<ActorGeneration>,
+        observe: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.0.lock();
+        match &*state {
+            InstalledToolsAvailability::Generation(current) if Arc::ptr_eq(current, expected) => {
+                Some(observe())
+            }
+            _ => None,
+        }
+    }
     pub(crate) fn active_reply(&self) -> Option<Arc<crate::RequestReplyActivation>> {
         self.1.lock().clone()
     }

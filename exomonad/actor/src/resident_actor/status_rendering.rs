@@ -461,7 +461,7 @@ pub(super) fn render_revisions_section(revisions: &RevisionIdentities) -> String
         .as_deref()
         .map_or("none", short_oid);
     let layer = render_revision_observation(&revisions.layer, |drift| {
-        format!(
+        let source = format!(
             "{}@{}; disk={}@{}; drifted={}",
             short_identity(&drift.active_identity),
             drift.active_generation,
@@ -472,7 +472,15 @@ pub(super) fn render_revisions_section(revisions: &RevisionIdentities) -> String
             } else {
                 "yes"
             },
-        )
+        );
+        match drift.active_notebook_generation {
+            Some(active) => format!(
+                "issued_notebook={:?}; issued_source={}; active_notebook={active}; source={source}",
+                drift.issued_notebook_generation,
+                drift.issued_identity.as_deref().unwrap_or("unobserved")
+            ),
+            None => source,
+        }
     });
     let publish = match revisions.layer.current() {
         Some(observed) => {
@@ -785,6 +793,9 @@ mod tests {
     fn source_drift_section_names_a_changed_module_in_the_layer_row() {
         let drift = crate::ActorSourceDriftObservation {
             layer: observed(crate::SourceLayerDrift {
+                issued_identity: None,
+                issued_notebook_generation: None,
+                active_notebook_generation: None,
                 active_identity: "rev-a".into(),
                 active_generation: 3,
                 disk_identity: "rev-b".into(),
@@ -807,6 +818,9 @@ mod tests {
     fn source_drift_section_reports_identical_revisions_as_checked_not_skipped() {
         let drift = crate::ActorSourceDriftObservation {
             layer: observed(crate::SourceLayerDrift {
+                issued_identity: None,
+                issued_notebook_generation: None,
+                active_notebook_generation: None,
                 active_identity: "rev-a".into(),
                 active_generation: 2,
                 disk_identity: "rev-a".into(),
@@ -906,6 +920,9 @@ mod tests {
                 since_unix_ms: 43_201_000,
                 last_known: Some(crate::ObservedSource {
                     sample: crate::SourceLayerDrift {
+                        issued_identity: None,
+                        issued_notebook_generation: None,
+                        active_notebook_generation: None,
                         active_identity: "old".into(),
                         active_generation: 1,
                         disk_identity: "new".into(),
@@ -1016,6 +1033,9 @@ mod tests {
                 ("worker-b".into(), crate::SourceObservation::NotObserved),
             ],
             layer: observed(crate::SourceLayerDrift {
+                issued_identity: None,
+                issued_notebook_generation: None,
+                active_notebook_generation: None,
                 active_identity: "5f0e2d4c3b2a19180706".into(),
                 active_generation: 3,
                 disk_identity: "e1d2c3b4a5968778695a".into(),

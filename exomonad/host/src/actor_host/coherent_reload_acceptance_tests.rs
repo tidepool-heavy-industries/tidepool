@@ -65,6 +65,7 @@ impl Drop for ReleaseReloadGate {
 struct GatedSourceLayers {
     owner: exomonad_actor::ActorSourceLayerResolver,
     gate: Arc<ReloadGate>,
+    observe_gate: Option<Arc<ReloadGate>>,
 }
 impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
     fn freeze_toolset_layer(
@@ -159,6 +160,9 @@ impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
         &self,
         source: &exomonad_actor::CheckpointSourceLayer,
     ) -> Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError> {
+        if let Some(gate) = &self.observe_gate {
+            gate.wait_if_armed();
+        }
         self.owner.observe(source)
     }
     fn stage_reload(
@@ -329,13 +333,30 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        configure_workshop(config, judgments.clone(), None);
-    })
+    let observe_gate = Arc::new(ReloadGate::default());
+    let transform = {
+        let observe_gate = observe_gate.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: Default::default(),
+                observe_gate: Some(observe_gate.clone()),
+            }) as exomonad_actor::ActorSourceLayerResolver
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(config, judgments.clone(), None);
+        },
+        transform,
+    )
     .await
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            let _release_observation_on_failure = ReleaseReloadGate(observe_gate.clone());
             let root = harness::model::AgentPath("/root".into());
             let mut pending = VecDeque::new();
             let retained = host
@@ -382,6 +403,13 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 .await
                 .unwrap();
             assert_true_page(host, &round.settled_output("bind-a"));
+            let baseline = super::tests::dispatch_status(old_request.as_ref(), "revisions").await;
+            assert_eq!(baseline["status"], "committed");
+            let observed_a = installation.runtime_observation.snapshot().source_drift.layer.current().expect("explicit baseline capture").sample.clone();
+            observe_gate.arm();
+            let refresh_policy = old_request.clone();
+            let refresh = tokio::spawn(async move { super::tests::dispatch_status(refresh_policy.as_ref(), "revisions").await });
+            host.context.while_root_live("source observation captured generation A", observe_gate.entered.notified()).await.unwrap();
             let operation = round.operation("publish-b");
             round.sync_call_named(
                 "publish-b",
@@ -401,6 +429,20 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
             );
             let durable_b = selected_root_generation(host).await;
+            observe_gate.release();
+            let refresh_result = host.context.while_root_live("superseded source observation rejoins", refresh).await.unwrap().unwrap();
+            assert_eq!(refresh_result["status"], "committed", "inspection reports unavailability as data");
+            assert!(matches!(installation.runtime_observation.snapshot().source_drift.layer,
+                exomonad_actor::SourceObservation::Unavailable { last_known: Some(previous), .. } if previous.sample == observed_a),
+                "capture A cannot publish current after generation B");
+            let current_observation = super::tests::dispatch_status(old_request.as_ref(), "revisions").await;
+            assert_eq!(current_observation["status"], "committed");
+            let observed_b = installation.runtime_observation.snapshot().source_drift.layer.current().unwrap().sample.clone();
+            assert_eq!(observed_b.issued_notebook_generation, old_request.request_generation().map(|id| id.get()));
+            assert_ne!(observed_b.issued_notebook_generation, observed_b.active_notebook_generation);
+            assert_eq!(observed_b.issued_identity.as_ref(), Some(&observed_a.active_identity));
+            assert_ne!(observed_b.issued_identity.as_ref(), Some(&observed_b.active_identity));
+            assert_eq!(observed_b.active_identity, observed_b.disk_identity);
             assert_eq!(
                 old_request.request_instructions(),
                 Some(instructions_a.as_str()),
@@ -666,6 +708,7 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
             Arc::new(GatedSourceLayers {
                 owner,
                 gate: gate.clone(),
+                observe_gate: None,
             })
         })
     };

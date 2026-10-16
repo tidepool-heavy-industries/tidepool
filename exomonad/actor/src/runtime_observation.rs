@@ -32,7 +32,10 @@ impl ActorWorkspaceObservation {
 
     #[must_use]
     pub fn orientation(&self) -> String {
-        format!("{}\n  The workspace path can be identical across actors; each actor sees its assigned checkout. Worktree receipt `cwd` is the host storage path. Verify assignment with Git identity, not a unique-looking `pwd`.", self.summary())
+        format!(
+            "{}\n  The workspace path can be identical across actors; each actor sees its assigned checkout. Worktree receipt `cwd` is the host storage path. Verify assignment with Git identity, not a unique-looking `pwd`.",
+            self.summary()
+        )
     }
 }
 
@@ -185,6 +188,9 @@ pub enum InboundNext {
 /// never been checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLayerDrift {
+    pub issued_identity: Option<String>,
+    pub issued_notebook_generation: Option<u64>,
+    pub active_notebook_generation: Option<u64>,
     pub active_identity: String,
     pub active_generation: u64,
     pub disk_identity: String,
@@ -332,6 +338,7 @@ pub struct RequestActivationObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActorRuntimeObservation {
+    source_refresh: Option<uuid::Uuid>,
     pub compactions: Option<u64>,
     pub backend_executable: Option<String>,
     pub backend_version: Option<String>,
@@ -609,6 +616,26 @@ pub struct ActorRuntimeObservationHandle {
     inner: Arc<RwLock<ActorRuntimeObservation>>,
 }
 
+pub(crate) struct SourceRefreshLease {
+    observation: ActorRuntimeObservationHandle,
+    token: uuid::Uuid,
+}
+
+impl SourceRefreshLease {
+    pub(crate) fn token(&self) -> uuid::Uuid {
+        self.token
+    }
+}
+
+impl Drop for SourceRefreshLease {
+    fn drop(&mut self) {
+        self.observation.finish_source_refresh(
+            self.token,
+            Err("source inspection ended before observation completed".into()),
+        );
+    }
+}
+
 /// Observation of an actual provider round. Dropping an unfinished round cannot
 /// leave the actor reporting success or an indefinitely active provider.
 pub(crate) struct ProviderTurnLease {
@@ -657,6 +684,40 @@ impl Drop for ProviderTurnLease {
 }
 
 impl ActorRuntimeObservationHandle {
+    pub(crate) fn source_refresh(&self) -> SourceRefreshLease {
+        SourceRefreshLease {
+            observation: self.clone(),
+            token: self.begin_source_refresh(),
+        }
+    }
+
+    fn begin_source_refresh(&self) -> uuid::Uuid {
+        let token = uuid::Uuid::new_v4();
+        let mut state = self.inner.write();
+        state.source_refresh = Some(token);
+        state.source_drift.layer.begin(unix_time_ms());
+        token
+    }
+
+    /// Only the latest refresh may publish. The installation owner separately
+    /// holds its current-generation fence while calling this method.
+    pub(crate) fn finish_source_refresh(
+        &self,
+        token: uuid::Uuid,
+        result: Result<SourceLayerDrift, String>,
+    ) -> bool {
+        let mut state = self.inner.write();
+        if state.source_refresh != Some(token) {
+            return false;
+        }
+        state.source_refresh = None;
+        match result {
+            Ok(sample) => state.source_drift.layer.publish(unix_time_ms(), sample),
+            Err(reason) => state.source_drift.layer.unavailable(unix_time_ms(), reason),
+        }
+        true
+    }
+
     /// Called by the round owner after it has acquired its execution lease.
     /// Success is published only after the corresponding durable settlement.
     pub(crate) fn begin_provider_turn(
@@ -980,6 +1041,83 @@ impl ActorRuntimeObservationHandle {
         if observation.provider_usage.len() > MAX_PROVIDER_SAMPLES {
             let remove = observation.provider_usage.len() - MAX_PROVIDER_SAMPLES;
             observation.provider_usage.drain(..remove);
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_refresh_tests {
+    use super::*;
+
+    fn sample(generation: u64) -> SourceLayerDrift {
+        SourceLayerDrift {
+            issued_identity: Some(format!("issued-{generation}")),
+            issued_notebook_generation: Some(generation - 1),
+            active_notebook_generation: Some(generation),
+            active_identity: format!("active-{generation}"),
+            active_generation: generation,
+            disk_identity: format!("disk-{generation}"),
+            disk_generation: generation,
+            changed_modules: vec!["Project.Work".into()],
+        }
+    }
+
+    #[test]
+    fn dropping_capture_settles_pending_without_overwriting_a_newer_refresh() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let first = handle.source_refresh();
+        drop(first);
+        assert!(matches!(
+            handle.snapshot().source_drift.layer,
+            SourceObservation::Unavailable { .. }
+        ));
+        let old = handle.source_refresh();
+        let new = handle.source_refresh();
+        assert!(handle.finish_source_refresh(new.token(), Ok(sample(2))));
+        drop(old);
+        drop(new);
+        assert_eq!(
+            handle
+                .snapshot()
+                .source_drift
+                .layer
+                .current()
+                .unwrap()
+                .sample,
+            sample(2)
+        );
+    }
+
+    #[test]
+    fn refresh_histories_fence_stale_completion_and_retain_failed_last_known() {
+        for history in 1..65 {
+            let handle = ActorRuntimeObservationHandle::default();
+            let first = handle.begin_source_refresh();
+            assert!(handle.finish_source_refresh(first, Ok(sample(history))));
+            let old = handle.begin_source_refresh();
+            let new = handle.begin_source_refresh();
+            if history % 2 == 0 {
+                assert!(!handle.finish_source_refresh(old, Ok(sample(history + 1))));
+            }
+            assert!(handle.finish_source_refresh(new, Ok(sample(history + 2))));
+            assert!(!handle.finish_source_refresh(old, Err("late filesystem failure".into())));
+            let latest = handle
+                .snapshot()
+                .source_drift
+                .layer
+                .current()
+                .unwrap()
+                .sample
+                .clone();
+            assert_eq!(latest, sample(history + 2));
+            let failed = handle.begin_source_refresh();
+            assert!(handle.finish_source_refresh(failed, Err("source unreadable".into())));
+            assert!(matches!(handle.snapshot().source_drift.layer,
+                SourceObservation::Unavailable { last_known: Some(previous), .. } if previous.sample == latest));
+            assert!(
+                !handle.finish_source_refresh(failed, Ok(sample(history + 3))),
+                "one refresh completion wins once"
+            );
         }
     }
 }
