@@ -14,7 +14,8 @@ use crate::{
 };
 
 pub const PROCESS_SUPERVISOR_VERSION: u32 = 2;
-const MAX_REQUEST_BYTES: usize = 64 * 1024;
+// Per-message transport budget, including the terminating newline.
+const MAX_SUPERVISOR_FRAME_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_MS: u64 = 120_000;
 const UNAUTHENTICATED_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const PRIMARY_LEASE: Duration = Duration::from_secs(2);
@@ -159,13 +160,15 @@ struct ProcessSupervisorResponse {
 /// Noncloneable client bound to one immutable launch identity. Each operation
 /// reconnects to the same helper; timeouts never manufacture a replacement.
 pub struct ProcessSupervisorClient {
-    socket_path: PathBuf,
-    launch_id: String,
-    credential: String,
+    transport: SupervisorTransport,
 }
 
 /// Recovery can observe, stop, and finalize but can never prepare or release.
 pub struct ProcessSupervisorRecovery {
+    transport: SupervisorTransport,
+}
+
+struct SupervisorTransport {
     socket_path: PathBuf,
     launch_id: String,
     credential: String,
@@ -183,9 +186,11 @@ impl ProcessSupervisorClient {
             return Err(ProcessSupervisorError::LaunchIdentity);
         }
         let client = Self {
-            socket_path,
-            launch_id,
-            credential: pairing_secret,
+            transport: SupervisorTransport {
+                socket_path,
+                launch_id,
+                credential: pairing_secret,
+            },
         };
         let observation = client.execute(ProcessSupervisorCommand::Pair, deadline)?;
         Ok((client, observation))
@@ -324,28 +329,7 @@ impl ProcessSupervisorClient {
         command: ProcessSupervisorCommand,
         deadline: Duration,
     ) -> Result<ProcessSupervisorResponse, ProcessSupervisorError> {
-        let deadline = deadline.min(Duration::from_millis(MAX_OPERATION_MS));
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.set_read_timeout(Some(deadline))?;
-        stream.set_write_timeout(Some(deadline))?;
-        serde_json::to_writer(
-            &mut stream,
-            &ProcessSupervisorRequest {
-                version: PROCESS_SUPERVISOR_VERSION,
-                launch_id: self.launch_id.clone(),
-                command,
-                credential: Some(self.credential.clone()),
-                deadline_ms: Some(deadline.as_millis().try_into().unwrap_or(MAX_OPERATION_MS)),
-            },
-        )?;
-        stream.write_all(b"\n")?;
-        let response: ProcessSupervisorResponse = serde_json::from_reader(BufReader::new(stream))?;
-        if response.version != PROCESS_SUPERVISOR_VERSION
-            || response.launch_id.as_deref() != Some(self.launch_id.as_str())
-        {
-            return Err(ProcessSupervisorError::LaunchIdentity);
-        }
-        Ok(response)
+        self.transport.request(command, deadline)
     }
 }
 
@@ -361,9 +345,11 @@ impl ProcessSupervisorRecovery {
             return Err(ProcessSupervisorError::LaunchIdentity);
         }
         let client = Self {
-            socket_path,
-            launch_id,
-            credential: recovery_secret,
+            transport: SupervisorTransport {
+                socket_path,
+                launch_id,
+                credential: recovery_secret,
+            },
         };
         let observation = client.execute(ProcessSupervisorCommand::Recover, deadline)?;
         Ok((client, observation))
@@ -439,11 +425,24 @@ impl ProcessSupervisorRecovery {
         command: ProcessSupervisorCommand,
         deadline: Duration,
     ) -> Result<ProcessSupervisorResponse, ProcessSupervisorError> {
+        self.transport.request(command, deadline)
+    }
+}
+
+impl SupervisorTransport {
+    fn request(
+        &self,
+        command: ProcessSupervisorCommand,
+        deadline: Duration,
+    ) -> Result<ProcessSupervisorResponse, ProcessSupervisorError> {
+        if deadline.is_zero() {
+            return Err(ProcessSupervisorError::Deadline);
+        }
         let deadline = deadline.min(Duration::from_millis(MAX_OPERATION_MS));
         let mut stream = UnixStream::connect(&self.socket_path)?;
         stream.set_read_timeout(Some(deadline))?;
         stream.set_write_timeout(Some(deadline))?;
-        serde_json::to_writer(
+        write_frame(
             &mut stream,
             &ProcessSupervisorRequest {
                 version: PROCESS_SUPERVISOR_VERSION,
@@ -453,19 +452,16 @@ impl ProcessSupervisorRecovery {
                 deadline_ms: Some(deadline.as_millis().try_into().unwrap_or(MAX_OPERATION_MS)),
             },
         )?;
-        stream.write_all(b"\n")?;
-        let mut bytes = Vec::new();
-        BufReader::new(stream)
-            .take((MAX_REQUEST_BYTES + 1) as u64)
-            .read_until(b'\n', &mut bytes)?;
-        if bytes.len() > MAX_REQUEST_BYTES {
-            return Err(ProcessSupervisorError::FrameTooLarge);
+        let response: ProcessSupervisorResponse = read_frame(&mut stream)?;
+        if response.version != PROCESS_SUPERVISOR_VERSION {
+            return Err(ProcessSupervisorError::Version(response.version));
         }
-        let response: ProcessSupervisorResponse = serde_json::from_slice(&bytes)?;
-        if response.version != PROCESS_SUPERVISOR_VERSION
-            || response.launch_id.as_deref() != Some(self.launch_id.as_str())
-        {
-            return Err(ProcessSupervisorError::Unauthorized);
+        match response.launch_id.as_deref() {
+            None => return Err(ProcessSupervisorError::Unauthorized),
+            Some(identity) if identity != self.launch_id => {
+                return Err(ProcessSupervisorError::LaunchIdentity)
+            }
+            Some(_) => {}
         }
         Ok(response)
     }
@@ -479,7 +475,7 @@ pub enum ProcessSupervisorError {
     UnsafePrivateDirectory,
     #[error("process supervisor manifest is not a private regular file")]
     UnsafeManifest,
-    #[error("unsupported process supervisor manifest version {0}")]
+    #[error("unsupported process supervisor version {0}")]
     Version(u32),
     #[error("invalid process supervisor launch identity")]
     LaunchIdentity,
@@ -650,12 +646,12 @@ fn serve(
         };
         stream.set_read_timeout(Some(UNAUTHENTICATED_READ_TIMEOUT))?;
         stream.set_write_timeout(Some(UNAUTHENTICATED_READ_TIMEOUT))?;
-        let request = match read_request(&mut stream) {
+        let request = match read_frame::<ProcessSupervisorRequest>(&mut stream) {
             Ok(request) => request,
             Err(error) => {
                 let response = unauthorized_response(Some(error.to_string()));
                 // best-effort: the client may already have disconnected.
-                write_response(&mut stream, &response).ok();
+                write_frame(&mut stream, &response).ok();
                 continue;
             }
         };
@@ -663,7 +659,7 @@ fn serve(
         {
             let response = unauthorized_response(None);
             // best-effort: the client may already have disconnected.
-            write_response(&mut stream, &response).ok();
+            write_frame(&mut stream, &response).ok();
             continue;
         }
         enum Authority {
@@ -680,7 +676,7 @@ fn serve(
             }
             ProcessSupervisorCommand::Pair => {
                 // best-effort: the client may already have disconnected.
-                write_response(&mut stream, &unauthorized_response(None)).ok();
+                write_frame(&mut stream, &unauthorized_response(None)).ok();
                 continue;
             }
             ProcessSupervisorCommand::Recover
@@ -697,7 +693,7 @@ fn serve(
             }
             _ => {
                 // best-effort: the client may already have disconnected.
-                write_response(&mut stream, &unauthorized_response(None)).ok();
+                write_frame(&mut stream, &unauthorized_response(None)).ok();
                 continue;
             }
         };
@@ -758,7 +754,7 @@ fn serve(
                 }
             }
         }
-        let response_written = write_response(&mut stream, &reply).is_ok();
+        let response_written = write_frame(&mut stream, &reply).is_ok();
         // Lost operation replies leave the same helper and scope addressable.
         // Finalization exits only after its response was actually written.
         if finalize && response_written {
@@ -934,28 +930,60 @@ fn observation(
     }
 }
 
-fn read_request(
-    stream: &mut UnixStream,
-) -> Result<ProcessSupervisorRequest, ProcessSupervisorError> {
+fn read_frame<T: serde::de::DeserializeOwned>(
+    stream: impl Read,
+) -> Result<T, ProcessSupervisorError> {
     let mut bytes = Vec::new();
     BufReader::new(stream)
-        .take((MAX_REQUEST_BYTES + 1) as u64)
+        .take((MAX_SUPERVISOR_FRAME_BYTES + 1) as u64)
         .read_until(b'\n', &mut bytes)?;
-    if bytes.len() > MAX_REQUEST_BYTES {
-        return Err(ProcessSupervisorError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "supervisor request exceeds limit",
-        )));
+    if bytes.len() > MAX_SUPERVISOR_FRAME_BYTES {
+        return Err(ProcessSupervisorError::FrameTooLarge);
+    }
+    if bytes.last() != Some(&b'\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unterminated supervisor frame",
+        )
+        .into());
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn write_response(
-    stream: &mut UnixStream,
-    response: &ProcessSupervisorResponse,
+/// Bound serialization before publishing any bytes to the socket, including
+/// one reserved byte for the framing newline.
+fn write_frame<T: Serialize>(
+    mut stream: impl Write,
+    value: &T,
 ) -> Result<(), ProcessSupervisorError> {
-    serde_json::to_writer(&mut *stream, response)?;
-    stream.write_all(b"\n")?;
+    struct FrameBuffer {
+        bytes: Vec<u8>,
+        exceeded: bool,
+    }
+    impl Write for FrameBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_SUPERVISOR_FRAME_BYTES - 1 - self.bytes.len() {
+                self.exceeded = true;
+                return Err(std::io::Error::other("supervisor frame exceeds limit"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut frame = FrameBuffer {
+        bytes: Vec::new(),
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut frame, value);
+    if frame.exceeded {
+        return Err(ProcessSupervisorError::FrameTooLarge);
+    }
+    result?;
+    frame.bytes.push(b'\n');
+    stream.write_all(&frame.bytes)?;
     Ok(())
 }
 
@@ -1102,6 +1130,302 @@ fn validate_absolute(path: &Path) -> Result<(), ProcessSupervisorError> {
 mod tests {
     use super::*;
 
+    fn reply() -> ProcessSupervisorResponse {
+        ProcessSupervisorResponse {
+            workspace_view: None,
+            version: PROCESS_SUPERVISOR_VERSION,
+            launch_id: Some("launch".into()),
+            observation: ProcessSupervisorObservation::Reserved,
+            operation_pending: false,
+            error: None,
+        }
+    }
+
+    fn fake_pair(
+        bytes: Vec<u8>,
+        recovery: bool,
+    ) -> Result<ProcessSupervisorObservation, ProcessSupervisorError> {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("peer.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::scope(|scope| {
+            let (finished, hold) = std::sync::mpsc::channel();
+            let peer = scope.spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _: ProcessSupervisorRequest = read_frame(&mut stream).unwrap();
+                // Small fragments exercise the public client's incremental decoder.
+                for chunk in bytes.chunks(17) {
+                    if stream.write_all(chunk).is_err() {
+                        break;
+                    }
+                }
+                if bytes.last() != Some(&b'\n') {
+                    stream.shutdown(std::net::Shutdown::Write).unwrap();
+                }
+                hold.recv_timeout(Duration::from_secs(3)).unwrap();
+            });
+            let result = if recovery {
+                ProcessSupervisorRecovery::recover(
+                    socket,
+                    "launch".into(),
+                    "r".repeat(64),
+                    Duration::from_secs(1),
+                )
+                .map(|(_, state)| state)
+            } else {
+                ProcessSupervisorClient::pair(
+                    socket,
+                    "launch".into(),
+                    "p".repeat(64),
+                    Duration::from_secs(1),
+                )
+                .map(|(_, state)| state)
+            };
+            finished.send(()).unwrap();
+            peer.join().unwrap();
+            result
+        })
+    }
+
+    #[test]
+    fn public_clients_frame_and_authentication_contract() {
+        for recovery in [false, true] {
+            let mut bytes = serde_json::to_vec(&reply()).unwrap();
+            bytes.push(b'\n');
+            assert_eq!(
+                fake_pair(bytes, recovery).unwrap(),
+                ProcessSupervisorObservation::Reserved
+            );
+            for (version, identity, expected) in
+                [(99, None, 0), (2, None, 1), (2, Some("other"), 2)]
+            {
+                let mut response = reply();
+                response.version = version;
+                response.launch_id = identity.map(str::to_owned);
+                let mut bytes = serde_json::to_vec(&response).unwrap();
+                bytes.push(b'\n');
+                let error = fake_pair(bytes, recovery).unwrap_err();
+                assert!(matches!(
+                    (expected, error),
+                    (0, ProcessSupervisorError::Version(99))
+                        | (1, ProcessSupervisorError::Unauthorized)
+                        | (2, ProcessSupervisorError::LaunchIdentity)
+                ));
+            }
+            let mut response = reply();
+            response.error = Some("authenticated failure".into());
+            response.operation_pending = true;
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            assert!(
+                matches!(fake_pair(bytes, recovery), Err(ProcessSupervisorError::Remote(message)) if message == "authenticated failure")
+            );
+            for bytes in [vec![], b"{}".to_vec(), b"{\n".to_vec(), b"\n".to_vec()] {
+                let terminated = bytes.last() == Some(&b'\n');
+                let error = fake_pair(bytes, recovery).unwrap_err();
+                assert!(if terminated {
+                    matches!(error, ProcessSupervisorError::Json(_))
+                } else {
+                    matches!(error, ProcessSupervisorError::Io(ref error) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn frame_byte_boundaries_and_atomic_writer() {
+        // JSON string quotes and the newline occupy three bytes, independently
+        // of the transport's admission predicate. Include multibyte UTF-8.
+        for size in [
+            MAX_SUPERVISOR_FRAME_BYTES - 1,
+            MAX_SUPERVISOR_FRAME_BYTES,
+            MAX_SUPERVISOR_FRAME_BYTES + 1,
+        ] {
+            let value = format!("λ{}", "x".repeat(size - 5));
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            bytes.push(b'\n');
+            assert_eq!(bytes.len(), size);
+            let mut written = Vec::new();
+            let result = write_frame(&mut written, &value);
+            let read = read_frame::<String>(bytes.as_slice());
+            if size <= MAX_SUPERVISOR_FRAME_BYTES {
+                result.unwrap();
+                assert_eq!(written, bytes);
+                assert_eq!(read.unwrap(), value);
+            } else {
+                assert!(matches!(result, Err(ProcessSupervisorError::FrameTooLarge)));
+                assert!(written.is_empty());
+                assert!(matches!(read, Err(ProcessSupervisorError::FrameTooLarge)));
+            }
+        }
+        for recovery in [false, true] {
+            for size in [
+                MAX_SUPERVISOR_FRAME_BYTES - 1,
+                MAX_SUPERVISOR_FRAME_BYTES,
+                MAX_SUPERVISOR_FRAME_BYTES + 1,
+            ] {
+                let response = reply();
+                let base = serde_json::to_vec(&response).unwrap().len() + 1;
+                // JSON permits trailing whitespace, preserving the response schema.
+                let mut bytes = serde_json::to_vec(&response).unwrap();
+                bytes.extend(std::iter::repeat_n(b' ', size - base));
+                bytes.push(b'\n');
+                let result = fake_pair(bytes, recovery);
+                if size <= MAX_SUPERVISOR_FRAME_BYTES {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(result, Err(ProcessSupervisorError::FrameTooLarge)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn serialization_error_is_not_a_size_error_and_emits_nothing() {
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("invalid value"))
+            }
+        }
+        let mut bytes = Vec::new();
+        assert!(matches!(
+            write_frame(&mut bytes, &Invalid),
+            Err(ProcessSupervisorError::Json(_))
+        ));
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn zero_deadline_precedes_socket_io() {
+        let socket = PathBuf::from("/no/such/supervisor.sock");
+        assert!(matches!(
+            ProcessSupervisorClient::pair(
+                socket.clone(),
+                "launch".into(),
+                "p".repeat(64),
+                Duration::ZERO
+            ),
+            Err(ProcessSupervisorError::Deadline)
+        ));
+        assert!(matches!(
+            ProcessSupervisorRecovery::recover(
+                socket,
+                "launch".into(),
+                "r".repeat(64),
+                Duration::ZERO
+            ),
+            Err(ProcessSupervisorError::Deadline)
+        ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn generated_fragmentation_preserves_json(
+            value in ".{0,200}",
+            fragment in 1usize..32,
+        ) {
+            struct Fragments<'a> { bytes: &'a [u8], fragment: usize }
+            impl Read for Fragments<'_> {
+                fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                    let count = output.len().min(self.fragment).min(self.bytes.len());
+                    output[..count].copy_from_slice(&self.bytes[..count]);
+                    self.bytes = &self.bytes[count..];
+                    Ok(count)
+                }
+            }
+            let mut encoded = serde_json::to_vec(&value).unwrap(); encoded.push(b'\n');
+            let decoded: String = read_frame(Fragments { bytes: &encoded, fragment }).unwrap();
+            proptest::prop_assert_eq!(decoded, value);
+        }
+    }
+
+    #[test]
+    fn public_clients_timeout_without_peer_eof() {
+        for recovery in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("peer.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            std::thread::scope(|scope| {
+                let (finished, hold) = std::sync::mpsc::channel();
+                let peer = scope.spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let _: ProcessSupervisorRequest = read_frame(&mut stream).unwrap();
+                    hold.recv_timeout(Duration::from_secs(3)).unwrap();
+                });
+                let result = if recovery {
+                    ProcessSupervisorRecovery::recover(
+                        socket,
+                        "launch".into(),
+                        "r".repeat(64),
+                        Duration::from_millis(25),
+                    )
+                    .map(|(_, state)| state)
+                } else {
+                    ProcessSupervisorClient::pair(
+                        socket,
+                        "launch".into(),
+                        "p".repeat(64),
+                        Duration::from_millis(25),
+                    )
+                    .map(|(_, state)| state)
+                };
+                assert!(
+                    matches!(result, Err(ProcessSupervisorError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+                );
+                finished.send(()).unwrap();
+                peer.join().unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn oversized_finalize_reply_keeps_helper_addressable() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = fixture(directory.path(), "true");
+        let listener = UnixListener::bind(manifest.socket_path()).unwrap();
+        let (commands, _receive) = std::sync::mpsc::sync_channel(8);
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(WorkerObservation {
+            workspace_view: None,
+            state: ProcessSupervisorObservation::NotSpawned,
+            pending: false,
+            error: Some("x".repeat(MAX_SUPERVISOR_FRAME_BYTES)),
+        }));
+        let worker = ScopeWorker {
+            commands,
+            observation: observed.clone(),
+        };
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve(&listener, &manifest, &worker).unwrap());
+            let mut stream = UnixStream::connect(manifest.socket_path()).unwrap();
+            write_frame(
+                &mut stream,
+                &ProcessSupervisorRequest {
+                    version: PROCESS_SUPERVISOR_VERSION,
+                    launch_id: manifest.launch_id.clone(),
+                    command: ProcessSupervisorCommand::Finalize,
+                    credential: Some(manifest.recovery_secret.clone()),
+                    deadline_ms: None,
+                },
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.is_empty(), "oversized reply must publish no bytes");
+            observed.lock().unwrap().error = None;
+            let (recovery, state) = ProcessSupervisorRecovery::recover(
+                manifest.socket_path(),
+                manifest.launch_id.clone(),
+                manifest.recovery_secret.clone(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(state, ProcessSupervisorObservation::NotSpawned);
+            recovery.finalize(Duration::from_secs(1)).unwrap();
+            server.join().unwrap();
+        });
+    }
+
     fn bwrap() -> PathBuf {
         std::env::var_os("SERVICE_SCOPE_BWRAP")
             .map(PathBuf::from)
@@ -1194,6 +1518,16 @@ mod tests {
             )
             .unwrap();
             assert_eq!(observed, ProcessSupervisorObservation::Pinned);
+            for command in [
+                ProcessSupervisorCommand::Prepare,
+                ProcessSupervisorCommand::Pin,
+                ProcessSupervisorCommand::Release,
+            ] {
+                let reply = recovery.request(command, Duration::from_secs(1)).unwrap();
+                assert!(reply.error.is_some());
+                assert!(!reply.operation_pending);
+                assert_eq!(reply.observation, ProcessSupervisorObservation::Pinned);
+            }
             assert!(!directory.path().join("started").exists());
             recovery.stop(Duration::from_secs(10)).unwrap();
             recovery.finalize(Duration::from_secs(10)).unwrap();

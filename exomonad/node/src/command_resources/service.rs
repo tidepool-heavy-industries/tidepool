@@ -63,10 +63,10 @@ enum Response {
 
 async fn receive<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std::io::Result<T> {
     let mut frame = String::new();
-    let count = BufReader::new(stream.take(MAX_FRAME))
+    let count = BufReader::new(stream.take(MAX_FRAME + 1))
         .read_line(&mut frame)
         .await?;
-    if count == 0 || count as u64 == MAX_FRAME || !frame.ends_with('\n') {
+    if count == 0 || count as u64 > MAX_FRAME || !frame.ends_with('\n') {
         return Err(io_error("invalid resource service frame"));
     }
     serde_json::from_str(&frame).map_err(|error| io_error(error.to_string()))
@@ -380,6 +380,34 @@ pub enum StartupLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn complete_frame_boundary_round_trip_and_oversize_refusal() {
+        for size in [MAX_FRAME - 1, MAX_FRAME, MAX_FRAME + 1] {
+            let value = format!("λ{}", "x".repeat(size as usize - 5));
+            assert_eq!(serde_json::to_vec(&value).unwrap().len() as u64 + 1, size);
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            if size <= MAX_FRAME {
+                let (sent, received) =
+                    tokio::join!(send(&mut writer, &value), receive::<String>(&mut reader));
+                sent.unwrap();
+                assert_eq!(received.unwrap(), value);
+            } else {
+                assert!(send(&mut writer, &value).await.is_err());
+                drop(writer);
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).await.unwrap();
+                assert!(bytes.is_empty());
+                let (mut writer, mut reader) = UnixStream::pair().unwrap();
+                let mut bytes = serde_json::to_vec(&value).unwrap();
+                bytes.push(b'\n');
+                let (sent, received) =
+                    tokio::join!(writer.write_all(&bytes), receive::<String>(&mut reader));
+                sent.unwrap();
+                assert!(received.is_err());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn empty_requests_refuse_surplus_fields_before_resource_dispatch() {
