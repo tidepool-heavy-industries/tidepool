@@ -18,7 +18,7 @@ data Edit = Replace { oldText :: Text, newText :: Text } deriving (Eq, Show, Gen
 instance ToJSON Edit
 instance FromJSON Edit
 instance JsonSchema Edit
-data PatchError = EmptyPatch | EmptyAnchor Int | MissingAnchor Int | AmbiguousAnchor Int | ReadFailed FsError | VersionMismatch File.FileReference File.FileReference deriving (Eq, Show, Generic)
+data PatchError = EmptyPatch | EmptyAnchor Int | MissingAnchor Int | AmbiguousAnchor Int | ReadFailed FsError | PathMismatch File.FileReference File.FileReference | VersionMismatch File.FileReference File.FileReference deriving (Eq, Show, Generic)
 instance ToJSON PatchError
 instance JsonSchema PatchError
 -- Constructor hidden: committing always uses the original captured snapshot.
@@ -42,7 +42,8 @@ prepare expected edits = do
   result <- File.readSnapshot (File.referencePath expected)
   pure $ case result of
     Left err -> Left (ReadFailed err)
-    Right snapshot | File.snapshotReference snapshot /= expected -> Left (VersionMismatch expected (File.snapshotReference snapshot))
+    Right snapshot | File.snapshotPath snapshot /= File.referencePath expected -> Left (PathMismatch expected (File.snapshotReference snapshot))
+    Right snapshot | File.snapshotVersion snapshot /= File.referenceVersion expected -> Left (VersionMismatch expected (File.snapshotReference snapshot))
     Right snapshot -> do
       body <- applyEdits edits (File.snapshotText snapshot)
       pure (Prepared snapshot body edits)

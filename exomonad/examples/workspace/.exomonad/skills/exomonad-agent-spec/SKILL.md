@@ -68,7 +68,8 @@ These modules are workspace-specific examples, not functions exported by the
 shared agent-spec API. Read their source before adapting them; a tool's effect
 constraints and record type must match the effects its body uses.
 
-An after-tool hook can observe a completed call; it does not present or rewrite
+An after-tool hook observes a completed executed call. Compile, input-schema and
+other preexecution refusals do not invoke it. It does not present or rewrite
 that tool's result. `toolResultValue` is the semantic JSON result, while
 `toolResultOutput` is the selected text. The shipped spec does not install a
 blanket monitor.

@@ -58,7 +58,7 @@ personaSeedTests = testGroup "persona seed"
       let action = do
             _ <- M.initialise
             _ <- M.replaceBlock M.Persona "I have discovered a fondness for tiny maps."
-            _ <- M.note "map" "A place to return to"
+            _ <- M.note "map.md" "A place to return to"
             M.initialise
           (_,files) = run (runState (Map.empty :: Map.Map Text Text) (interpret writeHost action))
       assertEqual "identity is not reseeded" (Just "I have discovered a fondness for tiny maps.") (Map.lookup ".exomonad/state/memory/persona.md" files)
@@ -137,7 +137,7 @@ personaSeedTests = testGroup "persona seed"
         Right prepared -> case field "tools" (Contract.preparedAgentSpecMetadata prepared) of
           Array tools -> do
             assertEqual "explicit ordinary tool order"
-              (map String ["read_file", "write_file", "edit_file", "preview_edit", "haskell", "reload"])
+              (map String ["read_file", "write_file", "edit_file", "preview_edit", "lookup", "readLookup", "haskell", "reload"])
               (map (field "name") tools)
             mapM_ (\tool -> assertEqual "hosted function input root" (String "object")
               (field "type" (field "inputSchema" tool)))

@@ -61,14 +61,15 @@ reloadPresenter result = case result of
   Left (ReloadUnreadable detail) -> "Reload unreadable: " <> detail
   Right outcome -> case outcome of
     ReloadUnchanged _ -> "Configuration unchanged; notebook bindings preserved."
-    ReloadPublished _ (SourceRevision identity _ _) _ diff -> "Published source " <> identity <> surfaceSummary diff
+    ReloadPublished _ (SourceRevision identity _ _) _ diff -> "Published source " <> identity <> surfaceSummary diff <> resetReminder
     ReloadRejected _ _ diagnostics -> "Preparation rejected: " <> diagnostics
     ReloadRefused _ _ (ReloadRefusal category detail diff) -> "Reload refused (" <> T.pack (show category) <> "): " <> detail <> surfaceSummary diff
     ReloadCancelled _ -> "Reload cancelled before publication."
     ReloadPublishedWithWarnings _ (SourceRevision identity _ _) _ warnings diff ->
-      "Published source " <> identity <> surfaceSummary diff <> " Warnings: " <> T.pack (show warnings)
+      "Published source " <> identity <> surfaceSummary diff <> resetReminder <> " Warnings: " <> T.pack (show warnings)
     ReloadPublicationUnconfirmed _ detail -> "Publication unconfirmed; reconcile before retry: " <> detail
   where
+    resetReminder = " Notebook reset; re-import modules and recreate notebook bindings before use."
     surfaceSummary (ReloadSurfaceDiff added removed changed) =
       " (tools added " <> count added <> ", removed " <> count removed <> ", changed " <> count changed <> ")."
     count = T.pack . show . length

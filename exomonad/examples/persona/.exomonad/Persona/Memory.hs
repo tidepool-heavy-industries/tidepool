@@ -56,11 +56,12 @@ revise block = reviseAt (path block)
 -- Storage errors are never interpreted as absence.
 initialise :: Member FsWrite effects => Eff effects [Either FsError WriteOutcome]
 initialise = traverse (\block -> writeCheckedIf Nothing (path block) (seed block)) [Persona, Human, Curiosities]
--- Names are single components within the persistent notes and change directories.
-note :: Member FsWrite effects => Text -> Text -> Eff effects (Either FsError ())
+-- The filename is literal, including any extension. Creation never overwrites
+-- an existing note; a publication returns its actual resolved FileReference.
+note :: Member FsWrite effects => Text -> Text -> Eff effects (Either FsError File.CommitOutcome)
 note name body = case component name of
   Left err -> pure (Left err)
-  Right file -> writeFile (".exomonad/state/notes/" <> file <> ".md") body
+  Right file -> File.createFile (".exomonad/state/notes/" <> file) body
 component :: Text -> Either FsError Text
 component name
   | T.null name || name == "." || name == ".." || T.any (`elem` ("/\\\0" :: String)) name = Left (FsSandbox "Use a nonempty single-component note name")

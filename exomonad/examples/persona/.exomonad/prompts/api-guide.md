@@ -43,7 +43,12 @@ display memoryEdit
 ```
 
 `Memory.replaceBlock Memory.Human body` explicitly replaces a whole block.
-`Memory.note "name" body` writes a note. Neither operation refreshes context.
+`Memory.note "name.md" body` creates that literal filename under the notes directory.
+Names are single components; directory separators and traversal names refuse.
+It never overwrites an existing note. Inspect the returned `CommitOutcome`: a
+`Published` receipt contains the actual resolved `FileReference` and durability;
+`Conflict` preserves the existing file. Use the returned reference in handoffs.
+Neither operation refreshes context.
 `Memory.initialise` creates only absent seed blocks. Inspect each returned result.
 For delayed edits, `Memory.prepareAt` retains the destination, version and proposed
 text; `Memory.commitRevision` refuses a stale proposal without retrying it.
@@ -108,6 +113,11 @@ activate authored text. Read `.exomonad/Persona/Orientation.hs` and
 `.exomonad/Persona/Context.hs` for the small editable composition and signatures.
 
 ## Exact discovery
+
+The installed `lookup` and `readLookup` tools resolve API details and revisit
+retained results without another notebook compilation. `lookup` returns an exact
+actor/incarnation/slot receipt; pass that identity to `readLookup` for the index,
+sections, receipt or selection trace. No semantic enrichment policy is installed.
 
 `doc <topic>` is query text, not Haskell syntax. In this notebook use
 `LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])`, then display the

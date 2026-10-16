@@ -1075,8 +1075,9 @@ data AgentSpec tools effects = AgentSpec
     -- unqualified and names its own record @tools@, and a field selector by
     -- that name would make each of those modules ambiguous.
     specTools :: tools (AsServerT (Eff effects))
-  , -- | Applied when a tool call finishes, to that call and its result, in the
-    -- actor's own resident machine.
+  , -- | Applied after an executed tool call finishes, to that call and its
+    -- result, in the actor's own resident machine. Compile, input-schema and
+    -- other preexecution refusals do not invoke this hook.
     afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
   , -- | Run once for a fresh conversation, before first inference. Checking
     -- and reloading a spec install the code without executing this slot.
