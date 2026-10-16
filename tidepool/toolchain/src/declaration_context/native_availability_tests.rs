@@ -76,11 +76,19 @@ fn source_import(
     product: &CertifiedRecoveryProduct,
     ordinal: u32,
 ) -> crate::certified_products::PendingImportOwner {
-    let mut binder = tidepool_repr::execution_schema::testing::identity(
-        &product.owner().module,
-        &format!("entry_{ordinal}"),
-    );
-    binder.unit = product.owner().unit.clone();
+    let product = crate::certified_products::finalize_original_for_inventory(
+        product.clone(),
+        &mut PackageInterfaceValidation::default(),
+    )
+    .expect("fixture native import has authenticated original groups");
+    let binder = product
+        .original_native()
+        .unwrap()
+        .group(ordinal)
+        .expect("fixture native import names an issued original group")
+        .group()
+        .binders()[0]
+        .clone();
     crate::certified_products::PendingImportOwner::Source {
         owner: product.owner().clone(),
         original_ordinal: ordinal,
@@ -1746,20 +1754,6 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let root = tempfile::tempdir().unwrap();
     let mut histories = 0;
-    let issued_import = |product: &CertifiedRecoveryProduct, ordinal| {
-        crate::certified_products::PendingImportOwner::Source {
-            owner: product.owner().clone(),
-            original_ordinal: ordinal,
-            binder: product
-                .original_native()
-                .unwrap()
-                .group(ordinal)
-                .unwrap()
-                .group()
-                .binders()[0]
-                .clone(),
-        }
-    };
     for same_root in [false, true] {
         for overlap in [false, true] {
             if same_root && !overlap {
@@ -1965,7 +1959,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                         };
                         for index in 0..2 {
                             let mut fixed = bind().unwrap();
-                            let imports = [issued_import(&products[index + 1], 7)];
+                            let imports = [source_import(&products[index + 1], 7)];
                             let admitted = inventory.admit_bound_target(
                                 &mut fixed,
                                 &inputs.artifacts,
@@ -2013,7 +2007,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                             }
                         }
                         let mut fixed = bind().unwrap();
-                        let imports = [issued_import(&products[0], 7)];
+                        let imports = [source_import(&products[0], 7)];
                         let demanded = inventory.admit_bound_target(
                             &mut fixed,
                             &inputs.artifacts,
