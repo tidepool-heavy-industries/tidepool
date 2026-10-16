@@ -12068,6 +12068,8 @@ pub(crate) mod tests {
                     inventory
                         .admit_shared(&request.compiler_inputs().artifacts, vec![entry.clone()])
                         .unwrap()
+                        .retain_original_custody(&request.compiler_inputs().artifacts)
+                        .unwrap()
                 } else {
                     request.compiler_inputs().artifacts.clone()
                 };
