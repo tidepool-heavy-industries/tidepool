@@ -480,6 +480,138 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
 }
 
 #[test]
+fn private_transport_full_offer_cannot_borrow_another_offers_root() {
+    use crate::artifact_inventory::{
+        ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
+    };
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("FullOfferRoot", 85);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone());
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let full = inventory.admit_shared(&base, vec![entry.clone()]).unwrap();
+    let issued = NativeOriginalRequirement::from_issued_group_custody(
+        entry.descriptor.id,
+        canonical.descriptor.id,
+        &full,
+    )
+    .unwrap()
+    .unwrap();
+    let metadata = CompilerInputProjection::from_issued_entries(&[entry.clone()])
+        .unwrap()
+        .project_metadata(full.metadata_snapshot())
+        .unwrap();
+    // The graph is authentic, but it contains no native roots. Deliberately
+    // misclassify that graph to exercise the transport owner's refusal boundary.
+    let no_groups = NativeOriginalRequirement {
+        original: entry.descriptor.id,
+        selection: ExactArtifactSelection::capture(&base),
+    };
+    for other in [false, true] {
+        let mut offers = vec![NativeCompilerAvailability::Full(no_groups.clone())];
+        if other {
+            offers.push(NativeCompilerAvailability::Issued {
+                original: entry.descriptor.id,
+                proof: Some(issued.clone()),
+            });
+        }
+        assert!(matches!(
+            NativeCompilerTransport::issue(&metadata, &full, &offers),
+            Err(CompileError::ExtractFailed(detail))
+                if detail == "artifact inventory: full native offer has no issued carrier"
+        ));
+    }
+    let empty = NativeCompilerTransport::issue(
+        &metadata,
+        &full,
+        &[NativeCompilerAvailability::Issued {
+            original: entry.descriptor.id,
+            proof: None,
+        }],
+    )
+    .unwrap();
+    assert!(!empty.availability[&entry.descriptor.id].permits(7));
+}
+
+#[test]
+fn private_transport_refuses_selected_dependency_product_and_interface_conflicts() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let dependency = product("CurrentDependency", 86);
+    let consumer = dependent_product(
+        "CurrentConsumer",
+        87,
+        vec![(7, vec![source_import(&dependency, 7)])],
+    );
+    for interface_drift in [false, true] {
+        let replacement = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "CurrentDependency",
+                vec![(7, vec![]), (9001, vec![])],
+                88,
+                &BTreeMap::new(),
+                if interface_drift {
+                    b"different dependency interface".to_vec()
+                } else {
+                    b"CurrentDependency".to_vec()
+                },
+            ),
+            producer.sha256(),
+        );
+        let recovered =
+            recovered_witness_fixtures(&[dependency.clone(), consumer.clone(), replacement]);
+        let entries = recovered
+            .iter()
+            .map(|row| {
+                Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let original = &recovered[0].product;
+        let consumer = &recovered[1].product;
+        let replacement = &recovered[2].product;
+        assert_eq!(
+            original.module_interface() != replacement.module_interface(),
+            interface_drift
+        );
+        assert_ne!(entries[0].descriptor.id, entries[2].descriptor.id);
+        let inventory = ArtifactInventory::default();
+        let issued = inventory
+            .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
+            .unwrap();
+        let canonical = ArtifactEntry::canonical(consumer.module_interface().unwrap().clone());
+        let proof =
+            crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
+                entries[1].descriptor.id,
+                canonical.descriptor.id,
+                &issued,
+            )
+            .unwrap()
+            .unwrap();
+        let current = inventory
+            .admit_shared(&inventory.empty_view(), vec![entries[2].clone()])
+            .unwrap();
+        let view = issued.merge(&current).unwrap();
+        let metadata =
+            CompilerInputProjection::from_issued_entries(&[entries[1].clone(), entries[2].clone()])
+                .unwrap()
+                .project_metadata(view.metadata_snapshot())
+                .unwrap();
+        assert!(matches!(
+            NativeCompilerTransport::issue(&metadata, &view, &[NativeCompilerAvailability::Full(proof)]),
+            Err(CompileError::ExtractFailed(detail))
+                if detail == "artifact inventory: issued native dependency conflicts with request interface"
+        ));
+    }
+}
+
+#[test]
 fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
     let unused = product("UnusedNative", 50);
     let required = product("RequiredNative", 51);
