@@ -14913,6 +14913,8 @@ mod tests {
             requests.mark_queued(owner, target, request).unwrap();
             let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
             assert!(initial.is_empty());
+            let unwatched = requests.reserve(owner, target);
+            requests.mark_queued(owner, target, unwatched).unwrap();
             let terminal = crate::RetainedActorExit::new();
             let failed =
                 crate::ActorTerminal::new(crate::ActorExitKind::Failed, "owner lost execution");
@@ -14997,7 +14999,7 @@ mod tests {
             match settlement {
                 crate::LocalResidentDeployment::SettlementChanged { notification } => {
                     assert_eq!(notification.owner, owner);
-                    assert_eq!(notification.request, request);
+                    assert_eq!(notification.request, unwatched);
                 }
                 other => panic!("expected settlement notice, got {}", other.kind()),
             }

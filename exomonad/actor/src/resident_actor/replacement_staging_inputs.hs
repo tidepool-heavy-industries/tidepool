@@ -16,13 +16,13 @@ let replacementEntry :: Int -> Eff '[] Int
       send ActorReadyWith
       send @(ActorLocal Maybe) (ActorCheckpointWith 0 state)
       next <- send @(ActorLocal Maybe) (ActorReceiveStatefulWith 0 handler)
-      send @(ActorLocal Maybe) (ActorCheckpointWith 0 (next :: Int))
+      send @(ActorLocal Maybe) (ActorCheckpointWith 0 (maybe state id next))
       error "controlled failure after staged source checkpoint"
       where
         handler :: forall result. Maybe result -> Eff '[ActorKernel, ActorLocal Maybe] ()
         handler (Just reply) = do
           send (ActorReplyWith 0 reply)
-          send (ActorContinueWith 0 (99 :: Int))
+          send (ActorContinueWith 0 (Just (99 :: Int)))
         handler Nothing = error "source mapper did not deliver its mailbox value"
     replacementLifecycleMapper :: Int -> Eff '[ActorKernel, ActorLocal Maybe] ()
     replacementLifecycleMapper _ = do

@@ -997,13 +997,17 @@ impl KernelBehavior for ForcedRetirementBehavior {
     }
 
     fn external_application_failed<'a>(
-        &'a mut self, context: &'a KernelContext, failure: ExternalApplicationFailure,
+        &'a mut self,
+        context: &'a KernelContext,
+        failure: ExternalApplicationFailure,
     ) -> BoxFuture<'a, ExternalFailureDisposition> {
         self.inner.external_application_failed(context, failure)
     }
 
     fn shutdown<'a>(
-        &'a mut self, context: &'a KernelContext, terminal: &'a ActorTerminal,
+        &'a mut self,
+        context: &'a KernelContext,
+        terminal: &'a ActorTerminal,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
         self.inner.shutdown(context, terminal)
     }
@@ -1042,6 +1046,7 @@ async fn assert_forced_request_retirement(
     fixture: &mut Fixture,
     target: &LocalActorRef,
     request: crate::RequestId,
+    unwatched: crate::RequestId,
     watch: crate::WatchId,
     owner: ActorRef,
 ) {
@@ -1060,7 +1065,7 @@ async fn assert_forced_request_retirement(
                     watches += 1;
                 }
                 LocalResidentDeployment::SettlementChanged { notification }
-                    if notification.request == request =>
+                    if notification.request == unwatched =>
                 {
                     settlements += 1;
                 }
@@ -1098,7 +1103,7 @@ async fn assert_forced_request_retirement(
                 watches += 1
             }
             LocalResidentDeployment::SettlementChanged { notification }
-                if notification.request == request =>
+                if notification.request == unwatched =>
             {
                 settlements += 1
             }
@@ -1111,7 +1116,7 @@ async fn assert_forced_request_retirement(
 fn watch_forced_target(
     fixture: &Fixture,
     target: &LocalActorRef,
-) -> (ActorRef, crate::RequestId, crate::WatchId) {
+) -> (ActorRef, crate::RequestId, crate::RequestId, crate::WatchId) {
     let owner = ActorRef::first(crate::ActorId(9901));
     let requests = &fixture.forest.environment.requests;
     let request = requests.reserve(owner, target.identity());
@@ -1120,7 +1125,11 @@ fn watch_forced_target(
         .unwrap();
     let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
     assert!(initial.is_empty());
-    (owner, request, watch)
+    let unwatched = requests.reserve(owner, target.identity());
+    requests
+        .mark_queued(owner, target.identity(), unwatched)
+        .unwrap();
+    (owner, request, unwatched, watch)
 }
 
 #[tokio::test]
@@ -1150,7 +1159,7 @@ async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
     .await
     .unwrap();
     let _context = receive.await.unwrap();
-    let (owner, request, watch) = watch_forced_target(&fixture, &actor);
+    let (owner, request, unwatched, watch) = watch_forced_target(&fixture, &actor);
     let (reply, _receive) = tokio::sync::oneshot::channel();
     actor
         .address()
@@ -1163,7 +1172,7 @@ async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
             reply: reply.into(),
         })
         .unwrap();
-    assert_forced_request_retirement(&mut fixture, &actor, request, watch, owner).await;
+    assert_forced_request_retirement(&mut fixture, &actor, request, unwatched, watch, owner).await;
     task.await.unwrap();
     assert!(actor
         .terminal()
@@ -1224,7 +1233,7 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
         .await
         .unwrap();
     let _child_context = receive.await.unwrap();
-    let (owner, request, watch) = watch_forced_target(&fixture, &child);
+    let (owner, request, unwatched, watch) = watch_forced_target(&fixture, &child);
     supervisor
         .shutdown(ActorTerminal::new(
             ActorExitKind::Completed,
@@ -1233,7 +1242,7 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
         .await
         .unwrap();
     task.await.unwrap();
-    assert_forced_request_retirement(&mut fixture, &child, request, watch, owner).await;
+    assert_forced_request_retirement(&mut fixture, &child, request, unwatched, watch, owner).await;
     let terminal = child.terminal().get().unwrap();
     assert_eq!(terminal.kind, ActorExitKind::Cancelled);
     assert_eq!(terminal.summary, "owner actor stopped");
