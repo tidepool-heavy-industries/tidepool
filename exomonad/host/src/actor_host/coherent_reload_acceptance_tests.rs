@@ -403,13 +403,19 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 )
                 .await
                 .unwrap();
-            assert_true_page(host, &round.settled_output("bind-a"));
+            let bound_a = round.settled_output("bind-a");
+            assert_true_page(host, &bound_a);
+            let bind_execution =
+                &super::test_campaign::explicit_display_operation(&bound_a)["id"]["execution"];
+            assert!(bind_execution.is_string(), "the checked display carries its execution");
             assert!(
                 std::fs::read_to_string(&host_trace)
                     .expect("retained host trace")
                     .lines()
                     .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .any(|row| row["fields"]["message"] == "call timing"),
+                    .any(|row| row["fields"]["message"] == "call timing"
+                        && row["fields"]["execution"] == *bind_execution
+                        && row["fields"]["outcome"] == "Committed"),
                 "the real post-startup cell terminal must survive stdout truncation"
             );
             let baseline = super::test_campaign::dispatch_status(old_request.as_ref(), "revisions").await;
