@@ -720,3 +720,205 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
         }
     }
 }
+
+#[tokio::test]
+async fn source_handler_failure_retains_original_checkpoint_and_source_after_staging() {
+    use crate::request::sources::{SourceBinding, SourceEvent, SourceTarget};
+
+    let fixture = Fixture::compile_mode(true);
+    let (mut behavior, owner) = fixture.behavior().await;
+    let actor = owner.actor.identity();
+    let parent = behavior.descriptor.placement().session;
+    fixture.with_factory(&mut behavior, false);
+    let (mut definition, _) = fixture.definition(&behavior, parent).await;
+    definition.child.entry = MailboxValue::new(
+        parent,
+        retain(
+            &behavior.environment.runner,
+            parent,
+            "replacementSourceFailureEntry",
+        )
+        .await,
+    );
+    let staged = owner
+        .kernel
+        .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
+        .await
+        .unwrap();
+    staged
+        .placement_custody
+        .transfer_to_actor(actor, staged.descriptor.placement())
+        .unwrap();
+    let original_checkpoint = Arc::clone(&staged.checkpoint.value);
+    behavior.descriptor = staged.descriptor;
+    behavior.standing = ResidentStanding::Receiving(staged.receiver);
+    behavior.committed = Some(CommittedActorState {
+        checkpoint: staged.checkpoint,
+        input: None,
+    });
+    let target = SourceTarget::Lifecycle(actor);
+    behavior.sources.push(SourceBinding {
+        target,
+        entry: Arc::new(
+            retain(
+                &behavior.environment.runner,
+                parent,
+                "replacementLifecycleMapper",
+            )
+            .await,
+        ),
+    });
+    let delivery = crate::SourceDelivery {
+        slot: 0,
+        target,
+        event: SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(
+            "original source event".into(),
+        )),
+    };
+    let error = match behavior.source(&owner.kernel, delivery).await {
+        Err(error) => error,
+        Ok(_) => panic!("source handler must fail after its next checkpoint is staged"),
+    };
+    assert!(
+        error
+            .detail
+            .contains("controlled failure after staged source checkpoint"),
+        "{error}"
+    );
+    assert!(
+        behavior.pending_checkpoint.is_some(),
+        "the real continuation reached its new checkpoint"
+    );
+    assert!(behavior.pause_failed_handler(&owner.kernel, &error.detail));
+    assert!(behavior.pending_checkpoint.is_none());
+    let ResidentStanding::Paused(paused) = &behavior.standing else {
+        panic!("failed source handler pauses for replacement");
+    };
+    assert!(Arc::ptr_eq(&paused.checkpoint.value, &original_checkpoint));
+    let RetainedActorInput::Source(source) = &paused.input else {
+        panic!("mapped mailbox custody must not replace the original source delivery");
+    };
+    assert_eq!(source.slot, 0);
+    assert_eq!(source.target, target);
+    assert!(matches!(
+        &source.event,
+        SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(detail))
+            if detail == "original source event"
+    ));
+    let context = behavior.context(actor);
+    let entry = retain(&behavior.environment.runner, parent, "replacementEntry").await;
+    let outcome = owner
+        .kernel
+        .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_application(
+            context.clone(),
+            entry,
+            Arc::clone(&paused.checkpoint.value),
+            context.placement.resource_scope,
+        ))
+        .await
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("retained predecessor checkpoint remains executable");
+    };
+    assert_eq!(result.to_json(), serde_json::json!(42));
+    let work = behavior.workbench_executions.lock().actor_scope_root(actor);
+    assert_eq!(
+        work.cleanup(&behavior.environment, &owner.kernel)
+            .await
+            .uncertainty(),
+        None
+    );
+    drop(behavior);
+    owner.finish().await;
+}
+
+#[tokio::test]
+async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_uncertainty() {
+    use crate::request::{RequestCleanupState, ResponseFailure, ResponseObservation};
+    let fixture = Fixture::compile_mode(true);
+    let (mut behavior, owner) = fixture.behavior().await;
+    let target = owner.actor.identity();
+    let parent = behavior.descriptor.placement().session;
+    fixture.with_factory(&mut behavior, false);
+    let (definition, _) = fixture.definition(&behavior, parent).await;
+    let staged = owner
+        .kernel
+        .compiler_lifecycle_scope(behavior.stage_replacement(target, definition))
+        .await
+        .unwrap();
+    staged
+        .placement_custody
+        .transfer_to_actor(target, staged.descriptor.placement())
+        .unwrap();
+    behavior.descriptor = staged.descriptor;
+    behavior.boot = None;
+    behavior.standing = ResidentStanding::Boot;
+    let requests = Arc::clone(&behavior.environment.requests);
+    let requester = ActorRef::first(crate::ActorId(target.id.0 + 100));
+    let request = requests.reserve(requester, target);
+    requests.mark_queued(requester, target, request).unwrap();
+    requests.present(target, request).unwrap();
+    requests
+        .cancel_request(
+            requester,
+            request,
+            crate::CancellationReason::RequesterCancelled,
+        )
+        .unwrap();
+    let claim = requests
+        .begin_cancellation_acknowledgement(target, request)
+        .unwrap();
+    behavior.accepted_settlement = Some(AcceptedRequestSettlement {
+        transfer: None,
+        kind: AcceptedRequestKind::Cancellation(claim),
+    });
+    // Cleanup may not retire the receiver's own realm as a message realm.
+    behavior.pending_program = Some(PendingActorProgram {
+        transfer: None,
+        resumption: ActorResumption::ReceiveAgain(SuspendedCast {
+            receiver: staged.receiver,
+            handler_realm: behavior.descriptor.placement().resource_scope,
+            cleanup: None,
+        }),
+    });
+    let error = behavior.resume(&owner.kernel).await.unwrap_err();
+    assert!(error
+        .detail
+        .contains("cancelled message lost its actor-owned receiver"));
+    assert!(
+        behavior.suspended_cast.is_some(),
+        "refused cleanup remains owned for shutdown"
+    );
+    assert_eq!(
+        requests.request_cleanup_state(requester, request),
+        Ok(RequestCleanupState::CancellationRequested {
+            reason: crate::CancellationReason::RequesterCancelled,
+            presented: true,
+        })
+    );
+    let machines = Arc::clone(behavior.environment.runner.machines_for_test());
+    let checkout = machines
+        .checkout_run(behavior.descriptor.placement().session)
+        .unwrap();
+    let terminal = ActorTerminal::new(ActorExitKind::Failed, "cancellation cleanup refused");
+    let (_, realm) = behavior
+        .shutdown_components(
+            &owner.kernel,
+            &terminal,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(1),
+        )
+        .await;
+    assert!(matches!(
+        realm,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    assert_eq!(
+        requests.observe_response(requester, request),
+        Ok(ResponseObservation::Unavailable(
+            ResponseFailure::TargetFailed(terminal.summary)
+        ))
+    );
+    drop(checkout);
+    drop(behavior);
+    owner.finish().await;
+}

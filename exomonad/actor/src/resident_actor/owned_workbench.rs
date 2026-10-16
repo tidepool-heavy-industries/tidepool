@@ -1024,7 +1024,6 @@ where
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
-                    park_effects: true,
                     context: context.clone(),
                     public_visibility: None,
                     control,

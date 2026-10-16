@@ -153,12 +153,23 @@ fn check_constructed_projection(
         expected_edges.clone()
     );
     let metadata = view.metadata_snapshot();
+    let warm = view.lease.inventory.metrics();
+    let repeated = view.clone().metadata_snapshot();
+    prop_assert!(Arc::ptr_eq(&metadata, &repeated));
+    prop_assert_eq!(
+        view.lease.inventory.metrics().entry_handle_copies,
+        warm.entry_handle_copies
+    );
     prop_assert_eq!(
         metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
         ids
     );
     prop_assert_eq!(
-        metadata.dependencies().into_iter().collect::<BTreeSet<_>>(),
+        metadata
+            .dependencies()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
         expected_edges
     );
     let selected: BTreeMap<_, _> = metadata
@@ -527,6 +538,13 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
     expected_owners.sort_by(|left, right| left.owner.cmp(&right.owner));
 
     let metadata = view.metadata_snapshot();
+    let warm = view.lease.inventory.metrics();
+    let repeated = view.clone().metadata_snapshot();
+    prop_assert!(Arc::ptr_eq(&metadata, &repeated));
+    prop_assert_eq!(
+        view.lease.inventory.metrics().entry_handle_copies,
+        warm.entry_handle_copies
+    );
     let mut descriptors = view.descriptors();
     descriptors.sort_by_key(|descriptor| (descriptor.owner.clone(), descriptor.id));
     let mut expected_descriptors = expected_descriptors;

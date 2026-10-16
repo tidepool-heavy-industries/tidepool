@@ -121,10 +121,10 @@ fn invalid_response(message: &str) -> std::io::Error {
 
 async fn receive<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std::io::Result<T> {
     let mut frame = String::new();
-    let count = BufReader::new(stream.take(MAX_FRAME))
+    let count = BufReader::new(stream.take(MAX_FRAME + 1))
         .read_line(&mut frame)
         .await?;
-    if count == 0 || count as u64 == MAX_FRAME || !frame.ends_with('\n') {
+    if count == 0 || count as u64 > MAX_FRAME || !frame.ends_with('\n') {
         return Err(invalid_response("invalid resource service frame"));
     }
     serde_json::from_str(&frame)
@@ -544,5 +544,84 @@ mod tests {
             serde_json::json!({"version":2,"request":{"operation":"policy","foreign":true}})
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_frame_boundary_round_trip_and_oversize_refusal() {
+        for size in [MAX_FRAME - 1, MAX_FRAME, MAX_FRAME + 1] {
+            let value = format!("λ{}", "x".repeat(size as usize - 5));
+            assert_eq!(serde_json::to_vec(&value).unwrap().len() as u64 + 1, size);
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            if size <= MAX_FRAME {
+                let (sent, received) =
+                    tokio::join!(send(&mut writer, &value), receive::<String>(&mut reader));
+                sent.unwrap();
+                assert_eq!(received.unwrap(), value);
+            } else {
+                assert!(send(&mut writer, &value).await.is_err());
+                drop(writer);
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).await.unwrap();
+                assert!(bytes.is_empty());
+                let (mut writer, mut reader) = UnixStream::pair().unwrap();
+                let mut bytes = serde_json::to_vec(&value).unwrap();
+                bytes.push(b'\n');
+                let (sent, received) =
+                    tokio::join!(writer.write_all(&bytes), receive::<String>(&mut reader));
+                sent.unwrap();
+                assert!(received.is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_requests_refuse_surplus_fields_before_resource_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("resources.sock");
+        let owner = Arc::new(super::super::tests::owner(directory.path()));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(serve(listener, owner.clone()));
+        for operation in ["policy", "observe"] {
+            let valid = serde_json::json!({"operation": operation});
+            let request: Request = serde_json::from_value(valid.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), valid);
+            let mut stream = UnixStream::connect(&socket).await.unwrap();
+            let valid_frame = serde_json::json!({"version": PROTOCOL_VERSION, "request": valid});
+            send(&mut stream, &valid_frame).await.unwrap();
+            let response: Response = receive(&mut stream).await.unwrap();
+            match (operation, response) {
+                ("policy", Response::Policy(policy)) => assert_eq!(policy, *owner.policy()),
+                ("observe", Response::Observation(_)) => {}
+                _ => panic!("valid request did not reach its resource authority"),
+            }
+            drop(stream);
+            for field in ["foreign", "actor", "id", "bytes", "", "λ"] {
+                for value in [
+                    serde_json::Value::Null,
+                    serde_json::json!(true),
+                    serde_json::json!(1),
+                    serde_json::json!("extra"),
+                    serde_json::json!([]),
+                    serde_json::json!({}),
+                ] {
+                    let mut invalid = valid.clone();
+                    invalid[field] = value;
+                    let mut stream = UnixStream::connect(&socket).await.unwrap();
+                    let invalid_frame =
+                        serde_json::json!({"version": PROTOCOL_VERSION, "request": invalid});
+                    send(&mut stream, &invalid_frame).await.unwrap();
+                    let result = tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        result.unwrap_err().kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                    );
+                    assert_eq!(*owner.actor_starts.lock(), 0);
+                }
+            }
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 }

@@ -396,12 +396,18 @@ impl WorkbenchInvocationMetadata {
     }
 }
 
+/// An existing display callback, addressed by its exact retained actor slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayExpansionRequest {
+    pub identity: (i64, i64, i64),
+    pub key: i64,
+}
+
 /// Actor-owned authority beside the transport-neutral workbench request.
 /// Semantic input is constructed here and cannot be independently replaced.
 /// Transport identity and checkpoint metadata never contain a handler.
 pub struct ActorWorkbenchInvocation {
     pub(crate) initial_context: bool,
-    pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     request: WorkbenchRequest,
     operation: WorkbenchToolOperation,
     pub(crate) hosted_checkpoint_capture:
@@ -440,14 +446,6 @@ impl ActorWorkbenchInvocation {
             .map(|call| call.selected().endpoint().plan())
     }
 
-    /// Execute an existing display callback through the actor's serialized mailbox.
-    /// Identity and key are validated against the actor's retained display slots.
-    pub fn for_display_expansion(identity: (i64, i64, i64), key: i64) -> Self {
-        let mut invocation = Self::unbound(WorkbenchRequest::from_cell_input(""));
-        invocation.display_expansion = Some((identity, key));
-        invocation
-    }
-
     pub(crate) fn issued(
         request: WorkbenchRequest,
         installation: Option<crate::resident_workbench::ActorRequestSnapshot>,
@@ -456,7 +454,6 @@ impl ActorWorkbenchInvocation {
     ) -> Self {
         Self {
             initial_context: false,
-            display_expansion: None,
             request,
             operation: WorkbenchToolOperation::Unbound(installation),
             hosted_checkpoint_capture,
@@ -472,7 +469,6 @@ impl ActorWorkbenchInvocation {
     ) -> Self {
         Self {
             initial_context: false,
-            display_expansion: None,
             request: metadata.apply(call.request()),
             operation: WorkbenchToolOperation::Installed(std::sync::Arc::new(call)),
             hosted_checkpoint_capture,
@@ -596,6 +592,11 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    ExpandDisplay {
+        request: DisplayExpansionRequest,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        reply: RpcReplyPort<KernelWorkbenchReply>,
+    },
     /// Wakes the actor when its one admitted task returns a fenced completion.
     ActorStepCompleted {
         step: WorkbenchStepKey,
@@ -665,6 +666,7 @@ impl KernelMessage {
             Self::Tool { .. } => "Tool",
             Self::ToolWithHostedCheckpoint { .. } => "ToolWithHostedCheckpoint",
             Self::Workbench { .. } => "Workbench",
+            Self::ExpandDisplay { .. } => "ExpandDisplay",
             Self::ActorStepCompleted { .. } => "ActorStepCompleted",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
@@ -722,6 +724,10 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("ToolWithHostedCheckpoint")
                 .field("invocation", invocation)
                 .finish_non_exhaustive(),
+            Self::ExpandDisplay { request, .. } => formatter
+                .debug_tuple("ExpandDisplay")
+                .field(request)
+                .finish(),
             Self::Workbench { invocation, .. } => formatter
                 .debug_struct("Workbench")
                 .field("request", &invocation.request)
@@ -1313,6 +1319,21 @@ impl LocalActorRef {
     ) -> Result<(), KernelCallFailure> {
         self.admit_mailbox(KernelMessage::Workbench {
             invocation,
+            control,
+            reply,
+        })
+        .await
+    }
+
+    /// Expand an existing display through the same incarnation and hosted admission owner.
+    pub async fn submit_display_expansion(
+        &self,
+        request: DisplayExpansionRequest,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        reply: RpcReplyPort<KernelWorkbenchReply>,
+    ) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::ExpandDisplay {
+            request,
             control,
             reply,
         })

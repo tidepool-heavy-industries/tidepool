@@ -37,6 +37,17 @@ fn response(status: WorkbenchRunStatus) -> WorkbenchResponse {
     }
 }
 
+impl ReplyDriver {
+    fn workbench<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        _: crate::ActorWorkbenchInvocation,
+        _: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+        Box::pin(async move { self.accept_reply(context.identity()) })
+    }
+}
+
 impl KernelBehavior for ReplyDriver {
     fn accepts_mailbox(&self) -> bool {
         !self.accepted
@@ -110,14 +121,7 @@ impl KernelBehavior for ReplyDriver {
             })
         })
     }
-    fn workbench<'a>(
-        &'a mut self,
-        context: &'a KernelContext,
-        _: crate::ActorWorkbenchInvocation,
-        _: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        Box::pin(async move { self.accept_reply(context.identity()) })
-    }
+
     fn dispatch_resume(
         &mut self,
         context: &KernelContext,
@@ -138,7 +142,6 @@ impl KernelBehavior for ReplyDriver {
                 _ = context.wait_requested_shutdown() => None,
             };
             OwnedActorCompletion::new(move |driver: &mut Self| {
-                let request = driver.request.lock().expect("request retained");
                 match successful {
                     Some(true) => {
                         let claim = driver
@@ -148,9 +151,13 @@ impl KernelBehavior for ReplyDriver {
                         crate::request::test_support::complete_reply(&driver.registry, claim, None);
                     }
                     Some(false) => {
+                        let claim = driver
+                            .reply_claim
+                            .take()
+                            .expect("accepted reply owns its affine claim");
                         driver
                             .registry
-                            .fail_reply_settlement(request, "controlled continuation failure");
+                            .fail_reply_settlement(claim, "controlled continuation failure");
                     }
                     // The kernel defers shutdown while this task is parked.
                     // Release the task; the real shutdown hook owns closure.
@@ -584,7 +591,6 @@ async fn run_history(history: &History, coverage: &mut Coverage, phase: &Cell<&s
         registry.begin_reply(actor.identity(), request),
         Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
     ));
-    registry.fail_reply_settlement(request, "late failure");
     check_observation(&registry, owner, request, Some(history.completion));
     assert_eq!(resumes.load(Ordering::SeqCst), 1);
     if !matches!(history.completion, Completion::Shutdown) {
@@ -662,9 +668,7 @@ async fn read_operation(
                 registry.begin_reply(actor.identity(), missing),
                 Err(crate::ReplyError::Stale)
             ));
-            assert!(registry
-                .fail_reply_settlement(missing, "stale failure")
-                .is_empty());
+            // Refused admission issues no claim with which to settle this ID.
             assert_eq!(
                 registry.observe_response(owner, missing),
                 Err(crate::ReplyError::Stale)
@@ -756,7 +760,7 @@ fn singleton_reply_watches_distinguish_required_success_from_allowed_failure() {
                 WatchObservation::Pending(_)
             ));
         }
-        registry.begin_reply(target, request).unwrap();
+        let claim = registry.begin_reply(target, request).unwrap();
         let failure = if stopped {
             registry.actor_stopped(
                 target,
@@ -766,9 +770,12 @@ fn singleton_reply_watches_distinguish_required_success_from_allowed_failure() {
                     diagnostic: None,
                 },
             );
+            assert!(registry
+                .fail_reply_settlement(claim, "late paired failure")
+                .is_empty());
             ResponseFailure::TargetCancelled("paired shutdown".into())
         } else {
-            registry.fail_reply_settlement(request, "paired continuation failure");
+            registry.fail_reply_settlement(claim, "paired continuation failure");
             ResponseFailure::SettlementFailed("paired continuation failure".into())
         };
         assert_eq!(

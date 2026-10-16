@@ -2476,12 +2476,15 @@ enum ReceiptSourceVersion {
 impl CertifiedSourceSelection {
     pub(crate) fn from_compiler_inputs(
         inputs: &crate::declaration_context::RequestCompilerInputs,
-        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        metadata: &crate::artifact_inventory::CompilerArtifactMetadata,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
-        let mut selected = Self::from_compiler_projection(&inputs.projection, metadata, operation)?;
-        selected
-            .with_native_original_requirements(metadata, &inputs.native_original_requirements)?;
+        let mut selected =
+            Self::from_compiler_projection(&inputs.projection, &metadata.retained, operation)?;
+        selected.with_native_original_requirements(
+            &metadata.retained,
+            &inputs.native_original_requirements,
+        )?;
         for role in inputs.projection.roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -2489,7 +2492,7 @@ impl CertifiedSourceSelection {
             let Some(crate::artifact_inventory::ArtifactEntry {
                 payload: crate::artifact_inventory::ArtifactPayload::Original(product),
                 ..
-            }) = metadata.artifacts.get(&original).map(Arc::as_ref)
+            }) = metadata.retained.artifacts.get(&original).map(Arc::as_ref)
             else {
                 return Err(CertificationError::Mismatch("request original payload"));
             };
@@ -2803,7 +2806,7 @@ impl CertifiedSourceSelection {
     /// Merely retaining a native artifact does not grant an original offer.
     pub(crate) fn from_compiler_projection(
         projection: &crate::artifact_inventory::CompilerInputProjection,
-        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let entries = projection
@@ -2841,7 +2844,7 @@ impl CertifiedSourceSelection {
     /// of its implementation dependencies' compiler visibility.
     pub(crate) fn with_native_original_requirements(
         &mut self,
-        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         requirements: &[crate::artifact_inventory::NativeOriginalRequirement],
     ) -> CertResult<()> {
         for requirement in requirements {
@@ -2922,7 +2925,7 @@ impl CertifiedSourceSelection {
 
     fn compiler_projection_from_metadata(
         &self,
-        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
@@ -6987,7 +6990,7 @@ fn validate_exact_cached_closure_with_validation(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
     context: &crate::declaration_context::ExactDeclarationContext,
-    metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+    metadata: &crate::artifact_inventory::CompilerArtifactMetadata,
     evidence: &DependencyEvidence,
     exact_imports: &BTreeMap<
         crate::declaration_join::ExactModuleIdentity,
@@ -7032,6 +7035,7 @@ fn validate_exact_cached_closure_with_validation(
     );
     // An offered dependency rejected by the worker cannot satisfy this receipt.
     let originals = metadata
+        .retained
         .artifacts
         .values()
         .filter_map(|entry| match &entry.payload {
@@ -7503,6 +7507,7 @@ pub(crate) fn certify_products_with_validation(
         });
     let inherited_products = projected_metadata.map_or_else(Vec::new, |metadata| {
         metadata
+            .retained
             .artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
@@ -7531,7 +7536,7 @@ pub(crate) fn certify_products_with_validation(
     }
     if projected_metadata
         .into_iter()
-        .flat_map(|metadata| metadata.artifacts.values())
+        .flat_map(|metadata| metadata.retained.artifacts.values())
         .any(|entry| entry.descriptor.producer_sha256 != producer_sha256)
     {
         return Err(CertificationError::Mismatch(
@@ -16777,6 +16782,7 @@ pub(crate) mod tests {
             assert!(request
                 .compiler_inputs()
                 .metadata
+                .retained
                 .selected_native_groups
                 .is_empty());
             assert!(request.compiler_original_products().unwrap().is_empty());
@@ -16784,6 +16790,7 @@ pub(crate) mod tests {
             assert_eq!(
                 effective
                     .metadata
+                    .retained
                     .artifacts
                     .values()
                     .filter_map(|entry| match &entry.payload {
@@ -17159,6 +17166,7 @@ pub(crate) mod tests {
                 assert!(cached_request
                     .compiler_inputs()
                     .metadata
+                    .retained
                     .selected_native_groups
                     .is_empty());
                 let mut cached_complete = admitted.clone();

@@ -2459,6 +2459,11 @@ struct PausedHandler {
     detail: String,
 }
 
+struct CommittedActorState {
+    checkpoint: StateCheckpoint,
+    input: Option<RetainedActorInput>,
+}
+
 struct StateCheckpoint {
     site: u64,
     value: Arc<RootCustody>,
@@ -2523,6 +2528,52 @@ struct AcceptedTerminalTransfer {
     request: crate::RequestId,
     kind: AcceptedTerminalKind,
     owner: RequestReservationOwner,
+}
+
+enum AcceptedReplyPublication {
+    Awaiting,
+    Published(Arc<crate::owned_result::OwnedResultSnapshot>),
+}
+
+struct AcceptedReply {
+    claim: crate::request::RequestReplyClaim,
+    preview: Option<String>,
+    publication: AcceptedReplyPublication,
+}
+
+enum AcceptedRequestKind {
+    Reply(AcceptedReply),
+    Cancellation(crate::request::CancellationAcknowledgementClaim),
+}
+
+struct AcceptedRequestSettlement {
+    transfer: Option<Arc<AcceptedTerminalTransfer>>,
+    kind: AcceptedRequestKind,
+}
+
+impl AcceptedRequestSettlement {
+    fn request(&self) -> crate::RequestId {
+        match &self.kind {
+            AcceptedRequestKind::Reply(reply) => reply.claim.request(),
+            AcceptedRequestKind::Cancellation(claim) => claim.request(),
+        }
+    }
+
+    fn matches_transfer(&self, transfer: &Arc<AcceptedTerminalTransfer>) -> bool {
+        self.request() == transfer.request
+            && matches!(
+                (&self.kind, transfer.kind),
+                (AcceptedRequestKind::Reply(_), AcceptedTerminalKind::Reply)
+                    | (
+                        AcceptedRequestKind::Cancellation(_),
+                        AcceptedTerminalKind::Cancellation
+                    )
+            )
+            && self
+                .transfer
+                .as_ref()
+                .is_some_and(|pending| Arc::ptr_eq(pending, transfer))
+    }
 }
 
 struct PendingActorProgram {
@@ -2943,6 +2994,25 @@ struct PreparedInteractivePublication {
     installation: LocalResidentInstallation,
 }
 
+struct AdmittedTypedExit {
+    destination: Arc<crate::owned_result::RequestResultDestination>,
+    publication: TypedExitPublication,
+}
+
+enum TypedExitPublication {
+    Awaiting,
+    Published(Arc<crate::owned_result::OwnedResultSnapshot>),
+}
+
+impl AdmittedTypedExit {
+    fn new(destination: Arc<crate::owned_result::RequestResultDestination>) -> Self {
+        Self {
+            destination,
+            publication: TypedExitPublication::Awaiting,
+        }
+    }
+}
+
 pub struct ResidentKernelBehavior<H, O> {
     replacement_transfer: Option<replacement::ReplacementTransfer>,
     retained_replacements: Vec<replacement::RetainedHandler>,
@@ -2961,12 +3031,11 @@ pub struct ResidentKernelBehavior<H, O> {
     lifecycle: Option<crate::LifecycleHandle>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
-    checkpoint: Option<StateCheckpoint>,
+    committed: Option<CommittedActorState>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     child_placement_custody: Option<child_launch::ChildPlacementCustody>,
     pending_checkpoint: Option<StateCheckpoint>,
-    active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
     sources: Vec<crate::request::sources::SourceBinding>,
     static_source_count: usize,
@@ -2987,17 +3056,8 @@ pub struct ResidentKernelBehavior<H, O> {
     after_tool: crate::after_tool::AfterToolLog,
     forest_control: bool,
     pending_program: Option<PendingActorProgram>,
-    pending_reply: Option<crate::request::RequestReplyClaim>,
-    pending_response: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
-    exit_destination: Option<Arc<crate::owned_result::RequestResultDestination>>,
-    pending_exit: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
-    /// The bounded reply-value preview `stage_request_reply` obtained for
-    /// `pending_reply`, if any -- carried to the settlement notice minted
-    /// once the resumed continuation settles (`resume`'s `finish_reply`
-    /// call). `None` either because the reply could not be previewed or
-    /// because no reply is pending.
-    pending_reply_preview: Option<String>,
-    pending_cancellation: Option<crate::RequestId>,
+    accepted_settlement: Option<AcceptedRequestSettlement>,
+    typed_exit: Option<AdmittedTypedExit>,
     suspended_cast: Option<SuspendedCast>,
     /// The request `standing == Interactive` is presenting, tracked
     /// independently of `standing` itself. See [`OutstandingInteractive`].
@@ -3242,7 +3302,6 @@ struct WorkbenchEffectState {
     lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
-    park_effects: bool,
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
@@ -3957,12 +4016,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             lifecycle: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
-            checkpoint: None,
+            committed: None,
             admitted_checkpoint: None,
             child_session_startup: None,
             child_placement_custody: None,
             pending_checkpoint: None,
-            active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
             sources: Vec::new(),
             source_connections: None,
@@ -3978,12 +4036,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             after_tool: crate::after_tool::AfterToolLog::default(),
             forest_control: false,
             pending_program: None,
-            pending_reply: None,
-            pending_response: None,
-            exit_destination: None,
-            pending_exit: None,
-            pending_reply_preview: None,
-            pending_cancellation: None,
+            accepted_settlement: None,
+            typed_exit: None,
             suspended_cast: None,
             outstanding_interactive: None,
             child_exit_observations: ChildExitObservations::default(),
@@ -5246,10 +5300,10 @@ where
         self.prepared_request_receiver.take();
         self.request_receiver_scope.take();
         self.shutdown_hook.take();
-        self.checkpoint.take();
+        self.committed.take();
         self.admitted_checkpoint.take();
         self.pending_checkpoint.take();
-        self.active_input.take();
+        self.accepted_settlement.take();
         self.boot.take();
         std::mem::take(&mut self.retained_replacements);
         // Issued requests may retain their installation past actor retirement.
@@ -5738,9 +5792,10 @@ where
         effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let request = claim.request();
+        let mut admission_claim = Some(claim);
         let settled = async {
 
-            if self.pending_program.is_some() || self.pending_reply.is_some() {
+            if self.pending_program.is_some() || self.accepted_settlement.is_some() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "actor settled a second reply before resuming the first".into(),
                 ));
@@ -5823,8 +5878,14 @@ where
                 transfer: None,
                 resumption: ActorResumption::Program { outcome, cleanup: None },
             });
-            self.pending_reply = Some(claim);
-            self.pending_reply_preview = reply_preview;
+            self.accepted_settlement = Some(AcceptedRequestSettlement {
+                transfer: None,
+                kind: AcceptedRequestKind::Reply(AcceptedReply {
+                    claim: admission_claim.take().expect("reply admission owns its claim"),
+                    preview: reply_preview,
+                    publication: AcceptedReplyPublication::Awaiting,
+                }),
+            });
             if let Some(effects) = effects {
                 self.record_terminal_transfer(effects, request, AcceptedTerminalKind::Reply);
             }
@@ -5840,11 +5901,11 @@ where
             Ok(())
         }
         .await;
-        if let Err(error) = &settled {
+        if let (Err(error), Some(claim)) = (&settled, admission_claim) {
             let notifications = self
                 .environment
                 .requests
-                .fail_reply_settlement(request, error.to_string());
+                .fail_reply_settlement(claim, error.to_string());
             self.publish_watch_notifications(notifications).await;
         }
         settled
@@ -7493,22 +7554,26 @@ where
                 continuation,
                 value,
             } => Box::pin(async move {
-                let destination = self.exit_destination.clone().ok_or_else(|| {
+                let typed_exit = self.typed_exit.as_mut().ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "typed exit publication has no admitted destination".into(),
                     )
                 })?;
-                if self.pending_exit.is_some() {
+                if matches!(typed_exit.publication, TypedExitPublication::Published(_)) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "actor published its exit twice".into(),
                     ));
                 }
-                self.pending_exit = Some(
-                    self.environment
-                        .runner
-                        .incorporate_result(context.placement.session, value, destination)
-                        .await?,
-                );
+                let snapshot = self
+                    .environment
+                    .runner
+                    .incorporate_result(
+                        context.placement.session,
+                        value,
+                        typed_exit.destination.clone(),
+                    )
+                    .await?;
+                typed_exit.publication = TypedExitPublication::Published(snapshot);
                 self.environment
                     .runner
                     .resume_unit(context.clone(), continuation)
@@ -7519,27 +7584,29 @@ where
                 request,
                 value,
             } => Box::pin(async move {
-                let destination = self
-                    .pending_reply
-                    .as_ref()
-                    .filter(|claim| claim.request() == request)
-                    .map(crate::request::RequestReplyClaim::destination)
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "response publication does not belong to the accepted reply".into(),
-                        )
-                    })?;
-                if self.pending_response.is_some() {
+                let Some(AcceptedRequestSettlement {
+                    kind: AcceptedRequestKind::Reply(reply),
+                    ..
+                }) = self
+                    .accepted_settlement
+                    .as_mut()
+                    .filter(|settlement| settlement.request() == request)
+                else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "response publication does not belong to the accepted reply".into(),
+                    ));
+                };
+                if !matches!(reply.publication, AcceptedReplyPublication::Awaiting) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "reply wrapper published its response twice".into(),
                     ));
                 }
-                self.pending_response = Some(
-                    self.environment
-                        .runner
-                        .incorporate_result(context.placement.session, value, destination)
-                        .await?,
-                );
+                let response = self
+                    .environment
+                    .runner
+                    .incorporate_result(context.placement.session, value, reply.claim.destination())
+                    .await?;
+                reply.publication = AcceptedReplyPublication::Published(response);
                 self.environment
                     .runner
                     .resume_unit(context.clone(), continuation)
@@ -7775,12 +7842,12 @@ where
                 .await?
             {
                 ResidentActorBoundary::Completed => {
-                    if self.exit_destination.is_some() {
-                        let result = self.pending_exit.take().ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
+                    if let Some(typed_exit) = self.typed_exit.take() {
+                        let TypedExitPublication::Published(result) = typed_exit.publication else {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
                                 "typed actor completed without publishing its exit".into(),
-                            )
-                        })?;
+                            ));
+                        };
                         let retained = kernel.retained_exit();
                         match retained
                             .claim_before_shutdown(|| retained.retain_result(result).is_ok())
@@ -7799,7 +7866,9 @@ where
                             }
                         }
                     }
-                    self.active_input = None;
+                    if let Some(committed) = &mut self.committed {
+                        committed.input = None;
+                    }
                     self.set_standing(context.actor, ResidentStanding::Terminal);
                     return Ok(KernelStep::Stop {
                         output: (),
@@ -7813,9 +7882,14 @@ where
                                 "checkpoint and receiver sites differ".into(),
                             ));
                         }
-                        self.checkpoint = Some(checkpoint);
+                        self.committed = Some(CommittedActorState {
+                            checkpoint,
+                            input: None,
+                        });
                     }
-                    self.active_input = None;
+                    if let Some(committed) = &mut self.committed {
+                        committed.input = None;
+                    }
                     self.input_origin = ActorInputOrigin::ActorStartup;
                     if let Some(outstanding) = &self.outstanding_interactive {
                         // The receive loop is advancing to its next native
@@ -9196,8 +9270,10 @@ where
             )
             .await?;
         let request = Arc::new(request.into_custody());
-        if self.checkpoint.is_some() && self.active_input.is_none() {
-            self.active_input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
+        if let Some(committed) = &mut self.committed {
+            if committed.input.is_none() {
+                committed.input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
+            }
         }
         let handler_realm = RealmId::fresh();
         let mut outcome = self
@@ -9420,7 +9496,8 @@ where
                         .park_interactive(kernel, context, session, None)
                         .await?;
                     if let InteractivePark::Cancelled(request) = parked {
-                        self.environment
+                        let claim = self
+                            .environment
                             .requests
                             .begin_cancellation_acknowledgement(context.actor, request)
                             .map_err(|error| {
@@ -9446,7 +9523,7 @@ where
                                 let notifications = self
                                     .environment
                                     .requests
-                                    .finish_cancellation_acknowledgement(request);
+                                    .finish_cancellation_acknowledgement(claim);
                                 self.publish_watch_notifications(notifications).await;
                                 return Ok(KernelStep::Continue(()));
                             }
@@ -9454,7 +9531,7 @@ where
                                 self.suspended_cast = Some(suspended);
                                 self.environment
                                     .requests
-                                    .rollback_cancellation_acknowledgement(request);
+                                    .rollback_cancellation_acknowledgement(claim);
                                 return Err(error);
                             }
                         }
@@ -9494,17 +9571,6 @@ where
     {
         let future = async move {
             loop {
-                if !execution_state.park_effects {
-                    if let Some(request) = current.native_start.take() {
-                        current.native_result = Some(
-                            current
-                                .execution
-                                .native(&self.environment, context)
-                                .advance_fragment(workbench, request)
-                                .await,
-                        );
-                    }
-                }
                 self.runtime_observation.publish_workbench_posture(
                     crate::ActorWorkbenchPosture::RunningUnit {
                         input_unit_index: unit.input_unit_index,
@@ -9527,10 +9593,7 @@ where
                                 ),
                             ),
                         )?;
-                        if execution_state.park_effects {
-                            return Ok(FragmentAdvance::ParkNative);
-                        }
-                        continue;
+                        return Ok(FragmentAdvance::ParkNative);
                     }
                     None => {
                         let request = match current.resume_failure.take() {
@@ -9548,10 +9611,7 @@ where
                                     ),
                                 ),
                             )?;
-                                if execution_state.park_effects {
-                                    return Ok(FragmentAdvance::ParkNative);
-                                }
-                                continue;
+                                return Ok(FragmentAdvance::ParkNative);
                             }
                             None if !current.scopes.is_empty()
                                 || current.execution.active_realm().is_some() =>
@@ -9584,22 +9644,14 @@ where
                                     .expect("running unit owns its outcome"),
                             },
                         };
-                        if execution_state.park_effects {
+                        {
                             assert!(
                                 current.native_start.is_none(),
                                 "one captured native request"
                             );
                             current.native_start = Some(request);
-                            if execution_state.park_effects {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
-                            continue;
+                            return Ok(FragmentAdvance::ParkNative);
                         }
-                        current
-                            .execution
-                            .native(&self.environment, context)
-                            .advance_fragment(workbench, request)
-                            .await?
                     }
                 };
                 match native {
@@ -9618,10 +9670,7 @@ where
                                 ),
                             ),
                         )?;
-                        if execution_state.park_effects {
-                            return Ok(FragmentAdvance::ParkNative);
-                        }
-                        continue;
+                        return Ok(FragmentAdvance::ParkNative);
                     }
                     owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
                         current.outcome = Some(outcome);
@@ -9689,10 +9738,7 @@ where
                                         runner.resume_tool_presentation(context, continuation).await
                                     }),
                                 });
-                            if execution_state.park_effects {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
-                            continue;
+                            return Ok(FragmentAdvance::ParkNative);
                         }
                         if unit.semantic_value.is_some() {
                             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9713,12 +9759,6 @@ where
                         };
                         let boundary = match boundary {
                             ResidentActorBoundary::Green(boundary) => {
-                                if !execution_state.park_effects {
-                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "async requires an independently admitted notebook execution"
-                                        .into(),
-                                ));
-                                }
                                 return self.prepare_green_boundary(
                                     kernel,
                                     context,
@@ -9763,10 +9803,7 @@ where
                                             }),
                                         },
                                     );
-                                        if execution_state.park_effects {
-                                            return Ok(FragmentAdvance::ParkNative);
-                                        }
-                                        continue;
+                                        return Ok(FragmentAdvance::ParkNative);
                                     }
                                 };
                                 let frame = scopes::ScopeFrame {
@@ -9790,10 +9827,7 @@ where
                                         token,
                                         work,
                                     });
-                                if execution_state.park_effects {
-                                    return Ok(FragmentAdvance::ParkNative);
-                                }
-                                continue;
+                                return Ok(FragmentAdvance::ParkNative);
                             }
                             ResidentActorBoundary::ScopeDone { token, .. }
                                 if !current.scopes.is_empty() =>
@@ -9813,10 +9847,7 @@ where
                                 )
                                 };
                                 self.prepare_scope_finish(kernel, context, current, body)?;
-                                if execution_state.park_effects {
-                                    return Ok(FragmentAdvance::ParkNative);
-                                }
-                                continue;
+                                return Ok(FragmentAdvance::ParkNative);
                             }
                             ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
                                 self.prepare_scope_finish(
@@ -9829,10 +9860,7 @@ where
                                     ),
                                 ),
                             )?;
-                                if execution_state.park_effects {
-                                    return Ok(FragmentAdvance::ParkNative);
-                                }
-                                continue;
+                                return Ok(FragmentAdvance::ParkNative);
                             }
                             boundary => boundary,
                         };
@@ -9925,14 +9953,12 @@ where
                             }
                             _ => {}
                         }
-                        if execution_state.park_effects
-                            && matches!(
-                                &boundary,
-                                ResidentActorBoundary::DisplayPublish { .. }
-                                    | ResidentActorBoundary::DisplaySelect { .. }
-                                    | ResidentActorBoundary::DisplayExpand { .. }
-                            )
-                        {
+                        if matches!(
+                            &boundary,
+                            ResidentActorBoundary::DisplayPublish { .. }
+                                | ResidentActorBoundary::DisplaySelect { .. }
+                                | ResidentActorBoundary::DisplayExpand { .. }
+                        ) {
                             current.parked_effect = Some(ParkedWorkbenchEffect {
                                 display: None,
                                 success_disposition,
@@ -10004,7 +10030,7 @@ where
                                 unit.command_output.push(rendered);
                             }
                         }
-                        let boundary = if execution_state.park_effects {
+                        let boundary = {
                             let captured = match boundary {
                                 ResidentActorBoundary::Start(start) => {
                                     Ok(OwnedWorkbenchWait::Launch(self.prepare_child_launch(
@@ -10058,8 +10084,6 @@ where
                                 }
                                 Err(boundary) => boundary,
                             }
-                        } else {
-                            boundary
                         };
                         match boundary {
                             ResidentActorBoundary::ReplyAttempt(attempt) => match self
@@ -10103,9 +10127,7 @@ where
                                         WorkbenchOperationDisposition::Rejected,
                                     );
                                     drop(attempt.result);
-                                    if execution_state.park_effects
-                                        && !execution_state.after_tool_active
-                                    {
+                                    if !execution_state.after_tool_active {
                                         current.native_start = Some(
                                         owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
                                             continuation: attempt.continuation,
@@ -10153,7 +10175,7 @@ where
                                         context.actor,
                                         acknowledgement.request,
                                     ) {
-                                    Ok(_) => {
+                                    Ok(claim) => {
                                         current.inflight_effect = None;
                                         record_workbench_operation(
                                             unit.operations,
@@ -10167,7 +10189,7 @@ where
                                         );
                                         return Ok(FragmentAdvance::Settled(
                                             ResidentWorkbenchStep::CancellationAcknowledged {
-                                                request: acknowledgement.request,
+                                                claim,
                                             },
                                         ));
                                     }
@@ -10183,9 +10205,7 @@ where
                                             effect_started.elapsed(),
                                             WorkbenchOperationDisposition::Rejected,
                                         );
-                                        if execution_state.park_effects
-                                            && !execution_state.after_tool_active
-                                        {
+                                        if !execution_state.after_tool_active {
                                             current.native_start = Some(
                                             owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
                                                 continuation: acknowledgement.continuation,
@@ -10363,10 +10383,7 @@ where
                                             return Err(error);
                                         }
                                         self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
-                                        if execution_state.park_effects {
-                                            return Ok(FragmentAdvance::ParkNative);
-                                        }
-                                        continue;
+                                        return Ok(FragmentAdvance::ParkNative);
                                     }
                                 });
                             }
@@ -10379,136 +10396,6 @@ where
             }
         };
         Box::pin(future)
-    }
-
-    /// Apply the retained after-tool slot at the tool-result boundary, and
-    /// answer what the model is shown.
-    ///
-    /// The serial adapter awaits presentation using the same frame and finalizer
-    /// as the production actor-owned completion cursor.
-    async fn annotate_tool_result(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        execution_state: &mut WorkbenchEffectState,
-        workbench: &crate::ResidentActorWorkbench<H, O>,
-        handler: crate::resident_workbench::InstalledAfterTool,
-        call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
-        output: String,
-        value: Option<serde_json::Value>,
-    ) -> String {
-        if execution_state.after_tool_active {
-            return output;
-        }
-        let mut context = context.clone();
-        context.haskell_effects_alias = handler.entry().execution_effects().clone();
-        let frame = after_tool_wait::capture(
-            handler,
-            call.clone(),
-            output,
-            value,
-            self.after_tool.begin(),
-            16 * 1024,
-        );
-        execution_state.after_tool_active = true;
-        let answer = workbench
-            .with_exact_continuation_cleanup(
-                context.clone(),
-                "after-tool presentation interrupted during runtime shutdown".into(),
-                self.run_after_tool(
-                    kernel,
-                    &context,
-                    execution_state,
-                    workbench,
-                    Arc::clone(frame.dispatch()),
-                    call.name.clone(),
-                    frame.payload(),
-                ),
-            )
-            .await;
-        let binding = match &answer {
-            Ok(crate::after_tool::Annotation::Pruned { .. }) => workbench
-                .bind_tool_result(
-                    context,
-                    frame.handle().to_owned(),
-                    frame.output().to_owned(),
-                )
-                .await
-                .and_then(|binding| binding.accept().map(|_| ())),
-            _ => Ok(()),
-        };
-        execution_state.after_tool_active = false;
-        self.render_after_tool(&frame, answer, binding)
-    }
-
-    /// One slot invocation, in the actor's own resident machine: the retained
-    /// dispatcher entered at the slot's index, and its effects settled exactly
-    /// as a tool call's are.
-    async fn run_after_tool(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        execution_state: &mut WorkbenchEffectState,
-        workbench: &crate::ResidentActorWorkbench<H, O>,
-        dispatch: Arc<RootCustody>,
-        tool: String,
-        payload: serde_json::Value,
-    ) -> Result<crate::after_tool::Annotation, ResidentActorWorkbenchError> {
-        let mut operations = Vec::new();
-        let mut effect_ordinal = 0;
-        let mut display_remaining = 16usize * 1024;
-        let mut command_output = Vec::new();
-        let mut recovered_bindings = Vec::new();
-        let step = workbench
-            .begin_after_tool(context.clone(), dispatch, tool, payload)
-            .await?;
-        let step = match step {
-            ResidentWorkbenchStep::Running { fragment, outcome } => {
-                let mut current = WorkbenchFragmentExecution::new(*fragment, *outcome);
-                match self
-                    .settle_fragment_effects(
-                        kernel,
-                        context,
-                        execution_state,
-                        workbench,
-                        &mut current,
-                        WorkbenchUnitExecution {
-                            execution: None,
-                            input_unit_index: 0,
-                            total: 1,
-                            named_tool: true,
-                            operations: &mut operations,
-                            effect_ordinal: &mut effect_ordinal,
-                            display_remaining: &mut display_remaining,
-                            command_output: &mut command_output,
-                            recovered_bindings: &mut recovered_bindings,
-                            semantic_value: &mut None,
-                        },
-                    )
-                    .await?
-                {
-                    FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkEffect
-                    | FragmentAdvance::ParkNative
-                    | FragmentAdvance::ParkGreen => {
-                        unreachable!("nested after-tool remains serial")
-                    }
-                }
-            }
-            settled => settled,
-        };
-        match step {
-            ResidentWorkbenchStep::Committed { output, .. } => {
-                crate::after_tool::Annotation::decode(&output)
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
-            }
-            ResidentWorkbenchStep::Rejected(rejection) => {
-                Err(ResidentActorWorkbenchError::ActorProtocol(rejection.output))
-            }
-            _ => Err(ResidentActorWorkbenchError::ActorProtocol(
-                "the after-tool slot ended in a transfer instead of an annotation".into(),
-            )),
-        }
     }
 
     /// The cell level of the run's span tree. `execution` is the tool call's
@@ -10877,12 +10764,11 @@ where
                                 request: request_start,
                                 span: unit_span,
                             };
-                            if effects.park_effects {
+                            {
                                 assert!(cursor.starting.is_none(), "one pending native unit");
                                 cursor.starting = Some(start);
                                 return Ok(WorkbenchRunAdvance::ParkUnit);
                             }
-                            owned_workbench::begin_unit(workbench, context.clone(), start).await
                         }
                     };
                     let started = match started {
@@ -11076,7 +10962,7 @@ where
                                 .as_ref()
                                 .and_then(crate::InstalledToolLease::after_tool)
                             {
-                                if effects.park_effects {
+                                {
                                     let frame = after_tool_wait::capture(
                                         handler,
                                         call,
@@ -11101,18 +10987,6 @@ where
                                     effects.after_tool_active = true;
                                     return Ok(WorkbenchRunAdvance::ParkAfterToolStart);
                                 }
-                                receipt.output = self
-                                    .annotate_tool_result(
-                                        kernel,
-                                        context,
-                                        effects,
-                                        workbench,
-                                        handler,
-                                        &call,
-                                        receipt.output,
-                                        receipt.value.clone(),
-                                    )
-                                    .await;
                             }
                         }
                         cursor.completed = Some(receipt);
@@ -11240,16 +11114,12 @@ where
                             ),
                         )));
                     }
-                    ResidentWorkbenchStep::CancellationAcknowledged {
-                        request: request_id,
-                    } => {
-                        if self.pending_program.is_some()
-                            || self.pending_reply.is_some()
-                            || self.pending_cancellation.is_some()
-                        {
+                    ResidentWorkbenchStep::CancellationAcknowledged { claim } => {
+                        let request_id = claim.request();
+                        if self.pending_program.is_some() || self.accepted_settlement.is_some() {
                             self.environment
                                 .requests
-                                .rollback_cancellation_acknowledgement(request_id);
+                                .rollback_cancellation_acknowledgement(claim);
                             return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
@@ -11280,7 +11150,7 @@ where
                                     self.standing = ResidentStanding::Interactive(awaiting);
                                     self.environment
                                         .requests
-                                        .rollback_cancellation_acknowledgement(request_id);
+                                        .rollback_cancellation_acknowledgement(claim);
                                     return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
@@ -11296,7 +11166,7 @@ where
                                     self.standing = standing;
                                     self.environment
                                         .requests
-                                        .rollback_cancellation_acknowledgement(request_id);
+                                        .rollback_cancellation_acknowledgement(claim);
                                     return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
@@ -11313,7 +11183,7 @@ where
                             self.standing = ResidentStanding::Interactive(awaiting);
                             self.environment
                                 .requests
-                                .rollback_cancellation_acknowledgement(request_id);
+                                .rollback_cancellation_acknowledgement(claim);
                             return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
@@ -11333,7 +11203,10 @@ where
                             transfer: None,
                             resumption: ActorResumption::ReceiveAgain(suspended),
                         });
-                        self.pending_cancellation = Some(request_id);
+                        self.accepted_settlement = Some(AcceptedRequestSettlement {
+                            transfer: None,
+                            kind: AcceptedRequestKind::Cancellation(claim),
+                        });
                         self.record_terminal_transfer(
                             effects,
                             request_id,
@@ -11556,6 +11429,10 @@ where
             .as_mut()
             .expect("accepted transfer owns its pending program")
             .transfer = Some(transfer.clone());
+        self.accepted_settlement
+            .as_mut()
+            .expect("accepted transfer owns settlement")
+            .transfer = Some(transfer.clone());
         effects.terminal_transfer = Some(transfer);
     }
 
@@ -11590,35 +11467,34 @@ where
                 // Only this admitted attempt may settle its transferred program.
                 if transfer.owner == execution_state.effects.reservation_owner
                     && self
-                        .pending_program
+                        .accepted_settlement
                         .as_ref()
-                        .and_then(|program| program.transfer.as_ref())
-                        .is_some_and(|pending| Arc::ptr_eq(pending, &transfer))
+                        .is_some_and(|pending| pending.matches_transfer(&transfer))
                 {
                     self.retain_pending_cast_cleanup();
-                    match transfer.kind {
-                        AcceptedTerminalKind::Reply => {
-                            if self
-                                .pending_reply
-                                .as_ref()
-                                .is_some_and(|claim| claim.request() == transfer.request)
-                            {
-                                self.pending_reply.take();
-                                self.pending_reply_preview.take();
-                                self.pending_response.take();
+                    if self
+                        .accepted_settlement
+                        .as_ref()
+                        .is_some_and(|pending| pending.matches_transfer(&transfer))
+                    {
+                        match self
+                            .accepted_settlement
+                            .take()
+                            .expect("matched settlement")
+                            .kind
+                        {
+                            AcceptedRequestKind::Reply(reply) => {
+                                notifications = self
+                                    .environment
+                                    .requests
+                                    .fail_reply_settlement(reply.claim, source.to_string());
                             }
-                            notifications = self
-                                .environment
-                                .requests
-                                .fail_reply_settlement(transfer.request, source.to_string());
-                        }
-                        AcceptedTerminalKind::Cancellation => {
-                            if self.pending_cancellation == Some(transfer.request) {
-                                self.pending_cancellation.take();
+                            AcceptedRequestKind::Cancellation(claim) => {
+                                let _ = self
+                                    .environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(claim);
                             }
-                            self.environment
-                                .requests
-                                .rollback_cancellation_acknowledgement(transfer.request);
                         }
                     }
                 }
@@ -11684,21 +11560,6 @@ where
             );
         }
         (result, notifications)
-    }
-
-    // Builtin and unconverted ingress retain their serial driver until their
-    // owned-step conversion. Hosted authored executions use the sync advances.
-    async fn finalize_serial_workbench_execution(
-        &mut self,
-        execution_state: &mut WorkbenchExecutionState,
-        kernel: &KernelContext,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        let finalization = self.begin_workbench_finalization(execution_state, kernel, result);
-        let result = settle_workbench_finalization(self.environment.clone(), finalization).await;
-        let (result, notifications) = self.complete_workbench_finalization(execution_state, result);
-        self.publish_watch_notifications(notifications).await;
-        result
     }
 
     // The admitted journal retains the same scope tree used by Green waits and
@@ -11853,8 +11714,8 @@ where
             let context = source.execution.context.clone();
             self.actor_callback_execution = Some(source.execution.clone());
             let delivery = self.environment.requests.accept_source_delivery(delivery);
-            if self.checkpoint.is_some() {
-                self.active_input = Some(RetainedActorInput::Source(delivery.clone()));
+            if let Some(committed) = &mut self.committed {
+                committed.input = Some(RetainedActorInput::Source(delivery.clone()));
             }
             let message = self
                 .environment
@@ -11881,7 +11742,7 @@ where
     }
 
     fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
-        if self.checkpoint.is_none()
+        if self.committed.is_none()
             || matches!(
                 self.standing,
                 ResidentStanding::Paused(_) | ResidentStanding::Terminal
@@ -11941,14 +11802,14 @@ where
             if matches!(self.standing, ResidentStanding::Paused(_)) {
                 return true;
             }
-            let (checkpoint, input) = match (self.checkpoint.take(), self.active_input.take()) {
-                (Some(checkpoint), Some(input)) => (checkpoint, input),
-                (checkpoint, input) => {
-                    self.checkpoint = checkpoint;
-                    self.active_input = input;
-                    return false;
-                }
+            let Some(mut committed) = self.committed.take() else {
+                return false;
             };
+            let Some(input) = committed.input.take() else {
+                self.committed = Some(committed);
+                return false;
+            };
+            let checkpoint = committed.checkpoint;
             self.pending_checkpoint = None;
             let failure = PausedHandler {
                 checkpoint,
@@ -11981,6 +11842,15 @@ where
         );
             true
         })
+    }
+
+    fn observe_exit(&mut self, kernel: &KernelContext) {
+        observe_request_retirement(
+            kernel.identity(),
+            kernel.retained_exit(),
+            Arc::clone(&self.environment.requests),
+            self.environment.deployments.clone(),
+        );
     }
 
     fn start<'a>(
@@ -12789,278 +12659,85 @@ where
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> crate::WorkbenchDispatch<Self> {
-        if invocation.display_expansion.is_some() {
-            return crate::WorkbenchDispatch::Sequential {
-                invocation,
-                control,
-            };
-        }
         self.dispatch_owned_workbench(kernel, invocation, control)
     }
 
-    fn workbench<'a>(
+    fn expand_display<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        invocation: crate::ActorWorkbenchInvocation,
+        request: crate::DisplayExpansionRequest,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
-            if let Some((identity, key)) = invocation.display_expansion {
-                let context = self.context(kernel.identity());
-                if control
-                    .as_ref()
-                    .is_some_and(|control| control.cancellation_requested())
-                {
-                    return Err(KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor: context.actor,
-                        detail: "display actor is unavailable or invocation was cancelled".into(),
-                        diagnostic: None,
-                    });
-                }
-                let expansion = self.expand_display(
-                    &context,
-                    identity,
-                    key,
-                    DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
-                    None,
-                );
-                let output = match control {
-                    Some(control) => {
-                        crate::resident_workbench::with_execution_control(control, expansion).await
-                    }
-                    None => expansion.await,
-                }
-                .map_err(|error| KernelInvocationFailure::Rejected {
+            let crate::DisplayExpansionRequest { identity, key } = request;
+            let context = self.context(kernel.identity());
+            if control
+                .as_ref()
+                .is_some_and(|control| control.cancellation_requested())
+            {
+                return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor: context.actor,
-                    detail: error.to_string(),
-                    diagnostic: error.failure_diagnostic(),
-                })?;
-                let operation = WorkbenchOperationReceipt {
-                    display_publication: None,
-                    id: WorkbenchOperationId {
-                        execution: WorkbenchExecutionId::from_digest(
-                            *uuid::Uuid::new_v4().as_bytes(),
-                        ),
-                        input_unit_index: 0,
-                        effect_ordinal: 0,
-                    },
-                    effect: "expand".into(),
-                    disposition: WorkbenchOperationDisposition::Committed,
-                    display: Some(output.clone()),
-                };
-                return Ok(KernelStep::Continue(workbench_response(
-                    WorkbenchRunStatus::Committed,
-                    vec![WorkbenchItemReceipt {
-                        presentation: None,
-                        index: 0,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Committed,
-                        output: output.page.text,
-                        value: None,
-                        diagnostics: Vec::new(),
-                        failure_layer: None,
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: vec![operation],
-                        terminal_transfer: None,
-                    }],
-                    1,
-                    1,
-                    None,
-                )));
-            }
-            let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
-            let WorkbenchAdmission {
-                issued_snapshot,
-                initial_context,
-                context,
-                request,
-                operation,
-                admitted_source,
-                compilation_authority,
-                public_owner: _public_owner,
-                current_builtin,
-                capture,
-                context_binding,
-                control,
-                invocation,
-            } = match admitted {
-                WorkbenchPreflight::Retained(reply) => return reply.map(KernelStep::Continue),
-                WorkbenchPreflight::Admitted(admitted) => admitted,
-            };
-            let admitted_workbench = compilation_authority.and_then(|authority| {
-                self.active_workbench().map(|workbench| {
-                    workbench
-                        .with_compilation_authority(authority)
-                        .with_json_input(
-                            request
-                                .input
-                                .as_ref()
-                                .map(tidepool_runtime::session::normalize_workbench_input),
-                        )
-                })
-            });
-            let execution = request.execution_id().cloned();
-            let retained_request = execution.as_ref().map(|_| request.clone());
-            let public_visibility = if current_builtin {
-                None
-            } else {
-                Some(
-                    self.environment
-                        .runner
-                        .public_visibility_snapshot(context.clone())
-                        .await
-                        .map_err(|error| KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor: context.actor,
-                            detail: format!("cannot capture public workbench view: {error}"),
-                            diagnostic: None,
-                        })?,
-                )
-            };
-            if let Some(execution) = &execution {
-                // Persist the fence in the forest-retained journal before effects
-                // can run; actor termination cannot turn uncertainty into replay.
-                self.workbench_executions.lock().begin(
-                    execution,
-                    request.clone(),
-                    invocation.as_ref(),
-                );
-                self.workbench_executions.lock().bind_provider_finalization(
-                    execution,
-                    invocation.as_ref(),
-                    control.as_ref(),
-                );
-            }
-            let local_execution_id = execution.clone().unwrap_or_else(|| {
-                WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
-            });
-            let reservation_owner = RequestReservationOwner::Workbench {
-                execution: local_execution_id.clone(),
-                attempt: crate::request::WorkbenchReservationAttempt::fresh(),
-            };
-            let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
-            self.workbench_executions.lock().retain_invocation_work(
-                invocation_work.clone(),
-                execution.as_ref(),
-                invocation.as_ref(),
-            );
-            let display_receipt_owner = execution.as_ref().and_then(|execution| {
-                self.workbench_executions
-                    .lock()
-                    .display_receipt_owner(execution, invocation.as_ref())
-            });
-            if let (Some(owner), Some(control)) = (&display_receipt_owner, &control) {
-                control.bind_receipt_owner(owner.clone());
-            }
-            let mut execution_state = WorkbenchExecutionState {
-                cell_span: cell_execution_span(&context, &request),
-                effects: WorkbenchEffectState {
-                    callback_scope: None,
-                    issued_snapshot,
-                    lifecycle: self.lifecycle.clone(),
-                    initial_context,
-                    display_receipt_owner,
-                    park_effects: false,
-                    context: context.clone(),
-                    public_visibility,
-                    control,
-                    model: None,
-                    context_binding,
-                    operation,
-                    admitted_source,
-                    reservation_owner,
-                    invocation_work,
-                    publication: CheckpointPublication::Workbench {
-                        boundary: request.checkpoint_boundary().cloned(),
-                        capture,
-                    },
-                    after_tool_active: false,
-                    terminal_transfer: None,
-                },
-                request,
-                replay_request: retained_request,
-                invocation,
-                cursor: WorkbenchCursor::default(),
-            };
-            // One INFO line per hosted tool call or cell, breaking down
-            // where its wall time went (checkout wait/hold, compile, Jev,
-            // exec) — see `crate::call_timing`. The scope wraps the whole
-            // call so every nested site it awaits (workbench compiles,
-            // resolved effects) can add to it as a task-local.
-            let call_kind = execution_state
-                .request
-                .tool_call()
-                .map(|call| call.name.clone())
-                .unwrap_or_else(|| "cell".to_string());
-            let (call_actor, call_incarnation) = actor_address(context.actor);
-            let call_scope = crate::call_timing::CallScope::new(
-                call_kind,
-                call_actor as u64,
-                call_incarnation as u64,
-            );
-            if let Some(public) = &execution_state.effects.public_visibility {
-                tracing::debug!(
-                    actor = ?context.actor,
-                    scope = ?public.scope,
-                    epoch = public.epoch,
-                    declaration_tip = public.declaration_tip.0,
-                    binding_count = public.bindings.len(),
-                    "workbench public view admitted"
-                );
-            }
-            let compiler_owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
-                work: execution_state.effects.invocation_work.clone(),
-                control: execution_state.effects.control.clone(),
-            };
-            let result = compiler_owner
-                .scope(call_scope.run(self.execute_workbench(
-                    kernel,
-                    &mut execution_state,
-                    admitted_workbench.as_ref(),
-                )))
-                .await
-                .and_then(|advance| {
-                    match advance {
-                    WorkbenchRunAdvance::Complete(step) => Ok(step),
-                    WorkbenchRunAdvance::ParkGreen => Err(workbench_failure(
-                        &execution_state.cursor.receipts,
-                        execution_state.cursor.index,
-                        execution_state.request.items.len(),
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "async frontier reached a serial workbench without owned task admission"
-                                .into(),
-                        ),
-                    )),
-                    WorkbenchRunAdvance::ParkEffect
-                    | WorkbenchRunAdvance::ParkUnit
-                    | WorkbenchRunAdvance::ParkNative
-                    | WorkbenchRunAdvance::ParkAfterToolStart
-                    | WorkbenchRunAdvance::ParkAfterToolFinish => {
-                        unreachable!("legacy workbench remains serial")
-                    }
-                }
+                    detail: "display actor is unavailable or invocation was cancelled".into(),
+                    diagnostic: None,
                 });
-            let call_outcome = match &result {
-                Ok(
-                    KernelStep::Continue(response)
-                    | KernelStep::ContinueLater(response)
-                    | KernelStep::Stop {
-                        output: response, ..
-                    },
-                ) => format!("{:?}", response.status),
-                Err(_) => "error".to_string(),
+            }
+            let expansion = ResidentKernelBehavior::expand_display(
+                self,
+                &context,
+                identity,
+                key,
+                DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                None,
+            );
+            let output = match control {
+                Some(control) => {
+                    crate::resident_workbench::with_execution_control(control, expansion).await
+                }
+                None => expansion.await,
+            }
+            .map_err(|error| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor: context.actor,
+                detail: error.to_string(),
+                diagnostic: error.failure_diagnostic(),
+            })?;
+            let operation = WorkbenchOperationReceipt {
+                display_publication: None,
+                id: WorkbenchOperationId {
+                    execution: WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()),
+                    input_unit_index: 0,
+                    effect_ordinal: 0,
+                },
+                effect: "expand".into(),
+                disposition: WorkbenchOperationDisposition::Committed,
+                display: Some(output.clone()),
             };
-            call_scope.finish(&call_outcome);
-            self.finalize_serial_workbench_execution(&mut execution_state, kernel, result)
-                .await
+            Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    presentation: None,
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output: output.page.text,
+                    value: None,
+                    diagnostics: Vec::new(),
+                    failure_layer: None,
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: vec![operation],
+                    terminal_transfer: None,
+                }],
+                1,
+                1,
+                None,
+            )))
         })
     }
 
@@ -13329,11 +13006,11 @@ where
                                 context.actor,
                                 ResidentStanding::Receiving(suspended.receiver),
                             );
-                            if let Some(request) = self.pending_cancellation.take() {
+                            if let Some(AcceptedRequestSettlement { kind: AcceptedRequestKind::Cancellation(claim), .. }) = self.accepted_settlement.take() {
                                 let notifications = self
                                     .environment
                                     .requests
-                                    .finish_cancellation_acknowledgement(request);
+                                    .finish_cancellation_acknowledgement(claim);
                                 self.publish_watch_notifications(notifications).await;
                             }
                             self.runtime_observation
@@ -13342,10 +13019,10 @@ where
                         }
                         Err(error) => {
                             self.suspended_cast = Some(suspended);
-                            if let Some(request) = self.pending_cancellation.take() {
+                            if let Some(AcceptedRequestSettlement { kind: AcceptedRequestKind::Cancellation(claim), .. }) = self.accepted_settlement.take() {
                                 self.environment
                                     .requests
-                                    .rollback_cancellation_acknowledgement(request);
+                                    .rollback_cancellation_acknowledgement(claim);
                             }
                             self.runtime_observation
                                 .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed);
@@ -13405,46 +13082,27 @@ where
                             cleanup.disarm();
                         }
                     }
-                    if let Some(claim) = self.pending_reply.take() {
-                        let request = claim.request();
-                        let reply_preview = self.pending_reply_preview.take();
-                        // Only this actor can read its own descriptor and
-                        // prepared workspace, so its path and seed revision
-                        // are attached here, ahead of settlement, rather
-                        // than looked up later from the bare request.
-                        self.environment.requests.record_target_identity(
-                            request,
-                            self.descriptor.actor_path().map(ToString::to_string),
-                            self.prepared_workspace.as_ref().map(|workspace| {
-                                workspace.handle().handle_receipt.source_head.raw.clone()
-                            }),
-                        );
-                        let notifications = self.environment.requests.finish_reply(
-                            claim,
-                            match self.pending_response.take() {
-                                Some(response) => response,
-                                None => {
-                                    let detail =
-                                        "reply wrapper completed without publishing its response";
-                                    let notifications = self
-                                        .environment
-                                        .requests
-                                        .fail_reply_settlement(request, detail);
-                                    self.publish_watch_notifications(notifications).await;
-                                    return Err(Self::workbench_failure(
-                                        ResidentActorWorkbenchError::ActorProtocol(detail.into()),
-                                    ));
+                    if let Some(settlement) = self.accepted_settlement.take() {
+                        let notifications = match settlement.kind {
+                            AcceptedRequestKind::Reply(reply) => {
+                                let request = reply.claim.request();
+                                self.environment.requests.record_target_identity(
+                                    request,
+                                    self.descriptor.actor_path().map(ToString::to_string),
+                                    self.prepared_workspace.as_ref().map(|workspace| workspace.handle().handle_receipt.source_head.raw.clone()),
+                                );
+                                match reply.publication {
+                                    AcceptedReplyPublication::Published(response) => self.environment.requests.finish_reply(reply.claim, response, reply.preview),
+                                    AcceptedReplyPublication::Awaiting => {
+                                        let detail = "reply wrapper completed without publishing its response";
+                                        let notifications = self.environment.requests.fail_reply_settlement(reply.claim, detail);
+                                        self.publish_watch_notifications(notifications).await;
+                                        return Err(Self::workbench_failure(ResidentActorWorkbenchError::ActorProtocol(detail.into())));
+                                    }
                                 }
-                            },
-                            reply_preview,
-                        );
-                        self.publish_watch_notifications(notifications).await;
-                    }
-                    if let Some(request) = self.pending_cancellation.take() {
-                        let notifications = self
-                            .environment
-                            .requests
-                            .finish_cancellation_acknowledgement(request);
+                            }
+                            AcceptedRequestKind::Cancellation(claim) => self.environment.requests.finish_cancellation_acknowledgement(claim),
+                        };
                         self.publish_watch_notifications(notifications).await;
                     }
                     self.runtime_observation
@@ -13458,20 +13116,18 @@ where
                         handler.cleanup = cleanup;
                         self.suspended_cast = Some(handler);
                     }
-                    self.pending_reply_preview = None;
-                    self.pending_response.take();
-                    if let Some(claim) = self.pending_reply.take() {
-                        let request = claim.request();
-                        let notifications = self.environment.requests.fail_reply_settlement(
-                            request,
-                            format!("reply continuation failed after acceptance: {error}"),
-                        );
-                        self.publish_watch_notifications(notifications).await;
-                    }
-                    if let Some(request) = self.pending_cancellation.take() {
-                        self.environment
-                            .requests
-                            .rollback_cancellation_acknowledgement(request);
+                    if let Some(settlement) = self.accepted_settlement.take() {
+                        match settlement.kind {
+                            AcceptedRequestKind::Reply(reply) => {
+                                let notifications = self.environment.requests.fail_reply_settlement(
+                                    reply.claim, format!("reply continuation failed after acceptance: {error}"),
+                                );
+                                self.publish_watch_notifications(notifications).await;
+                            }
+                            AcceptedRequestKind::Cancellation(claim) => {
+                                let _ = self.environment.requests.rollback_cancellation_acknowledgement(claim);
+                            }
+                        }
                     }
                     self.runtime_observation
                         .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed);
@@ -13571,11 +13227,15 @@ where
             self.source_connections.take();
             self.sources.clear();
             let context = self.context(kernel.identity());
-            let notifications = self
-                .environment
-                .requests
-                .actor_stopped(context.actor, terminal);
-            self.publish_watch_notifications(notifications).await;
+            publish_request_retirement(
+                &self.environment.requests,
+                &self.environment.deployments,
+                context.actor,
+                terminal,
+            )
+            .await;
+
+            self.accepted_settlement.take();
 
             // Hook admission and every realm/placement checkout below race the
             // same deadline `finish_actor` computed once: a busy machine can
@@ -13604,9 +13264,8 @@ where
             } else {
                 Confirmed
             };
-            self.active_input = None;
             self.pending_checkpoint = None;
-            self.checkpoint = None;
+            self.committed = None;
             self.outstanding_interactive = None;
             self.set_standing(context.actor, ResidentStanding::Terminal);
             self.boot = None;
@@ -13736,11 +13395,13 @@ where
             if let Some(custody) = &self.worktree_custody {
                 custody.actor_stopped(terminal);
             }
-            let notifications = self
-                .environment
-                .requests
-                .actor_stopped(kernel.identity(), terminal);
-            self.publish_watch_notifications(notifications).await;
+            publish_request_retirement(
+                &self.environment.requests,
+                &self.environment.deployments,
+                kernel.identity(),
+                terminal,
+            )
+            .await;
             self.publish_retired(kernel.identity(), terminal.clone());
             let session = self.descriptor.placement().session;
             self.release_session_state();
@@ -15777,14 +15438,62 @@ fn lookup_response(
     )
 }
 
+/// Retained exit observation also runs when forced owner loss bypasses the
+/// resident behavior's shutdown callbacks. Keep this task independent of the
+/// behavior and machine so it cannot retain the resources being retired.
+fn observe_request_retirement(
+    actor: ActorRef,
+    terminal: crate::RetainedActorExit,
+    requests: Arc<RequestRegistry>,
+    deployments: mpsc::Sender<LocalResidentDeployment>,
+) {
+    tokio::spawn(async move {
+        let terminal = terminal.wait().await;
+        publish_request_retirement(&requests, &deployments, actor, &terminal).await;
+    });
+}
+
+/// Request retirement is idempotent in the registry. Normal shutdown calls it
+/// before hooks; the retained-exit observer covers shutdowns that never return
+/// to the behavior. All notices use the same backpressured publication path.
+async fn publish_request_retirement(
+    requests: &Arc<RequestRegistry>,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    actor: ActorRef,
+    terminal: &ActorTerminal,
+) {
+    let notifications = requests.actor_stopped(actor, terminal);
+    publish_request_notifications(requests, deployments, notifications).await;
+}
+
 /// The one publication path for request-registry notices: watch transitions,
 /// then every queued settlement. The resident actor calls it after each
 /// registry transition it makes; a command completion task calls it after
 /// settling a job outside any actor turn.
-pub(crate) async fn publish_request_notifications(
-    requests: &RequestRegistry,
+pub(crate) fn publish_request_notifications(
+    requests: &Arc<RequestRegistry>,
     deployments: &mpsc::Sender<LocalResidentDeployment>,
     notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let requests = Arc::clone(requests);
+    let deployments = deployments.clone();
+    let notifications = notifications.into_iter().collect::<Vec<_>>();
+    // Cancellation of a publisher detaches this task. The task keeps custody
+    // of watch transitions until bounded publication completes.
+    let publication = tokio::spawn(async move {
+        deliver_request_notifications(&requests, &deployments, notifications).await;
+    });
+    async move {
+        if let Err(error) = publication.await {
+            tracing::error!(%error, "request notification publisher task failed");
+        }
+    }
+}
+
+async fn deliver_request_notifications(
+    requests: &RequestRegistry,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    notifications: Vec<crate::request::WatchNotification>,
 ) {
     for notification in notifications {
         // A watch forgotten by campaign cleanup keeps no state to poll.
@@ -16357,6 +16066,115 @@ mod tests {
         assert!(empty.contains("(none registered)"));
         assert!(empty.contains("(none pending)"));
         assert!(empty.contains("pollWatch"));
+    }
+
+    #[tokio::test]
+    async fn retained_exit_observer_retires_requests_once_with_backpressure() {
+        use crate::request::{ResponseFailure, ResponseObservation};
+
+        for (exit_before_observer, cancel_shutdown_publisher) in
+            [(false, false), (true, false), (false, true)]
+        {
+            let owner = ActorRef::first(ActorId(901));
+            let target = ActorRef::first(ActorId(902));
+            let requests = std::sync::Arc::new(crate::request::RequestRegistry::default());
+            let request = requests.reserve(owner, target);
+            requests.mark_queued(owner, target, request).unwrap();
+            let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
+            assert!(initial.is_empty());
+            let unwatched = requests.reserve(owner, target);
+            requests.mark_queued(owner, target, unwatched).unwrap();
+            let terminal = crate::RetainedActorExit::new();
+            let failed =
+                crate::ActorTerminal::new(crate::ActorExitKind::Failed, "owner lost execution");
+            let (deployments, mut receiver) = tokio::sync::mpsc::channel(1);
+            deployments
+                .try_send(crate::LocalResidentDeployment::Retired {
+                    actor: owner,
+                    terminal: failed.clone(),
+                })
+                .unwrap();
+            if cancel_shutdown_publisher {
+                let task_requests = std::sync::Arc::clone(&requests);
+                let task_deployments = deployments.clone();
+                let task_failed = failed.clone();
+                let publisher = tokio::spawn(async move {
+                    super::publish_request_retirement(
+                        &task_requests,
+                        &task_deployments,
+                        target,
+                        &task_failed,
+                    )
+                    .await;
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while matches!(
+                        requests.observe_response(owner, request),
+                        Ok(ResponseObservation::Pending(_))
+                    ) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("normal shutdown issued its watch transition");
+                publisher.abort();
+                let _ = publisher.await;
+            }
+            if exit_before_observer {
+                terminal.publish(failed.clone()).unwrap();
+            }
+            super::observe_request_retirement(
+                target,
+                terminal.clone(),
+                std::sync::Arc::clone(&requests),
+                deployments.clone(),
+            );
+            if !exit_before_observer {
+                terminal.publish(failed.clone()).unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while matches!(
+                    requests.observe_response(owner, request),
+                    Ok(ResponseObservation::Pending(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("retained exit must close requests even with a full deployment queue");
+            assert_eq!(
+                requests.observe_response(owner, request),
+                Ok(ResponseObservation::Unavailable(
+                    ResponseFailure::TargetFailed(failed.summary.clone(),)
+                ))
+            );
+            assert_eq!(receiver.recv().await.unwrap().kind(), "Retired");
+            let notice = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("watch notice must survive backpressure")
+                .unwrap();
+            match notice {
+                crate::LocalResidentDeployment::WatchChanged { notification } => {
+                    assert_eq!(notification.owner, owner);
+                    assert_eq!(notification.watch, watch);
+                }
+                other => panic!("expected watch notice, got {}", other.kind()),
+            }
+            let settlement =
+                tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                    .await
+                    .expect("settlement notice must survive backpressure")
+                    .unwrap();
+            match settlement {
+                crate::LocalResidentDeployment::SettlementChanged { notification } => {
+                    assert_eq!(notification.owner, owner);
+                    assert_eq!(notification.request, unwatched);
+                }
+                other => panic!("expected settlement notice, got {}", other.kind()),
+            }
+            super::publish_request_retirement(&requests, &deployments, target, &failed).await;
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[derive(Clone, Default)]

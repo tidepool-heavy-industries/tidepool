@@ -29,7 +29,6 @@ pub struct OriginalDisplayContext {
     identity: [u8; 32],
     declarations: Arc<ExactDeclarationContext>,
     witness: CanonicalInputTypeWitness,
-    observations: Arc<crate::declaration_context::OriginalDisplayObservations>,
     input_context: Arc<ExactDeclarationContext>,
 }
 
@@ -46,19 +45,11 @@ impl OriginalDisplayContext {
             .original_input_type()
             .expect("validated live input")
             .clone();
-        let observations = Arc::new(declarations.display_observations());
-        let encoded = serde_json::to_vec(&observations).expect("issued display observations");
-        use sha2::Digest;
-        let mut hash = sha2::Sha256::new();
-        hash.update(b"TPEXACTDISPLAYCONTEXT1");
-        hash.update((encoded.len() as u64).to_le_bytes());
-        hash.update(&encoded);
-        hash.update(witness.original_bytes());
+        let identity = declarations.display_identity(witness.original_bytes());
         Ok(Some(Arc::new(Self {
-            identity: hash.finalize().into(),
+            identity,
             declarations,
             witness,
-            observations,
             input_context: prototype.context().clone(),
         })))
     }
@@ -84,7 +75,9 @@ impl OriginalDisplayContext {
 impl PartialEq for OriginalDisplayContext {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
-            || (self.observations == other.observations
+            || (self
+                .declarations
+                .same_display_observations(&other.declarations)
                 && self.witness == other.witness
                 && self.witness.original_bytes() == other.witness.original_bytes()
                 && self

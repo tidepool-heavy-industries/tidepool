@@ -3254,7 +3254,7 @@ pub(crate) enum ResidentWorkbenchStep {
         preview: Option<String>,
     },
     CancellationAcknowledged {
-        request: crate::RequestId,
+        claim: crate::request::CancellationAcknowledgementClaim,
     },
 }
 

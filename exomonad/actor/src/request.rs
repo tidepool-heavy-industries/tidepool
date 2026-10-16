@@ -358,7 +358,11 @@ enum TargetState {
         presented: bool,
         reason: CancellationReason,
     },
-    AcknowledgingCancellation(CancellationReason),
+    AcknowledgingCancellation {
+        reason: CancellationReason,
+        presented: bool,
+        generation: u64,
+    },
     Settling {
         generation: u64,
     },
@@ -419,6 +423,34 @@ impl PartialEq for RequestReplyClaim {
     }
 }
 impl Eq for RequestReplyClaim {}
+
+/// Affine authority for one cancellation acknowledgement attempt.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CancellationAcknowledgementClaim {
+    request: RequestId,
+    target: ActorRef,
+    generation: u64,
+    reason: CancellationReason,
+    presented: bool,
+}
+
+impl CancellationAcknowledgementClaim {
+    pub(crate) fn request(&self) -> RequestId {
+        self.request
+    }
+    pub(crate) fn reason(&self) -> CancellationReason {
+        self.reason
+    }
+    fn matches(&self, record: &RequestRecord) -> bool {
+        record.target == self.target
+            && record.target_state()
+                == TargetState::AcknowledgingCancellation {
+                    reason: self.reason,
+                    presented: self.presented,
+                    generation: self.generation,
+                }
+    }
+}
 
 enum ReplyClaimEntry<'activation> {
     Ordinary,
@@ -756,8 +788,11 @@ enum RequestSettlement {
         value: Arc<OwnedResultSnapshot>,
         preview: Option<String>,
     },
-    ReplyFailed(String),
-    CancellationAcknowledged,
+    ReplyFailed {
+        claim: RequestReplyClaim,
+        detail: String,
+    },
+    CancellationAcknowledged(CancellationAcknowledgementClaim),
 }
 
 struct SettlementEffects {
@@ -897,26 +932,32 @@ impl RequestStateTable {
                 }
                 false
             }
-            RequestSettlement::ReplyFailed(detail) => {
-                if let Some(record) = self.requests.get_mut(&request) {
-                    if matches!(record.target_state(), TargetState::Settling { .. }) {
-                        record
-                            .operation_mut()
-                            .ok()?
-                            .set_target_state(TargetState::Closed);
-                        if record.owner_state == OwnerState::Observing {
-                            record.owner_state =
-                                OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail));
-                        }
-                    }
+            RequestSettlement::ReplyFailed { claim, detail } => {
+                let record = self.requests.get_mut(&request)?;
+                if record.target_state()
+                    != (TargetState::Settling {
+                        generation: claim.generation,
+                    })
+                    || record.target != claim.target
+                {
+                    return None;
+                }
+                record
+                    .operation_mut()
+                    .ok()?
+                    .set_target_state(TargetState::Closed);
+                if record.owner_state == OwnerState::Observing {
+                    record.owner_state =
+                        OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail));
                 }
                 false
             }
-            RequestSettlement::CancellationAcknowledged => {
+            RequestSettlement::CancellationAcknowledged(claim) => {
                 let record = self.requests.get_mut(&request)?;
-                let TargetState::AcknowledgingCancellation(reason) = record.target_state() else {
+                if !claim.matches(record) {
                     return None;
-                };
+                }
+                let reason = claim.reason;
                 record
                     .operation_mut()
                     .ok()?
@@ -1271,7 +1312,7 @@ impl RequestRegistry {
             || matches!(
                 record.target_state(),
                 TargetState::Closed
-                    | TargetState::AcknowledgingCancellation(_)
+                    | TargetState::AcknowledgingCancellation { .. }
                     | TargetState::Settling { .. }
             );
         Ok((record.progress().cloned(), closed))
@@ -2035,7 +2076,7 @@ impl RequestRegistry {
             | TargetState::CancellationRequested {
                 presented: true, ..
             }
-            | TargetState::AcknowledgingCancellation(_)
+            | TargetState::AcknowledgingCancellation { .. }
             | TargetState::Settling { .. } => Err(ReplyError::Stale),
         }
     }
@@ -2056,7 +2097,9 @@ impl RequestRegistry {
         match record.target_state() {
             TargetState::Presented => Ok(publish()),
             TargetState::CancellationRequested { .. }
-            | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
+            | TargetState::AcknowledgingCancellation { .. } => {
+                Err(ReplyError::CancellationRequested)
+            }
             TargetState::Closed => Err(ReplyError::AlreadySettled),
             TargetState::Reserved | TargetState::Queued | TargetState::Settling { .. } => {
                 Err(ReplyError::Stale)
@@ -2104,7 +2147,11 @@ impl RequestRegistry {
         &self,
         permit: crate::request_reply_tool::ReplyToolPermit<'_>,
     ) -> Result<RequestReplyClaim, ReplyError> {
-        self.begin_reply_entry(permit.actor(), permit.request(), ReplyClaimEntry::Tool(permit))
+        self.begin_reply_entry(
+            permit.actor(),
+            permit.request(),
+            ReplyClaimEntry::Tool(permit),
+        )
     }
 
     fn begin_reply_entry(
@@ -2140,7 +2187,9 @@ impl RequestRegistry {
                     (None, ReplyClaimEntry::Ordinary) => {}
                     (Some(definition), ReplyClaimEntry::Tool(permit))
                         if permit.matches_definition(definition) => {}
-                    (Some(_), ReplyClaimEntry::Ordinary) => return Err(ReplyError::ReplyToolRequired),
+                    (Some(_), ReplyClaimEntry::Ordinary) => {
+                        return Err(ReplyError::ReplyToolRequired)
+                    }
                     _ => return Err(ReplyError::Unauthorized),
                 }
                 let destination = record
@@ -2162,7 +2211,9 @@ impl RequestRegistry {
                 })
             }
             TargetState::CancellationRequested { .. }
-            | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
+            | TargetState::AcknowledgingCancellation { .. } => {
+                Err(ReplyError::CancellationRequested)
+            }
             TargetState::Closed => Err(ReplyError::AlreadySettled),
             TargetState::Reserved | TargetState::Queued | TargetState::Settling { .. } => {
                 Err(ReplyError::Stale)
@@ -2193,6 +2244,7 @@ impl RequestRegistry {
     /// target just replied with (`None` when it could not be read cheaply).
     /// It rides along only as far as this request's own `Ready` settlement
     /// notice; nothing else on the request depends on it.
+    /// Retired or superseded claims are inert and do not reevaluate watches.
     pub(crate) fn finish_reply(
         &self,
         claim: RequestReplyClaim,
@@ -2212,14 +2264,21 @@ impl RequestRegistry {
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
+    /// Retired or superseded claims are inert and do not reevaluate watches.
     pub(crate) fn fail_reply_settlement(
         &self,
-        request: RequestId,
+        claim: RequestReplyClaim,
         detail: impl Into<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         state
-            .settle(request, RequestSettlement::ReplyFailed(detail.into()))
+            .settle(
+                claim.request,
+                RequestSettlement::ReplyFailed {
+                    claim,
+                    detail: detail.into(),
+                },
+            )
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
@@ -2303,7 +2362,8 @@ impl RequestRegistry {
         }
         if matches!(
             record.target_state(),
-            TargetState::CancellationRequested { .. } | TargetState::AcknowledgingCancellation(_)
+            TargetState::CancellationRequested { .. }
+                | TargetState::AcknowledgingCancellation { .. }
         ) {
             return Ok((CancelRequestOutcome::AlreadyRequested, None));
         }
@@ -2361,7 +2421,7 @@ impl RequestRegistry {
         record.owner_state = OwnerState::Unavailable(ResponseFailure::DeadlineExceeded);
         let notification = match record.target_state() {
             TargetState::CancellationRequested { .. }
-            | TargetState::AcknowledgingCancellation(_) => None,
+            | TargetState::AcknowledgingCancellation { .. } => None,
             _ => {
                 let presented = record.target_state() == TargetState::Presented;
                 if let Ok(operation) = record.operation_mut() {
@@ -2403,7 +2463,7 @@ impl RequestRegistry {
             TargetState::CancellationRequested { reason, .. } => {
                 ReplyObservation::CancellationRequested(reason)
             }
-            TargetState::AcknowledgingCancellation(reason) => {
+            TargetState::AcknowledgingCancellation { reason, .. } => {
                 ReplyObservation::CancellationRequested(reason)
             }
             TargetState::Closed => ReplyObservation::Closed,
@@ -2415,12 +2475,17 @@ impl RequestRegistry {
         &self,
         target: ActorRef,
         request: RequestId,
-    ) -> Result<CancellationReason, ReplyError> {
+    ) -> Result<CancellationAcknowledgementClaim, ReplyError> {
         let mut state = self.state.lock();
+        let generation = state
+            .next_reply_claim
+            .checked_add(1)
+            .ok_or(ReplyError::Stale)?;
+        state.next_reply_claim = generation;
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
-        let reason = match record.target_state() {
-            TargetState::CancellationRequested { reason, .. } => reason,
+        let (reason, presented) = match record.target_state() {
+            TargetState::CancellationRequested { reason, presented } => (reason, presented),
             TargetState::Closed => return Err(ReplyError::AlreadySettled),
             _ => return Err(ReplyError::Stale),
         };
@@ -2442,33 +2507,54 @@ impl RequestRegistry {
         }
         record
             .operation_mut()?
-            .set_target_state(TargetState::AcknowledgingCancellation(reason));
+            .set_target_state(TargetState::AcknowledgingCancellation {
+                reason,
+                presented,
+                generation,
+            });
         record.operation_mut()?.progress = None;
-        Ok(reason)
+        Ok(CancellationAcknowledgementClaim {
+            request,
+            target,
+            generation,
+            reason,
+            presented,
+        })
     }
 
+    /// Retired or superseded claims are inert and do not reevaluate watches.
     pub(crate) fn finish_cancellation_acknowledgement(
         &self,
-        request: RequestId,
+        claim: CancellationAcknowledgementClaim,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         state
-            .settle(request, RequestSettlement::CancellationAcknowledged)
+            .settle(
+                claim.request,
+                RequestSettlement::CancellationAcknowledged(claim),
+            )
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
-    pub(crate) fn rollback_cancellation_acknowledgement(&self, request: RequestId) {
+    pub(crate) fn rollback_cancellation_acknowledgement(
+        &self,
+        claim: CancellationAcknowledgementClaim,
+    ) -> Result<(), ReplyError> {
         let mut state = self.state.lock();
-        if let Some(record) = state.requests.get_mut(&request) {
-            if let TargetState::AcknowledgingCancellation(reason) = record.target_state() {
-                if let Ok(operation) = record.operation_mut() {
-                    operation.set_target_state(TargetState::CancellationRequested {
-                        presented: true,
-                        reason,
-                    });
-                }
-            }
+        let record = state
+            .requests
+            .get_mut(&claim.request)
+            .ok_or(ReplyError::Stale)?;
+        if !claim.matches(record) {
+            return Err(ReplyError::Stale);
         }
+        record
+            .operation_mut()?
+            .set_target_state(TargetState::CancellationRequested {
+                presented: claim.presented,
+                reason: claim.reason,
+            });
+        Ok(())
     }
 
     pub(crate) fn abandon_response(
@@ -3199,7 +3285,7 @@ fn authorize_progress_publication(
         | TargetState::CancellationRequested {
             presented: true, ..
         } => Ok(()),
-        TargetState::Closed | TargetState::AcknowledgingCancellation(_) => {
+        TargetState::Closed | TargetState::AcknowledgingCancellation { .. } => {
             Err(ReplyError::AlreadySettled)
         }
         _ => Err(ReplyError::Stale),
@@ -4578,10 +4664,10 @@ mod tests {
                         registry.observe_watch(owner, watch),
                         Ok(WatchObservation::Pending(_))
                     ));
-                    registry
+                    let cancellation_claim = registry
                         .begin_cancellation_acknowledgement(target, request)
                         .unwrap();
-                    registry.finish_cancellation_acknowledgement(request);
+                    registry.finish_cancellation_acknowledgement(cancellation_claim);
                 }
                 _ => {
                     registry.actor_stopped(
@@ -5365,15 +5451,22 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve_for_operation(owner, target, "JSON reply".into(), true, None);
+        let request =
+            registry.reserve_for_operation(owner, target, "JSON reply".into(), true, None);
         test_support::admit_reply_tool_request(&registry, owner, request);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         // Both direct helpers and route callbacks use this same claim owner.
         for _ in 0..2 {
-            assert_eq!(registry.begin_reply(target, request), Err(ReplyError::ReplyToolRequired),
-                "ordinary reply must not bypass JSON request admission");
-            assert_eq!(registry.observe_reply(target, request), Ok(ReplyObservation::Open));
+            assert_eq!(
+                registry.begin_reply(target, request),
+                Err(ReplyError::ReplyToolRequired),
+                "ordinary reply must not bypass JSON request admission"
+            );
+            assert_eq!(
+                registry.observe_reply(target, request),
+                Ok(ReplyObservation::Open)
+            );
         }
     }
 
@@ -5388,8 +5481,8 @@ mod tests {
         let (watch, initial) = registry.register_watch(owner, vec![request]).unwrap();
         assert!(initial.is_empty());
 
-        let _claim = registry.begin_reply(target, request).unwrap();
-        let notifications = registry.fail_reply_settlement(request, "continuation trapped");
+        let claim = registry.begin_reply(target, request).unwrap();
+        let notifications = registry.fail_reply_settlement(claim, "continuation trapped");
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -5409,9 +5502,94 @@ mod tests {
             registry.begin_reply(target, request),
             Err(ReplyError::AlreadySettled)
         );
-        assert!(registry
-            .fail_reply_settlement(request, "second failure")
-            .is_empty());
+    }
+
+    #[test]
+    fn queued_cancellation_rollback_preserves_presentation_and_reissues_claim() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry
+            .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+            .unwrap();
+        let claim = registry
+            .begin_cancellation_acknowledgement(target, request)
+            .unwrap();
+        registry
+            .rollback_cancellation_acknowledgement(claim)
+            .unwrap();
+        {
+            let state = registry.state.lock();
+            let record = state.requests.get(&request).unwrap();
+            assert_eq!(
+                record.target_state(),
+                TargetState::CancellationRequested {
+                    presented: false,
+                    reason: CancellationReason::RequesterCancelled,
+                }
+            );
+            assert_eq!(
+                authorize_progress_publication(record, target),
+                Err(ReplyError::Stale)
+            );
+        }
+        registry.present(target, request).unwrap();
+        let claim = registry
+            .begin_cancellation_acknowledgement(target, request)
+            .unwrap();
+        registry.finish_cancellation_acknowledgement(claim);
+        assert_eq!(
+            registry.observe_reply(target, request),
+            Ok(ReplyObservation::Closed)
+        );
+    }
+
+    #[test]
+    fn retirement_makes_retained_settlement_claims_inert() {
+        for mode in 0..4 {
+            let registry = RequestRegistry::default();
+            let owner = actor(1);
+            let target = actor(2);
+            let request = registry.reserve_native(owner, target);
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+            registry.register_watch(owner, vec![request]).unwrap();
+            let reply = (mode < 2).then(|| registry.begin_reply(target, request).unwrap());
+            let cancellation = (mode >= 2).then(|| {
+                registry
+                    .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+                    .unwrap();
+                registry
+                    .begin_cancellation_acknowledgement(target, request)
+                    .unwrap()
+            });
+            let terminal = ActorTerminal {
+                kind: ActorExitKind::Failed,
+                summary: "retired".into(),
+                diagnostic: None,
+            };
+            assert_eq!(registry.actor_stopped(target, &terminal).len(), 1);
+            let before = registry.observe_response(owner, request);
+            match mode {
+                0 => assert!(
+                    test_support::complete_reply(&registry, reply.unwrap(), None).is_empty()
+                ),
+                1 => assert!(registry
+                    .fail_reply_settlement(reply.unwrap(), "late failure")
+                    .is_empty()),
+                2 => assert!(registry
+                    .finish_cancellation_acknowledgement(cancellation.unwrap())
+                    .is_empty()),
+                _ => assert_eq!(
+                    registry.rollback_cancellation_acknowledgement(cancellation.unwrap()),
+                    Err(ReplyError::Stale)
+                ),
+            }
+            assert_eq!(registry.observe_response(owner, request), before);
+            assert!(registry.actor_stopped(target, &terminal).is_empty());
+        }
     }
 
     #[test]
@@ -5626,10 +5804,10 @@ mod tests {
                 CancellationReason::RequesterCancelled
             ))
         );
-        registry
+        let cancellation_claim = registry
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
-        let notifications = registry.finish_cancellation_acknowledgement(request);
+        let notifications = registry.finish_cancellation_acknowledgement(cancellation_claim);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -5707,10 +5885,10 @@ mod tests {
             ))
         );
         registry.present(target, request).unwrap();
-        registry
+        let cancellation_claim = registry
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
-        let notifications = registry.finish_cancellation_acknowledgement(request);
+        let notifications = registry.finish_cancellation_acknowledgement(cancellation_claim);
         assert!(notifications.is_empty());
         assert_eq!(
             registry.observe_response(owner, request),
@@ -5776,7 +5954,7 @@ mod tests {
                 (None, Vec::new())
             );
             let notifications = if settlement_fails {
-                registry.fail_reply_settlement(request, "lost result")
+                registry.fail_reply_settlement(reply_claim_request.take().unwrap(), "lost result")
             } else {
                 crate::request::test_support::complete_optional_reply(
                     &registry,
@@ -5811,7 +5989,7 @@ mod tests {
         registry
             .cancel_request(owner, request, CancellationReason::RequesterCancelled)
             .unwrap();
-        registry
+        let cancellation_claim = registry
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
         let (_, initial) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5820,7 +5998,7 @@ mod tests {
         assert!(cancellation.is_none());
         assert_eq!(notifications.len(), 1);
         assert!(registry
-            .finish_cancellation_acknowledgement(request)
+            .finish_cancellation_acknowledgement(cancellation_claim)
             .is_empty());
         assert_eq!(
             registry.observe_response(owner, request),

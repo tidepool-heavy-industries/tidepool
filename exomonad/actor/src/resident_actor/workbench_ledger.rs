@@ -634,6 +634,23 @@ mod tests {
         context: Arc<std::sync::OnceLock<KernelContext>>,
         fail_cleanup: bool,
     }
+    impl CleanupProbe {
+        fn workbench<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: crate::ActorWorkbenchInvocation,
+            _: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<
+            'a,
+            Result<
+                KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+                KernelInvocationFailure,
+            >,
+        > {
+            panic!("no native workbench admitted")
+        }
+    }
+
     impl KernelBehavior for CleanupProbe {
         fn start<'a>(
             &'a mut self,
@@ -667,19 +684,22 @@ mod tests {
         ) -> BoxFuture<'a, Result<KernelStep<Value>, KernelInvocationFailure>> {
             panic!("no native tool admitted")
         }
-        fn workbench<'a>(
-            &'a mut self,
-            _: &'a KernelContext,
-            _: crate::ActorWorkbenchInvocation,
-            _: Option<Arc<crate::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<
-            'a,
-            Result<
-                KernelStep<tidepool_runtime::session::WorkbenchResponse>,
-                KernelInvocationFailure,
-            >,
-        > {
-            panic!("no native workbench admitted")
+        fn dispatch_workbench(
+            &mut self,
+            _context: &KernelContext,
+            invocation: crate::ActorWorkbenchInvocation,
+            control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> crate::WorkbenchDispatch<Self> {
+            crate::WorkbenchDispatch::Sequential {
+                invocation,
+                control,
+                executor: |mut behavior, context, invocation, control| {
+                    Box::pin(async move {
+                        let result = behavior.workbench(&context, invocation, control).await;
+                        (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                    })
+                },
+            }
         }
         fn external_application_failed<'a>(
             &'a mut self,

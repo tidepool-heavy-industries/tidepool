@@ -544,12 +544,12 @@ pub(crate) fn complete_optional_reply(
         .map_or_else(Vec::new, |claim| complete_reply(registry, claim, preview))
 }
 
+pub(crate) fn publication(request: RequestId) -> RuntimeResultPublication {
+    fixture().lock().publish(request)
+}
+
 pub(crate) fn snapshot(claim: &RequestReplyClaim) -> Arc<OwnedResultSnapshot> {
-    OwnedResultSnapshot::incorporated(
-        fixture().lock().publish(claim.request()),
-        claim.destination(),
-    )
-    .unwrap()
+    OwnedResultSnapshot::incorporated(publication(claim.request()), claim.destination()).unwrap()
 }
 
 pub(crate) fn force(snapshot: &OwnedResultSnapshot) -> i64 {

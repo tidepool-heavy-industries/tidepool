@@ -119,11 +119,11 @@ pub use kernel::lifecycle::resident::{
     RootBindingAdapter, RootBindingClaimError, RootBindingOperationClaim,
 };
 pub use kernel::{
-    ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
-    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
-    KernelWorkbenchFailure, KernelWorkbenchReply, LifecycleHandle, LocalActorRef,
-    NativeProviderAdmission, NativeProviderSettlementError, NativeProviderStartError,
-    NativeProviderTurnLease, ProviderIdleProbe, WorkbenchStepKey,
+    ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, DisplayExpansionRequest,
+    KernelCallFailure, KernelCallReply, KernelInvocationFailure, KernelInvocationReply,
+    KernelMessage, KernelResume, KernelWorkbenchFailure, KernelWorkbenchReply, LifecycleHandle,
+    LocalActorRef, NativeProviderAdmission, NativeProviderSettlementError,
+    NativeProviderStartError, NativeProviderTurnLease, ProviderIdleProbe, WorkbenchStepKey,
 };
 pub use lineage::{
     ActorAdmissionRegistry, CheckpointLease, CheckpointRefusal, SpawnAdmission,

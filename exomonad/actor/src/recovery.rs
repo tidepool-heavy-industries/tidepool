@@ -2529,19 +2529,13 @@ mod tests {
         > {
             Box::pin(async { panic!("journal coordinator fixture has no tools") })
         }
-        fn workbench<'a>(
-            &'a mut self,
-            _context: &'a crate::KernelContext,
+        fn dispatch_workbench(
+            &mut self,
+            _context: &crate::KernelContext,
             _invocation: crate::ActorWorkbenchInvocation,
             _control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        ) -> futures_util::future::BoxFuture<
-            'a,
-            Result<
-                crate::KernelStep<tidepool_runtime::session::WorkbenchResponse>,
-                crate::KernelInvocationFailure,
-            >,
-        > {
-            Box::pin(async { panic!("journal coordinator fixture has no workbench") })
+        ) -> crate::WorkbenchDispatch<Self> {
+            panic!("journal coordinator fixture has no workbench")
         }
         fn external_application_failed<'a>(
             &'a mut self,

@@ -364,7 +364,7 @@ impl RequestRecord {
                 self.target_state(),
                 TargetState::Closed
                     | TargetState::Settling { .. }
-                    | TargetState::AcknowledgingCancellation(_)
+                    | TargetState::AcknowledgingCancellation { .. }
             );
         let settlement = match &self.owner_state {
             OwnerState::Observing => None,

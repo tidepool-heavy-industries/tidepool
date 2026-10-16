@@ -776,6 +776,8 @@ fn run_history(
         request
     });
     let mut facts: [RequestFacts; 4] = std::array::from_fn(|_| RequestFacts::default());
+    let mut cancellation_claims: [Option<crate::request::CancellationAcknowledgementClaim>; 4] =
+        std::array::from_fn(|_| None);
     let mut reply_claims: [Option<crate::request::RequestReplyClaim>; 4] =
         std::array::from_fn(|_| None);
     let mut capabilities: Vec<Capability> = vec![];
@@ -1195,7 +1197,12 @@ fn run_history(
                     usize::from(expected == Err(ReplyError::UpdatePending));
                 check(
                     registry
-                        .begin_cancellation_acknowledgement(caller.actor(targets[key]), ids[key]),
+                        .begin_cancellation_acknowledgement(caller.actor(targets[key]), ids[key])
+                        .map(|claim| {
+                            let reason = claim.reason();
+                            cancellation_claims[key] = Some(claim);
+                            reason
+                        }),
                     expected,
                     action,
                     coverage,
@@ -1209,16 +1216,20 @@ fn run_history(
                 if !model.forgotten() && !model.closed() && model.ack_claimed() {
                     model.accepted.push(RequestFact::AckRolledBack);
                 }
-                registry.rollback_cancellation_acknowledgement(ids[key]);
+                if let Some(claim) = cancellation_claims[key].take() {
+                    let _ = registry.rollback_cancellation_acknowledgement(claim);
+                }
             }
             Action::FinishAck => {
                 let model = &mut facts[key];
                 if !model.forgotten() && !model.closed() && model.ack_claimed() {
                     model.accepted.push(RequestFact::AckFinished);
                 }
-                prop_assert!(registry
-                    .finish_cancellation_acknowledgement(ids[key])
-                    .is_empty());
+                if let Some(claim) = cancellation_claims[key].take() {
+                    prop_assert!(registry
+                        .finish_cancellation_acknowledgement(claim)
+                        .is_empty());
+                }
             }
             Action::RetireTarget | Action::RetireOwner => {
                 let actor = caller.actor(if matches!(action, Action::RetireTarget) {

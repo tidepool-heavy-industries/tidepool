@@ -112,7 +112,6 @@ fn execution_with_id(
                 lifecycle: None,
                 initial_context: false,
                 display_receipt_owner: None,
-                park_effects: true,
                 context,
                 public_visibility: None,
                 control: Some(control),

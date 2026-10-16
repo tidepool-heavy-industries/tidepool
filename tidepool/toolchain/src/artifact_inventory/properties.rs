@@ -467,7 +467,11 @@ fn observe(
             descriptors
         );
         prop_assert_eq!(
-            snapshot.dependencies().into_iter().collect::<BTreeSet<_>>(),
+            snapshot
+                .dependencies()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             edges
         );
         prop_assert!(snapshot.ambiguous_native_owners.is_empty());
@@ -479,8 +483,8 @@ fn observe(
         prop_assert_eq!(
             snapshot
                 .entries
-                .into_iter()
-                .map(|(owner, entry)| (owner, entry.descriptor.id))
+                .iter()
+                .map(|(owner, entry)| (owner.clone(), entry.descriptor.id))
                 .collect::<BTreeMap<_, _>>(),
             owners.clone()
         );

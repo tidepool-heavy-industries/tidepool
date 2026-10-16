@@ -1190,7 +1190,8 @@ fn immutable_candidates_in_context_with_catalog(
         .artifact_view()
         .metadata_snapshot()
         .ambiguous_native_owners
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|owner| (owner.unit, owner.module))
         .collect();
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)

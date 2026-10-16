@@ -1177,8 +1177,8 @@ pub(crate) async fn expand_display_response(
 ) -> Result<WorkbenchResponse, ResidentToolError> {
     let (reply, receive) = oneshot::channel();
     actor
-        .admit_mailbox(crate::KernelMessage::Workbench {
-            invocation: crate::ActorWorkbenchInvocation::for_display_expansion(identity, key),
+        .admit_mailbox(crate::KernelMessage::ExpandDisplay {
+            request: crate::DisplayExpansionRequest { identity, key },
             control: Some(crate::WorkbenchExecutionControl::untracked()),
             reply: reply.into(),
         })

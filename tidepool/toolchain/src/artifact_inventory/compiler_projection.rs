@@ -426,11 +426,12 @@ impl CompilerInputProjection {
 
     pub(crate) fn project_metadata(
         &self,
-        mut metadata: ArtifactMetadataSnapshot,
-    ) -> Result<ArtifactMetadataSnapshot, CompileError> {
-        metadata.entries = self.entries_from_metadata(&metadata)?;
-        metadata.ambiguous_native_owners.clear();
-        Ok(metadata)
+        metadata: Arc<RetainedArtifactMetadata>,
+    ) -> Result<CompilerArtifactMetadata, CompileError> {
+        Ok(CompilerArtifactMetadata {
+            entries: self.entries_from_metadata(&metadata)?,
+            retained: metadata,
+        })
     }
 
     /// Resolve selected type evidence by its issued interface ID, independently
@@ -522,7 +523,7 @@ impl CompilerInputProjection {
 
     pub(crate) fn entries_from_metadata(
         &self,
-        metadata: &ArtifactMetadataSnapshot,
+        metadata: &RetainedArtifactMetadata,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         self.entries_from_artifacts(&metadata.artifacts)
     }

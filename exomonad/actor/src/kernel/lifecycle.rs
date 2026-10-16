@@ -1326,6 +1326,7 @@ impl Actor for LifecycleCoordinator {
                         KernelMessage::Tool { .. }
                             | KernelMessage::ToolWithHostedCheckpoint { .. }
                             | KernelMessage::Workbench { .. }
+                            | KernelMessage::ExpandDisplay { .. }
                     ) {
                     Err(KernelCallFailure::MailboxClosed(state.identity))
                 } else {

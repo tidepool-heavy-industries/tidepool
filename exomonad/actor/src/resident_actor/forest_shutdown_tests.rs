@@ -93,6 +93,10 @@ struct ObservedBehavior {
 }
 
 impl KernelBehavior for ObservedBehavior {
+    fn observe_exit(&mut self, context: &KernelContext) {
+        self.inner.observe_exit(context);
+    }
+
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
@@ -176,13 +180,20 @@ impl KernelBehavior for ObservedBehavior {
         self.inner.tool(context, invocation, capture)
     }
 
-    fn workbench<'a>(
-        &'a mut self,
-        context: &'a KernelContext,
+    fn dispatch_workbench(
+        &mut self,
+        context: &KernelContext,
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        self.inner.workbench(context, invocation, control)
+    ) -> crate::WorkbenchDispatch<Self> {
+        match self.inner.dispatch_workbench(context, invocation, control) {
+            crate::WorkbenchDispatch::Owned(task) => crate::WorkbenchDispatch::Owned(
+                task.project_behavior(|outer: &mut Self| &mut outer.inner),
+            ),
+            crate::WorkbenchDispatch::Sequential { .. } => {
+                unreachable!("resident notebook dispatch is owned")
+            }
+        }
     }
 
     fn external_application_failed<'a>(
@@ -1650,5 +1661,433 @@ async fn dropped_resident_startup_caller_cleans_configured_actor_and_exact_place
             Err(crate::DirectoryError::Unavailable)
         ),
         "finalization ends the directory owner; it does not issue an absence observation"
+    );
+}
+
+/// Runs the resident startup path, but deliberately prevents resident shutdown
+/// callbacks from settling requests, so retained-exit observation is required.
+struct ForcedRetirementBehavior {
+    inner: Behavior,
+    context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
+    shutdowns: Arc<AtomicUsize>,
+    stopped: Arc<AtomicUsize>,
+    refuse_before_start: bool,
+    early_request: Option<Arc<Mutex<Option<(crate::RequestId, crate::RequestId, crate::WatchId)>>>>,
+}
+
+impl KernelBehavior for ForcedRetirementBehavior {
+    fn observe_exit(&mut self, context: &KernelContext) {
+        self.inner.observe_exit(context);
+        if self.refuse_before_start {
+            let requests = &self.inner.environment.requests;
+            let owner = ActorRef::first(crate::ActorId(9901));
+            let request = requests.reserve(owner, context.identity());
+            requests
+                .mark_queued(owner, context.identity(), request)
+                .unwrap();
+            let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
+            assert!(initial.is_empty());
+            let unwatched = requests.reserve(owner, context.identity());
+            requests
+                .mark_queued(owner, context.identity(), unwatched)
+                .unwrap();
+            *self.early_request.as_ref().unwrap().lock() = Some((request, unwatched, watch));
+            context.retained_exit().request_shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "stop before resident startup",
+            ));
+            assert!(self.context.take().unwrap().send(context.clone()).is_ok());
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        assert!(!self.refuse_before_start, "retired actor must bypass start");
+        let send = self.context.take().unwrap();
+        Box::pin(async move {
+            let result = self.inner.start(context).await;
+            assert!(send.send(context.clone()).is_ok());
+            result
+        })
+    }
+
+    fn cast<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        sender: ActorRef,
+        request: MailboxValue,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        self.inner.cast(context, sender, request)
+    }
+
+    fn call<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        caller: ActorRef,
+        ancestry: crate::CallAncestry,
+        request: MailboxValue,
+    ) -> BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+        self.inner.call(context, caller, ancestry, request)
+    }
+
+    fn tool<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _invocation: exomonad_tool::ToolInvocation,
+        _capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
+        Box::pin(async { panic!("lose the serial behavior owner") })
+    }
+
+    fn dispatch_workbench(
+        &mut self,
+        context: &KernelContext,
+        invocation: crate::ActorWorkbenchInvocation,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> crate::WorkbenchDispatch<Self> {
+        match self.inner.dispatch_workbench(context, invocation, control) {
+            crate::WorkbenchDispatch::Owned(task) => crate::WorkbenchDispatch::Owned(
+                task.project_behavior(|outer: &mut Self| &mut outer.inner),
+            ),
+            crate::WorkbenchDispatch::Sequential { .. } => unreachable!(),
+        }
+    }
+
+    fn external_application_failed<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        failure: ExternalApplicationFailure,
+    ) -> BoxFuture<'a, ExternalFailureDisposition> {
+        self.inner.external_application_failed(context, failure)
+    }
+
+    fn shutdown<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        terminal: &'a ActorTerminal,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        self.inner.shutdown(context, terminal)
+    }
+
+    fn child_exited(&mut self, notice: ChildExitNotice) {
+        self.inner.child_exited(notice);
+    }
+
+    fn shutdown_components<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _terminal: &'a ActorTerminal,
+        _deadline: tokio::time::Instant,
+    ) -> BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
+        self.shutdowns.fetch_add(1, Ordering::Relaxed);
+        if self.refuse_before_start {
+            panic!("lose pre-start shutdown ownership");
+        }
+        Box::pin(std::future::pending())
+    }
+
+    fn stopped<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _terminal: &'a ActorTerminal,
+    ) -> BoxFuture<'a, ()> {
+        self.stopped.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async {})
+    }
+}
+
+async fn assert_forced_request_retirement(
+    fixture: &mut Fixture,
+    target: ActorRef,
+    retained_exit: &crate::RetainedActorExit,
+    request: crate::RequestId,
+    unwatched: crate::RequestId,
+    watch: crate::WatchId,
+    owner: ActorRef,
+) {
+    use crate::request::{ResponseFailure, ResponseObservation};
+    let terminal = tokio::time::timeout(Duration::from_secs(2), retained_exit.wait())
+        .await
+        .expect("forced actor must publish its retained exit");
+    let mut watches = 0;
+    let mut settlements = 0;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while watches == 0 || settlements == 0 {
+            match fixture._deployments.recv().await.unwrap() {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.watch == watch =>
+                {
+                    watches += 1;
+                }
+                LocalResidentDeployment::SettlementChanged { notification }
+                    if notification.request == unwatched =>
+                {
+                    settlements += 1;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("forced exit must publish request retirement without resident shutdown");
+    let failure = match terminal.kind {
+        ActorExitKind::Failed => ResponseFailure::TargetFailed(terminal.summary.clone()),
+        ActorExitKind::Cancelled => ResponseFailure::TargetCancelled(terminal.summary.clone()),
+        ActorExitKind::Completed => panic!("expected forced retirement"),
+    };
+    assert_eq!(
+        fixture
+            .forest
+            .environment
+            .requests
+            .observe_response(owner, request),
+        Ok(ResponseObservation::Unavailable(failure))
+    );
+    publish_request_retirement(
+        &fixture.forest.environment.requests,
+        &fixture.forest.environment.deployments,
+        target,
+        &terminal,
+    )
+    .await;
+    while let Ok(event) = fixture._deployments.try_recv() {
+        match event {
+            LocalResidentDeployment::WatchChanged { notification }
+                if notification.watch == watch =>
+            {
+                watches += 1
+            }
+            LocalResidentDeployment::SettlementChanged { notification }
+                if notification.request == unwatched =>
+            {
+                settlements += 1
+            }
+            _ => {}
+        }
+    }
+    assert_eq!((watches, settlements), (1, 1));
+}
+
+fn watch_forced_target(
+    fixture: &Fixture,
+    target: &LocalActorRef,
+) -> (ActorRef, crate::RequestId, crate::RequestId, crate::WatchId) {
+    let owner = ActorRef::first(crate::ActorId(9901));
+    let requests = &fixture.forest.environment.requests;
+    let request = requests.reserve(owner, target.identity());
+    requests
+        .mark_queued(owner, target.identity(), request)
+        .unwrap();
+    let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
+    assert!(initial.is_empty());
+    let unwatched = requests.reserve(owner, target.identity());
+    requests
+        .mark_queued(owner, target.identity(), unwatched)
+        .unwrap();
+    (owner, request, unwatched, watch)
+}
+
+#[tokio::test]
+async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
+    let mut fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        ForcedRetirementBehavior {
+            inner: fixture.behavior(ActorDescriptor::new("panic-root", placement)),
+            context: Some(send),
+            shutdowns: shutdowns.clone(),
+            stopped: stopped.clone(),
+            refuse_before_start: false,
+            early_request: None,
+        },
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    let _context = receive.await.unwrap();
+    let (owner, request, unwatched, watch) = watch_forced_target(&fixture, &actor);
+    let (reply, _receive) = tokio::sync::oneshot::channel();
+    actor
+        .address()
+        .send_message(crate::KernelMessage::Tool {
+            invocation: exomonad_tool::ToolInvocation {
+                context: None,
+                name: "panic".into(),
+                arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({})),
+            },
+            reply: reply.into(),
+        })
+        .unwrap();
+    assert_forced_request_retirement(
+        &mut fixture,
+        actor.identity(),
+        actor.terminal(),
+        request,
+        unwatched,
+        watch,
+        owner,
+    )
+    .await;
+    task.await.unwrap();
+    assert!(actor
+        .terminal()
+        .get()
+        .unwrap()
+        .summary
+        .contains("serial actor continuation panicked"));
+    assert_eq!(shutdowns.load(Ordering::Relaxed), 0);
+    assert_eq!(stopped.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
+    let mut fixture = Fixture::new().await;
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    // Capture a real kernel context through the root's resident startup wrapper.
+    let root_placement = fixture
+        .forest
+        .environment
+        .runner
+        .provision_root_scope(fixture.forest.session)
+        .await
+        .unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let (supervisor, task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        ObservedBehavior {
+            inner: fixture.behavior(ActorDescriptor::new("forced-child-owner", root_placement)),
+            context: Some(send),
+            owner: crate::local_actor::SpawnOwnership::Independent,
+            peers: Arc::new(Mutex::new(Vec::new())),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            gate: None,
+            start_gate: None,
+            configured_start_gate: None,
+        },
+        fixture.forest.incarnation,
+        fixture.forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    let context = receive.await.unwrap();
+    let placement = fixture.child_placement(&supervisor).await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let child = context
+        .spawn_child(
+            None,
+            ForcedRetirementBehavior {
+                inner: fixture.behavior(
+                    ActorDescriptor::new("hung-child", placement)
+                        .with_supervisor_parent(Some(supervisor.identity())),
+                ),
+                context: Some(send),
+                shutdowns: shutdowns.clone(),
+                stopped: stopped.clone(),
+                refuse_before_start: false,
+                early_request: None,
+            },
+        )
+        .await
+        .unwrap();
+    let _child_context = receive.await.unwrap();
+    let (owner, request, unwatched, watch) = watch_forced_target(&fixture, &child);
+    supervisor
+        .shutdown(ActorTerminal::new(
+            ActorExitKind::Completed,
+            "owner finished",
+        ))
+        .await
+        .unwrap();
+    task.await.unwrap();
+    assert_forced_request_retirement(
+        &mut fixture,
+        child.identity(),
+        child.terminal(),
+        request,
+        unwatched,
+        watch,
+        owner,
+    )
+    .await;
+    let terminal = child.terminal().get().unwrap();
+    assert_eq!(terminal.kind, ActorExitKind::Cancelled);
+    assert_eq!(terminal.summary, "owner actor stopped");
+    assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
+    assert_eq!(stopped.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn resident_pre_start_owner_loss_retires_requests_without_start_or_stopped() {
+    let mut fixture = Fixture::new().await;
+    let placement = fixture
+        .forest
+        .environment
+        .runner
+        .provision_root_scope(fixture.forest.session)
+        .await
+        .unwrap();
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let early_request = Arc::new(Mutex::new(None));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let result = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        ForcedRetirementBehavior {
+            inner: fixture.behavior(ActorDescriptor::new("pre-start-loss", placement)),
+            context: Some(send),
+            shutdowns: shutdowns.clone(),
+            stopped: stopped.clone(),
+            refuse_before_start: true,
+            early_request: Some(early_request.clone()),
+        },
+        fixture.forest.incarnation,
+        fixture.forest.directory.clone(),
+    )
+    .await;
+    assert!(result.is_err(), "pre-start shutdown panic must fail spawn");
+    let context = receive.await.unwrap();
+    let (request, unwatched, watch) = early_request.lock().take().unwrap();
+    assert_forced_request_retirement(
+        &mut fixture,
+        context.identity(),
+        &context.retained_exit(),
+        request,
+        unwatched,
+        watch,
+        ActorRef::first(crate::ActorId(9901)),
+    )
+    .await;
+    assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
+    assert_eq!(stopped.load(Ordering::Relaxed), 0);
+    assert!(fixture
+        .forest
+        .environment
+        .actors
+        .lock()
+        .get(&context.identity())
+        .is_none());
+    assert_eq!(
+        context.retained_exit().get().unwrap().kind,
+        ActorExitKind::Failed
     );
 }

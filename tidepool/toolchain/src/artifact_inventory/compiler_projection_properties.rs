@@ -302,15 +302,23 @@ impl Catalog {
             self.expected_ids(roles)
         );
         assert_eq!(
-            metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
+            metadata
+                .retained
+                .artifacts
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
             before.iter().map(|entry| entry.id).collect()
         );
         assert_eq!(
-            metadata.selected_native_groups,
+            metadata.retained.selected_native_groups,
             view.selected_native_groups(),
             "compiler roles cannot change group custody"
         );
-        assert!(metadata.ambiguous_native_owners.is_empty());
+        assert_eq!(
+            metadata.retained.ambiguous_native_owners,
+            view.metadata_snapshot().ambiguous_native_owners
+        );
         assert_eq!(
             view.descriptors(),
             before,
@@ -461,7 +469,7 @@ fn compiler_projection_dependency_refusals_preserve_exact_owners() {
         .unwrap_err();
     let mut changed_seal = view.metadata_snapshot();
     let required = Arc::make_mut(
-        changed_seal
+        Arc::make_mut(&mut changed_seal)
             .artifacts
             .get_mut(&catalog.interfaces[1].descriptor.id)
             .unwrap(),
@@ -516,7 +524,9 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
             .flatten()
         {
             let mut stale_snapshot = view.metadata_snapshot();
-            stale_snapshot.artifacts.remove(&stale_id);
+            Arc::make_mut(&mut stale_snapshot)
+                .artifacts
+                .remove(&stale_id);
             assert!(
                 selected.entries_from_metadata(&stale_snapshot).is_err(),
                 "stale role IDs refuse before dependent metadata indexing"
