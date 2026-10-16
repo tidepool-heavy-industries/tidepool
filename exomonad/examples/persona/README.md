@@ -36,7 +36,8 @@ its existing environment owner; it is never passed as a Haskell argument.
 Jev uses the existing `TYPESAFE_API_KEY` configuration. Missing credentials are
 explicit tool failures. No credentials are needed for the focused mock tests.
 
-The agent spec exposes one synchronous Haskell notebook with forms, console,
+The agent spec exposes direct `lookup`/`readLookup` discovery and file tools,
+and one synchronous Haskell notebook with forms, console,
 ordinary workspace files, Jev, lookup, reflection, active source inspection, and Web.
 Its synchronous notebook includes context editing, record actors, hosted agents,
 typed requests, watches, inspection and scoped cleanup. It omits commands and
@@ -51,6 +52,10 @@ boundary, not a separate OS user or process sandbox.
 `Persona.Memory.initialise` creates absent persona/human/curiosities blocks using
 compare-and-swap. It never overwrites existing contents; storage errors remain
 failures. The files are ordinary Markdown under `.exomonad/state/memory`.
+`Persona.Memory.note` creates a literal single filename under `.exomonad/state/notes`,
+including the supplied extension, and returns the publication outcome with its
+actual resolved file reference. Existing files produce a conflict. Directory
+separators and traversal names refuse; filesystem authority remains with File.
 `Persona.Orientation.startup` supplies their complete text as initial context.
 `Persona.Context.refresh` explicitly reads the current files and replaces that
 authored block using its issued context reference. A missing or unpublished

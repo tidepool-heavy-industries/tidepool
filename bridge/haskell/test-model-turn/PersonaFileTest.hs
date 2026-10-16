@@ -20,6 +20,8 @@ import Tidepool.Records (FsError(..))
 import qualified Tidepool.File as File
 import qualified Persona.FileTools as Tools
 import qualified Persona.Patch as Patch
+import qualified Persona.Memory as Memory
+import qualified Data.Map.Strict as Map
 
 -- Controlled filesystem effect owner. Real hashes/locks/publication are tested
 -- independently by the native handler history suite; these unique fixture
@@ -60,9 +62,77 @@ reference = do
 external :: Maybe Text -> Eff '[FsRead, FsWrite, State World] ()
 external text = do state <- get @World; put state { body = text }
 
+-- This owner returns resolved destinations just as the filesystem handler does.
+-- The helper must carry that issued reference through to its caller unchanged.
+type Notes = Map.Map Text Text
+noteDestination :: Text -> Text
+noteDestination target
+  | "/" `T.isPrefixOf` target = target
+  | otherwise = "/workspace/" <> target
+noteReader :: FsRead a -> Eff '[FsWrite, State Notes] a
+noteReader (FsReadSnapshot target) = do
+  files <- get @Notes
+  let resolved = noteDestination target
+  pure $ case Map.lookup resolved files of
+    Nothing -> Left (FsNotFound resolved)
+    Just text -> Right (FsSnapshot resolved text (digest text))
+noteReader _ = error "notes reopen through a single snapshot"
+noteWriter :: FsWrite a -> Eff '[State Notes] a
+noteWriter (FsWriteCas target Nothing proposal) = do
+  files <- get @Notes
+  let resolved = noteDestination target
+  case Map.lookup resolved files of
+    Just text -> pure (Right (Left (Just (digest text))))
+    Nothing -> do
+      put (Map.insert resolved proposal files)
+      pure (Right (Right (FsWriteReceipt resolved (digest proposal) FsDurable)))
+noteWriter _ = error "notes must only create, never replace"
+runNotes :: Notes -> Eff '[FsRead, FsWrite, State Notes] a -> (a, Notes)
+runNotes files = run . runState files . interpret noteWriter . interpret noteReader
+
 personaFileTests :: TestTree
 personaFileTests = testGroup "persona file tools"
-  [ testCase "stale earlier read refuses even when edits match fresh contents" $ do
+  [ testCase "literal note filenames return a reopenable issued reference and collisions preserve contents" $ do
+      mapM_ (\name -> do
+        let ((created, reopened, duplicate), after) = runNotes Map.empty $ do
+              created <- Memory.note name "cat"
+              reopened <- case created of
+                Right (File.Published ref File.Durable) -> File.readSnapshot (File.referencePath ref)
+                _ -> error "expected note publication"
+              duplicate <- Memory.note name "dog"
+              pure (created, reopened, duplicate)
+            destination = "/workspace/.exomonad/state/notes/" <> name
+        case (created, reopened) of
+          (Right (File.Published ref File.Durable), Right snapshot) -> do
+            assertEqual "literal filename and resolved destination" destination (File.referencePath ref)
+            assertEqual "issued identity reopens exactly" ref (File.snapshotReference snapshot)
+            assertEqual "reopened contents" "cat" (File.snapshotText snapshot)
+          _ -> error "note reference did not reopen"
+        assertBool "existing note refuses replacement" (case duplicate of Right (File.Conflict _ Nothing (Just _)) -> True; _ -> False)
+        assertEqual "single unchanged artifact" (Map.singleton destination "cat") after)
+        ["new.md", "plain", "old.md.md", "α.json"]
+  , testCase "invalid note components never submit a file operation" $ do
+      let refuse :: FsWrite a -> Eff '[] a
+          refuse _ = error "invalid note name reached filesystem"
+      mapM_ (\name -> assertBool "component refusal" (case run (interpret refuse (Memory.note name "cat")) of
+        Left (FsSandbox _) -> True; _ -> False)) ["", ".", "..", "a/b", "a\\b", "a\0b"]
+  , testCase "path identity mismatch is distinct from changed contents" $ do
+      let ((valid, wrongPath, stale), after) = execute (initial (Just "cat")) $ do
+            observed <- reference
+            valid <- Patch.prepare observed [Patch.Replace "cat" "dog"]
+            wrongPath <- Patch.prepare (observed {File.referencePath = "file"}) [Patch.Replace "cat" "dog"]
+            external (Just "owl")
+            stale <- Patch.prepare observed [Patch.Replace "owl" "dog"]
+            pure (valid, wrongPath, stale)
+      assertBool "issued reference works" (case valid of Right _ -> True; _ -> False)
+      assertBool "same content with another path is path mismatch" (case wrongPath of
+        Left (Patch.PathMismatch expected actual) -> File.referencePath expected /= File.referencePath actual && File.referenceVersion expected == File.referenceVersion actual
+        _ -> False)
+      assertBool "same path with different content is version mismatch" (case stale of
+        Left (Patch.VersionMismatch expected actual) -> File.referencePath expected == File.referencePath actual && File.referenceVersion expected /= File.referenceVersion actual
+        _ -> False)
+      assertEqual "no writes during preparation" 0 (attempts after)
+  , testCase "stale earlier read refuses even when edits match fresh contents" $ do
       let (result, after) = execute (initial (Just "cat")) $ do
             old <- reference
             external (Just "dog")

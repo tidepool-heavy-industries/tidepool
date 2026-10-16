@@ -12,6 +12,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Records (FsError)
 import qualified Tidepool.File as File
 import qualified Persona.FileTools as Files
+import qualified Tidepool.Lookup.Tools as LookupTools
 import Tidepool.Effects.Core
   ( AskUser, Console, FsRead, FsWrite, Jev, Lookup, Reflect, Source, Web
   , Actor, ActorContext, AgentLaunch, AgentInspection
@@ -44,18 +45,20 @@ data PersonaTools mode = PersonaTools
   , write_file :: mode :- Sync (Call WriteFileInput (Either FsError File.CommitOutcome))
   , edit_file :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError File.CommitOutcome))
   , preview_edit :: mode :- Sync (Call Files.EditInput (Either Files.FileToolError Files.PreviewReceipt))
+  , lookup :: LookupTools.LookupTools mode
   , haskell :: mode :- Sync (HaskellCell PersonaEffects)
   , reload :: mode :- Sync (Call ReloadInput (Either ReloadError ReloadOutcome))
   }
   deriving (Generic)
 -- Try adding an afterTool hook here to notice something useful after a call.
--- A hook receives ToolCall and ToolResult and returns Annotation: Annotated
+-- A hook receives completed ToolCall and ToolResult values; compile, schema and
+-- other preexecution refusals do not invoke it. Annotation: Annotated
 -- adds a note beside the result; NoAnnotation leaves it alone. With this spec,
 -- a notebook call is the whole cell, rather than each helper invoked inside it.
 -- A Jev/Reflect-using hook needs those effects in this signature's constraints.
 -- Save the implementation in a module, connect it here, then reload. You can
 -- add or replace the hook without adding a new registered tool.
-agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite] effects)
+agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite, Lookup, Console] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools
   { read_file = presentWith presentJson $ syncTool
@@ -70,6 +73,7 @@ agentSpec = defaultSpec { specTools = PersonaTools
   , preview_edit = presentWith presentJson $ syncTool
       "Preview exact replacements without writing. Use the file reference returned by read_file."
       Files.previewEditTool
+  , lookup = LookupTools.tools
   , haskell = haskellTool "Use the persistent Haskell notebook to recall and save memory, search the web, use forms, and compose reusable functions, Jev judgments, actors and workflows. Use the installed file tools for direct source reads and edits, including when a notebook cell will not compile. Inspect active source separately from drafts; explicitly validate and reload edits before relying on them. Bind evidence before displaying selections."
   , reload = standardReload }
   , initialContext = Just Orientation.startup }
