@@ -15863,6 +15863,64 @@ mod tests {
     }
 
     #[test]
+    fn fresh_source_owner_distinguishes_compiler_roles_from_retained_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = support_offer(&[support_product("Consumer")]);
+        let hidden_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            CompilerInputProjection::default(),
+            fixture.artifacts.clone(),
+            [],
+        )
+        .unwrap();
+        let hidden = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&hidden_support)
+                .unwrap(),
+        );
+        assert!(hidden
+            .interface_owners()
+            .iter()
+            .any(|interface| { interface.owner == identity("fixture", "Consumer") }));
+        assert!(hidden
+            .compiler_metadata_snapshot()
+            .unwrap()
+            .entries
+            .is_empty());
+        let request = program_request(directory.path(), hidden.clone());
+        let receipt = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut value = read_receipt(&receipt);
+        value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        write_receipt(&receipt, &value);
+        request.validate_receipt(&receipt, None, &hidden).unwrap();
+
+        let selected_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            fixture.projection,
+            fixture.artifacts,
+            [],
+        )
+        .unwrap();
+        let selected = hidden
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(&selected_support)
+            .unwrap();
+        for (context, planned) in [
+            (&selected, None),
+            (hidden.as_ref(), Some(identity("fixture", "Consumer"))),
+        ] {
+            assert!(request
+                .validate_receipt(&receipt, planned.as_ref(), context)
+                .err()
+                .expect("selected or planned source owner must refuse replacement")
+                .to_string()
+                .contains("fresh module replaced an admitted exact owner"));
+        }
+    }
+
+    #[test]
     fn program_segment_preserves_physical_source_authority_across_item_outputs() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
