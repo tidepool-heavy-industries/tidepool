@@ -518,19 +518,35 @@ impl OriginalCompilerInputs {
             .collect::<Vec<_>>();
         let mut native_original_requirements =
             carry_native_original_requirements(&projection, &preferred);
-        let mut native_availability = Vec::new();
+        let original_ids = projection
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        let mut seen_issuers = BTreeSet::new();
+        let mut offers_by_original = BTreeMap::<ArtifactId, Vec<NativeCompilerAvailability>>::new();
         for issued in selection.request_native_availability() {
-            for offer in issued.issuance.iter().filter(|offer| {
-                projection
-                    .roles()
-                    .iter()
-                    .any(|role| role.original() == Some(offer.original()))
-            }) {
-                if !native_availability.contains(offer) {
-                    native_availability.push(offer.clone());
+            // Receipt rows share their request's immutable issuance owner.
+            // Pointer identity avoids repeated work; each distinct owner still
+            // contributes its exact facts, including competing bindings.
+            if !seen_issuers.insert(Arc::as_ptr(&issued.issuance).cast::<()>()) {
+                continue;
+            }
+            for offer in issued
+                .issuance
+                .iter()
+                .filter(|offer| original_ids.contains(&offer.original()))
+            {
+                let choices = offers_by_original.entry(offer.original()).or_default();
+                if !choices.contains(offer) {
+                    choices.push(offer.clone());
                 }
             }
         }
+        let mut native_availability = offers_by_original
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
         let complete = selection
             .complete_native_products(artifacts)
             .map_err(compiler_evidence_failure)?;
