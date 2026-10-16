@@ -1821,7 +1821,7 @@ async fn assert_forced_request_retirement(
     let mut settlements = 0;
     tokio::time::timeout(Duration::from_secs(2), async {
         while watches == 0 || settlements == 0 {
-            match fixture._deployments.recv().await.unwrap() {
+            match fixture.recv_deployment().await.unwrap() {
                 LocalResidentDeployment::WatchChanged { notification }
                     if notification.watch == watch =>
                 {
@@ -1858,7 +1858,7 @@ async fn assert_forced_request_retirement(
         &terminal,
     )
     .await;
-    while let Ok(event) = fixture._deployments.try_recv() {
+    while let Ok(event) = fixture.try_recv_deployment() {
         match event {
             LocalResidentDeployment::WatchChanged { notification }
                 if notification.watch == watch =>

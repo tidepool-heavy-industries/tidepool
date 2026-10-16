@@ -9,11 +9,21 @@ pub(super) struct TestForest {
     pub(super) forest: Arc<Forest>,
     // Keep publication available for the entire test, even when it does not
     // inspect deployments. Dropping this receiver changes retirement admission.
-    _deployments: mpsc::Receiver<LocalResidentDeployment>,
+    deployments: mpsc::Receiver<LocalResidentDeployment>,
     _session_root: tempfile::TempDir,
 }
 
 impl TestForest {
+    pub(super) async fn recv_deployment(&mut self) -> Option<LocalResidentDeployment> {
+        self.deployments.recv().await
+    }
+
+    pub(super) fn try_recv_deployment(
+        &mut self,
+    ) -> Result<LocalResidentDeployment, mpsc::error::TryRecvError> {
+        self.deployments.try_recv()
+    }
+
     pub(super) async fn new() -> Self {
         let session_root = tempfile::tempdir().expect("session root");
         let session_id = tidepool_runtime::session::fresh_session_id();
@@ -40,7 +50,7 @@ impl TestForest {
         .expect("actual resident forest owner");
         Self {
             forest: Arc::new(forest),
-            _deployments: deployments,
+            deployments,
             _session_root: session_root,
         }
     }

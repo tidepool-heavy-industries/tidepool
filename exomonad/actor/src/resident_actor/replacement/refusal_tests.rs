@@ -723,7 +723,7 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
 
 #[tokio::test]
 async fn source_handler_failure_retains_original_checkpoint_and_source_after_staging() {
-    use crate::request::sources::{SourceBinding, SourceEvent, SourceTarget};
+    use crate::request::sources::{CallbackExecution, SourceBinding, SourceEvent, SourceTarget};
 
     let fixture = Fixture::compile_mode(true);
     let (mut behavior, owner) = fixture.behavior().await;
@@ -757,8 +757,10 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         input: None,
     });
     let target = SourceTarget::Lifecycle(actor);
+    let execution = CallbackExecution::from_context(behavior.descriptor.session_context(actor));
     behavior.sources.push(SourceBinding {
         target,
+        execution,
         entry: Arc::new(
             retain(
                 &behavior.environment.runner,
@@ -789,7 +791,11 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         behavior.pending_checkpoint.is_some(),
         "the real continuation reached its new checkpoint"
     );
-    assert!(behavior.pause_failed_handler(&owner.kernel, &error.detail));
+    assert!(
+        behavior
+            .pause_failed_handler(&owner.kernel, &error.detail)
+            .await
+    );
     assert!(behavior.pending_checkpoint.is_none());
     let ResidentStanding::Paused(paused) = &behavior.standing else {
         panic!("failed source handler pauses for replacement");
