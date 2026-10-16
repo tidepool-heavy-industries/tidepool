@@ -2235,7 +2235,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         );
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context.clone()))
-            .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+            .prepare_compilation_with_private_input(
+                root.path(),
+                PRODUCER,
+                None,
+                Some(private.clone()),
+            )
             .unwrap();
         assert_eq!(
             request.compiler_original_products().unwrap(),
@@ -2263,6 +2268,9 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             ]
         );
 
+        context = context
+            .retain_issued_native_offers(private.native_offers().iter().cloned())
+            .unwrap();
         // The inventory issuer explicitly selects complete original censuses;
         // the compiler issuer still names exactly one of those native bodies.
         {
@@ -2283,6 +2291,15 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .selected_native_groups();
         assert_eq!(groups.len(), products.len() * 2);
         let dependencies = context.facts.compiler_support.artifacts.dependencies();
+        let lost_offer = context
+            .clone()
+            .rebuild(|facts| facts.compiler_support.native_offers = Arc::from([]));
+        assert!(
+            ExactCompileContext::new(Arc::new(lost_offer))
+                .prepare_compilation(&root.path().join("lost-offer"), PRODUCER)
+                .is_err(),
+            "selected execution and body custody cannot reconstruct a lost issued offer"
+        );
         let private =
             OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
                 .unwrap()
@@ -4196,8 +4213,14 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     };
     let root = tempfile::tempdir().unwrap();
     let captured = acquire(&initial, &root.path().join("initial"));
+    assert!(
+        captured
+            .context_all_groups(&[entry.descriptor.id], Vec::new())
+            .is_err(),
+        "omitting the required canonical artifact cannot restore the recorded closure"
+    );
     let issued = captured
-        .context_all_groups(&[entry.descriptor.id], Vec::new())
+        .context_all_groups(&initial.artifact_view().artifact_ids(), Vec::new())
         .unwrap();
     assert!(issued.facts.compiler_support.native_offers()[0].is_full());
     assert_eq!(issued.artifact_view().selected_native_groups().len(), 2);
