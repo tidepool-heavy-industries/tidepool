@@ -12097,8 +12097,9 @@ mod tests {
                 .find(|row| row.as_array().unwrap()[1] == text("Native"))
                 .unwrap();
             let fields = row.as_array().unwrap();
-            assert_eq!(fields.len(), 8);
+            assert_eq!(fields.len(), 9);
             assert_eq!(fields[6].as_array().unwrap().len(), 1);
+            assert_eq!(fields[8], Value::Array(vec![text("full-carrier")]));
             let descriptor = fields[7].as_array().unwrap();
             let Value::Text(path) = &descriptor[0] else {
                 unreachable!()
