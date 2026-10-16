@@ -11969,7 +11969,7 @@ pub(crate) mod tests {
         let entry = Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
         let mut unexpected = Vec::new();
         let mut observed = 0;
-        for mode in ["full", "empty", "partial"] {
+        for mode in ["full", "current", "empty", "partial"] {
             let inventory = ArtifactInventory::default();
             let projection =
                 CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
@@ -12018,7 +12018,7 @@ pub(crate) mod tests {
                 .prepare_compilation(&root.path().join("initial"), producer_bytes)
                 .unwrap();
             let expected = match mode {
-                "full" => value_array([value_text("full-carrier")]),
+                "full" | "current" => value_array([value_text("full-carrier")]),
                 "empty" => value_array([value_text("issued-groups"), value_array([])]),
                 "partial" => value_array([
                     value_text("issued-groups"),
@@ -12035,14 +12035,32 @@ pub(crate) mod tests {
                     .unwrap()[8]
                     .clone()
             };
-            assert_eq!(wire_mode(&request), expected, "initial mode={mode}");
+            let initial_expected = if mode == "current" {
+                value_array([value_text("issued-groups"), value_array([])])
+            } else {
+                expected.clone()
+            };
+            assert_eq!(wire_mode(&request), initial_expected, "initial mode={mode}");
             let mut validation = PackageInterfaceValidation::default();
-            let selection = CertifiedSourceSelection::from_compiler_inputs(
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
                 &request.compiler_inputs().metadata,
                 &validation.inventory,
             )
             .unwrap();
+            if mode == "current" {
+                // A newly certified complete product is issued by the current
+                // source owner, independently of this request's empty baseline.
+                selection = CertifiedSourceSelection::default();
+                selection
+                    .admit_current(
+                        product.owner(),
+                        ProductOrigin::Fresh,
+                        product.module_interface().unwrap(),
+                        &validation.inventory,
+                    )
+                    .unwrap();
+            }
             for broaden in [false, true] {
                 let custody = if broaden {
                     // A separately issued complete carrier is legitimate new custody;
@@ -12054,7 +12072,12 @@ pub(crate) mod tests {
                     request.compiler_inputs().artifacts.clone()
                 };
                 let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
-                let public = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+                let public = Arc::new(
+                    ExactDeclarationContext::new(&[], &[], vec![])
+                        .unwrap()
+                        .extend_checked_original_products(producer.sha256(), &[])
+                        .unwrap(),
+                );
                 let next = ExactCompileContext::new(public)
                     .prepare_compilation_with_private_input(
                         &root.path().join(format!("next-{broaden}")),
@@ -12115,7 +12138,8 @@ pub(crate) mod tests {
                         &BTreeMap::new(),
                         &mut validation,
                     );
-                    let allowed = mode == "full" || (mode == "partial" && ordinal == 7);
+                    let allowed =
+                        matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
                     if !allowed
                         && !matches!(&imported, Err(CertificationError::OriginalAvailability(refusal))
                         if refusal.owner == *product.owner() && refusal.original_ordinal == ordinal)
@@ -12123,7 +12147,10 @@ pub(crate) mod tests {
                         unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected typed refusal actual={imported:?}"));
                     }
                     if allowed {
-                        let imports = imported.unwrap();
+                        let Ok(imports) = imported else {
+                            unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={imported:?}"));
+                            continue;
+                        };
                         let admitted = inventory
                             .admit_certified_with_demand(
                                 &next.compiler_inputs().artifacts,
@@ -12142,7 +12169,7 @@ pub(crate) mod tests {
                 }
             }
         }
-        assert_eq!(observed, 12);
+        assert_eq!(observed, 16);
         assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
     }
 
