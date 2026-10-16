@@ -9619,7 +9619,7 @@ mod tests {
             .artifacts
             .entries()
             .iter()
-            .all(|entry| entry.descriptor.owner != *generated.owner()));
+            .all(|entry| entry.descriptor.owner != admission.generated_source_owner().unwrap()));
         assert_eq!(
             continued.artifacts.capture_graph_selection().roots,
             support.capture_graph_selection().roots
