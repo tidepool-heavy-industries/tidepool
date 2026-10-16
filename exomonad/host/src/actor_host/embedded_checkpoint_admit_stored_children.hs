@@ -16,7 +16,6 @@ do
     (defaultRequestOptions { requestLabel = Just "checkpoint-alpha" })
   Right betaRequest <- request @Text beta ("read the captured Haskell context" :: Text)
     (defaultRequestOptions { requestLabel = Just "checkpoint-beta" })
-  R.send (storeAgents (R.client groupStore)) [alpha, beta]
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
   refusal <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
