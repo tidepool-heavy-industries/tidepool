@@ -2635,6 +2635,20 @@ impl ArtifactInventory {
                 .or_default()
                 .insert(*group);
         }
+        // Body offers narrow retained custody without choosing among issuers.
+        let mut offered = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
+        for proof in selection.native_original_requirements() {
+            for group in &proof.selection.graph_selection().native_groups {
+                offered
+                    .entry(NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    })
+                    .or_default()
+                    .insert(*group);
+            }
+        }
+        groups.extend(offered);
         // The issuing role may qualify a group among several retained bindings.
         // Availability by itself leaves ambiguity intact until demand.
         let mut qualified = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
@@ -2761,6 +2775,31 @@ impl ArtifactInventory {
         while let Some(group) = pending.pop() {
             if resolved_groups.contains_key(&group) || planned.contains_key(&group) {
                 continue;
+            }
+            let explicit_root = selection.native_original_requirements().any(|proof| {
+                proof.selection.graph_selection().roots.iter().any(|root| {
+                    matches!(root, ArtifactBindingNode::Group(root)
+                        if root.binding.artifact() == group.artifact
+                            && root.original_ordinal == group.original_ordinal)
+                })
+            });
+            if let Some(entry) = fixed.entries.get(&group.artifact) {
+                if let ArtifactPayload::Original(product) = &entry.payload {
+                    if !explicit_root
+                        && !selection.permits_native_group(
+                            group.artifact,
+                            product.owner(),
+                            group.original_ordinal,
+                        )
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::NativeGroupUnavailable {
+                                artifact: group.artifact,
+                                original_ordinal: group.original_ordinal,
+                            },
+                        ));
+                    }
+                }
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.

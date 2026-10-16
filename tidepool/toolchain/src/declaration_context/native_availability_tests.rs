@@ -3597,9 +3597,15 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("BoundedRequest", 117);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let unrelated = product("UnofferedCustody", 118);
+    let unrelated_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), unrelated.clone()).unwrap());
     let inventory = ArtifactInventory::default();
     let full = inventory
-        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .admit_shared(
+            &inventory.empty_view(),
+            vec![entry.clone(), unrelated_entry.clone()],
+        )
         .unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -3643,7 +3649,14 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             DeclarationContextFacts {
                 producer: producer.sha256(),
                 inventory: custody,
-                compiler_projection: projection.interface_only(),
+                compiler_projection: projection
+                    .interface_only()
+                    .merge(
+                        &CompilerInputProjection::from_issued_entries(&[unrelated_entry.clone()])
+                            .unwrap()
+                            .interface_only(),
+                    )
+                    .unwrap(),
                 lexical: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -3689,5 +3702,22 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 );
             }
         }
+        let mut fixed = inventory
+            .bind_segment(&inputs.artifacts, vec![], &selection)
+            .unwrap();
+        let imports = [source_import(&unrelated, 7)];
+        let denied = inventory.admit_bound_target(
+            &mut fixed,
+            &inputs.artifacts,
+            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
+            vec![],
+            &selection,
+        );
+        assert!(
+            matches!(denied, Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 }
+                if artifact == unrelated_entry.descriptor.id)),
+            "unoffered dependency custody cannot authorize native demand"
+        );
     }
 }

@@ -2961,6 +2961,32 @@ impl CertifiedSourceSelection {
         Ok(())
     }
 
+    /// A completed fresh product owns its body. Retained request bodies are
+    /// limited to their closed availability and exact dependency proofs.
+    pub(crate) fn permits_native_group(
+        &self,
+        original: crate::artifact_inventory::ArtifactId,
+        owner: &CachedHomeOwner,
+        ordinal: u32,
+    ) -> bool {
+        if let Some(selected) = self
+            .native_selections()
+            .find(|selected| &selected.owner == owner)
+        {
+            return selected.availability.permits(ordinal);
+        }
+        self.native_original_requirements().any(|proof| {
+            proof
+                .selection
+                .graph_selection()
+                .native_groups
+                .iter()
+                .any(|group| {
+                    group.binding.artifact() == original && group.original_ordinal == ordinal
+                })
+        })
+    }
+
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
         self.visible_modules()
             .map(|(_, row)| row)
