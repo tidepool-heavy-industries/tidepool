@@ -12436,7 +12436,10 @@ pub(crate) mod tests {
         );
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(producer.sha256(), &[])
+                .unwrap(),
         ))
         .prepare_compilation_with_private_input(root.path(), producer_bytes, None, Some(private))
         .unwrap();
