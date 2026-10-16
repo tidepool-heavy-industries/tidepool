@@ -59,7 +59,8 @@ import Tidepool.View.Types (View(..), viewTree)
 import Tidepool.View.Wire (encodeView)
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( ResultReference(..), ResultInspectionError(..), SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith, DisplaySelectableWith, DisplaySelectWith, DisplayNavigationInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( ResultReference(..), ResultInspectionError, SourceStatus(..), SourceRevision(..), SourceModule(..), Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith, DisplaySelectableWith, DisplaySelectWith, DisplayNavigationInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+import qualified Tidepool.Effects.Core as Core (ResultInspectionError(..))
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -185,10 +186,10 @@ instance Display ResultReference where
      ("resultCall", displayTree (resultCall value))]
 
 instance Display ResultInspectionError where
-  displayTree ResultUnbound = TextLeaf "ResultUnbound"
-  displayTree ResultMissing = TextLeaf "ResultMissing"
-  displayTree ResultUnauthorized = TextLeaf "ResultUnauthorized"
-  displayTree (ResultUnreadable detail) = application 0 "ResultUnreadable" [displayTree detail]
+  displayTree Core.ResultUnbound = TextLeaf "ResultUnbound"
+  displayTree Core.ResultMissing = TextLeaf "ResultMissing"
+  displayTree Core.ResultUnauthorized = TextLeaf "ResultUnauthorized"
+  displayTree (Core.ResultUnreadable detail) = application 0 "ResultUnreadable" [displayTree detail]
 
 instance Display SourceModule where
   displayTree value = Constructor "SourceModule"
