@@ -5227,7 +5227,7 @@ mod tests {
             );
             assert_eq!(
                 authorize_progress_publication(record, target),
-                Err(ReplyError::NotPresented)
+                Err(ReplyError::Stale)
             );
         }
         registry.present(target, request).unwrap();
