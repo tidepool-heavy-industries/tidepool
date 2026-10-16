@@ -1,6 +1,5 @@
 do
-  current <- C.getContext
-  C.putContext (over C.contextBlocks (<> [C.Text Nothing C.User "child-curated" []]) current)
+  C.ContextStaged _ <- C.stageContext (C.contextPatch [C.appendNote "child-curated" []])
   C.setNextModel "executor"
   if curatedHelper retainedValue == 43
     then pure ()

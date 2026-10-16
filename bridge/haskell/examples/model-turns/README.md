@@ -35,58 +35,58 @@ row. This is separate from resident/JIT and live-provider acceptance.
 
 ## Editing an agent's retained context
 
-`Tidepool.Agent.Context` provides an authority-free `Context` value for
-reviewing and curating the current actor transcript. The runtime retains
-authority: a reference in this value can identify a transcript item, but it
-cannot open or restore one. `editableTexts` traverses authored text and eligible
-visible message/result bodies, using full text rather than bounded previews.
-Native Haskell tool input/source and function arguments stay pinned, even after
-completion. Native grouping remains protected, while each visible body follows
-its own editable flag. `visibleTexts`, `blockKind`, and `blockProvenance` let a
-curator inspect content and origin. `toNotes` turns selected nonopaque completed
-exchanges into authored notes with source provenance; pending and protected
-groups remain untouched, and opaque group removal is refused.
+`Tidepool.Agent.Context` reads the current actor's active committed projection
+as an authority-free `Context`. `contextBlocks`, `visibleTexts`, and
+`referencedTexts` inspect its native structure, full text, selectors and origins.
+`editableTexts` is a read-only fold. Native Haskell source/input and function
+arguments stay pinned. `display` gives bounded text previews, character counts,
+exact references, selectors and content versions.
 
-Context reads and writes require `ContextReadWrite`, which only a synchronous
-tool profile can declare. A normal asynchronous cell remains the default and
-cannot edit context. The whole synchronous cell sees its staged edits; context,
-model, and effort publish together only on whole-cell success. Failure or
-cancellation discards the draft and deferred children, but external effects
-already issued are not rolled back. Actor-owned background work may outlive a
-successful cell.
+Build one `ContextPatch` with `contextPatch`. Each `replaceText target body`
+uses an opaque target from `textTargets current`, binding the exact reference,
+selector and owner-issued content version. `removeUnit` uses an issued target
+from `unitTargets current`; eligible removals are whole nonopaque completed
+exchanges or independently removable authored notes. Equal text does not identify
+an occurrence. `appendNote body sources` creates an assistant note and preserves
+its source references; the host issues its new reference at commit. `toNotes`
+purely builds removals and assistant notes for selected removable exchanges.
 
-`C.trimText reason retainedText` is a pure helper that prefixes the retained
-source with `[Trimmed: reason]`. The marker is ordinary text, not runtime
-metadata. Same-model continuation forwards opaque reasoning unchanged while
-using edited visible text; this does not promise that earlier conclusions stay
-semantically valid after facts change. An incompatible cross-model continuation
-must fail explicitly instead of silently dropping opaque history. Stage a
-model with `setNextModel "executor"` and effort with
-`C.setNextEffort C.High` only when the context/model combination is supported.
-The model name is `Text`: the host resolves a configured alias first, then
-treats an unmatched value as a literal identifier.
+`previewContext current patch` validates known fields, versions and overlapping
+targets without effects, returning a projected document, changed targets and
+before/after character counts. It makes no provider token or cache estimate and
+cannot establish current authority. Removing a group and editing a nested field
+in the same patch is invalid; distinct multipart selectors remain independent.
+`ContextWorkflow.inspectAndCurate` demonstrates this build, preview, stage flow.
 
-The editable `Context` retains native evidence. Cross-model input can project
-completed reasoning exchanges as attributed readable notes, including visible
-summaries and tool inputs/results, when the provider context is compatible.
-The Store keeps the originals. Incomplete or unauthenticated opaque exchanges
-and incompatible compaction prevent switching; they are not converted into
-empty summaries.
+`stageContext patch` returns `ContextStageRefused problems` or
+`ContextStaged transaction`. One synchronous cell may stage one batch; build
+all changes before staging. A staged handle is pending work, not a commit
+receipt. Context reads continue to show the committed base. On whole-cell
+success, context, model and effort commit together. Failure or cancellation
+discards the batch; external effects already issued remain. In a later cell,
+`inspectContextTransaction transaction` reports staged, committed with the
+actual head/generation and appended references, rejected, cancelled, or unknown.
+A saved inspection or target preserves data and versions, never edit authority.
+Staleness compares current content rather than an unrelated head generation;
+returning to exactly the same content permits that version again.
 
-Use `display` on a returned `Context` for its bounded structural view of authored
-blocks and safe native previews. `ContextWorkflow.inspectAndCurate` demonstrates
-provenance-preserving notes and editing full eligible text. The current call,
-pending operation identities/pairing, and later arrivals remain protected.
-Each visible body has its own editability flag. A later cell can edit admitted
-visible message/result bodies from a completed editing exchange; native tool
-source/input and function arguments remain pinned.
-Restoring a saved `Context` intentionally replaces the editable visible prefix,
-but does not restore authority. It must preserve the current protected and
-opaque groups; a stale snapshot missing required groups is refused. Persistent
-Haskell helpers reduce later calls but do not make their source editable.
+Only an explicitly synchronous profile admits `ContextReadWrite`. After the
+editing cell commits, capture the context for delegation separately;
+`ContextWorkflow.delegateCuratedContext` uses that completed projection.
+`getInitialContext` reports historical startup evidence, so refresh selects its
+exact reference in a new inspection and stages a targeted replacement.
+`inspectOriginalText reference selector` observes an authorized retained original,
+including after removal, with explicit missing, denied, unsupported-selector
+and unavailable outcomes. It does not enumerate arbitrary transcript history.
 
-Keep curation in ordinary Haskell. For a compact semantic choice, `J.each`
-can examine many source slices in one packet. `ContextWorkflow.selectOriginalSlices`
-returns only exact selected text together with its original provenance; apply
-those values through the ordinary optics. Jev supplies a selection, not
-rewritten source text or authority to open transcript references.
+`C.trimText reason retainedText` prefixes exact retained source with an ordinary
+`[Trimmed: reason]` marker. Same-model continuation retains opaque reasoning.
+Unsupported cross-model history is refused explicitly. `setNextModel` resolves
+a configured alias, then a literal model identifier; `setNextEffort` stages the
+next request's reasoning effort. Neither is a promise about semantic validity
+after facts change.
+
+For a compact semantic choice, `ContextWorkflow.selectOriginalSlices` uses
+`J.each` to examine source slices together. It returns only selected original
+text and its provenance; use the selected version-bound targets to build a
+patch. Jev supplies a selection, never authority to open references.

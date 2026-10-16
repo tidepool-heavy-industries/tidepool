@@ -3872,7 +3872,10 @@ impl ResidentActorBoundary {
         match self {
             Self::Context {
                 request:
-                    crate::ContextReq::GetContextWith | crate::ContextReq::GetInitialContextWith,
+                    crate::ContextReq::GetContextWith
+                    | crate::ContextReq::GetInitialContextWith
+                    | crate::ContextReq::InspectContextTransactionWith(_)
+                    | crate::ContextReq::InspectOriginalTextWith(_, _),
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,

@@ -6,8 +6,8 @@
 
 -- | Read and curate the current actor's retained transcript.
 --
--- 'Context' contains data only. Its references are identifiers, not authority
--- to recover an item or to restore a context prefix. The runtime validates all
+-- 'Context' contains data only. Its references and content versions do not
+-- grant authority to recover an item or edit a transcript. The runtime validates all
 -- edits against the actor's current transcript and principal.
 module Tidepool.Agent.Context
   ( Context
@@ -25,8 +25,32 @@ module Tidepool.Agent.Context
   , editableTexts
   , visibleTexts
   , referencedTexts
-  , ContextEditError (..)
-  , removeText
+  , ContextVersion
+  , ContextTextTarget
+  , ContextUnitTarget
+  , textTargets
+  , unitTargets
+  , targetReference
+  , targetSelector
+  , targetText
+  , targetVersion
+  , unitReference
+  , unitVersion
+  , replaceText
+  , removeUnit
+  , appendNote
+  , contextPatch
+  , ContextPatch
+  , ContextChange
+  , ContextProblem (..)
+  , ContextProblemCode (..)
+  , ContextTransaction
+  , ContextTransactionReceipt (..)
+  , ContextTransactionStatus (..)
+  , ContextStageResult (..)
+  , OriginalTextObservation (..)
+  , ContextPreview (..)
+  , previewContext
   , trimText
   , blockKind
   , blockProvenance
@@ -36,15 +60,15 @@ module Tidepool.Agent.Context
   , InitialContextObservation (..)
   , getInitialContext
   , getContext
-  , putContext
-  , modifyContext
-  , modifyContextM
+  , stageContext
+  , inspectContextTransaction
+  , inspectOriginalText
   , setNextModel
   , setNextEffort
   )
 where
 
-import Control.Lens (Fold, Lens', Traversal', folding, lens)
+import Control.Lens (Fold, Getter, folding, to)
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -55,6 +79,18 @@ import Tidepool.Inspection.Tree (treeParts)
 import Tidepool.Effects.Core
   ( ContextBlock (..)
   , ContextDocument (..)
+  , ContextInspection (..)
+  , ContextTextVersion (..)
+  , ContextUnitVersion (..)
+  , ContextPatch (..)
+  , ContextChange (..)
+  , ContextProblem (..)
+  , ContextProblemCode (..)
+  , ContextTransaction
+  , ContextTransactionReceipt (..)
+  , ContextTransactionStatus (..)
+  , ContextStageResult (..)
+  , OriginalTextObservation (..)
   , ContextNativeKind (..)
   , ContextTextSelector (..)
   , ContextVisibleText (..)
@@ -68,33 +104,53 @@ import Tidepool.Effects.Core
   )
 
 -- | A transcript copy with no capability-bearing operations or constructor.
-newtype Context = Context ContextDocument
+newtype Context = Context ContextInspection
+  deriving (Show, Eq)
+
+documentOf :: Context -> ContextDocument
+documentOf (Context inspection) = contextInspectionDocument inspection
 
 -- | A bounded structural view of the visible transcript. References and
 -- provenance are data only; this view adds no access to the items they identify.
 instance Display Context where
-  displayTree (Context (ContextDocument contextBlocksValue)) =
-    displayRecord 0 "Context" [("blocks", treeParts "[" "]" (map displayBlock contextBlocksValue))]
+  displayTree context@(Context inspection) =
+    displayRecord 0 "Context"
+      [ ("blocks", treeParts "[" "]" (map displayBlock (blocks (documentOf context))))
+      , ("textVersions", treeParts "[" "]" (map displayVersion (contextInspectionTextVersions inspection)))
+      , ("removableUnits", treeParts "[" "]" (map displayUnit (contextInspectionUnitVersions inspection)))
+      ]
     where
-      displayBlock (Text _ role body _) =
-        displayRecord 0 "Text" [("role", displayTree role), ("body", displayTree body)]
-      displayBlock (Native _ kind preview protected texts) =
-        displayRecord
-          0
-          "Native"
-          [ ("kind", displayTree kind)
-          , ("preview", displayTree preview)
+      summary body = displayRecord 0 "Text"
+        [("characters", displayTree (Text.length body)), ("preview", displayTree (Text.take 160 body))]
+      referenceTree value = displayTree (show value)
+      displayBlock (Text reference role body sources) =
+        displayRecord 0 "Text"
+          [("reference", referenceTree reference), ("role", displayTree role),
+           ("body", summary body), ("sources", referenceTree sources)]
+      displayBlock (Native reference kind preview protected texts) =
+        displayRecord 0 "Native"
+          [ ("reference", referenceTree reference)
+          , ("kind", displayTree kind)
+          , ("preview", summary preview)
           , ("protected", displayTree protected)
           , ("texts", treeParts "[" "]" (map displayVisibleText texts))
           ]
-      displayVisibleText visibleText =
-        displayRecord
-          0
-          "ContextVisibleText"
-          [ ("selector", displayTree (contextVisibleTextSelector visibleText))
-          , ("editable", displayTree (contextVisibleTextEditable visibleText))
-          , ("removable", displayTree (contextVisibleTextRemovable visibleText))
-          ]
+      displayVisibleText visibleText = displayRecord 0 "ContextVisibleText"
+        [ ("reference", referenceTree (contextVisibleTextReference visibleText))
+        , ("selector", displayTree (contextVisibleTextSelector visibleText))
+        , ("body", summary (contextVisibleTextText visibleText))
+        , ("editable", displayTree (contextVisibleTextEditable visibleText))
+        , ("removable", displayTree (contextVisibleTextRemovable visibleText))
+        ]
+      displayVersion version = displayRecord 0 "ContextTextVersion"
+        [ ("reference", referenceTree (contextTextVersionReference version))
+        , ("selector", displayTree (contextTextVersionSelector version))
+        , ("version", displayTree (Text.take 16 (contextTextVersionDigest version)))
+        ]
+      displayUnit version = displayRecord 0 "ContextUnitVersion"
+        [ ("reference", referenceTree (contextUnitVersionReference version))
+        , ("version", displayTree (Text.take 16 (contextUnitVersionDigest version)))
+        ]
 
 data ContextBlockKind
   = AuthoredText ContextRole
@@ -108,74 +164,193 @@ data ContextProvenance
   | NativeProvenance ContextReference
   deriving (Show, Eq)
 
-contextBlocks :: Lens' Context [ContextBlock]
-contextBlocks = lens getBlocks setBlocks
-  where
-    getBlocks (Context document) = blocks document
-    setBlocks (Context document) value = Context (document {blocks = value})
+-- | Read-only ordered blocks from the active committed projection.
+contextBlocks :: Getter Context [ContextBlock]
+contextBlocks = to (blocks . documentOf)
 
--- | Traverse authored text and full native visible fields marked editable.
--- Native previews, selectors, references, and non-editable fields are kept.
-editableTexts :: Traversal' Context Text
-editableTexts action (Context document) =
-  (\updated -> Context (document {blocks = updated})) <$> traverse edit (blocks document)
-  where
-    edit (Text reference role body sources) =
-      (\updated -> Text reference role updated sources) <$> action body
-    edit (Native reference kind preview protected texts) =
-      (\updated -> Native reference kind preview protected updated)
-        <$> traverse editVisible texts
-    editVisible visibleText
-      | contextVisibleTextEditable visibleText =
-          (\updated -> visibleText {contextVisibleTextText = updated})
-            <$> action (contextVisibleTextText visibleText)
-      | otherwise = pure visibleText
+-- | Eligible text bodies for inspection. Build edits with 'textTargets'.
+editableTexts :: Fold Context Text
+editableTexts = folding (map targetText . textTargets)
 
 -- | Visible authored text and full visible native fields in transcript order.
 visibleTexts :: Fold Context Text
 visibleTexts = folding (concatMap visible . blocks . unwrap)
   where
-    unwrap (Context document) = document
+    unwrap = documentOf
     visible (Text _ _ body _) = [body]
     visible (Native _ _ _ _ texts) = map contextVisibleTextText texts
 
--- | Issued text identities in transcript order. A newly staged text block has
--- no reference until publication; read it again after the tool result.
+-- | Issued text identities in transcript order. Appended notes receive their
+-- reference at commit; read a fresh inspection after the tool result.
 referencedTexts :: Fold Context ContextVisibleText
 referencedTexts = folding (concatMap referenced . blocks . unwrap)
   where
-    unwrap (Context document) = document
+    unwrap = documentOf
     referenced (Text (Just reference) _ body _) =
       [ContextVisibleText reference (MessageText 0) body True True]
     referenced (Text Nothing _ _ _) = []
     referenced (Native _ _ _ _ texts) = texts
 
-data ContextEditError
-  = ReferenceNotVisible
-  | ReferenceAmbiguous
-  | RemovalNotAllowed
+-- | A text and its owner-issued content version. Constructors remain hidden;
+-- these are data, and the host revalidates eligibility and current content.
+newtype ContextVersion = ContextVersion Text
   deriving (Show, Eq)
 
--- | Remove one exact issued text occurrence. Native evidence may contain
--- independently authored notes; only fields issued as removable can be omitted.
--- This edits data only. 'putContext' still validates and stages publication.
-removeText :: ContextReference -> Context -> Either ContextEditError Context
-removeText selected (Context document) = case matches of
-  [] -> Left ReferenceNotVisible
-  [False] -> Left RemovalNotAllowed
-  [True] -> Right (Context (document {blocks = concatMap remove (blocks document)}))
-  _ -> Left ReferenceAmbiguous
+data ContextTextTarget = ContextTextTarget ContextTextVersion Text
+  deriving (Show, Eq)
+
+newtype ContextUnitTarget = ContextUnitTarget ContextUnitVersion
+  deriving (Show, Eq)
+
+textTargets :: Context -> [ContextTextTarget]
+textTargets context@(Context inspection) =
+  [ ContextTextTarget version (contextVisibleTextText body)
+  | version <- contextInspectionTextVersions inspection
+  , [body] <- [filter (matches version) (referenced context)]
+  , contextVisibleTextEditable body
+  ]
   where
-    matches = concatMap matching (blocks document)
-    matching (Text (Just reference) _ _ _) | reference == selected = [True]
-    matching (Native _ _ _ _ texts) =
-      [contextVisibleTextRemovable field | field <- texts, contextVisibleTextReference field == selected]
-    matching _ = []
-    remove block@(Text (Just reference) _ _ _) | reference == selected = []
-                                             | otherwise = [block]
-    remove (Native reference kind preview protected texts) =
-      [Native reference kind preview protected (filter ((/= selected) . contextVisibleTextReference) texts)]
-    remove block = [block]
+    matches version body = contextTextVersionReference version == contextVisibleTextReference body
+      && contextTextVersionSelector version == contextVisibleTextSelector body
+
+referenced :: Context -> [ContextVisibleText]
+referenced = concatMap fields . blocks . documentOf
+  where
+    fields (Text (Just reference) _ body _) = [ContextVisibleText reference (MessageText 0) body True True]
+    fields (Native _ _ _ _ texts) = texts
+    fields _ = []
+
+unitTargets :: Context -> [ContextUnitTarget]
+unitTargets (Context inspection) = map ContextUnitTarget (contextInspectionUnitVersions inspection)
+
+targetReference :: ContextTextTarget -> ContextReference
+targetReference (ContextTextTarget version _) = contextTextVersionReference version
+
+targetSelector :: ContextTextTarget -> ContextTextSelector
+targetSelector (ContextTextTarget version _) = contextTextVersionSelector version
+
+targetText :: ContextTextTarget -> Text
+targetText (ContextTextTarget _ body) = body
+
+targetVersion :: ContextTextTarget -> ContextVersion
+targetVersion (ContextTextTarget version _) = ContextVersion (contextTextVersionDigest version)
+
+unitVersion :: ContextUnitTarget -> ContextVersion
+unitVersion (ContextUnitTarget version) = ContextVersion (contextUnitVersionDigest version)
+
+unitReference :: ContextUnitTarget -> ContextReference
+unitReference (ContextUnitTarget version) = contextUnitVersionReference version
+
+replaceText :: ContextTextTarget -> Text -> ContextChange
+replaceText (ContextTextTarget version _) = ReplaceContextText
+  (contextTextVersionReference version) (contextTextVersionSelector version) (contextTextVersionDigest version)
+
+removeUnit :: ContextUnitTarget -> ContextChange
+removeUnit (ContextUnitTarget version) = RemoveContextUnit
+  (contextUnitVersionReference version) (contextUnitVersionDigest version)
+
+-- | Append an assistant note, citing exact evidence references. It cannot
+-- synthesize a user message or choose the note's issued reference.
+appendNote :: Text -> [ContextReference] -> ContextChange
+appendNote = AppendContextNote
+
+contextPatch :: [ContextChange] -> ContextPatch
+contextPatch = ContextPatch
+
+-- | Pure projected document, changed targets, and character counts. This is a
+-- local preview, not host admission or a provider token/cache estimate.
+data ContextPreview = ContextPreview
+  { previewDocument :: ContextDocument
+  , previewChanges :: [ContextChange]
+  , previewCharactersBefore :: Int
+  , previewCharactersAfter :: Int
+  } deriving (Show, Eq)
+
+instance Display ContextPreview where
+  displayTree preview = displayRecord 0 "ContextPreview"
+    [ ("changes", treeParts "[" "]" (map displayChange (previewChanges preview)))
+    , ("charactersBefore", displayTree (previewCharactersBefore preview))
+    , ("charactersAfter", displayTree (previewCharactersAfter preview))
+    , ("document", displayTree (Context (ContextInspection (previewDocument preview) [] [])))
+    ]
+    where
+      displayChange (ReplaceContextText reference selector _ body) = displayRecord 0 "ReplaceText"
+        [("reference", displayTree (show reference)), ("selector", displayTree selector),
+         ("characters", displayTree (Text.length body)), ("preview", displayTree (Text.take 160 body))]
+      displayChange (RemoveContextUnit reference _) = displayRecord 0 "RemoveUnit"
+        [("reference", displayTree (show reference))]
+      displayChange (AppendContextNote body sources) = displayRecord 0 "AppendNote"
+        [("sources", displayTree (show sources)), ("characters", displayTree (Text.length body)),
+         ("preview", displayTree (Text.take 160 body))]
+
+-- | Validate the patch against this inspection's issued versions and fields.
+-- Only the host can decide current authority and commit the transaction.
+previewContext :: Context -> ContextPatch -> Either [ContextProblem] ContextPreview
+previewContext context@(Context inspection) (ContextPatch changes)
+  | null problems = Right (ContextPreview after changes (size before) (size after))
+  | otherwise = Left problems
+  where
+    before = documentOf context
+    after = foldl apply before changes
+    size = sum . map Text.length . concatMap bodies . blocks
+    bodies (Text _ _ body _) = [body]
+    bodies (Native _ _ _ _ fields) = map contextVisibleTextText fields
+    problem code reference detail = ContextProblem code reference detail
+    problems = concatMap validate changes ++ overlaps changes
+    validate (ReplaceContextText reference selector expected _) =
+      case [v | v <- contextInspectionTextVersions inspection,
+            contextTextVersionReference v == reference, contextTextVersionSelector v == selector] of
+        [] -> [problem ContextProblemMissing (Just reference) "No issued text version in this inspection"]
+        [version]
+          | contextTextVersionDigest version /= expected -> [problem ContextProblemStale (Just reference) "Text version differs from this inspection"]
+          | null [t | t <- textTargets context, targetReference t == reference, targetSelector t == selector] ->
+              [problem ContextProblemIneligible (Just reference) "Text is not uniquely editable in this inspection"]
+          | otherwise -> []
+        _ -> [problem ContextProblemAmbiguous (Just reference) "Text version is ambiguous"]
+    validate (RemoveContextUnit reference expected) =
+      case [v | v <- contextInspectionUnitVersions inspection, contextUnitVersionReference v == reference] of
+        [] -> [problem ContextProblemMissing (Just reference) "No removable unit version in this inspection"]
+        [version] | contextUnitVersionDigest version == expected -> []
+                  | otherwise -> [problem ContextProblemStale (Just reference) "Unit version differs from this inspection"]
+        _ -> [problem ContextProblemAmbiguous (Just reference) "Unit version is ambiguous"]
+    validate (AppendContextNote _ sources) =
+      [problem ContextProblemMissing (Just source) "Note source is outside this inspection"
+      | source <- sources, source `notElem` knownReferences]
+    knownReferences = concatMap references (blocks before)
+    references (Text reference _ _ sources) = maybe sources (: sources) reference
+    references (Native reference _ _ _ fields) = reference : map contextVisibleTextReference fields
+    overlaps [] = []
+    overlaps (change : rest) =
+      [problem ContextProblemInvalidPatch reference "Patch targets overlap" | other <- rest, conflict change other,
+        let reference = changeReference change] ++ overlaps rest
+    changeReference (ReplaceContextText reference _ _ _) = Just reference
+    changeReference (RemoveContextUnit reference _) = Just reference
+    changeReference (AppendContextNote _ _) = Nothing
+    conflict (ReplaceContextText a sa _ _) (ReplaceContextText b sb _ _) = a == b && sa == sb
+    conflict (RemoveContextUnit a _) (RemoveContextUnit b _) = overlapUnit a b || overlapUnit b a
+    conflict (RemoveContextUnit a _) other = maybe False (overlapUnit a) (changeReference other)
+    conflict other (RemoveContextUnit b _) = maybe False (overlapUnit b) (changeReference other)
+    conflict _ _ = False
+    overlapUnit unit reference = unit == reference || any (contains unit reference) (blocks before)
+    contains unit reference (Native candidate _ _ _ fields) = candidate == unit
+      && reference `elem` map contextVisibleTextReference fields
+    contains _ _ _ = False
+    apply document (AppendContextNote body sources) = document {blocks = blocks document ++ [Text Nothing Assistant body sources]}
+    apply document (RemoveContextUnit reference _) = document {blocks = concatMap (remove reference) (blocks document)}
+    apply document (ReplaceContextText reference selector _ body) = document {blocks = map (replace reference selector body) (blocks document)}
+    remove reference block@(Text candidate _ _ _) = if candidate == Just reference then [] else [block]
+    remove reference (Native candidate kind preview protected fields)
+      | candidate == reference = []
+      | otherwise = [Native candidate kind preview protected (filter ((/= reference) . contextVisibleTextReference) fields)]
+    replace reference selector body (Text candidate role original sources)
+      | candidate == Just reference && selector == MessageText 0 = Text candidate role body sources
+      | otherwise = Text candidate role original sources
+    replace reference selector body (Native candidate kind preview protected fields) =
+      Native candidate kind preview protected (map update fields)
+      where
+        update field
+          | contextVisibleTextReference field == reference && contextVisibleTextSelector field == selector = field {contextVisibleTextText = body}
+          | otherwise = field
 
 -- | Mark retained context text with a short, author-supplied explanation.
 -- The marker is ordinary text and has no runtime control meaning.
@@ -190,24 +365,18 @@ blockProvenance :: ContextBlock -> ContextProvenance
 blockProvenance (Text reference _ _ sources) = AuthoredProvenance reference sources
 blockProvenance (Native reference _ _ _ _) = NativeProvenance reference
 
--- | Replace selected, editable completed exchanges with authored notes. Each
--- note cites the exchange it preserves. Pending, opaque, and protected native
--- blocks remain unchanged.
-toNotes :: [ContextReference] -> Context -> Context
-toNotes selected (Context document) =
-  Context (document {blocks = map asNote (blocks document)})
+-- | Replace selected removable completed exchanges with assistant notes.
+-- Refuse a missing or ineligible unit rather than silently ignore it.
+toNotes :: [ContextReference] -> Context -> Either [ContextProblem] ContextPatch
+toNotes selected context = contextPatch . concat <$> traverse asNote selected
   where
-    asNote block@(Native reference CompletedExchange _ protected texts)
-      | reference `elem` selected && not protected && any contextVisibleTextEditable texts =
-          Text Nothing User (Text.intercalate "\n" retainedTexts) [reference]
-      | otherwise = block
-      where
-        retainedTexts =
-          [ contextVisibleTextText visibleText
-          | visibleText <- texts
-          , contextVisibleTextEditable visibleText
-          ]
-    asNote block = block
+    asNote reference = case
+      [(unit, fields) | unit <- unitTargets context, unitReference unit == reference,
+        Native candidate CompletedExchange _ False fields <- blocks (documentOf context), candidate == reference] of
+      [(unit, fields)] -> Right [removeUnit unit, appendNote
+        (Text.intercalate "\n" (map contextVisibleTextText (filter contextVisibleTextEditable fields))) [reference]]
+      [] -> Left [ContextProblem ContextProblemIneligible (Just reference) "Completed exchange is not uniquely removable"]
+      _ -> Left [ContextProblem ContextProblemAmbiguous (Just reference) "Completed exchange is ambiguous"]
 
 -- | Observe startup's retained result and historical publication receipt.
 -- This performs no startup effects and does not claim its text is still active.
@@ -222,28 +391,19 @@ getInitialContext = send GetInitialContextWith
 getContext :: Member ContextReadWrite effects => Eff effects Context
 getContext = Context <$> send GetContextWith
 
-putContext :: Member ContextReadWrite effects => Context -> Eff effects ()
-putContext (Context document) = send (PutContextWith document)
+-- | Stage one batch. A refusal is ordinary data; a staged handle is not a
+-- commit receipt. Inspect it in a later cell to observe final settlement.
+stageContext :: Member ContextReadWrite effects => ContextPatch -> Eff effects ContextStageResult
+stageContext = send . StageContextWith
 
-modifyContext
-  :: Member ContextReadWrite effects
-  => (Context -> Context)
-  -> Eff effects Context
-modifyContext update = do
-  current <- getContext
-  let updated = update current
-  putContext updated
-  pure updated
+inspectContextTransaction :: Member ContextReadWrite effects => ContextTransaction -> Eff effects ContextTransactionStatus
+inspectContextTransaction = send . InspectContextTransactionWith
 
-modifyContextM
-  :: Member ContextReadWrite effects
-  => (Context -> Eff effects Context)
-  -> Eff effects Context
-modifyContextM update = do
-  current <- getContext
-  updated <- update current
-  putContext updated
-  pure updated
+-- | Observe the exact retained original of an authorized referenced field,
+-- including after its removal from the active projection. References do not
+-- grant authority, and this does not enumerate the full original history.
+inspectOriginalText :: Member ContextReadWrite effects => ContextReference -> ContextTextSelector -> Eff effects OriginalTextObservation
+inspectOriginalText reference selector = send (InspectOriginalTextWith reference selector)
 
 -- | Select the actor's next provider model. The host resolves a configured
 -- alias first, then treats an unmatched name as a literal model identifier.

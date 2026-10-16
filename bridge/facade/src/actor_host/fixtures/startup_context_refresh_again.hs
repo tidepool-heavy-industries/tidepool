@@ -3,5 +3,6 @@ _ <- if currentStartupPublication == startupPublication then pure () else error 
 startupCurrent <- C.getContext
 let startupMatches = [body | C.Text (Just reference) _ body _ <- view C.contextBlocks startupCurrent, reference == startupReference]
 _ <- if startupMatches == ["startup-refreshed"] then pure () else error "refresh did not preserve the issued reference"
-C.putContext (over C.contextBlocks (map (startupReplace "startup-refreshed-again")) startupCurrent)
+C.ContextStaged _ <- C.stageContext
+  (C.contextPatch [C.replaceText (startupTarget startupCurrent) "startup-refreshed-again"])
 display True

@@ -1,4 +1,4 @@
-import Control.Lens (over, view)
+import Control.Lens (view)
 import qualified Tidepool.Agent.Context as C
 
 startupPublication <- C.getInitialContext
@@ -9,8 +9,9 @@ startupPublication <- C.getInitialContext
 startupCurrent <- C.getContext
 let startupMatches = [body | C.Text (Just reference) _ body _ <- view C.contextBlocks startupCurrent, reference == startupReference]
 _ <- if startupMatches == [startupOriginalText] then pure () else error "startup publication target differs from retained result"
-let startupReplace body block = case block of
-      C.Text (Just reference) role _ sources | reference == startupReference -> C.Text (Just reference) role body sources
-      other -> other
-C.putContext (over C.contextBlocks (map (startupReplace "startup-refreshed")) startupCurrent)
+let startupTarget context = case filter ((== startupReference) . C.targetReference) (C.textTargets context) of
+      [target] -> target
+      _ -> error "startup target is missing or ambiguous"
+C.ContextStaged startupRefreshTransaction <- C.stageContext
+  (C.contextPatch [C.replaceText (startupTarget startupCurrent) "startup-refreshed"])
 display True

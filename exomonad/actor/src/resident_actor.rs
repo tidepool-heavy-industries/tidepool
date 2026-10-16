@@ -17375,8 +17375,8 @@ mod tests {
         let execution = WorkbenchExecutionId::from_digest([11; 16]);
         let requests = [
             crate::ContextReq::GetContextWith,
-            crate::ContextReq::PutContextWith(tidepool_bridge_effects::ContextDocument {
-                blocks: Vec::new(),
+            crate::ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
+                changes: Vec::new(),
             }),
             crate::ContextReq::SetNextModelWith("next-model".into()),
             crate::ContextReq::SetNextEffortWith(crate::ForkEffort::High),

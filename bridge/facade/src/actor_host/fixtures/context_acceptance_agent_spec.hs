@@ -10,7 +10,6 @@
 {-# LANGUAGE TypeOperators #-}
 module AgentSpec (agentSpec) where
 
-import Control.Lens (over)
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -50,7 +49,11 @@ agentSpec = defaultSpec
 
 curateContext :: CurateArgs -> Eff (SyncEffects effects) Text
 curateContext _ = do
-  _ <- C.modifyContext (over C.editableTexts (T.replace "parent-original" "compiled-handler-curated"))
+  current <- C.getContext
+  C.ContextStaged _ <- C.stageContext (C.contextPatch
+    [C.replaceText target updated | target <- C.textTargets current,
+      let updated = T.replace "parent-original" "compiled-handler-curated" (C.targetText target),
+      updated /= C.targetText target])
   C.setNextModel "executor"
   C.setNextEffort C.High
   pure "compiled-handler-committed"
