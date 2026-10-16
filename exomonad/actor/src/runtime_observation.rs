@@ -1052,6 +1052,10 @@ mod source_refresh_tests {
         assert!(handle.finish_source_refresh(new.token(), Ok(sample(2))));
         drop(old);
         drop(new);
+        handle.begin_source_drift_poll(SourceDriftTargets {
+            checkout: true,
+            frozen: true,
+        });
         assert_eq!(
             handle
                 .snapshot()
