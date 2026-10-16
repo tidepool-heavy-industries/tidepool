@@ -442,7 +442,7 @@ fn committed_browser_display(
     let target = browser_target(&fixture.context);
     let expected_conversation = harness::model::ConversationIdentity::Embedded {
         run: target.run.clone(),
-        actor: target.actor,
+        actor: target.actor.clone(),
         incarnation: target.incarnation.clone(),
     };
     let store = fixture.runtime.store();
