@@ -556,7 +556,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
 #[tokio::test]
 async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work() {
     use exomonad_actor::ActorPlacement;
-    let (_storage, config) = policy_config();
+    let (_storage, mut config) = policy_config();
     let script = Arc::new(ScriptState::default());
     let transport = script.clone();
     let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
@@ -567,6 +567,10 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
         Arc::new(move || Script(transport.clone())),
     )
     .with_launch_config(&config);
+    config.workspace_inputs.as_mut().unwrap().models.insert(
+        "luna".into(),
+        "changed-after-admission".into(),
+    );
     let descriptor = ActorDescriptor::new(
         "selected-cell",
         ActorPlacement {
@@ -575,7 +579,7 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
         },
     )
-    .with_model(Some(Model::Astra));
+    .with_model(Some(Model::CustomAlias("fast".into())));
     let policy = factory.policy(&descriptor).unwrap();
     let service = Arc::new(CellModelService::<Offline, Script>::new(
         tokio::runtime::Handle::current(),
@@ -594,6 +598,7 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
         };
         for selection in [
             None,
+            Some(Model::ProviderModel("admitted-model".into())),
             Some(Model::Sol),
             Some(Model::Luna),
             Some(Model::ProviderModel("configured-sol".into())),
@@ -607,6 +612,7 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             assert_eq!(result["receipt"]["counts"]["requests"], 1);
         }
         for selection in [
+            Model::Astra,
             Model::CustomAlias("unrelated".into()),
             Model::CustomAlias("missing".into()),
             Model::ProviderModel("luna".into()),
@@ -627,7 +633,8 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             .map(|request| request.model.as_str())
             .collect::<Vec<_>>(),
         [
-            "configured-astra",
+            "admitted-model",
+            "admitted-model",
             "configured-sol",
             "configured-luna",
             "configured-sol",
@@ -647,6 +654,6 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             .iter()
             .filter(|event| event.kind == "model_invocation_receipt")
             .count(),
-        5
+        6
     );
 }
