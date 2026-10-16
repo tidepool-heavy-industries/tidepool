@@ -3907,6 +3907,67 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
 }
 
 #[test]
+fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("MatchingOfferRole", 91);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap());
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
+        .unwrap()
+        .unwrap();
+    let full = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, Some(proof)).unwrap();
+    assert!(full.is_full());
+    let partial = full
+        .within_projection(&projection, &inventory.empty_view())
+        .unwrap()
+        .unwrap();
+    assert!(!partial.is_full());
+    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
+
+    for offer in [&full, &partial, &empty] {
+        let expected = offer.snapshot_facts();
+        for _ in 0..8 {
+            let before = inventory.metrics();
+            let retained = offer
+                .within_projection(&projection, &artifacts)
+                .unwrap()
+                .unwrap();
+            let after = inventory.metrics();
+            assert_eq!(
+                after.graph_visits, before.graph_visits,
+                "an exact matching role propagates its opaque issuance without proving it again"
+            );
+            assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+            assert_eq!(retained.snapshot_facts(), expected);
+        }
+    }
+    assert!(
+        full.within_projection(&CompilerInputProjection::default(), &artifacts)
+            .unwrap()
+            .is_none(),
+        "unrelated projection still excludes the offer"
+    );
+
+    let changed = product("MatchingOfferRole", 92);
+    let changed = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
+    let competing = CompilerInputProjection::from_issued_entries(&[changed]).unwrap();
+    let error = full.within_projection(&competing, &artifacts).unwrap_err();
+    let CompileError::ExtractFailed(message) = error else {
+        panic!("the native inventory must refuse the competing role: {error:?}");
+    };
+    assert_eq!(
+        message,
+        "artifact inventory: native offer conflicts with selected compiler product or interface"
+    );
+}
+
+#[test]
 fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     use crate::artifact_inventory::{
         CompilerSourceSupport, IssuedNativeOffer, NativeOriginalRequirement,
