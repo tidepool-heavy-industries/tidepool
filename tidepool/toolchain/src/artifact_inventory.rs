@@ -12221,11 +12221,15 @@ mod tests {
             expected_descriptors,
         );
         assert_eq!(metadata.dependencies(), expected_dependencies);
-        assert!(Arc::ptr_eq(&metadata, &view.clone().metadata_snapshot()));
         let after = inventory.metrics();
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 6);
+        assert!(Arc::ptr_eq(&metadata, &view.clone().metadata_snapshot()));
+        let repeated = inventory.metrics();
+        assert_eq!(repeated.view_queries - after.view_queries, 1);
+        assert_eq!(repeated.graph_visits, after.graph_visits);
+        assert_eq!(repeated.entry_handle_copies, after.entry_handle_copies);
     }
 
     #[test]
