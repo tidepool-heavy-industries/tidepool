@@ -285,6 +285,13 @@ def cohorts() -> dict:
                 "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "notebook-a-a-b-a",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
+            "harness-performance-persona": {
+                "tests": ["actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_persona_workbench_history"], "expected_count": 1,
+                "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "persona-workbench",
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "harness-performance-concurrent-children": {
                 "tests": ["actor_host::scripted_three_actor_performance::production_harness_two_children_execute_concurrently"], "expected_count": 1,
                 "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",

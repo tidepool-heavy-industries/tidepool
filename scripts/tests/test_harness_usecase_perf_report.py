@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import datetime, timedelta, timezone
 import itertools
 import json
 from pathlib import Path
@@ -42,6 +43,74 @@ def check_shrinking_samples(samples, check):
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
+    def workbench_rows(self, scale=1):
+        phases = [
+            (0, "private_begin_started"), (1, "private_begin_completed"),
+            (1, "cell_prepare_started"), (4, "cell_prepare_completed"),
+            (4, "checked_item_admit_started"), (5, "checked_item_admitted"),
+            (5, "native_item_snapshot_started"), (7, "native_item_snapshot_completed"),
+            (8, "native_item_jit_completed"), (8, "native_item_run_started"),
+            (9, "native_item_run_completed"), (9, "private_publish_started"),
+            (11, "private_publish_completed"),
+        ]
+        origin = datetime(2026, 10, 15, tzinfo=timezone.utc)
+        return [{"timestamp": (origin + timedelta(microseconds=tick * scale)).isoformat(),
+                 "target": "exomonad_actor::workbench_phase",
+                 "fields": {"message": "workbench phase", "phase": phase},
+                 "span": {"name": "cell", "execution": "measured"}}
+                for tick, phase in phases]
+
+    def test_workbench_partition_is_additive_and_does_not_count_nested_spans_twice(self):
+        for scale in (1, 17, 1000, 1_000_000):
+            rows = self.workbench_rows(scale)
+            nested = {"timestamp": rows[3]["timestamp"],
+                      "target": "exomonad_harness::timing",
+                      "fields": {"message": "close", "time.busy": "2ms", "time.idle": "3µs"},
+                      "span": {"name": "cell_program.offer", "inclusive": True},
+                      "spans": [{"name": "cell", "execution": "measured"}]}
+            result = reporter.workbench_phase_partition([*rows, nested], "measured")
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(sum(result["totals_ns"].values()), 11 * scale * 1000)
+            self.assertEqual(result["counts"]["item_snapshot"], 1)
+            self.assertEqual(result["nested_owner_spans"][0]["busy_ns"], 2_000_000)
+            self.assertEqual(result["nested_owner_spans"][0]["idle_ns"], 3000)
+            self.assertEqual(reporter.workbench_phase_partition(rows, "other")["status"], "not_collected")
+
+    def test_workbench_partition_refuses_missing_duplicate_reversed_and_overlapping_boundaries(self):
+        rows = self.workbench_rows()
+        cases = [rows[:-1], [*rows[:1], rows[0], *rows[1:]]]
+        reversed_rows = [dict(row) for row in rows]
+        reversed_rows[3] = {**rows[3], "timestamp": rows[0]["timestamp"]}
+        cases.append(reversed_rows)
+        overlapping = [dict(row) for row in rows]
+        overlapping[4] = {**rows[4], "timestamp": rows[2]["timestamp"]}
+        cases.append(overlapping)
+        cases.append([row for row in rows if row["fields"]["phase"].startswith(
+            ("private_", "cell_prepare_"))])
+        for case in cases:
+            result = reporter.workbench_phase_partition(case, "measured")
+            self.assertEqual(result["status"], "partial_or_unknown", result)
+            self.assertTrue(result["problems"])
+
+    def test_pre_post_preparation_never_treats_missing_owner_spans_as_zero(self):
+        rows = self.workbench_rows()
+        result = reporter.workbench_phase_partition(rows, "measured")
+        for group in result["compiler_pre_post_sibling_spans"].values():
+            self.assertEqual(group["status"], "partial_or_unknown")
+            self.assertIsNone(group["wall_ns"])
+        names = ["cell_program.setup", "cell_program.bind", "cell_program.offer",
+                 "cell_program.admit", "cell_program.declaration_projections", "cell_program.seal"]
+        owners = [{"target": "exomonad_harness::timing",
+                   "fields": {"message": "close", "time.busy": "1ms", "time.idle": "0ns"},
+                   "span": {"name": name}, "spans": [{"name": "cell", "execution": "measured"}]}
+                  for name in names]
+        result = reporter.workbench_phase_partition([*rows, *owners], "measured")
+        for group in result["compiler_pre_post_sibling_spans"].values():
+            self.assertEqual(group["status"], "complete")
+            self.assertEqual(group["wall_ns"], 3_000_000)
+        result = reporter.workbench_phase_partition([*rows, *owners, owners[0]], "measured")
+        self.assertIsNone(result["compiler_pre_post_sibling_spans"]["pre_compiler"]["wall_ns"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -256,6 +325,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             activation["workspace_preparation_ns"] = 11_000
             activation["host_start_readiness_ns"] = 7_000
         measured_phase = {"harness-eight-phase": "reuse-retained", "three-actor-capture": "root-fork-capture",
+                          "persona-workbench": "warm-context-read-first",
                           "two-children-concurrent": "root-fork-capture", "notebook-a-a-b-a": "repeat-a",
                           "prepare-once-repeated-launch": "fresh-preparation"}[cohort]
         workload = [
@@ -929,6 +999,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 phase_path = self.root / "artifacts/phases.jsonl"
                 phases = reporter.read_jsonl(phase_path)
                 second_phase = {"harness-eight-phase": "first-arithmetic", "three-actor-capture": "child-alpha-reply",
+                                "persona-workbench": "warm-source-display-first",
                                 "two-children-concurrent": "children-concurrent-replies", "notebook-a-a-b-a": "changed-b",
                                 "prepare-once-repeated-launch": "launch-1"}[cohort]
                 next(phase for phase in phases if phase["phase"] == second_phase)["logical_compiler_requests"] = 1

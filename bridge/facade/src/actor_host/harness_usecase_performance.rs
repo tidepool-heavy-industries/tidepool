@@ -12,6 +12,7 @@ use std::time::Instant;
 enum NotebookHistory {
     OrderedUsecase,
     AABA,
+    Persona,
 }
 
 impl NotebookHistory {
@@ -19,6 +20,7 @@ impl NotebookHistory {
         match self {
             Self::OrderedUsecase => "harness-eight-phase",
             Self::AABA => "notebook-a-a-b-a",
+            Self::Persona => "persona-workbench",
         }
     }
 }
@@ -31,6 +33,32 @@ struct Phase {
 }
 
 fn issue(round: RequestedRound, phase: &Phase, call_id: &str) {
+    if phase.name == "persona-setup" {
+        // Real recorded assistant messages, not tool-output strings supplied
+        // with an assumed context reference. The context owner issues targets.
+        let mut items = (1..=5)
+            .map(|index| {
+                Item(json!({
+                    "type": "message", "role": "assistant", "phase": "commentary",
+                    "content": [{"type": "output_text",
+                        "text": format!("persona-original-{index}")}],
+                }))
+            })
+            .collect::<Vec<_>>();
+        items.push(Item(json!({
+            "type": "custom_tool_call", "call_id": call_id,
+            "name": "haskell_sync", "input": phase.source,
+        })));
+        round
+            .reply
+            .send(ResponsesTurn {
+                response_id: format!("response-{call_id}"),
+                items,
+                usage: Default::default(),
+            })
+            .expect("resident Engine still awaits its scripted reply");
+        return;
+    }
     round.cell_named(
         if phase.asynchronous {
             "haskell"
@@ -45,6 +73,97 @@ fn issue(round: RequestedRound, phase: &Phase, call_id: &str) {
             ToolExecution::Synchronous
         },
     );
+}
+
+#[tokio::test]
+#[ignore = "requires exclusive matched compiler daemon and retained host/daemon traces"]
+async fn production_harness_persona_workbench_history() {
+    let display = include_str!("fixtures/harness_usecase_persona_display.hs");
+    let read = include_str!("fixtures/harness_usecase_persona_read.hs");
+    notebook_phases(
+        NotebookHistory::Persona,
+        &[
+            Phase {
+                name: "persona-setup",
+                source: include_str!("fixtures/harness_usecase_persona_setup.hs"),
+                expected: "persona-ready",
+                asynchronous: false,
+            },
+            Phase {
+                name: "fresh-source-display",
+                source: display,
+                expected: "module Tidepool.Agent.Context",
+                asynchronous: false,
+            },
+            Phase {
+                name: "fresh-context-read",
+                source: read,
+                expected: "True",
+                asynchronous: false,
+            },
+            Phase {
+                name: "accumulate-one",
+                source: include_str!("fixtures/harness_usecase_persona_accumulate_one.hs"),
+                expected: "36",
+                asynchronous: false,
+            },
+            Phase {
+                name: "accumulate-two",
+                source: include_str!("fixtures/harness_usecase_persona_accumulate_two.hs"),
+                expected: "100",
+                asynchronous: false,
+            },
+            Phase {
+                name: "accumulate-three",
+                source: include_str!("fixtures/harness_usecase_persona_accumulate_three.hs"),
+                expected: "164",
+                asynchronous: false,
+            },
+            Phase {
+                name: "accumulate-four",
+                source: include_str!("fixtures/harness_usecase_persona_accumulate_four.hs"),
+                expected: "228",
+                asynchronous: false,
+            },
+            Phase {
+                name: "warm-source-display-first",
+                source: display,
+                expected: "module Tidepool.Agent.Context",
+                asynchronous: false,
+            },
+            Phase {
+                name: "warm-source-display-repeat",
+                source: display,
+                expected: "module Tidepool.Agent.Context",
+                asynchronous: false,
+            },
+            Phase {
+                name: "warm-context-read-first",
+                source: read,
+                expected: "True",
+                asynchronous: false,
+            },
+            Phase {
+                name: "warm-context-read-repeat",
+                source: read,
+                expected: "True",
+                asynchronous: false,
+            },
+            Phase {
+                name: "context-edit-five",
+                source: include_str!("fixtures/harness_usecase_persona_edit.hs"),
+                expected: "staged-five",
+                asynchronous: false,
+            },
+            Phase {
+                name: "context-edit-readback",
+                source: include_str!("fixtures/harness_usecase_persona_readback.hs"),
+                expected: "True",
+                asynchronous: false,
+            },
+        ],
+    )
+    .await;
 }
 
 fn has_output(round: &RequestedRound, call_id: &str) -> bool {

@@ -7,6 +7,8 @@ records into zero latency or a claim that no queueing/compilation occurred.
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import re
@@ -18,12 +20,20 @@ EXPECTED_PHASES = (
     "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
     "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
 )
+PERSONA_PHASES = (
+    "persona-setup", "fresh-source-display", "fresh-context-read",
+    "accumulate-one", "accumulate-two", "accumulate-three", "accumulate-four",
+    "warm-source-display-first", "warm-source-display-repeat",
+    "warm-context-read-first", "warm-context-read-repeat",
+    "context-edit-five", "context-edit-readback",
+)
 THREE_ACTOR_ROSTER_PATH = (Path(__file__).resolve().parents[1] /
                            "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json")
 if not THREE_ACTOR_ROSTER_PATH.is_file():
     THREE_ACTOR_ROSTER_PATH = Path(__file__).resolve().parent / "three-actor-workload-roster.json"
 THREE_ACTOR_PHASES = tuple(json.loads(THREE_ACTOR_ROSTER_PATH.read_text()))
 KNOWN_ROSTERS = {"harness-eight-phase": EXPECTED_PHASES,
+                 "persona-workbench": PERSONA_PHASES,
                  "three-actor-capture": THREE_ACTOR_PHASES,
                  "two-children-concurrent": ("activation", "root-setup", "root-fork-capture", "async-yield", "children-concurrent-replies", "parent-publication-read", "explicit-child-cleanup", "host-cleanup"),
                  "notebook-a-a-b-a": ("first-a", "repeat-a", "changed-b", "return-a"),
@@ -390,7 +400,7 @@ def native_call_requirement(cohort, name):
     """The named workload owns applicability; observed rows cannot remove obligations."""
     if name in ("environment", "activation"):
         return 0, "lifecycle"
-    if cohort in ("harness-eight-phase", "notebook-a-a-b-a") and name in KNOWN_ROSTERS[cohort]:
+    if cohort in ("harness-eight-phase", "notebook-a-a-b-a", "persona-workbench") and name in KNOWN_ROSTERS[cohort]:
         return 1, None
     if cohort in ("three-actor-capture", "two-children-concurrent"):
         if name == "async-yield":
@@ -404,6 +414,120 @@ def native_call_requirement(cohort, name):
     if cohort == "prepare-once-repeated-launch" and name in KNOWN_ROSTERS[cohort]:
         return 0, "workspace_preparation" if name == "fresh-preparation" else "lifecycle"
     return None, None
+
+
+def trace_timestamp_ns(value):
+    """Host UTC observations; never reinterpret them as actor monotonic time."""
+    if not isinstance(value, str):
+        raise ValueError("missing host timestamp")
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError("host timestamp lacks timezone")
+    delta = moment - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+
+
+def span_duration_ns(value):
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ns|µs|us|ms|s)", str(value))
+    if match is None:
+        return None
+    scale = {"ns": 1, "µs": 1000, "us": 1000, "ms": 1_000_000, "s": 1_000_000_000}
+    return int(Decimal(match[1]) * scale[match[2]])
+
+
+def workbench_phase_partition(host_rows, execution):
+    """Partition sequential phase boundaries; retain nested owner spans separately.
+
+    UTC timestamps support old trace replay. They can expose clock reversal or
+    overlap, but do not share the call summary's process-monotonic origin.
+    Missing/incomplete phases stay unknown instead of becoming zero work.
+    """
+    boundaries = {
+        "private_begin_started": ("private_begin_completed", "private_begin"),
+        "cell_prepare_started": ("cell_prepare_completed", "cell_prepare"),
+        "checked_item_admit_started": ("checked_item_admitted", "item_admission"),
+        "native_item_snapshot_started": ("native_item_snapshot_completed", "item_snapshot"),
+        "native_item_snapshot_completed": ("native_item_jit_completed", "item_jit"),
+        "native_item_run_started": ("native_item_run_completed", "item_run"),
+        "private_publish_started": ("private_publish_completed", "private_publish"),
+    }
+    endings = {end: (start, name) for start, (end, name) in boundaries.items()}
+    pending, intervals, owners, problems = {}, [], [], []
+    for index, row in enumerate(host_rows):
+        if attr(row, "execution") != execution:
+            continue
+        value = fields(row)
+        if (row.get("target") == "exomonad_harness::timing"
+                and value.get("message") == "close"):
+            span = row.get("span", {})
+            busy = span_duration_ns(value.get("time.busy"))
+            idle = span_duration_ns(value.get("time.idle"))
+            owners.append({"event_index": index, "name": span.get("name"),
+                           "inclusive": span.get("inclusive") is True,
+                           "busy_ns": busy, "idle_ns": idle,
+                           "wall_ns": busy + idle if busy is not None and idle is not None else None,
+                           "ancestors": [part.get("name") for part in row.get("spans", [])]})
+        if (row.get("target") != "exomonad_actor::workbench_phase"
+                or value.get("message") != "workbench phase"):
+            continue
+        phase = value.get("phase")
+        if phase not in boundaries and phase not in endings:
+            continue
+        try:
+            timestamp = trace_timestamp_ns(row.get("timestamp"))
+        except ValueError:
+            problems.append({"event_index": index, "reason": "invalid_timestamp"})
+            continue
+        if phase in endings:
+            start, name = endings[phase]
+            opened = pending.pop(start, None)
+            if opened is None or timestamp < opened[0]:
+                problems.append({"event_index": index, "phase": phase,
+                                 "reason": "missing_or_reversed_start"})
+            else:
+                intervals.append({"name": name, "start_ns": opened[0], "end_ns": timestamp,
+                                  "wall_ns": timestamp - opened[0],
+                                  "start_event_index": opened[1], "end_event_index": index})
+        if phase in boundaries:
+            if phase in pending:
+                problems.append({"event_index": index, "phase": phase, "reason": "duplicate_start"})
+            pending[phase] = timestamp, index
+    for phase in pending:
+        problems.append({"phase": phase, "reason": "missing_end"})
+    ordered = sorted(intervals, key=lambda interval: interval["start_ns"])
+    for previous, current in zip(ordered, ordered[1:]):
+        if current["start_ns"] < previous["end_ns"]:
+            problems.append({"event_index": current["start_event_index"], "reason": "overlapping_phases"})
+    counts = Counter(interval["name"] for interval in intervals)
+    for required in ("private_begin", "cell_prepare", "private_publish"):
+        if intervals and counts[required] != 1:
+            problems.append({"phase": required, "reason": "missing_or_duplicate_owner_phase"})
+    for required in ("item_admission", "item_snapshot", "item_jit", "item_run"):
+        if intervals and not counts[required]:
+            problems.append({"phase": required, "reason": "item_phase_not_observed"})
+    compiler_siblings = {}
+    for group, names in (
+        ("pre_compiler", ("cell_program.setup", "cell_program.bind", "cell_program.offer")),
+        ("post_compiler", ("cell_program.admit", "cell_program.declaration_projections", "cell_program.seal")),
+    ):
+        selected = [owner for owner in owners if owner["name"] in names]
+        counts_by_name = Counter(owner["name"] for owner in selected)
+        complete = all(counts_by_name[name] == 1 for name in names) and all(
+            owner["wall_ns"] is not None for owner in selected)
+        compiler_siblings[group] = {
+            "status": "complete" if complete else "partial_or_unknown",
+            "wall_ns": sum(owner["wall_ns"] for owner in selected) if complete else None,
+            "owners": selected,
+        }
+    return {"status": "not_collected" if not intervals and not problems else
+                      "partial_or_unknown" if problems else "complete",
+            "clock_domain": "host_trace_utc", "problems": problems,
+            "intervals": ordered,
+            "totals_ns": {name: sum(interval["wall_ns"] for interval in intervals if interval["name"] == name)
+                          for name in counts},
+            "counts": dict(counts), "nested_owner_spans": owners,
+            "compiler_pre_post_sibling_spans": compiler_siblings,
+            "interpretation": "Sequential boundary intervals only; nested spans and aggregate compile/checkout counters overlap and must not be added."}
 
 
 def execution_observations(host_rows, phases, cohort, host_process_id):
@@ -927,6 +1051,10 @@ def analyze(record_path):
             "dispatch_attribution": "exact_group" if exact_dispatch_group else "one" if len(execution_ids) == 1 else
                                     "missing" if not execution_ids else "ambiguous",
             "call_timing_records": call_timing,
+            "workbench_phase_partitions": [
+                {"execution": execution, **workbench_phase_partition(host_rows, execution)}
+                for execution in sorted(execution_ids)
+            ],
             "publication_work": publication_work_observation(call_timing),
             "harness_runtime_cost_events": phase_costs,
             "harness_runtime_cost_coverage": cost_coverage,
