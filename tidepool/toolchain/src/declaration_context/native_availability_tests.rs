@@ -515,6 +515,11 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         original: entry.descriptor.id,
         selection: ExactArtifactSelection::capture(&base),
     };
+    assert!(no_groups
+        .selection
+        .graph_selection()
+        .native_groups
+        .is_empty());
     for other in [false, true] {
         let mut offers = vec![NativeCompilerAvailability::Full(no_groups.clone())];
         if other {
@@ -529,8 +534,12 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
                 if detail == "artifact inventory: full native offer has no issued carrier"
         ));
     }
+    let no_demand = CompilerInputProjection::from_issued_entries(&[entry.clone()])
+        .unwrap()
+        .project_metadata(base.metadata_snapshot())
+        .unwrap();
     let empty = NativeCompilerTransport::issue(
-        &metadata,
+        &no_demand,
         &full,
         &[NativeCompilerAvailability::Issued {
             original: entry.descriptor.id,
@@ -1737,6 +1746,20 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let root = tempfile::tempdir().unwrap();
     let mut histories = 0;
+    let issued_import = |product: &CertifiedRecoveryProduct, ordinal| {
+        crate::certified_products::PendingImportOwner::Source {
+            owner: product.owner().clone(),
+            original_ordinal: ordinal,
+            binder: product
+                .original_native()
+                .unwrap()
+                .group(ordinal)
+                .unwrap()
+                .group()
+                .binders()[0]
+                .clone(),
+        }
+    };
     for same_root in [false, true] {
         for overlap in [false, true] {
             if same_root && !overlap {
@@ -1806,7 +1829,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                 let issue = |index: usize, marker: &str, version| {
                     let marker = product(marker, version);
                     inventory
-                        .admit_shared_with_demand(
+                        .admit_recovery_selection(
                             &base,
                             vec![
                                 entries[0].clone(),
@@ -1815,10 +1838,16 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                                     marker.module_interface().unwrap().clone(),
                                 )),
                             ],
-                            NativeArtifactDemand::CertifiedTargetImports(&[source_import(
-                                &products[index],
-                                7,
-                            )]),
+                            &BTreeSet::from([
+                                NativeGroupKey {
+                                    artifact: entries[index].descriptor.id,
+                                    original_ordinal: 7,
+                                },
+                                NativeGroupKey {
+                                    artifact: entries[0].descriptor.id,
+                                    original_ordinal: if index == 1 || overlap { 7 } else { 9001 },
+                                },
+                            ]),
                         )
                         .unwrap()
                 };
@@ -1936,7 +1965,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                         };
                         for index in 0..2 {
                             let mut fixed = bind().unwrap();
-                            let imports = [source_import(&products[index + 1], 7)];
+                            let imports = [issued_import(&products[index + 1], 7)];
                             let admitted = inventory.admit_bound_target(
                                 &mut fixed,
                                 &inputs.artifacts,
@@ -1984,7 +2013,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                             }
                         }
                         let mut fixed = bind().unwrap();
-                        let imports = [source_import(&products[0], 7)];
+                        let imports = [issued_import(&products[0], 7)];
                         let demanded = inventory.admit_bound_target(
                             &mut fixed,
                             &inputs.artifacts,
