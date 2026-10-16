@@ -1003,7 +1003,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         .inventory()
         .admit_shared(context.artifact_view(), value_interfaces)
         .unwrap();
-    let context = Arc::new(context.rebuild(|facts| {
+    let context = Arc::new(Arc::unwrap_or_clone(context).rebuild(|facts| {
         facts.inventory = view;
         facts.compiler_projection = projection;
     }));
