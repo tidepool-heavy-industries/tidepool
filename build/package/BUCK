@@ -80,7 +80,7 @@ genrule(
         "//third-party/rust:matched_harness_source_revision",
         "root//:workspace_cargo_manifest",
         "root//:workspace_cargo_lock",
-        "root//bridge/facade:facade_cargo_manifest",
+        "root//exomonad/host:host_cargo_manifest",
         "root//:workspace_flake_lock",
         "root//:workspace_flake_nix",
         "root//:embedded_web_provenance_script",
@@ -88,10 +88,10 @@ genrule(
     out = "harness-source-revision.txt",
     bash = """set -euo pipefail
 SOURCE="$TMP/provenance-source"
-mkdir -p "$SOURCE/bridge/facade" "$SOURCE/scripts"
+mkdir -p "$SOURCE/exomonad/host" "$SOURCE/scripts"
 cp "$PWD/$(location root//:workspace_cargo_manifest)" "$SOURCE/Cargo.toml"
 cp "$PWD/$(location root//:workspace_cargo_lock)" "$SOURCE/Cargo.lock"
-cp "$PWD/$(location root//bridge/facade:facade_cargo_manifest)" "$SOURCE/bridge/facade/Cargo.toml"
+cp "$PWD/$(location root//exomonad/host:host_cargo_manifest)" "$SOURCE/exomonad/host/Cargo.toml"
 cp "$PWD/$(location root//:workspace_flake_lock)" "$SOURCE/flake.lock"
 cp "$PWD/$(location root//:workspace_flake_nix)" "$SOURCE/flake.nix"
 cp "$PWD/$(location root//:embedded_web_provenance_script)" "$SOURCE/scripts/embedded_web_provenance.py"

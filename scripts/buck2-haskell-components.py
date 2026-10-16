@@ -163,7 +163,7 @@ def source(module, roots):
     if module in PROTOCOL_MODULES:
         return path, "//bridge/protocol:generated[" + normalized_path("bridge/haskell/lib/" + path) + "]"
     if module == "Project.Checks" and "generated/pinned" in roots:
-        return path, "//bridge/facade:workspace_pinned_check_source"
+        return path, "//exomonad/host:workspace_pinned_check_source"
     if is_jev_core(module) and "generated/jev/core" in roots:
         return path, "toolchains//:jev_sources[" + normalized_path("core/" + path) + "]"
     candidates = [PACKAGE / root / path for root in roots if not root.startswith("generated/")]

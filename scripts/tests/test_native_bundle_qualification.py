@@ -580,6 +580,25 @@ class NativeQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'browser driver'):
                     qualification.verify_browser_driver(driver, contract)
 
+    def test_former_facade_target_cannot_issue_a_host_bundle_artifact(self):
+        # Matching bytes from an obsolete issuing target do not establish the
+        # ownership required by a bundle built from the split host package.
+        for relative, old_target in (
+            ('bin/exomonad-unwrapped', '//bridge/facade:exomonad'),
+            ('bin/exomonad-view-helper', '//bridge/facade:exomonad-view-helper'),
+            ('bin/tidepool-tests', '//bridge/facade:tidepool_unit_tests'),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                bundle = Path(directory)
+                contract = {'artifacts': {}}
+                observed = {}
+                for path, target in qualification.ARTIFACT_TARGETS.items():
+                    contract['artifacts'][path] = {'target': target, 'sha256': 'same-bytes'}
+                    observed[path] = {'sha256': 'same-bytes'}
+                contract['artifacts'][relative]['target'] = old_target
+                with self.assertRaisesRegex(ValueError, 'mixed native build artifact: ' + relative):
+                    qualification.verify_artifact_contract(bundle, contract, observed)
+
     def test_artifact_contract_reuses_the_verified_inventory_without_rehashing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

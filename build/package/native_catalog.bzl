@@ -144,9 +144,9 @@ def native_prepared_products(**kwargs):
 
 def native_runtime_bundle(name, catalog_backed):
     bundle_sources = {
-        "host": "//bridge/facade:exomonad",
-        "view-helper": "//bridge/facade:exomonad-view-helper",
-        "libtest": "//bridge/facade:tidepool_unit_tests",
+        "host": "//exomonad/host:exomonad",
+        "view-helper": "//exomonad/host:exomonad-view-helper",
+        "libtest": "//exomonad/host:exomonad_host_unit_tests",
         "compiler-frontend": "//tidepool/extract-cmd:tidepool-extract",
         "compiler-worker": "//bridge/haskell:tidepool_extract_bin",
         "haskell-sources": "//bridge/haskell:facade_embedded_sources",
@@ -178,9 +178,9 @@ def native_runtime_bundle(name, catalog_backed):
         bash = "set -euo pipefail\n" + ('CATALOG_ARGUMENTS=(--catalog "$PWD/$(location :native_catalog)" --root-entry "$PWD/$(location :native_root_entry)" --workbench-entry "$PWD/$(location :native_workbench_entry)" --async-workbench-entry "$PWD/$(location :native_async_workbench_entry)")\n' if catalog_backed else 'CATALOG_ARGUMENTS=()\n') + """
     "$(exe toolchains//:python)" "$PWD/$(location :qualification_script)" assemble \
       --output "$PWD/$OUT" \
-      --host "$PWD/$(location //bridge/facade:exomonad)" \
-      --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
-      --libtest "$PWD/$(location //bridge/facade:tidepool_unit_tests)" \
+      --host "$PWD/$(location //exomonad/host:exomonad)" \
+      --view-helper "$PWD/$(location //exomonad/host:exomonad-view-helper)" \
+      --libtest "$PWD/$(location //exomonad/host:exomonad_host_unit_tests)" \
       --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
       --test-fixtures "$PWD/$(location //bridge/testing:haskell_test_fixtures)" \
       --fixture-manifest "$PWD/$(location //:test_fixture_manifest)" \

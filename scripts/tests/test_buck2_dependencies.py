@@ -18,7 +18,7 @@ ROOT_NAMES = (
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
     "tidepool-bridge-derive", "tidepool-runtime",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-host", "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "jev-integration",
     "tidepool-mcp", "tidepool-handlers", "tidepool", "tidepool-testing",
     "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
@@ -182,7 +182,7 @@ print(open(os.environ['FAKE_METADATA']).read())
             "exomonad-actor": [],
             "tidepool-mcp": [],
             "tidepool-handlers": [],
-            "tidepool": [
+            "exomonad-host": [
                 ("tidepool-toolchain", "build", None, True, []),
                 ("serde", None, None, True, ["derive"]),
                 ("serde", "build", None, True, ["derive"]),
@@ -296,7 +296,7 @@ print(open(os.environ['FAKE_METADATA']).read())
         for name in ("serde", "serde_json"):
             with self.subTest(missing_build_edge=name):
                 metadata, _ = self.fixture_metadata()
-                facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+                facade = next(p for p in metadata["packages"] if p["name"] == "exomonad-host")
                 node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == facade["id"])
                 node["deps"] = [
                     edge for edge in node["deps"]
@@ -311,7 +311,7 @@ print(open(os.environ['FAKE_METADATA']).read())
                              ("target", "cfg(unix)")):
             with self.subTest(unmodeled_build_declaration=field):
                 metadata, _ = self.fixture_metadata()
-                facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+                facade = next(p for p in metadata["packages"] if p["name"] == "exomonad-host")
                 dependency = next(d for d in facade["dependencies"]
                                   if d["name"] == "serde" and d["kind"] == "build")
                 dependency[field] = value
@@ -321,7 +321,7 @@ print(open(os.environ['FAKE_METADATA']).read())
                                               if not (d["name"] == "serde" and d["kind"] is None)]
                 result = self.run_generator(metadata)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Model build dependency for tidepool", result.stderr)
+                self.assertIn("Model build dependency for exomonad-host", result.stderr)
                 self.assertEqual(manifest_path.read_bytes(), previous)
 
     def test_unmodeled_codegen_build_dependency_is_rejected(self):
@@ -385,7 +385,7 @@ print(open(os.environ['FAKE_METADATA']).read())
 
     def test_plain_shared_profile_rejects_transitive_codex_closure_without_publishing(self):
         metadata, _ = self.fixture_metadata()
-        tidepool = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+        tidepool = next(p for p in metadata["packages"] if p["name"] == "exomonad-host")
         codex_id = "registry+fixture#codex-shoal-protocol@1.0.0"
         metadata["packages"].append({
             "id": codex_id, "name": "codex-shoal-protocol", "version": "1.0.0",
@@ -439,7 +439,7 @@ print(open(os.environ['FAKE_METADATA']).read())
 
     def test_unlocked_git_sources_fail_closed(self):
         metadata, _ = self.fixture_metadata()
-        package = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+        package = next(p for p in metadata["packages"] if p["name"] == "exomonad-host")
         dependency = next(d for d in package["dependencies"] if d["rename"] == "harness_git")
         dependency["source"] = "git+ssh://github.com/tidepool-heavy-industries/exomonad-harness.git#deadbeef"
         harness = next(p for p in metadata["packages"] if p["name"] == "harness" and p["source"].startswith("git+"))

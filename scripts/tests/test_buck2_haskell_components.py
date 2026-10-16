@@ -273,7 +273,7 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertEqual(G.source("Tidepool.Internal.ModelControl", ["generated/protocol"])[1],
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")
         self.assertEqual(G.source("Project.Checks", ["generated/pinned"])[1],
-                         "//bridge/facade:workspace_pinned_check_source")
+                         "//exomonad/host:workspace_pinned_check_source")
         self.assertEqual(G.source("Jev.Core.Schema", ["generated/jev/core"])[1],
                          "toolchains//:jev_sources[core_Jev_Core_Schema_hs]")
         with tempfile.TemporaryDirectory() as directory:

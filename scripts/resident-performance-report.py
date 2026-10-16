@@ -2,7 +2,7 @@
 """Report retained production resident samples against actual daemon evidence.
 
 Run after the owning production runner has exited; this tool starts no services
-and changes no caches. See bridge/facade/tests/embedded-gates.md for the owning
+and changes no caches. See exomonad/host/tests/embedded-gates.md for the owning
 production fixtures and retained-evidence reporting procedure.
 """
 

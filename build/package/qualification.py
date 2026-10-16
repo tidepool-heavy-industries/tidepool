@@ -160,11 +160,11 @@ UNSET_ENVIRONMENT = (
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
-    "bin/exomonad-unwrapped": "//bridge/facade:exomonad",
-    "bin/exomonad-view-helper": "//bridge/facade:exomonad-view-helper",
+    "bin/exomonad-unwrapped": "//exomonad/host:exomonad",
+    "bin/exomonad-view-helper": "//exomonad/host:exomonad-view-helper",
     "bin/tidepool-extract": "//tidepool/extract-cmd:tidepool-extract",
     "bin/tidepool-extract-bin": "//bridge/haskell:tidepool_extract_bin",
-    "bin/tidepool-tests": "//bridge/facade:tidepool_unit_tests",
+    "bin/tidepool-tests": "//exomonad/host:exomonad_host_unit_tests",
 }
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
 BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver", "recipe_workspace")
@@ -1263,7 +1263,7 @@ def verify_artifact_contract(bundle: Path, contract: dict, observed_inventory: d
     verify_recipe_workspace(bundle, contract, observed_inventory)
 
 
-HARNESS_PERFORMANCE_ROSTER_SOURCE = "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
+HARNESS_PERFORMANCE_ROSTER_SOURCE = "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json"
 HARNESS_PERFORMANCE_ROSTER_RESOURCE = "share/exomonad/three-actor-workload-roster.json"
 
 

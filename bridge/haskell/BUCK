@@ -160,6 +160,16 @@ export_file(
     visibility = ["PUBLIC"],
 )
 
+# The generic facade embeds only the standard library. Actor sources are host inputs.
+filegroup(
+    name = "stdlib_embedded_sources",
+    srcs = dict([(source, source) for source in glob(
+        ["lib/**/*.hs"],
+        exclude = ["lib/**/Prelude_cbor/**"] + _PROTOCOL_LIBRARY_SOURCES.keys(),
+    )] + _PROTOCOL_LIBRARY_SOURCES.items()),
+    visibility = ["PUBLIC"],
+)
+
 filegroup(
     name = "facade_embedded_sources",
     srcs = dict([(source, source) for source in glob(

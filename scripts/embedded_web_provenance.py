@@ -79,7 +79,7 @@ def validate_generated_source(cargo_lock: dict, flake_lock: dict, revision: str,
 def validate(
     cargo_manifest: dict,
     cargo_lock: dict,
-    facade_manifest: dict,
+    host_manifest: dict,
     flake_lock: dict,
     flake_source: str,
 ) -> str:
@@ -97,16 +97,16 @@ def validate(
         "workspace harness dependency selects a different package",
     )
 
-    facade_package = facade_manifest.get("package", {})
-    _require(facade_package.get("name") == "tidepool", "facade manifest is not the tidepool package")
-    facade_version = facade_package.get("version")
-    if isinstance(facade_version, dict) and facade_version.get("workspace") is True:
-        facade_version = cargo_manifest.get("workspace", {}).get("package", {}).get("version")
-    _require(isinstance(facade_version, str), "facade package version is not declared")
-    facade_harness = facade_manifest.get("dependencies", {}).get("harness")
+    host_package = host_manifest.get("package", {})
+    _require(host_package.get("name") == "exomonad-host", "host manifest is not the exomonad-host package")
+    host_version = host_package.get("version")
+    if isinstance(host_version, dict) and host_version.get("workspace") is True:
+        host_version = cargo_manifest.get("workspace", {}).get("package", {}).get("version")
+    _require(isinstance(host_version, str), "host package version is not declared")
+    host_harness = host_manifest.get("dependencies", {}).get("harness")
     _require(
-        isinstance(facade_harness, dict) and facade_harness.get("workspace") is True,
-        "production facade does not consume the workspace harness dependency",
+        isinstance(host_harness, dict) and host_harness.get("workspace") is True,
+        "production host does not consume the workspace harness dependency",
     )
 
     harness_lock_records = [
@@ -121,21 +121,21 @@ def validate(
     _require(lock_requested == requested, "Cargo.lock harness rev differs from Cargo.toml")
     _require(lock_resolved == requested, "Cargo.lock did not resolve the exact requested harness commit")
 
-    facade_records = [
+    host_records = [
         package
         for package in cargo_lock.get("package", [])
-        if package.get("name") == "tidepool"
-        and package.get("version") == facade_version
+        if package.get("name") == "exomonad-host"
+        and package.get("version") == host_version
     ]
-    _require(len(facade_records) == 1, "Cargo.lock must contain exactly one production tidepool package")
+    _require(len(host_records) == 1, "Cargo.lock must contain exactly one production exomonad-host package")
     selected_harness_dependencies = [
         dependency
-        for dependency in facade_records[0].get("dependencies", [])
+        for dependency in host_records[0].get("dependencies", [])
         if dependency.split(" ", 1)[0] == "harness"
     ]
     _require(
         len(selected_harness_dependencies) == 1,
-        "Cargo.lock production tidepool package must depend on the selected harness package",
+        "Cargo.lock production exomonad-host package must depend on the selected harness package",
     )
 
     nodes = flake_lock.get("nodes", {})
@@ -173,7 +173,7 @@ def load_and_validate(root: Path) -> str:
     return validate(
         tomllib.loads((root / "Cargo.toml").read_text()),
         tomllib.loads((root / "Cargo.lock").read_text()),
-        tomllib.loads((root / "bridge/facade/Cargo.toml").read_text()),
+        tomllib.loads((root / "exomonad/host/Cargo.toml").read_text()),
         json.loads((root / "flake.lock").read_text()),
         (root / "flake.nix").read_text(),
     )
@@ -185,9 +185,9 @@ def fixture(revision: str = "a" * 40) -> tuple[dict, dict, dict, dict, str]:
         {"workspace": {"dependencies": {"harness": {"git": HARNESS_REPOSITORY, "rev": revision, "package": "harness"}}}},
         {"package": [
             {"name": "harness", "version": "0.1.0", "source": source, "dependencies": []},
-            {"name": "tidepool", "version": "0.1.0", "dependencies": ["harness"]},
+            {"name": "exomonad-host", "version": "0.1.0", "dependencies": ["harness"]},
         ]},
-        {"package": {"name": "tidepool", "version": "0.1.0"}, "dependencies": {"harness": {"workspace": True}}},
+        {"package": {"name": "exomonad-host", "version": "0.1.0"}, "dependencies": {"harness": {"workspace": True}}},
         {"nodes": {
             "root": {"inputs": {"harnessWeb": "harnessWeb"}},
             "harnessWeb": {"original": {"rev": revision}, "locked": {"rev": revision}},
@@ -202,6 +202,19 @@ def fixture(revision: str = "a" * 40) -> tuple[dict, dict, dict, dict, str]:
 class ProvenanceTests(unittest.TestCase):
     def test_connected_revision_passes(self) -> None:
         self.assertEqual(validate(*fixture()), "a" * 40)
+
+    def test_generic_facade_cannot_issue_host_web_provenance(self) -> None:
+        args = list(fixture())
+        args[2]["package"]["name"] = "tidepool"
+        with self.assertRaisesRegex(ProvenanceError, "not the exomonad-host package"):
+            validate(*args)
+
+    def test_host_lock_edge_is_required_even_when_generic_facade_consumes_harness(self) -> None:
+        args = list(fixture())
+        args[1]["package"].append({"name": "tidepool", "version": "0.1.0", "dependencies": ["harness"]})
+        args[1]["package"][1]["dependencies"] = []
+        with self.assertRaisesRegex(ProvenanceError, "exomonad-host package must depend"):
+            validate(*args)
 
     def test_unrelated_matching_revision_cannot_hide_cargo_lock_drift(self) -> None:
         args = list(fixture())
@@ -279,10 +292,10 @@ class BuckSourceProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="buck-package-source-test-") as temporary:
             root = Path(temporary)
             revision = "a" * 40
-            (root / "bridge/facade").mkdir(parents=True)
+            (root / "exomonad/host").mkdir(parents=True)
             (root / "Cargo.toml").write_text(f'[workspace.dependencies.harness]\ngit = "{HARNESS_REPOSITORY}"\nrev = "{revision}"\n')
-            (root / "Cargo.lock").write_text(f'[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "git+{HARNESS_REPOSITORY}?rev={revision}#{revision}"\n[[package]]\nname = "tidepool"\nversion = "0.1.0"\ndependencies = ["harness"]\n')
-            (root / "bridge/facade/Cargo.toml").write_text('[package]\nname = "tidepool"\nversion = "0.1.0"\n[dependencies.harness]\nworkspace = true\n')
+            (root / "Cargo.lock").write_text(f'[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "git+{HARNESS_REPOSITORY}?rev={revision}#{revision}"\n[[package]]\nname = "exomonad-host"\nversion = "0.1.0"\ndependencies = ["harness"]\n')
+            (root / "exomonad/host/Cargo.toml").write_text('[package]\nname = "exomonad-host"\nversion = "0.1.0"\n[dependencies.harness]\nworkspace = true\n')
             (root / "flake.lock").write_text(json.dumps(fixture(revision)[3]))
             (root / "flake.nix").write_text(fixture(revision)[4])
             actual = root / "actual-revision.txt"

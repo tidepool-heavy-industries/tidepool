@@ -28,7 +28,7 @@ PERSONA_PHASES = (
     "context-edit-five", "context-edit-readback",
 )
 THREE_ACTOR_ROSTER_PATH = (Path(__file__).resolve().parents[1] /
-                           "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json")
+                           "exomonad/host/src/actor_host/fixtures/three_actor_workload_roster.json")
 if not THREE_ACTOR_ROSTER_PATH.is_file():
     THREE_ACTOR_ROSTER_PATH = Path(__file__).resolve().parent / "three-actor-workload-roster.json"
 THREE_ACTOR_PHASES = tuple(json.loads(THREE_ACTOR_ROSTER_PATH.read_text()))

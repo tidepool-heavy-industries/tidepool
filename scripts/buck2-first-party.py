@@ -46,7 +46,7 @@ arguments.add_argument(
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
-if selected & {"tidepool", "tidepool-runtime", "exomonad-actor"}:
+if selected & {"exomonad-host", "tidepool-runtime", "exomonad-actor"}:
     selected.add("tidepool-testing")
 SUPPORTED_PACKAGES = NATIVE_PACKAGES
 # Every executable suite uses the existing counted, process-isolated runner.
@@ -56,6 +56,9 @@ GENERATED_BIN_NAMES = {
     "tidepool-effects-gen": "tidepool_effects_gen",
 }
 TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "source_bundle::tests::materialization_repairs_a_stale_or_partial_completion_marker",
+    "source_bundle::tests::completion_marker_does_not_hide_changed_or_missing_library_sources",
+    "source_bundle::tests::selected_source_verification_rejects_changed_missing_and_extra_modules",
     "certified_products::tests::original_native_index_preserves_sparse_order_and_selected_identity",
     "certified_products::tests::original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners",
     "certified_products::tests::original_native_index_matches_linear_scan_for_generated_sparse_groups",
@@ -529,8 +532,8 @@ def source_inputs(package, target, features=(), test_target=False):
         sources.update((directory / "src").rglob("*.rs"))
         sources = {source for source in sources
                    if source.relative_to(ROOT).as_posix() not in test_only}
-        facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
-        if package["name"] == "tidepool" and not facade_unit_test:
+        facade_unit_test = package["name"] == "exomonad-host" and target["name"].endswith("_unit_tests")
+        if package["name"] == "exomonad-host" and not facade_unit_test:
             sources = {
                 source for source in sources
                 if source.name != "tests.rs"
@@ -587,13 +590,13 @@ def source_inputs(package, target, features=(), test_target=False):
             included = pathlib.Path(os.path.abspath(source.parent / relative))
             if not included.resolve().is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
-            if test_target and package["name"] in {"tidepool", "exomonad-actor"} and included.suffix == ".hs":
+            if test_target and package["name"] in {"exomonad-host", "exomonad-actor"} and included.suffix == ".hs":
                 # Compile-time includes and runtime reads share one fixture roster.
                 register_test_fixture(included, external_labels)
             if included.is_relative_to(ROOT) and included.relative_to(ROOT).as_posix() in test_only:
                 continue
             if (
-                package["name"] == "tidepool"
+                package["name"] == "exomonad-host"
                 and not target["name"].endswith("_unit_tests")
                 and included.is_relative_to(ROOT)
                 and included.relative_to(ROOT).as_posix().startswith((
@@ -675,7 +678,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
         env["TIDEPOOL_DOUBLE_ORACLE_SOURCE"] = "$(location :show_double_oracle_source)"
         resources.extend(["toolchains//:ghc", ":show_double_oracle_source"])
-    if package_name in {"tidepool", "exomonad-actor"}:
+    if package_name in {"exomonad-host", "exomonad-actor"}:
         env["TIDEPOOL_TEST_FIXTURE_ROOT"] = "$(location //bridge/testing:haskell_test_fixtures)"
         resources.append("//bridge/testing:haskell_test_fixtures")
     if package_name == "tidepool-codegen" and unit:
@@ -695,7 +698,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}
         or (package_name == "tidepool-extract-cmd" and not unit
             and target_name in {"daemon_integration", "transaction_integration", "build_products_ownership", "retained_fingerprint"})
-        or (package_name == "tidepool" and target_name in {
+        or (package_name == "exomonad-host" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
             "exomonad_action_surface", "exomonad_workspace_check",
         })
@@ -722,7 +725,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
         env["TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR"] = "$(location //bridge/haskell:retained_import_test_sources)"
         resources.append("//bridge/haskell:retained_import_test_sources")
-    if package_name == "tidepool" and target_name in {
+    if package_name == "exomonad-host" and target_name in {
         "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
     }:
         env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
@@ -742,7 +745,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         env["TIDEPOOL_CATALOG_TEST_PYTHON"] = "$(exe toolchains//:python)"
         env["TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"] = "$(location //build/package:qualification_script)"
         resources.extend(["toolchains//:python", "//build/package:qualification_script"])
-    if package_name == "tidepool" and target_name == "exomonad_action_surface":
+    if package_name == "exomonad-host" and target_name == "exomonad_action_surface":
         env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "tidepool-mcp" and not unit and target_name == "mcp":
         worker = True
@@ -779,7 +782,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-protocol":
         env["RUSTFMT"] = "$(exe toolchains//:rustfmt)"
         resources.append("toolchains//:rustfmt")
-    if package_name == "tidepool":
+    if package_name == "exomonad-host":
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
         env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
         env["PATH"] = "$(location toolchains//:exomonad_runtime_tools)/bin"
@@ -1278,8 +1281,8 @@ def facade_test_cases(binary):
         "toolchains//:browser_test_closure",
         "toolchains//:playwright_browsers",
     ]
-    prepared_recipe_env, prepared_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_prepared_recipe_contract_test")
-    capture_recipe_env, capture_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_recipe_source_capture_test")
+    prepared_recipe_env, prepared_recipe_resources, _ = test_runtime_inputs("exomonad-host", "facade_prepared_recipe_contract_test")
+    capture_recipe_env, capture_recipe_resources, _ = test_runtime_inputs("exomonad-host", "facade_recipe_source_capture_test")
     all_env = {**host_env, **prepared_recipe_env, **capture_recipe_env}
     all_paths = {**browser_paths,
                  "TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"}
@@ -1412,7 +1415,7 @@ def facade_test_cases(binary):
         ("facade_outer_restart_positive_test", [
             "exomonad::production_restart_acceptance_tests::outer_host_stop_and_crash_restore_accepted_source_and_selected_account_without_replay",
         ], all_env, all_paths, all_resources, True, True, 1200),
-        ("tidepool_unit_tests_all", [], all_env, all_paths, all_resources, True, False, 600),
+        ("exomonad_host_unit_tests_all", [], all_env, all_paths, all_resources, True, False, 600),
     ]
     rules = []
     for name, tests, env, resource_env, resources, worker, ignored, timeout in groups:
@@ -1448,7 +1451,7 @@ for package_name, package in local.items():
     CURRENT_QUALIFICATION_SOURCES = {"Cargo.toml", "BUCK"}
     package_features, enabled_dependencies, forwarded_features = feature_plan(package)
     has_custom_build = any("custom-build" in target["kind"] for target in package["targets"])
-    if has_custom_build and package_name not in {"tidepool-codegen", "tidepool"}:
+    if has_custom_build and package_name not in {"tidepool-codegen", "tidepool", "exomonad-host"}:
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
     if package_name in {"tidepool-protocol", "tidepool-mcp"}:
@@ -1459,12 +1462,12 @@ for package_name, package in local.items():
     if package_name == "exomonad-node":
         rules.append("""tidepool_rust_binary(
     name = "view_helper_fixture",
-    package_name = "tidepool",
-    package_dir = "bridge/facade",
+    package_name = "exomonad-host",
+    package_dir = "exomonad/host",
     version = """ + json.dumps(package["version"]) + """,
-    crate_root = "bridge/facade/src/bin/exomonad-view-helper.rs",
+    crate_root = "exomonad/host/src/bin/exomonad-view-helper.rs",
     edition = "2021",
-    srcs_filegroup = "//bridge/facade:exomonad-view-helper_sources",
+    srcs_filegroup = "//exomonad/host:exomonad-view-helper_sources",
     deps = [":exomonad_node"],
     visibility = ["PUBLIC"],
 )
@@ -1480,15 +1483,15 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
     if package_name == "tidepool-testing":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
-    if package_name == "tidepool":
+    if package_name in {"tidepool", "exomonad-host"}:
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
-load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
+load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs", "exomonad_host_build_inputs")
 load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 ''')
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
     dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True)
     unit_deps, unit_named = dev_deps, dev_named
-    if package_name == "tidepool":
+    if package_name == "exomonad-host":
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
         )
@@ -1510,13 +1513,13 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
         for named_dependencies in (normal_named, dev_named, unit_named):
             named_dependencies["prepared_md5_native"] = ":prepared_md5_native"
     targets = package["targets"]
-    if package_name == "tidepool":
+    if package_name in {"tidepool", "exomonad-host"}:
         rules.append("""export_file(
-    name = "facade_cargo_manifest",
+    name = "{manifest_name}",
     src = "Cargo.toml",
     visibility = ["PUBLIC"],
 )
-""")
+""".replace("{manifest_name}", "host_cargo_manifest" if package_name == "exomonad-host" else "facade_cargo_manifest"))
         build_targets = [target for target in targets if "custom-build" in target["kind"]]
         if len(build_targets) != 1:
             raise SystemExit("facade requires exactly one Cargo build.rs target")
@@ -1531,18 +1534,21 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
             "tidepool_rust_binary", "tidepool_build_script", build_targets[0],
             package, build_deps, build_named,
         ))
-        rules.append('''tidepool_facade_build_inputs(
+        source_rule = "exomonad_host_build_inputs" if package_name == "exomonad-host" else "tidepool_facade_build_inputs"
+        source_args = ('    workspace_gitlink = "//build/rust:workspace_gitlink",\n'
+                       '    workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources",\n'
+                       if package_name == "exomonad-host" else "")
+        haskell_sources = "facade_embedded_sources" if package_name == "exomonad-host" else "stdlib_embedded_sources"
+        rules.append(source_rule + '''(
     name = "tidepool_build_source_tree",
     cargo_manifest = "Cargo.toml",
-    workspace_gitlink = "//build/rust:workspace_gitlink",
-    haskell_sources = "//bridge/haskell:facade_embedded_sources",
-    workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources",
-)
+    haskell_sources = "//bridge/haskell:''' + haskell_sources + '''",
+''' + source_args + ''')
 
 tidepool_buildscript_run(
     name = "tidepool_build_script_run",
     first_party = True,
-    package_name = "tidepool",
+    package_name = "''' + package_name + '''",
     version = "''' + package["version"] + '''",
     buildscript_rule = ":tidepool_build_script",
     manifest_dir = ":tidepool_build_source_tree",
@@ -1558,7 +1564,7 @@ tidepool_buildscript_run(
     tests = [target for target in targets if "test" in target["kind"]]
     for target in libraries:
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
-        if package_name == "tidepool":
+        if package_name in {"tidepool", "exomonad-host"}:
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rule = render_rule("tidepool_rust_library", target["name"], target, package, normal_deps, normal_named, extra, features=package_features)
         rules.append(rule)
@@ -1569,7 +1575,7 @@ tidepool_buildscript_run(
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
         binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else GENERATED_BIN_NAMES.get(target["name"], target["name"])
         extra = ""
-        if package_name == "tidepool":
+        if package_name in {"tidepool", "exomonad-host"}:
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, extra, features=package_features))
         NATIVE_TARGETS[package_name]["binaries"][target["name"]] = {"build": "//" + CURRENT_DIR + ":" + binary_name}
@@ -1580,7 +1586,7 @@ tidepool_buildscript_run(
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         extra = runtime_arguments(env, resources, worker)
-        if package_name == "tidepool":
+        if package_name in {"tidepool", "exomonad-host"}:
             extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_isolated_test", binary_name + "_unit_tests", target, package, deps, dev_named, extra, features=package_features, test_target=True))
         NATIVE_TARGETS[package_name]["binaries"][target["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + binary_name + "_unit_tests_binary", "test": "//" + CURRENT_DIR + ":" + binary_name + "_unit_tests"})
@@ -1596,6 +1602,8 @@ tidepool_buildscript_run(
         if package_name == "tidepool-toolchain":
             unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},'
         if package_name == "tidepool":
+            unit_extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
+        if package_name == "exomonad-host":
             unit_rule = "tidepool_rust_binary"
             unit_extra = '''    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],'''
@@ -1605,7 +1613,7 @@ tidepool_buildscript_run(
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features, test_target=True))
         if package_name == "tidepool-testing":
             rules.append(testing_fixture_test_cases(unit_target["name"]))
-        shared = package_name in {"tidepool", "tidepool-runtime", "exomonad-actor"}
+        shared = package_name in {"exomonad-host", "tidepool-runtime", "exomonad-actor"}
         if package_name in {"tidepool-runtime", "exomonad-actor"}:
             env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
             if package_name == "tidepool-runtime":
@@ -1665,7 +1673,7 @@ tidepool_buildscript_run(
     visibility = ["PUBLIC"],
 )
 ''')
-        if package_name == "tidepool":
+        if package_name == "exomonad-host":
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
@@ -1739,7 +1747,7 @@ tidepool_buildscript_run(
     visibility = ["PUBLIC"],
 )
 ''')
-    if package_name == "tidepool":
+    if package_name == "exomonad-host":
         rules.append('''export_file(
     name = "workspace_pinned_check_source",
     src = "src/exomonad/workspace_pinned_check.hs",
@@ -1861,7 +1869,7 @@ else:
         register_test_fixture(ROOT / relative, EXTERNAL_SOURCE_LABELS)
     fixture_resource_outputs(complete=False)
 
-if "tidepool" in selected:
+if "exomonad-host" in selected:
     gitlink_rows = subprocess.check_output(["git", "ls-files", "--stage", "--", ".exomonad/workspace"], cwd=ROOT, text=True).splitlines()
     if len(gitlink_rows) != 1:
         raise SystemExit("native facade needs one recorded .exomonad/workspace gitlink")

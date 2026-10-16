@@ -16,7 +16,7 @@ def supports_native_facade_build_dependency(package_name, dependency):
     source identity by each graph projection.
     """
     return (
-        package_name == "tidepool"
+        package_name in {"tidepool", "exomonad-host"}
         and dependency["kind"] == "build"
         and dependency["name"] in {"tidepool-toolchain", "serde", "serde_json"}
         and dependency["rename"] is None
@@ -87,7 +87,7 @@ NATIVE_PACKAGES = frozenset({
     "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
     "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
     "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-host", "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "jev-integration",
     "tidepool-testing", "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
 })
