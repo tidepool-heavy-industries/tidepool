@@ -159,7 +159,7 @@ enum ProxySelection {
     Ready {
         service: ServiceIdentity,
         session: String,
-        operation: Option<uuid::Uuid>,
+        operation: uuid::Uuid,
     },
 }
 
@@ -170,19 +170,6 @@ impl ProxyRecord {
             selection,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyProxyRecord {
-    session: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum StoredProxyRecord {
-    Current(ProxyRecord),
-    Legacy(LegacyProxyRecord),
 }
 
 /// What to do with a stored proxy session, given whether the caller asked for
@@ -214,22 +201,20 @@ pub fn decide(stored: StoredSession, fresh: bool) -> Decision {
     }
 }
 
-fn read_proxy_record(path: &Path) -> Result<Option<StoredProxyRecord>, ProxyError> {
+fn read_proxy_record(path: &Path) -> Result<Option<ProxyRecord>, ProxyError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("cannot read {}: {error}", path.display()).into()),
     };
-    let record = serde_json::from_slice(&bytes).map_err(|error| {
+    let record: ProxyRecord = serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "cannot decode {}: {error}; inspect the saved selection before provisioning",
             path.display()
         )
     })?;
-    if let StoredProxyRecord::Current(ProxyRecord { version, .. }) = &record {
-        if *version != 1 {
-            return Err(format!("unsupported proxy record version {version}").into());
-        }
+    if record.version != 1 {
+        return Err(format!("unsupported proxy record version {}", record.version).into());
     }
     Ok(Some(record))
 }
@@ -337,7 +322,7 @@ async fn provision(
         proxy_json,
         &ProxyRecord::new(ProxySelection::Ready {
             service: request.service,
-            operation: Some(request.operation),
+            operation: request.operation,
             session: attachment.session.clone(),
         }),
     )?;
@@ -434,23 +419,7 @@ async fn resolve_proxy_selection(
     let stored = read_proxy_record(&proxy_json)?;
     let service = super::service_identity(client).await?;
     let session = match stored {
-        Some(StoredProxyRecord::Legacy(legacy)) => {
-            if !session_alive(client, &legacy.session).await? {
-                return Err("legacy proxy selection is not live; list current operators and explicitly reconcile the saved session before provisioning".into());
-            }
-            // This binds an observed live session to the current owner; it
-            // does not claim proof of the legacy record's historical owner.
-            write(
-                &proxy_json,
-                &ProxyRecord::new(ProxySelection::Ready {
-                    service,
-                    session: legacy.session.clone(),
-                    operation: None,
-                }),
-            )?;
-            Some(legacy.session)
-        }
-        Some(StoredProxyRecord::Current(record)) => match record.selection {
+        Some(record) => match record.selection {
             ProxySelection::Pending { request } => {
                 if request.service != service {
                     return Err(service_changed());
@@ -682,11 +651,9 @@ mod tests {
         );
         let error = run_root_for_session(runs.path(), "missing").unwrap_err();
         assert!(error.to_string().contains("missing"));
-        assert!(
-            error
-                .to_string()
-                .contains(&runs.path().display().to_string())
-        );
+        assert!(error
+            .to_string()
+            .contains(&runs.path().display().to_string()));
     }
 
     #[test]
@@ -754,10 +721,10 @@ mod tests {
                 incarnation: uuid::Uuid::new_v4(),
             },
             session: "operator-1-1".into(),
-            operation: None,
+            operation: uuid::Uuid::new_v4(),
         });
         write_proxy_record(&path, &record).unwrap();
-        let Some(StoredProxyRecord::Current(read)) = read_proxy_record(&path).unwrap() else {
+        let Some(read) = read_proxy_record(&path).unwrap() else {
             panic!("current record");
         };
         assert_eq!(read, record);

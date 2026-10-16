@@ -277,10 +277,10 @@ async fn pending_publication_failure_never_submits_and_retry_keeps_visible_ident
         );
         assert_eq!(host.count(), 0);
         let request = if published {
-            let Some(StoredProxyRecord::Current(ProxyRecord {
+            let Some(ProxyRecord {
                 selection: ProxySelection::Pending { request },
                 ..
-            })) = read_proxy_record(&host.record_path()).unwrap()
+            }) = read_proxy_record(&host.record_path()).unwrap()
             else {
                 panic!("pending retained");
             };
@@ -319,7 +319,7 @@ async fn service_change_refuses_pending_and_ready_even_when_fresh() {
         ProxySelection::Ready {
             service: foreign,
             session: "old".into(),
-            operation: None,
+            operation: uuid::Uuid::new_v4(),
         },
     ] {
         let record = ProxyRecord::new(selection);
@@ -348,43 +348,50 @@ async fn service_change_refuses_pending_and_ready_even_when_fresh() {
 }
 
 #[tokio::test]
-async fn legacy_live_selection_migrates_but_dead_legacy_refuses() {
+async fn legacy_or_unattributed_selection_refuses_before_network_even_when_fresh() {
     let host = Host::new(false).await;
     let session = resident_operator_session(host.directory.path(), &host.client, false)
         .await
         .unwrap();
-    std::fs::write(
-        host.record_path(),
-        serde_json::to_vec(&serde_json::json!({"session":session})).unwrap(),
-    )
-    .unwrap();
+    let current = std::fs::read(host.record_path()).unwrap();
+    let mut unattributed: serde_json::Value = serde_json::from_slice(&current).unwrap();
+    unattributed["selection"]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
+    let missing_operation = serde_json::to_vec(&unattributed).unwrap();
+    unattributed["selection"]["operation"] = serde_json::Value::Null;
+    let null_operation = serde_json::to_vec(&unattributed).unwrap();
+    let live_legacy = serde_json::to_vec(&serde_json::json!({"session":session})).unwrap();
+    // An unreachable client establishes that rejection precedes service observation.
+    let offline = reqwest::Client::builder()
+        .unix_socket(host.directory.path().join("absent.sock"))
+        .retry(reqwest::retry::never())
+        .build()
+        .unwrap();
+    for bytes in [
+        live_legacy.as_slice(),
+        b"{\"session\":\"missing\"}",
+        &missing_operation,
+        &null_operation,
+    ] {
+        std::fs::write(host.record_path(), bytes).unwrap();
+        for fresh in [false, true] {
+            let error = resident_operator_session(host.directory.path(), &offline, fresh)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("cannot decode"), "{error}");
+            assert_eq!(std::fs::read(host.record_path()).unwrap(), bytes);
+            assert_eq!(host.count(), 1);
+        }
+    }
+    std::fs::write(host.record_path(), current).unwrap();
     assert_eq!(
         resident_operator_session(host.directory.path(), &host.client, false)
             .await
             .unwrap(),
         session
     );
-    let Some(StoredProxyRecord::Current(ProxyRecord {
-        selection: ProxySelection::Ready {
-            service, operation, ..
-        },
-        ..
-    })) = read_proxy_record(&host.record_path()).unwrap()
-    else {
-        panic!("migrated Ready");
-    };
-    assert_eq!(service, host.identity());
-    assert!(operation.is_none());
-    assert_eq!(host.count(), 1);
-    std::fs::write(host.record_path(), b"{\"session\":\"missing\"}").unwrap();
-    for fresh in [false, true] {
-        assert!(
-            resident_operator_session(host.directory.path(), &host.client, fresh)
-                .await
-                .is_err()
-        );
-        assert_eq!(host.count(), 1);
-    }
     host.finish().await;
 }
 
@@ -543,14 +550,14 @@ async fn fresh_refuses_unconfirmed_stop_without_admitting_next_operation() {
                 .is_err()
         );
         assert_eq!(host.count(), 1);
-        let Some(StoredProxyRecord::Current(ProxyRecord {
+        let Some(ProxyRecord {
             selection: ProxySelection::Ready { operation, .. },
             ..
-        })) = read_proxy_record(&host.record_path()).unwrap()
+        }) = read_proxy_record(&host.record_path()).unwrap()
         else {
             panic!("original result retained");
         };
-        assert_eq!(operation, Some(request.operation));
+        assert_eq!(operation, request.operation);
         assert_eq!(host.service.state.provisions.lock().await.len(), 1);
     }
     host.finish().await;
@@ -684,10 +691,10 @@ async fn lost_or_malformed_provision_reply_retains_pending_for_reconciliation() 
                 .await
                 .is_err()
         );
-        let Some(StoredProxyRecord::Current(ProxyRecord {
+        let Some(ProxyRecord {
             selection: ProxySelection::Pending { request: saved },
             ..
-        })) = read_proxy_record(&host.record_path()).unwrap()
+        }) = read_proxy_record(&host.record_path()).unwrap()
         else {
             panic!("pending retained");
         };

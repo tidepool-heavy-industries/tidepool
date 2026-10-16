@@ -21,7 +21,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 pub(crate) const STATUS_VERSION: u32 = 5;
-const PREVIOUS_STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 mod launch_preflight;
@@ -2386,23 +2385,14 @@ async fn wait_until_interactive_generation(
 }
 
 pub(crate) fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Error>> {
-    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or_else(|| runtime_error("Exomonad run status has no valid version"))?;
-    if version == PREVIOUS_STATUS_VERSION {
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| runtime_error("Exomonad run status is not an object"))?;
-        object.insert("version".into(), STATUS_VERSION.into());
-    } else if version != STATUS_VERSION {
+    let status: RunStatus = serde_json::from_slice(bytes)?;
+    if status.version != STATUS_VERSION {
         return Err(runtime_error(format!(
-            "unsupported Exomonad run status version {version} (expected {STATUS_VERSION})"
+            "unsupported Exomonad run status version {} (expected {STATUS_VERSION})",
+            status.version
         )));
     }
-    Ok(serde_json::from_value(value)?)
+    Ok(status)
 }
 
 impl RunStatus {
@@ -4057,29 +4047,24 @@ mod tests {
             test_agent_defaults(),
             RunPhase::AwaitingBinding { root_actor },
         );
-        let mut legacy = serde_json::to_value(current).unwrap();
-        let object = legacy.as_object_mut().unwrap();
-        object.insert("version".into(), PREVIOUS_STATUS_VERSION.into());
+        let mut value = serde_json::to_value(&current).unwrap();
+        let object = value.as_object_mut().unwrap();
         object.remove("recovered_actors");
         object.remove("lost_state");
         object.remove("resource_service");
-        let migrated = decode_run_status(&serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(migrated.version, STATUS_VERSION);
-        assert!(migrated.recovered_actors.is_empty());
-        assert!(migrated.lost_state.is_empty());
-        assert_eq!(migrated.resource_service.healthy, None);
-
-        let old = serde_json::json!({
-            "version": 3,
-            "run_id": "run-1",
-            "workspace": "/tmp/work",
-            "session": "exomonad-work",
-            "phase": {"state": "awaiting_input", "root_actor": root_actor},
-        });
-        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported Exomonad run status version 3"));
+        let decoded = decode_run_status(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(decoded, current);
+        assert_eq!(decoded.resource_service.healthy, None);
+        for version in [0, 3, 4, 6] {
+            value["version"] = version.into();
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(decode_run_status(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!(
+                    "unsupported Exomonad run status version {version}"
+                )));
+        }
     }
 
     #[test]
