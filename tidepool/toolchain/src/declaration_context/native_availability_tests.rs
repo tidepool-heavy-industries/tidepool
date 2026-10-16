@@ -300,6 +300,27 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .retain_original_custody(&right)
         .unwrap();
     let baseline = CompilerInputProjection::from_issued_entries(&[native_entry.clone()]).unwrap();
+    assert!(left_proof.qualify_availability(&view).unwrap().is_some());
+    let selected_proof =
+        NativeOriginalRequirement::from_selected_view(native_entry.descriptor.id, &left)
+            .unwrap()
+            .unwrap();
+    assert!(selected_proof
+        .qualify_availability(&view)
+        .unwrap()
+        .is_none());
+    for (supplied, full) in [(&left_proof, true), (&selected_proof, false)] {
+        let offers = capture_native_availability(&baseline, &view, std::slice::from_ref(supplied))
+            .expect("a supplied exact proof must not be recaptured from broader custody");
+        let [offer] = offers.as_slice() else {
+            panic!("one native role must retain one availability offer");
+        };
+        assert_eq!(offer.original(), native_entry.descriptor.id);
+        assert_eq!(matches!(offer, NativeCompilerAvailability::Full(_)), full);
+        let retained = offer.proof().unwrap();
+        assert_eq!(retained, supplied);
+        assert_eq!(dependency(retained, &view), left_group);
+    }
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),
