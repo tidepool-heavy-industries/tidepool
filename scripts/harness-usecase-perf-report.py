@@ -453,6 +453,11 @@ def workbench_phase_partition(host_rows, execution):
     }
     endings = {end: (start, name) for start, (end, name) in boundaries.items()}
     pending, intervals, owners, problems = {}, [], [], []
+    previous_timestamp = None
+    native_attempts = {}
+    native_sequence = ("native_item_snapshot_started", "native_item_snapshot_completed",
+                       "native_item_jit_completed", "native_item_run_started",
+                       "native_item_run_completed")
     for index, row in enumerate(host_rows):
         if attr(row, "execution") != execution:
             continue
@@ -478,22 +483,45 @@ def workbench_phase_partition(host_rows, execution):
         except ValueError:
             problems.append({"event_index": index, "reason": "invalid_timestamp"})
             continue
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            problems.append({"event_index": index, "phase": phase,
+                             "reason": "clock_reversed_in_event_order"})
+        previous_timestamp = timestamp
+        item, attempt = attr(row, "item"), attr(row, "install_attempt")
+        if phase in native_sequence:
+            if type(item) is not int or type(attempt) is not int or attempt < 1:
+                problems.append({"event_index": index, "phase": phase,
+                                 "reason": "missing_native_item_attempt_identity"})
+                item, attempt = None, None
+            native_attempts.setdefault((item, attempt), []).append(phase)
+        identity = (item, attempt) if phase.startswith("native_item_") else (None, None)
         if phase in endings:
             start, name = endings[phase]
-            opened = pending.pop(start, None)
+            opened = pending.pop((start, *identity), None)
             if opened is None or timestamp < opened[0]:
                 problems.append({"event_index": index, "phase": phase,
                                  "reason": "missing_or_reversed_start"})
             else:
                 intervals.append({"name": name, "start_ns": opened[0], "end_ns": timestamp,
                                   "wall_ns": timestamp - opened[0],
+                                  **({"item": item, "install_attempt": attempt}
+                                     if phase.startswith("native_item_") else {}),
                                   "start_event_index": opened[1], "end_event_index": index})
         if phase in boundaries:
-            if phase in pending:
+            key = (phase, *identity)
+            if key in pending:
                 problems.append({"event_index": index, "phase": phase, "reason": "duplicate_start"})
-            pending[phase] = timestamp, index
-    for phase in pending:
-        problems.append({"phase": phase, "reason": "missing_end"})
+            pending[key] = timestamp, index
+    for phase, item, attempt in pending:
+        problems.append({"phase": phase, "item": item, "install_attempt": attempt,
+                         "reason": "missing_end"})
+    # Declaration admissions need no native execution. Every observed native
+    # attempt, including a stale-import retry, owns this exact sequence.
+    for (item, attempt), observed in native_attempts.items():
+        if tuple(observed) != native_sequence:
+            problems.append({"item": item, "install_attempt": attempt,
+                             "reason": "incomplete_or_reordered_native_attempt",
+                             "observed_phases": observed})
     ordered = sorted(intervals, key=lambda interval: interval["start_ns"])
     for previous, current in zip(ordered, ordered[1:]):
         if current["start_ns"] < previous["end_ns"]:
@@ -527,7 +555,7 @@ def workbench_phase_partition(host_rows, execution):
                           for name in counts},
             "counts": dict(counts), "nested_owner_spans": owners,
             "compiler_pre_post_sibling_spans": compiler_siblings,
-            "interpretation": "Sequential boundary intervals only; nested spans and aggregate compile/checkout counters overlap and must not be added."}
+            "interpretation": "Sequential boundary intervals only; nested spans and aggregate compile/checkout counters overlap and must not be added. Pre/post compiler groups identify sibling preparation owners; declaration_projections can issue further physical compiler work."}
 
 
 def execution_observations(host_rows, phases, cohort, host_process_id):

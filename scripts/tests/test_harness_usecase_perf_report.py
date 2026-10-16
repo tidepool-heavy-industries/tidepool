@@ -56,8 +56,9 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         origin = datetime(2026, 10, 15, tzinfo=timezone.utc)
         return [{"timestamp": (origin + timedelta(microseconds=tick * scale)).isoformat(),
                  "target": "exomonad_actor::workbench_phase",
-                 "fields": {"message": "workbench phase", "phase": phase},
-                 "span": {"name": "cell", "execution": "measured"}}
+                 "fields": {"message": "workbench phase", "phase": phase,
+                            **({"install_attempt": 1} if phase.startswith("native_item_") else {})},
+                 "span": {"name": "cell", "execution": "measured", "item": 0}}
                 for tick, phase in phases]
 
     def test_workbench_partition_is_additive_and_does_not_count_nested_spans_twice(self):
@@ -110,6 +111,46 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             self.assertEqual(group["wall_ns"], 3_000_000)
         result = reporter.workbench_phase_partition([*rows, *owners, owners[0]], "measured")
         self.assertIsNone(result["compiler_pre_post_sibling_spans"]["pre_compiler"]["wall_ns"])
+
+    def test_workbench_partition_requires_each_native_item_attempt(self):
+        rows = self.workbench_rows()
+        second = json.loads(json.dumps(rows[4:11]))
+        for row in second:
+            row["timestamp"] = (datetime.fromisoformat(row["timestamp"]) + timedelta(microseconds=5)).isoformat()
+            row["span"]["item"] = 1
+        publication = json.loads(json.dumps(rows[11:]))
+        for row in publication:
+            row["timestamp"] = (datetime.fromisoformat(row["timestamp"]) + timedelta(microseconds=5)).isoformat()
+        complete = [*rows[:11], *second, *publication]
+        self.assertEqual(reporter.workbench_phase_partition(complete, "measured")["status"], "complete")
+        # Global phase presence and even equal totals cannot stand in for each
+        # item's sequence: retain a missing run and a misattributed run control.
+        missing_run = [*rows[:11], *second[:-2], *publication]
+        wrong_item = json.loads(json.dumps(complete))
+        wrong_item[16]["span"]["item"] = 0
+        wrong_item[17]["span"]["item"] = 0
+        for case in (missing_run, wrong_item):
+            result = reporter.workbench_phase_partition(case, "measured")
+            self.assertEqual(result["status"], "partial_or_unknown")
+            self.assertIn("incomplete_or_reordered_native_attempt", [p["reason"] for p in result["problems"]])
+        declaration = json.loads(json.dumps(second[:2]))
+        self.assertEqual(reporter.workbench_phase_partition(
+            [*rows[:11], *declaration, *publication], "measured")["status"], "complete")
+
+    def test_workbench_partition_checks_event_clock_order_and_native_identity(self):
+        rows = self.workbench_rows()
+        backwards = json.loads(json.dumps(rows))
+        for row in backwards[:2]:
+            row["timestamp"] = (datetime.fromisoformat(row["timestamp"]) + timedelta(microseconds=20)).isoformat()
+        result = reporter.workbench_phase_partition(backwards, "measured")
+        self.assertEqual(result["status"], "partial_or_unknown")
+        self.assertIn("clock_reversed_in_event_order", [p["reason"] for p in result["problems"]])
+        for key, location in (("item", "span"), ("install_attempt", "fields")):
+            missing = json.loads(json.dumps(rows))
+            del missing[6][location][key]
+            result = reporter.workbench_phase_partition(missing, "measured")
+            self.assertEqual(result["status"], "partial_or_unknown")
+            self.assertIn("missing_native_item_attempt_identity", [p["reason"] for p in result["problems"]])
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
