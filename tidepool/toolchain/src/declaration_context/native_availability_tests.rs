@@ -2272,7 +2272,17 @@ fn replay_native_transport_history(
                 let before =
                     capture_native_availability(&capture_projection, &sources[index], &supplied)
                         .unwrap();
-                let receiving = expanded.retain_original_custody(&sources[index]).unwrap();
+                // Restore this source's complete selected namespace, including
+                // its marker payload, before comparing custody-only additions.
+                let receiving = expanded
+                    .merge(&sources[index])
+                    .unwrap()
+                    .retain_original_custody(&sources[index])
+                    .unwrap();
+                assert_eq!(
+                    receiving.capture_graph_selection().namespace,
+                    sources[index].capture_graph_selection().namespace
+                );
                 let after = capture_native_availability(&capture_projection, &receiving, &supplied)
                     .unwrap();
                 assert_eq!(after, before, "custody expansion cannot change supplied evidence with fixed canonical bindings");
