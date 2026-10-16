@@ -227,7 +227,7 @@ impl IssuedNativeOffer {
         source: &ArtifactView,
     ) -> Result<Self, CompileError> {
         use crate::exact_context::NativeOfferSnapshotBody;
-        let exact_empty;
+        let exact_source;
         let source = if let NativeOfferSnapshotBody::Empty(custody) = &facts.body {
             let graph = custody.graph_selection();
             if !graph.roots.is_empty()
@@ -238,10 +238,16 @@ impl IssuedNativeOffer {
                     "recovered empty offer lacks exact original custody",
                 ));
             }
-            exact_empty = source.select_issued(Vec::new(), custody)?;
-            &exact_empty
+            exact_source = source.select_issued(Vec::new(), custody)?;
+            &exact_source
         } else {
-            source
+            let selection = match &facts.body {
+                NativeOfferSnapshotBody::Partial(selection)
+                | NativeOfferSnapshotBody::Full(selection) => selection,
+                NativeOfferSnapshotBody::Empty(_) => unreachable!(),
+            };
+            exact_source = source.select_issued(Vec::new(), selection)?;
+            &exact_source
         };
         let selection = match &facts.body {
             NativeOfferSnapshotBody::Empty(_) => None,
@@ -262,8 +268,21 @@ impl IssuedNativeOffer {
             ));
         }
         match &facts.body {
-            NativeOfferSnapshotBody::Full(_) if !offer.is_full() => {
-                return Err(failure("recovered full native offer no longer qualifies"));
+            NativeOfferSnapshotBody::Full(_) => {
+                let proof = offer.proof().expect("full snapshot retains proof").clone();
+                let qualification = proof
+                    .qualify_issued_availability(source)?
+                    .ok_or_else(|| failure("recovered full native offer no longer qualifies"))?;
+                offer = Self(Arc::new(NativeOfferFacts {
+                    original: offer.0.original,
+                    interface: offer.0.interface,
+                    owner: offer.0.owner.clone(),
+                    body: NativeOfferBody::Full {
+                        proof,
+                        qualification,
+                    },
+                    custody: offer.0.custody.clone(),
+                }));
             }
             NativeOfferSnapshotBody::Partial(_) => {
                 let proof = offer

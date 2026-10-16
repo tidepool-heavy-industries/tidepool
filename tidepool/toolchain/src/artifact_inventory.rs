@@ -485,6 +485,12 @@ impl QualifiedNativeAvailability {
     }
 }
 
+#[derive(Clone, Copy)]
+enum NativeAvailabilityQualificationScope {
+    CurrentNamespace,
+    IssuedClosure,
+}
+
 impl NativeOriginalRequirement {
     /// Observe only this issuer's authenticated group closure. A receiving
     /// inventory cannot supply missing choices from its other retained views.
@@ -536,6 +542,23 @@ impl NativeOriginalRequirement {
         &self,
         view: &ArtifactView,
     ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
+        self.qualify_availability_in(view, NativeAvailabilityQualificationScope::CurrentNamespace)
+    }
+
+    /// Authenticate a recorded Full receipt against its own exact graph. This
+    /// establishes historical issuance, not compatibility with current roles.
+    pub(crate) fn qualify_issued_availability(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
+        self.qualify_availability_in(view, NativeAvailabilityQualificationScope::IssuedClosure)
+    }
+
+    fn qualify_availability_in(
+        &self,
+        view: &ArtifactView,
+        scope: NativeAvailabilityQualificationScope,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let graph = self.selection.graph_selection();
         validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
@@ -574,7 +597,10 @@ impl NativeOriginalRequirement {
             }
             *carriers.first().expect("one issued native carrier")
         };
-        if view
+        if matches!(
+            scope,
+            NativeAvailabilityQualificationScope::CurrentNamespace
+        ) && view
             .lease
             .selection
             .namespace
@@ -599,9 +625,32 @@ impl NativeOriginalRequirement {
         )
         .descriptor
         .id;
-        let Some(canonical_binding) = view.lease.selection.namespace.get(&canonical).copied()
-        else {
-            return Ok(None);
+        let canonical_binding = match scope {
+            NativeAvailabilityQualificationScope::CurrentNamespace => {
+                let Some(binding) = view.lease.selection.namespace.get(&canonical).copied() else {
+                    return Ok(None);
+                };
+                binding
+            }
+            NativeAvailabilityQualificationScope::IssuedClosure => {
+                let bindings = state
+                    .outgoing(InventoryNodeKey::Artifact(carrier))
+                    .filter_map(|(target, dependency)| match target {
+                        InventoryNodeKey::Artifact(binding)
+                            if binding.artifact == canonical
+                                && *dependency == ArtifactDependency::Interface
+                                && graph.bindings.contains(&binding) =>
+                        {
+                            Some(binding)
+                        }
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                if bindings.len() != 1 {
+                    return Ok(None);
+                }
+                *bindings.first().expect("one issued canonical carrier")
+            }
         };
         if !graph.bindings.contains(&canonical_binding)
             || graph
@@ -6323,7 +6372,8 @@ impl ArtifactView {
                 }
             }
         }
-        let joined = self.merge(other)?;
+        self.validate_issued_merge(other)?;
+        let joined = self.merge_validated_namespace(other, namespace.clone())?;
         let roots = namespace
             .values()
             .copied()
@@ -6391,6 +6441,19 @@ impl ArtifactView {
                 namespace.insert(id, binding);
             }
         }
+        drop(state);
+        self.merge_validated_namespace(other, namespace)
+    }
+
+    /// Both views and the exact namespace have already crossed their issuing
+    /// owner. Historical edges remain in their immutable scopes, independently
+    /// of the compiler namespace selected for this receiving view.
+    fn merge_validated_namespace(
+        &self,
+        other: &Self,
+        namespace: BTreeMap<ArtifactId, ArtifactBinding>,
+    ) -> Result<Self, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let mut issuing_payloads = BTreeMap::new();
         for (id, incoming) in &other.lease.payloads {
             if let Some(previous) = self.lease.payloads.get(id) {
@@ -6435,7 +6498,7 @@ impl ArtifactView {
     /// Retain issued private offers in order. A validated prefix can defer a
     /// custody-only addition which changes no owned node or payload authority;
     /// its exact seeds and ordered materialization parent still enter the result.
-    /// Every changing prefix uses ordinary merge and its refusal boundary.
+    /// Every prefix preserves the receiving compiler namespace exactly.
     #[tracing::instrument(
         target = "exomonad_harness::timing",
         name = "products.native_offer_custody",
@@ -6470,7 +6533,8 @@ impl ArtifactView {
                 continue;
             }
             current = current.finish_deferred_custody(std::mem::take(&mut deferred))?;
-            current = current.merge(incoming)?;
+            current.validate_issued_merge(incoming)?;
+            current = current.merge_validated_namespace(incoming, current.namespace())?;
             validated = true;
             ordinary_merges += 1;
         }
@@ -6513,21 +6577,12 @@ impl ArtifactView {
         }
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let projection = self.read_projection(&state);
-        let ids = artifact_ids(&projection.nodes);
-        let entries = projection
-            .entries
-            .iter()
-            .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
-            .collect::<BTreeMap<_, _>>();
-        state
-            .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        SelectedOwners::new(&state, &entries, &ids)?.planned_edges(
-            &state,
-            &entries,
-            &native_groups(&projection.nodes),
-            NativeClosureStage::AcceptedMerge,
-        )?;
+        let namespace = self.namespace();
+        let entries = namespace
+            .keys()
+            .map(|id| (*id, Arc::clone(&self.lease.payloads[id])))
+            .collect();
+        SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
         let reads = ViewReadProjection {
             nodes: projection.nodes.clone(),
             entries: projection.entries.clone(),

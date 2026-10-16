@@ -892,9 +892,11 @@ impl OriginalCompilerInputs {
     }
 
     fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        let projection = self.projection.merge(&other.projection)?;
-        let artifacts = self.artifacts.merge(&other.artifacts)?;
-        projection.validate(&artifacts)?;
+        let (artifacts, projection) = self.artifacts.merge_compiler_inputs(
+            &self.projection,
+            &other.artifacts,
+            &other.projection,
+        )?;
         // This joins alternatives, rather than selecting a caller namespace.
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
@@ -1219,7 +1221,14 @@ impl ProtectedScaffoldRequirements {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
                 native_offers.extend(private.native_offers.iter().cloned());
-                context.artifact_view().merge(&private.artifacts)?
+                context
+                    .artifact_view()
+                    .merge_compiler_inputs(
+                        &context.facts.compiler_support.projection,
+                        &private.artifacts,
+                        &private.projection,
+                    )?
+                    .0
             }
             None => context.artifact_view().clone(),
         };
