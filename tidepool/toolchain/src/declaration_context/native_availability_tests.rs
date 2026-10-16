@@ -309,18 +309,19 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .qualify_availability(&view)
         .unwrap()
         .is_none());
-    for (supplied, full) in [(&left_proof, true), (&selected_proof, false)] {
-        let offers = capture_native_availability(&baseline, &view, std::slice::from_ref(supplied))
-            .expect("a supplied exact proof must not be recaptured from broader custody");
-        let [offer] = offers.as_slice() else {
-            panic!("one native role must retain one availability offer");
-        };
-        assert_eq!(offer.original(), native_entry.descriptor.id);
-        assert_eq!(matches!(offer, NativeCompilerAvailability::Full(_)), full);
-        let retained = offer.proof().unwrap();
-        assert_eq!(retained, supplied);
-        assert_eq!(dependency(retained, &view), left_group);
-    }
+    let unambiguous = capture_native_availability(&baseline, &left, &[selected_proof]).unwrap();
+    let [NativeCompilerAvailability::Full(qualified)] = unambiguous.as_slice() else {
+        panic!("matching selected roots may use an independently qualified complete proof");
+    };
+    assert_eq!(qualified, &left_proof);
+    let offers = capture_native_availability(&baseline, &view, std::slice::from_ref(&left_proof))
+        .expect("a supplied qualified proof must not be recaptured from broader custody");
+    let [NativeCompilerAvailability::Full(retained)] = offers.as_slice() else {
+        panic!("one qualified native role must retain its full availability offer");
+    };
+    assert_eq!(retained.original, native_entry.descriptor.id);
+    assert_eq!(retained, &left_proof);
+    assert_eq!(dependency(retained, &view), left_group);
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),
