@@ -310,21 +310,30 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .qualify_availability(&view)
         .unwrap()
         .is_some());
-    let unambiguous =
-        capture_native_availability(&baseline, &left, std::slice::from_ref(&selected_proof))
-            .unwrap();
-    let [NativeCompilerAvailability::Full(qualified)] = unambiguous.as_slice() else {
-        panic!("a complete selected-root proof qualifies through its own carrier edges");
-    };
-    assert_eq!(qualified, &selected_proof);
-    let offers = capture_native_availability(&baseline, &view, std::slice::from_ref(&left_proof))
-        .expect("a supplied qualified proof must not be recaptured from broader custody");
-    let [NativeCompilerAvailability::Full(retained)] = offers.as_slice() else {
-        panic!("one qualified native role must retain its full availability offer");
-    };
-    assert_eq!(retained.original, native_entry.descriptor.id);
-    assert_eq!(retained, &left_proof);
-    assert_eq!(dependency(retained, &view), left_group);
+    let unambiguous = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+        &baseline,
+        &left,
+        std::slice::from_ref(&selected_proof),
+    )
+    .unwrap();
+    assert_eq!(unambiguous.len(), 1);
+    assert!(
+        unambiguous[0].is_full(),
+        "a complete selected-root proof qualifies through its own carrier edges"
+    );
+    assert_eq!(unambiguous[0].proof(), Some(&selected_proof));
+    let offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+        &baseline,
+        &view,
+        std::slice::from_ref(&left_proof),
+    )
+    .expect("a supplied qualified proof must not be recaptured from broader custody");
+    assert_eq!(offers.len(), 1);
+    let retained = &offers[0];
+    assert!(retained.is_full());
+    assert_eq!(retained.original(), native_entry.descriptor.id);
+    assert_eq!(retained.proof(), Some(&left_proof));
+    assert_eq!(dependency(retained.proof().unwrap(), &view), left_group);
     let partial_views = [7, 9001].map(|ordinal| {
         make(
             &format!("PartialIssuance{ordinal}"),
@@ -366,13 +375,16 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         partial_proofs.to_vec(),
         vec![partial_proofs[1].clone(), partial_proofs[0].clone()],
     ] {
-        let offers = capture_native_availability(&baseline, &broad, &supplied).unwrap();
+        let offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+            &baseline, &broad, &supplied,
+        )
+        .unwrap();
         assert_eq!(offers.len(), supplied.len());
         for (offer, proof) in offers.iter().zip(&supplied) {
             assert_eq!(offer.original(), native_entry.descriptor.id);
             assert_eq!(offer.proof(), Some(proof));
             assert_eq!(
-                matches!(offer, NativeCompilerAvailability::Full(_)),
+                offer.is_full(),
                 proof == &left_proof || proof == &right_proof
             );
         }
@@ -385,9 +397,9 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert_eq!(competing.issued_groups(&broad).unwrap().len(), 4);
     assert!(competing.qualify_availability(&broad).unwrap().is_none());
     assert!(matches!(
-        capture_native_availability(&baseline, &broad, std::slice::from_ref(&competing))
+        crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(&baseline, &broad, std::slice::from_ref(&competing))
             .unwrap().as_slice(),
-        [NativeCompilerAvailability::Issued { proof: Some(proof), .. }] if proof == &competing
+        [offer] if !offer.is_full() && offer.proof() == Some(&competing)
     ));
     let marker = product("DifferentCarrier", 80);
     let other = inventory
@@ -428,13 +440,36 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .qualify_availability(&mismatch)
             .unwrap()
             .is_none());
-        let offers =
-            capture_native_availability(&baseline, &mismatch, std::slice::from_ref(&left_proof))
-                .unwrap();
+        let offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+            &baseline,
+            &mismatch,
+            std::slice::from_ref(&left_proof),
+        )
+        .unwrap();
         assert!(matches!(
             offers.as_slice(),
-            [NativeCompilerAvailability::Issued { proof: Some(proof), .. }] if proof == &left_proof
+            [offer] if !offer.is_full() && offer.proof() == Some(&left_proof)
         ));
+        let full = crate::artifact_inventory::IssuedNativeOffer::issue(
+            native_entry.descriptor.id,
+            &left,
+            Some(left_proof.clone()),
+        )
+        .unwrap();
+        let narrowed = full
+            .within_projection(&baseline, &mismatch)
+            .unwrap()
+            .unwrap();
+        assert!(!narrowed.is_full());
+        assert_eq!(narrowed.proof(), Some(&left_proof));
+        assert!(
+            !narrowed
+                .within_projection(&baseline, &left)
+                .unwrap()
+                .unwrap()
+                .is_full(),
+            "propagation cannot promote a narrowed offer by rediscovery"
+        );
     }
     let mut malformed = left_proof.clone();
     let mut graph = malformed.selection.graph_selection().clone();
@@ -446,7 +481,9 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         vec![malformed, left_proof.clone()],
     ] {
         assert!(matches!(
-            capture_native_availability(&baseline, &broad, &supplied),
+            crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+                &baseline, &broad, &supplied
+            ),
             Err(CompileError::ExtractFailed(_))
         ));
     }
@@ -475,7 +512,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         )
         .unwrap();
         let issued = input
-            .native_original_requirements
+            .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .unwrap();
@@ -499,7 +536,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .unwrap();
         let retained = request
             .compiler_inputs()
-            .native_original_requirements
+            .native_original_requirements()
             .iter()
             .find(|proof| proof.original == consumer_entry.descriptor.id)
             .unwrap();
@@ -638,6 +675,163 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
 }
 
 #[test]
+fn original_receipt_retains_transitive_support_without_unrelated_offer() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement, NativeRequirementRoot,
+    };
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let dependency = product("ReceiptDependency", 91);
+    let ancestor = dependent_product(
+        "ReceiptAncestor",
+        92,
+        vec![(7, vec![source_import(&dependency, 7)])],
+    );
+    let unrelated = product("ReceiptUnrelated", 93);
+    let recovered = recovered_witness_fixtures(&[ancestor, dependency, unrelated]);
+    let entries = recovered
+        .iter()
+        .map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let full = inventory.admit_shared(&base, entries.clone()).unwrap();
+    let complete = |index: usize| {
+        let canonical =
+            ArtifactEntry::canonical(recovered[index].product.module_interface().unwrap().clone())
+                .descriptor
+                .id;
+        let proof = NativeOriginalRequirement::from_issued_group_custody(
+            entries[index].descriptor.id,
+            canonical,
+            &full,
+        )
+        .unwrap()
+        .unwrap();
+        IssuedNativeOffer::issue(entries[index].descriptor.id, &full, Some(proof)).unwrap()
+    };
+    let ancestor_offer = complete(0);
+    let unrelated_offer = complete(2);
+    let dependency_offer = IssuedNativeOffer::issue(entries[1].descriptor.id, &base, None).unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+    let metadata = projection
+        .project_metadata(base.metadata_snapshot())
+        .unwrap();
+    let transport = NativeCompilerTransport::issue(
+        &metadata,
+        &full,
+        &[
+            ancestor_offer.clone(),
+            dependency_offer,
+            unrelated_offer.clone(),
+        ],
+    )
+    .unwrap();
+    let receipt = transport.availability[&entries[1].descriptor.id].clone();
+    assert_eq!(
+        receipt.offers().len(),
+        2,
+        "B retains its empty offer and the actual A proof contributing B's group"
+    );
+    assert!(receipt
+        .offers()
+        .iter()
+        .any(|offer| offer.original() == entries[0].descriptor.id));
+    assert!(receipt
+        .offers()
+        .iter()
+        .all(|offer| offer.original() != entries[2].descriptor.id));
+    assert!(receipt.permits(7));
+    assert!(!receipt.permits(9001));
+    assert!(matches!(receipt.mode, NativeTransportMode::IssuedGroups(_)));
+    let unrelated_payload =
+        Arc::downgrade(&full.metadata_snapshot().artifacts[&entries[2].descriptor.id]);
+    let b_id = entries[1].descriptor.id;
+    let a_id = entries[0].descriptor.id;
+    let demand = source_import(&recovered[1].product, 7);
+    let b = base.select_roots(vec![b_id]).unwrap();
+    let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
+    let b_metadata = b_projection
+        .project_metadata(b.metadata_snapshot())
+        .unwrap();
+    let b_transport = NativeCompilerTransport {
+        metadata: b_projection
+            .project_metadata(b.metadata_snapshot())
+            .unwrap(),
+        availability: BTreeMap::from([(b_id, receipt)]),
+    };
+    let inputs = RequestCompilerInputs {
+        projection: b_projection.clone(),
+        metadata: b_metadata,
+        artifacts: b.clone(),
+        native_transport: b_transport,
+        declaration_semantic_sha256: [0; 32],
+        original_sources: Default::default(),
+    };
+    let validation = PackageInterfaceValidation::default();
+    let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        &inputs,
+        &inputs.metadata,
+        &validation.inventory,
+    )
+    .unwrap();
+    drop(inputs);
+    drop(transport);
+    drop(metadata);
+    drop(unrelated_offer);
+    drop(ancestor_offer);
+    drop(full);
+    drop(base);
+    drop(entries);
+    drop(recovered);
+    assert!(
+        unrelated_payload.upgrade().is_none(),
+        "a B receipt must release unrelated C payload ownership"
+    );
+
+    let private = OriginalCompilerInputs::from_selection(&selected, &b).unwrap();
+    let admitted = inventory
+        .admit_projected_with_native_offers(
+            &private.artifacts,
+            vec![],
+            &private.projection,
+            &private.native_offers,
+        )
+        .unwrap();
+    let graph = admitted.capture_graph_selection();
+    assert!(graph
+        .namespace
+        .iter()
+        .all(|binding| binding.artifact != a_id));
+    assert!(graph
+        .roots
+        .iter()
+        .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
+    let groups = admitted.native_groups_for_target(None, &[demand]).unwrap();
+    assert_eq!(
+        groups
+            .iter()
+            .map(|group| (group.binding.artifact(), group.original_ordinal))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(b_id, 7)])
+    );
+    assert!(admitted
+        .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: b_id,
+            original_ordinal: 9001
+        }])
+        .is_err());
+}
+
+#[test]
 fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     use crate::artifact_inventory::{
         ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
@@ -663,50 +857,46 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     )
     .unwrap()
     .unwrap();
-    let metadata = CompilerInputProjection::from_issued_entries(&[entry.clone()])
-        .unwrap()
-        .project_metadata(full.metadata_snapshot())
-        .unwrap();
-    // The graph is authentic, but it contains no native roots. Deliberately
-    // misclassify that graph to exercise the transport owner's refusal boundary.
+    // An authentic graph without native roots cannot construct Full. Another
+    // offer's complete graph does not change that owner's qualification.
     let no_groups = NativeOriginalRequirement {
         original: entry.descriptor.id,
         selection: ExactArtifactSelection::capture(&base),
     };
-    assert!(no_groups
-        .selection
-        .graph_selection()
-        .native_groups
-        .is_empty());
-    for other in [false, true] {
-        let mut offers = vec![NativeCompilerAvailability::Full(no_groups.clone())];
-        if other {
-            offers.push(NativeCompilerAvailability::Issued {
-                original: entry.descriptor.id,
-                proof: Some(issued.clone()),
-            });
-        }
-        let error = NativeCompilerTransport::issue(&metadata, &full, &offers)
-            .map(|_| ())
-            .expect_err("each Full offer needs its own issued native root");
-        assert_eq!(
-            error.to_string(),
-            failure("full native offer has no issued carrier").to_string()
-        );
-    }
+    let unqualified = crate::artifact_inventory::IssuedNativeOffer::issue(
+        entry.descriptor.id,
+        &full,
+        Some(no_groups),
+    )
+    .unwrap();
+    assert!(!unqualified.is_full());
+    let complete = crate::artifact_inventory::IssuedNativeOffer::issue(
+        entry.descriptor.id,
+        &full,
+        Some(issued),
+    )
+    .unwrap();
+    assert!(complete.is_full());
     let no_demand = CompilerInputProjection::from_issued_entries(&[entry.clone()])
         .unwrap()
         .project_metadata(base.metadata_snapshot())
         .unwrap();
-    let empty = NativeCompilerTransport::issue(
-        &no_demand,
-        &full,
-        &[NativeCompilerAvailability::Issued {
-            original: entry.descriptor.id,
-            proof: None,
-        }],
-    )
-    .unwrap();
+    for other in [false, true] {
+        let mut offers = vec![unqualified.clone()];
+        if other {
+            offers.push(complete.clone());
+        }
+        let transport = NativeCompilerTransport::issue(&no_demand, &full, &offers).unwrap();
+        assert_eq!(
+            transport.availability[&entry.descriptor.id].permits(7),
+            other
+        );
+        assert!(!offers[0].is_full());
+    }
+    let empty_offer =
+        crate::artifact_inventory::IssuedNativeOffer::issue(entry.descriptor.id, &full, None)
+            .unwrap();
+    let empty = NativeCompilerTransport::issue(&no_demand, &full, &[empty_offer]).unwrap();
     assert!(!empty.availability[&entry.descriptor.id].permits(7));
 }
 
@@ -788,7 +978,12 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         let error = NativeCompilerTransport::issue(
             &metadata,
             &view,
-            &[NativeCompilerAvailability::Full(proof)],
+            &[crate::artifact_inventory::IssuedNativeOffer::issue(
+                entries[1].descriptor.id,
+                &issued,
+                Some(proof),
+            )
+            .unwrap()],
         )
         .map(|_| ())
         .expect_err("dependency availability cannot replace a selected product or interface");
@@ -999,7 +1194,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     assert!(!request.input_transport_files().is_empty());
     let retained = request
         .compiler_inputs()
-        .native_original_requirements
+        .native_original_requirements()
         .iter()
         .find(|requirement| requirement.original == authored_id)
         .unwrap();
@@ -2283,9 +2478,12 @@ fn replay_native_transport_history(
                 ])
                 .unwrap();
                 let supplied = [proofs[index].clone(), partial[index].clone()];
-                let before =
-                    capture_native_availability(&capture_projection, &sources[index], &supplied)
-                        .unwrap();
+                let before = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+                    &capture_projection,
+                    &sources[index],
+                    &supplied,
+                )
+                .unwrap();
                 // Restore this source's complete selected namespace, including
                 // its marker payload, before comparing custody-only additions.
                 let receiving = expanded
@@ -2297,11 +2495,19 @@ fn replay_native_transport_history(
                     receiving.capture_graph_selection().namespace,
                     sources[index].capture_graph_selection().namespace
                 );
-                let after = capture_native_availability(&capture_projection, &receiving, &supplied)
-                    .unwrap();
+                let after = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+                    &capture_projection,
+                    &receiving,
+                    &supplied,
+                )
+                .unwrap();
                 assert_eq!(after, before, "custody expansion cannot change supplied evidence with fixed canonical bindings");
-                assert!(after.iter().any(|offer| matches!(offer, NativeCompilerAvailability::Full(proof) if proof == &proofs[index])));
-                assert!(after.iter().any(|offer| matches!(offer, NativeCompilerAvailability::Issued { proof: Some(proof), .. } if proof == &partial[index])));
+                assert!(after
+                    .iter()
+                    .any(|offer| offer.is_full() && offer.proof() == Some(&proofs[index])));
+                assert!(after
+                    .iter()
+                    .any(|offer| !offer.is_full() && offer.proof() == Some(&partial[index])));
                 if index == 0 && has_ambient_full {
                     assert!(ambient_proof
                         .qualify_availability(&receiving)
@@ -2378,7 +2584,7 @@ fn replay_native_transport_history(
     assert_eq!(wire_mode(&request, "IndependentLeft"), full_mode());
     coverage.full_without_demand += 1;
     for index in 0..2 {
-        assert!(inputs.native_original_requirements.iter().any(|proof| {
+        assert!(inputs.native_original_requirements().iter().any(|proof| {
             proof.original == proofs[index].original
                 && proof.issued_group_carriers(&inputs.artifacts).unwrap() == expected[index]
         }));
@@ -2517,7 +2723,7 @@ fn replay_native_transport_history(
     .unwrap();
     coverage.dependent_issuances += 1;
     let proof = produced
-        .native_original_requirements
+        .native_original_requirements()
         .iter()
         .find(|proof| proof.original == dependent_entry.descriptor.id)
         .unwrap()

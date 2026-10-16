@@ -828,7 +828,7 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     request.validate_artifacts().unwrap();
     assert!(request
         .compiler_inputs()
-        .native_original_requirements
+        .native_original_requirements()
         .iter()
         .any(|proof| proof.original == fixture.original.descriptor.id));
     assert_eq!(context.as_ref(), &before);

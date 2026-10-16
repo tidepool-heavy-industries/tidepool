@@ -1270,7 +1270,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                                 .collect()
                         );
                         selection
-                            .with_native_original_requirements(
+                            .with_new_product_dependencies(
                                 &custody.metadata_snapshot(),
                                 &[NativeOriginalRequirement {
                                     original: catalog.original(module, version).descriptor.id,

@@ -2431,22 +2431,40 @@ enum ReceiptSourceSelection {
 struct ReceiptNativeSelection {
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
-    requirements: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
     availability: ReceiptNativeAvailability,
 }
 
 #[derive(Clone, Debug)]
 enum ReceiptNativeAvailability {
-    /// Explicit complete products and newly certified source own their bodies.
-    CompleteProduct,
+    /// Completed product bytes await native graph issuance. Dependencies are
+    /// transaction-held evidence, not a reusable Full availability certificate.
+    NewProduct {
+        dependencies: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
+    },
     /// Exact requests retain the same immutable fact used by their input wire.
     Request(Arc<crate::declaration_context::NativeTransportAvailability>),
 }
 
 impl ReceiptNativeAvailability {
+    fn requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        let dependencies = match self {
+            Self::NewProduct { dependencies } => dependencies.as_slice(),
+            Self::Request(_) => &[],
+        };
+        let offers = match self {
+            Self::Request(availability) => availability.offers(),
+            Self::NewProduct { .. } => &[],
+        };
+        dependencies
+            .iter()
+            .chain(offers.iter().filter_map(|offer| offer.proof()))
+    }
+
     fn permits(&self, ordinal: u32) -> bool {
         match self {
-            Self::CompleteProduct => true,
+            Self::NewProduct { .. } => true,
             Self::Request(availability) => availability.permits(ordinal),
         }
     }
@@ -2481,10 +2499,6 @@ impl CertifiedSourceSelection {
     ) -> CertResult<Self> {
         let mut selected =
             Self::from_compiler_projection(&inputs.projection, &metadata.retained, operation)?;
-        selected.with_native_original_requirements(
-            &metadata.retained,
-            &inputs.native_original_requirements,
-        )?;
         for role in inputs.projection.roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -2523,7 +2537,7 @@ impl CertifiedSourceSelection {
         self.native_selections()
             .filter_map(|native| match &native.availability {
                 ReceiptNativeAvailability::Request(issued) => Some(issued),
-                ReceiptNativeAvailability::CompleteProduct => None,
+                ReceiptNativeAvailability::NewProduct { .. } => None,
             })
     }
 
@@ -2536,7 +2550,7 @@ impl CertifiedSourceSelection {
             .filter(|native| {
                 matches!(
                     native.availability,
-                    ReceiptNativeAvailability::CompleteProduct
+                    ReceiptNativeAvailability::NewProduct { .. }
                 )
             })
             .map(|native| {
@@ -2566,7 +2580,7 @@ impl CertifiedSourceSelection {
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         self.native_selections()
-            .flat_map(|native| native.requirements.iter())
+            .flat_map(|native| native.availability.requirements())
     }
 
     fn visible_modules(
@@ -2827,7 +2841,7 @@ impl CertifiedSourceSelection {
             .into_iter()
             .filter_map(crate::artifact_inventory::NativeOriginalRequirement::from_role)
             .collect::<Vec<_>>();
-        selection.with_native_original_requirements(metadata, &requirements)?;
+        selection.with_new_product_dependencies(metadata, &requirements)?;
         for entry in entries.values().filter(|entry| {
             !matches!(
                 &entry.payload,
@@ -2842,7 +2856,7 @@ impl CertifiedSourceSelection {
     /// Transfer exact native requirements from the selected source issuer.
     /// Namespace metadata authenticates the matching native role, independently
     /// of its implementation dependencies' compiler visibility.
-    pub(crate) fn with_native_original_requirements(
+    pub(crate) fn with_new_product_dependencies(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         requirements: &[crate::artifact_inventory::NativeOriginalRequirement],
@@ -2872,8 +2886,14 @@ impl CertifiedSourceSelection {
                     "native requirement compiler owner",
                 ));
             }
-            if !native.requirements.contains(requirement) {
-                native.requirements.push(requirement.clone());
+            let ReceiptNativeAvailability::NewProduct { dependencies } = &mut native.availability
+            else {
+                return Err(CertificationError::Mismatch(
+                    "cannot amend an issued native offer",
+                ));
+            };
+            if !dependencies.contains(requirement) {
+                dependencies.push(requirement.clone());
             }
         }
         Ok(())
@@ -3010,8 +3030,9 @@ impl CertifiedSourceSelection {
                         native: ReceiptNativeSelection {
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
-                            requirements: Vec::new(),
-                            availability: ReceiptNativeAvailability::CompleteProduct,
+                            availability: ReceiptNativeAvailability::NewProduct {
+                                dependencies: Vec::new(),
+                            },
                         },
                     },
                 )
@@ -3117,8 +3138,9 @@ impl CertifiedSourceSelection {
                 native: ReceiptNativeSelection {
                     owner: owner.clone(),
                     version,
-                    requirements: Vec::new(),
-                    availability: ReceiptNativeAvailability::CompleteProduct,
+                    availability: ReceiptNativeAvailability::NewProduct {
+                        dependencies: Vec::new(),
+                    },
                 },
             },
         );

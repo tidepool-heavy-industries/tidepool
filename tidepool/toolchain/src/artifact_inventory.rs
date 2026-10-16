@@ -15,8 +15,10 @@ use crate::CompileError;
 mod properties;
 
 mod compiler_projection;
+mod native_availability;
 pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+pub(crate) use native_availability::IssuedNativeOffer;
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
@@ -455,10 +457,26 @@ pub(crate) struct NativeOriginalRequirement {
 pub(crate) struct QualifiedNativeAvailability {
     original: ArtifactId,
     carrier: ArtifactBinding,
+    canonical: ArtifactBinding,
     groups: BTreeSet<NativeGroupBinding>,
 }
 
 impl QualifiedNativeAvailability {
+    fn matches_namespace(&self, namespace: &ArtifactView) -> bool {
+        namespace
+            .lease
+            .selection
+            .namespace
+            .get(&self.original)
+            .is_none_or(|selected| *selected == self.carrier)
+            && namespace
+                .lease
+                .selection
+                .namespace
+                .get(&self.canonical.artifact)
+                == Some(&self.canonical)
+    }
+
     pub(crate) fn original(&self) -> ArtifactId {
         self.original
     }
@@ -634,6 +652,7 @@ impl NativeOriginalRequirement {
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
+            canonical: canonical_binding,
             groups,
         }))
     }
@@ -843,16 +862,31 @@ enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
     Projected(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
-    PrivateAvailability(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
+    PrivateAvailability(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
+    Offered(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
 }
 
 impl ArtifactRootIntent<'_> {
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
-            Self::PrivateAvailability(_, proofs) => proofs.to_vec(),
+            Self::PrivateAvailability(_, offers) | Self::Offered(_, offers) => {
+                let mut requirements = Vec::new();
+                for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
+                    if !requirements.contains(proof) {
+                        requirements.push(proof.clone());
+                    }
+                }
+                requirements
+            }
             Self::Certified(selection) => {
-                selection.native_original_requirements().cloned().collect()
+                let mut requirements = Vec::new();
+                for proof in selection.native_original_requirements() {
+                    if !requirements.contains(proof) {
+                        requirements.push(proof.clone());
+                    }
+                }
+                requirements
             }
             Self::Projected(projection, preferred) => {
                 let mut requirements = projection
@@ -3155,6 +3189,43 @@ impl ArtifactInventory {
         )
         .map(|admission| admission.artifacts)
     }
+    /// Accept exact availability support without importing the issuer's roots.
+    /// An offer may supply groups for a projected dependency while its own
+    /// original remains outside the compiler namespace.
+    pub(crate) fn admit_projected_with_native_offers(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<ArtifactView, CompileError> {
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        for offer in offers {
+            if !offered.contains(&offer.original())
+                && !offer
+                    .issued_group_carriers()?
+                    .keys()
+                    .any(|group| offered.contains(&group.binding.artifact()))
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: offer.original(),
+                    },
+                ));
+            }
+        }
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            NativeArtifactDemand::ScopeInterfaces,
+            ArtifactRootIntent::Offered(projection, offers),
+        )
+        .map(|admission| admission.artifacts)
+    }
     /// Issue complete private products using only the request's exact external
     /// dependency proofs. This temporary view does not publish execution demand.
     pub(crate) fn admit_private_complete_products(
@@ -3162,22 +3233,26 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        availability: &[NativeOriginalRequirement],
+        availability: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
         let offered = projection
             .roles()
             .iter()
             .filter_map(CompilerInputRole::original)
             .collect::<BTreeSet<_>>();
-        if let Some(proof) = availability
-            .iter()
-            .find(|proof| !offered.contains(&proof.original))
-        {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeRootOutsideView {
-                    artifact: proof.original,
-                },
-            ));
+        for offer in availability {
+            if !offered.contains(&offer.original())
+                && !offer
+                    .issued_group_carriers()?
+                    .keys()
+                    .any(|group| offered.contains(&group.binding.artifact()))
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: offer.original(),
+                    },
+                ));
+            }
         }
         self.admit_shared_with_intent(
             parent,
@@ -3361,6 +3436,7 @@ impl ArtifactInventory {
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             ),
             ArtifactRootIntent::Projected(projection, _)
+            | ArtifactRootIntent::Offered(projection, _)
             | ArtifactRootIntent::PrivateAvailability(projection, _) => {
                 projection.entries_from_artifacts(&selected)?;
                 let ids = projection
@@ -3409,7 +3485,13 @@ impl ArtifactInventory {
                 let ArtifactBindingNode::Group(group) = root else {
                     continue;
                 };
-                if group.binding.artifact() == *original {
+                // A contributing offer can support a dependency without giving
+                // its own original a current compiler role or executable root.
+                if group.binding.artifact() == *original
+                    && namespace_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(original))
+                {
                     required_roots
                         .entry(NativeGroupKey {
                             artifact: *original,
@@ -7024,7 +7106,7 @@ mod tests {
             .unwrap()
             .unwrap();
         selection
-            .with_native_original_requirements(&prefix.metadata_snapshot(), &[requirement])
+            .with_new_product_dependencies(&prefix.metadata_snapshot(), &[requirement])
             .unwrap();
         let mut fixed = inventory
             .bind_segment(&prefix, vec![native.clone(), child.clone()], &selection)
@@ -7317,7 +7399,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 selection
-                    .with_native_original_requirements(&chosen.metadata_snapshot(), &[requirement])
+                    .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                     .unwrap();
             }
             let mut fixed = inventory
@@ -7400,7 +7482,7 @@ mod tests {
             };
             let mut selection = bound_selection_for_entries(&chosen, &[native.clone()]);
             selection
-                .with_native_original_requirements(&chosen.metadata_snapshot(), &[requirement])
+                .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                 .unwrap();
             let mut fixed = inventory
                 .bind_segment(&chosen, vec![native.clone()], &selection)
@@ -10037,7 +10119,7 @@ mod tests {
                     if required == &child.descriptor.owner)));
             }
             receipt
-                .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
+                .with_new_product_dependencies(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
             for (joined, projected) in [
                 issuer.merge(&sibling).unwrap(),
@@ -10138,7 +10220,7 @@ mod tests {
             )
             .unwrap();
         ambiguous
-            .with_native_original_requirements(&joined.metadata_snapshot(), &preserved)
+            .with_new_product_dependencies(&joined.metadata_snapshot(), &preserved)
             .unwrap();
         assert!(matches!(inventory.admit_certified_with_demand(
             &joined, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &ambiguous,
@@ -10373,7 +10455,7 @@ mod tests {
                 )
                 .unwrap();
             receipt
-                .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
+                .with_new_product_dependencies(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
             for (joined, projected) in [
                 issuer.merge(&sibling).unwrap(),
@@ -11592,7 +11674,7 @@ mod tests {
                             Some(inputs),
                         )
                         .unwrap();
-                let facts = &request.compiler_inputs().native_original_requirements;
+                let facts = &request.compiler_inputs().native_original_requirements();
                 assert!(!facts
                     .iter()
                     .any(|fact| fact.original == helper.descriptor.id));
@@ -11982,10 +12064,7 @@ mod tests {
                     )
                     .unwrap();
                 certified
-                    .with_native_original_requirements(
-                        &recovered.metadata_snapshot(),
-                        &requirements,
-                    )
+                    .with_new_product_dependencies(&recovered.metadata_snapshot(), &requirements)
                     .unwrap();
                 let mut bound = recovered_inventory
                     .bind_segment(&recovered, vec![], &certified)
@@ -12048,7 +12127,7 @@ mod tests {
                     )
                     .unwrap();
                 chosen_certified
-                    .with_native_original_requirements(
+                    .with_new_product_dependencies(
                         &chosen.metadata_snapshot(),
                         &helper_requirements,
                     )
@@ -13188,7 +13267,7 @@ mod tests {
                 )
                 .unwrap();
             certified
-                .with_native_original_requirements(&view.metadata_snapshot(), &requirements)
+                .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
                 .unwrap();
             let mut bound = inventory.bind_segment(view, vec![], &certified).unwrap();
             let selected = inventory

@@ -475,13 +475,16 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             &[],
         )
         .unwrap();
-        let native_availability =
-            capture_native_availability(&projection, &artifacts, &requirements).unwrap();
+        let native_offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+            &projection,
+            &artifacts,
+            &requirements,
+        )
+        .unwrap();
         let private = OriginalCompilerInputs {
             projection,
             artifacts,
-            native_availability,
-            native_original_requirements: requirements,
+            native_offers,
         };
         ProtectedScaffoldRequirements::default()
             .compiler_inputs(context, Some(&private))
