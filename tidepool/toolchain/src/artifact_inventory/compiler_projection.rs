@@ -183,21 +183,10 @@ impl CompilerSourceSupport {
         })
     }
 
-    pub(crate) fn native_offer_observations(
-        &self,
-    ) -> Result<Vec<(ArtifactId, bool, Option<ExactArtifactSelectionDigest>)>, CompileError> {
+    pub(crate) fn native_offer_observations(&self) -> Result<BTreeSet<[u8; 32]>, CompileError> {
         self.native_offers
             .iter()
-            .map(|offer| {
-                Ok((
-                    offer.original(),
-                    offer.is_full(),
-                    offer
-                        .proof()
-                        .map(|proof| proof.selection.observation_digest())
-                        .transpose()?,
-                ))
-            })
+            .map(|offer| offer.snapshot_facts().identity())
             .collect()
     }
 
