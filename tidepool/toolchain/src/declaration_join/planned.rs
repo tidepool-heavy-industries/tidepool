@@ -933,6 +933,96 @@ mod tests {
         assert_eq!(context.artifact_view().selected_native_groups(), before);
     }
 
+    #[test]
+    fn authored_certification_preserves_historical_canonical_custody() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+            IssuedNativeOffer,
+        };
+        use crate::certified_products::{
+            fixture_finalized_product,
+            tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
+        };
+        let product = |name: &str, version: u8, interface: &[u8]| {
+            let value = fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    name,
+                    vec![(7, vec![]), (11, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    interface.to_vec(),
+                ),
+                [1; 32],
+            );
+            recovered_witness_fixtures(&[value]).remove(0).product
+        };
+        let old = product("PublicationType", 1, b"historical canonical");
+        let current = product("PublicationType", 2, b"selected canonical");
+        let authored = product("AuthoredConsumer", 3, b"authored canonical");
+        let inventory = ArtifactInventory::default();
+        let old_entry = Arc::new(ArtifactEntry::original([1; 32], old).unwrap());
+        let old_view = inventory
+            .admit_shared(&inventory.empty_view(), vec![old_entry.clone()])
+            .unwrap();
+        let offer = IssuedNativeOffer::issue(old_entry.descriptor.id, &old_view, None).unwrap();
+        let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
+        let current_view = inventory
+            .admit_shared(&inventory.empty_view(), vec![current_entry.clone()])
+            .unwrap()
+            .interface_projection(&[current_entry.descriptor.owner.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_interface_view(&current_view).unwrap();
+        let baseline = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(
+                &CompilerSourceSupport::new(projection.clone(), current_view, [offer]).unwrap(),
+            )
+            .unwrap();
+        let compiled = crate::declaration_context::certified_product_artifact_view(
+            [1; 32],
+            &[current.clone(), authored.clone()],
+            &[],
+            None,
+        )
+        .unwrap();
+        let products = [current, authored.clone()];
+        let interfaces = products
+            .iter()
+            .map(|product| ExactInterfaceOwner {
+                owner: ExactModuleIdentity {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                },
+                requirements: vec![],
+            })
+            .collect::<Vec<_>>();
+        let view = crate::declaration_context::certified_artifact_view(
+            [1; 32],
+            &products,
+            &interfaces,
+            &[],
+            &compiled,
+            Some(&baseline),
+        )
+        .unwrap();
+        assert!(view.artifact_ids().contains(&old_entry.descriptor.id));
+        let roles = authored_compiler_projection(&baseline, &view, &authored).unwrap();
+        assert_eq!(
+            roles
+                .snapshot_roles()
+                .get(&current_entry.descriptor.owner)
+                .unwrap()
+                .interface(),
+            projection.roles()[0].interface()
+        );
+        assert!(roles
+            .snapshot_roles()
+            .get(&old_entry.descriptor.owner)
+            .unwrap()
+            .original()
+            .is_none());
+    }
+
     fn issued_originals(
         products: &[CertifiedRecoveryProduct],
     ) -> Result<crate::certified_products::SelectedOriginalClosure, CompileError> {

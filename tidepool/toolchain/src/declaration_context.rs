@@ -8320,6 +8320,13 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     Ok(current)
 }
 
+#[tracing::instrument(
+    target = "exomonad_harness::timing",
+    name = "products.certified_artifact_view",
+    level = "debug",
+    skip_all,
+    fields(inclusive = true)
+)]
 pub(crate) fn certified_artifact_view(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
@@ -8340,7 +8347,10 @@ pub(crate) fn certified_artifact_view(
                 .map(|entry| entry.descriptor.id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let view = view.merge(&compiled.select_roots(selected)?)?;
+    let view = {
+        let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.certified_artifact_view.merge", inclusive = true).entered();
+        view.merge(&compiled.select_roots(selected)?)?
+    };
     let mut entries = Vec::new();
     for product in products {
         let owner = identity(&product.owner().unit, &product.owner().module);
@@ -8368,6 +8378,7 @@ pub(crate) fn certified_artifact_view(
             requirements,
         ));
     }
+    let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.certified_artifact_view.admit", inclusive = true).entered();
     view.inventory().admit(&view, entries)
 }
 
