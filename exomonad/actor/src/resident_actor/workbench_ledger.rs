@@ -93,6 +93,40 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn hosted_operation_references(
+        &self,
+        after: Option<(bool, &exomonad_tool::OriginalOperation)>,
+        limit: usize,
+    ) -> (Vec<(bool, exomonad_tool::OriginalOperation)>, usize, bool) {
+        let operations: std::collections::BTreeSet<_> = self
+            .0
+            .iter()
+            .filter_map(|(key, record)| match key {
+                WorkbenchReplayKey::Hosted(key) if key.is_original_invocation() => key
+                    .invocation()
+                    .model_operation()
+                    .cloned()
+                    .map(|operation| {
+                        (
+                            record
+                                .provider_finalization
+                                .as_ref()
+                                .is_some_and(|owner| owner.successfully_settled()),
+                            operation,
+                        )
+                    }),
+                _ => None,
+            })
+            .collect();
+        let total = operations.len();
+        let page: Vec<_> = operations
+            .into_iter()
+            .filter(|(stage, operation)| after.is_none_or(|after| (*stage, operation) > after))
+            .take(limit + 1)
+            .collect();
+        let more = page.len() > limit;
+        (page.into_iter().take(limit).collect(), total, more)
+    }
     pub(super) fn invocation_is_terminal(
         &self,
         invocation: &exomonad_tool::ToolInvocationContext,
@@ -624,6 +658,78 @@ impl WorkbenchExecutions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_discovery_pages_pending_and_finalized_refs_without_losing_pre_receipt_work() {
+        let actor = ActorRef {
+            id: crate::ActorId(1),
+            incarnation: crate::Incarnation::FIRST,
+        };
+        let mut journal = WorkbenchExecutions::default();
+        let mut expected = std::collections::BTreeSet::new();
+        for index in (0..81).rev() {
+            let operation = exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "discovery".into(),
+                    actor: "/root".into(),
+                    incarnation: "1".into(),
+                },
+                request_id: format!("request-{index:03}"),
+                call_id: "same-call".into(),
+            };
+            let control = crate::WorkbenchExecutionControl::from_invocation(Some(
+                exomonad_tool::ToolInvocationContext::original(operation.clone()),
+            ));
+            let key = control.invocation.as_ref().unwrap();
+            let execution = control.execution_id(actor);
+            let request = WorkbenchRequest::from_cell_input("owned discovery entry")
+                .with_execution_id(execution.clone());
+            journal.begin(&execution, request, Some(key));
+            let owner = crate::HostedOperationSettlement::issue(actor, control.clone());
+            journal.bind_provider_finalization(&execution, Some(key), Some(&control));
+            let finalized = index < 40;
+            if finalized {
+                // Native finalization may precede any Store output/receipt.
+                control
+                    .provider_finalization
+                    .finish(Ok(crate::ProviderFinalizationKind::Completed));
+            } else if index == 80 {
+                control
+                    .provider_finalization
+                    .finish(Err("unconfirmed".into()));
+            }
+            drop(owner);
+            expected.insert((finalized, operation));
+        }
+        let (first, total, more) = journal.hosted_operation_references(None, 32);
+        assert_eq!(total, 81);
+        assert!(more);
+        assert!(
+            first.iter().all(|(finalized, _)| !finalized),
+            "pending refs precede older successful finalization"
+        );
+        let mut found = first;
+        loop {
+            let (stage, operation) = found.last().unwrap();
+            let (page, observed_total, more) =
+                journal.hosted_operation_references(Some((*stage, operation)), 32);
+            assert_eq!(observed_total, total);
+            assert!(page.len() <= 32);
+            found.extend(page);
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(
+            found.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            journal.0.len(),
+            81,
+            "reads cannot consume execution evidence"
+        );
+    }
 
     use futures_util::future::BoxFuture;
     use serde_json::Value;

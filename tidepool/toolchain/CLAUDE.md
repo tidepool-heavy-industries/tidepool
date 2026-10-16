@@ -250,6 +250,11 @@ issuance scopes; transport neither selects nor collapses those bindings. Full
 availability requires an individual offer's complete proof. Combining issued
 subsets cannot create Full. The inventory owns execution selection through exact
 root and carrier choices, and refuses any remaining demand ambiguity.
+Target admission uses exact offered graph candidates before explicit execution
+root qualification. Retained custody cannot fill an empty or partial request
+offer, including dependency-only originals absent from its compiler namespace.
+Fresh product bodies and explicit issued Group roots retain their own authority;
+absence of a request offer is not permission to recover one from custody.
 
 Changes here need a history crossing offer, dependent-product admission, private
 handoff and subsequent compilation. Carry independently issued overlapping

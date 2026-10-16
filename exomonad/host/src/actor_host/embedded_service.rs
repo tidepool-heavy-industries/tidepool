@@ -362,6 +362,10 @@ impl EmbeddedService {
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let (router, control, commands) = harness::server::server_with_config(server_config);
         runtime.configure_output_observer(control.clone())?;
+        control.install_operation_observer(super::operation_observation::gui_reader(
+            runtime.store(),
+            runtime.scheduler(),
+        ))?;
         control.publish(
             harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
                 runtime

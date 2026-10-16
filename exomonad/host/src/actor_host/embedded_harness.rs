@@ -1809,7 +1809,7 @@ impl Provider for EmbeddedDispatcher {
                     Err(error) => {
                         return unavailable_context_completion(JobOutput::Completed(Err(
                             error.into()
-                        )))
+                        )));
                     }
                 };
                 let binding = match self.snapshot.request_reply_activation() {
@@ -2042,6 +2042,49 @@ impl EmbeddedCancellationOwner {
 
 #[async_trait::async_trait]
 impl CancellationOwner for EmbeddedCancellationOwner {
+    fn observe_operation(
+        &self,
+        operation: &OperationId,
+        _handle: &JobHandle,
+    ) -> harness::operation_observation::NativeOperationObservation {
+        use harness::operation_observation::{
+            NativeOperationExecution as Execution, NativeOperationObservation,
+            OperationFinalization as Finalization,
+        };
+        let owner = embedded_invocation_context(&self.identity, operation)
+            .ok()
+            .and_then(|context| self.snapshot.retained_operation(context).ok());
+        let Some(owner) = owner else {
+            return NativeOperationObservation {
+                execution: Execution::Unavailable,
+                finalization: Finalization::Unknown,
+            };
+        };
+        let execution = match owner.terminal() {
+            exomonad_actor::HostedOperationTerminal::Pending => Execution::Pending,
+            exomonad_actor::HostedOperationTerminal::Settled(
+                WorkbenchCancellationOutcome::Unconfirmed { .. }
+                | WorkbenchCancellationOutcome::UnknownEvaluation { .. },
+            ) => Execution::Unconfirmed,
+            exomonad_actor::HostedOperationTerminal::Settled(_) => Execution::Terminal,
+        };
+        use exomonad_actor::{HostedOperationFinalization, ProviderFinalizationKind};
+        let finalization = match owner.finalization() {
+            HostedOperationFinalization::Pending => Finalization::Pending,
+            HostedOperationFinalization::Settled(Err(_)) => Finalization::Unconfirmed,
+            HostedOperationFinalization::Settled(Ok(kind)) => match kind {
+                ProviderFinalizationKind::Completed => Finalization::Completed,
+                ProviderFinalizationKind::Aborted => Finalization::Aborted,
+                ProviderFinalizationKind::RetirementAborted => Finalization::RetirementAborted,
+                ProviderFinalizationKind::NotAdmitted => Finalization::NotAdmitted,
+            },
+        };
+        NativeOperationObservation {
+            execution,
+            finalization,
+        }
+    }
+
     fn cancellation_wait(&self) -> harness::provider::CancellationWait {
         // The exact native operation retains its execution and cleanup owner.
         // Cancellation joins that terminal; actor loss settles the observation

@@ -4,6 +4,102 @@ use super::*;
 use crate::generated::source::{SourceError, SourceReq};
 use crate::resident_workbench::ActorRequestSnapshot;
 
+/// Explicit inspection uses the active installation, while retaining which
+/// generation the inspecting model request captured. No background polling.
+pub(super) async fn refresh_source_observation(
+    layers: Option<crate::ActorSourceLayerResolver>,
+    installed: Arc<crate::resident_workbench::InstalledToolsState>,
+    observation: crate::ActorRuntimeObservationHandle,
+    issued: Option<ActorRequestSnapshot>,
+) {
+    let refresh = observation.source_refresh();
+    let token = refresh.token();
+    let (Some(layers), Some(active)) = (layers, installed.current_generation()) else {
+        observation.finish_source_refresh(
+            token,
+            Err("no active generation source inspection owner".into()),
+        );
+        return;
+    };
+    let source = active.installation.source().clone();
+    let active_generation = active.id.get();
+    let issued_generation = issued
+        .as_ref()
+        .and_then(ActorRequestSnapshot::generation)
+        .map(|generation| generation.id.get());
+    // Filesystem observation needs only immutable issued source evidence. Do
+    // not retain the generation's native scope through an uncancellable read.
+    let issued_source = issued
+        .as_ref()
+        .map(|issued| issued.installation().source().clone());
+    drop(issued);
+    let inspected = tokio::task::spawn_blocking(move || {
+        let issued_revision = issued_source
+            .as_ref()
+            .map(|source| layers.revision(source))
+            .transpose()?;
+        layers
+            .observe(&source)
+            .map(|status| (issued_revision, status))
+    })
+    .await;
+    let result = match inspected {
+        Ok(Ok((issued_revision, status))) => {
+            let active_source_generation = u64::try_from(status.active.generation);
+            let disk_source_generation = u64::try_from(status.disk.generation);
+            let (Ok(active_source_generation), Ok(disk_source_generation)) =
+                (active_source_generation, disk_source_generation)
+            else {
+                observation.finish_source_refresh(
+                    token,
+                    Err("source owner returned a negative revision generation".into()),
+                );
+                return;
+            };
+            let before: std::collections::BTreeMap<_, _> = status
+                .active
+                .modules
+                .iter()
+                .map(|module| (&module.name, &module.digest))
+                .collect();
+            let after: std::collections::BTreeMap<_, _> = status
+                .disk
+                .modules
+                .iter()
+                .map(|module| (&module.name, &module.digest))
+                .collect();
+            let names: std::collections::BTreeSet<_> =
+                before.keys().chain(after.keys()).copied().collect();
+            let changed_modules = names
+                .into_iter()
+                .filter(|name| before.get(*name) != after.get(*name))
+                .cloned()
+                .collect();
+            Ok(crate::SourceLayerDrift {
+                issued_identity: issued_revision.map(|revision| revision.identity),
+                issued_notebook_generation: issued_generation,
+                active_notebook_generation: Some(active_generation),
+                active_identity: status.active.identity,
+                active_generation: active_source_generation,
+                disk_identity: status.disk.identity,
+                disk_generation: disk_source_generation,
+                changed_modules,
+            })
+        }
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(format!("source inspection did not complete: {error}")),
+    };
+    if installed
+        .with_current_generation(&active, || observation.finish_source_refresh(token, result))
+        .is_none()
+    {
+        observation.finish_source_refresh(
+            token,
+            Err("source inspection superseded by generation publication".into()),
+        );
+    }
+}
+
 fn source_error(error: crate::SourceInspectionError) -> SourceError {
     match error {
         crate::SourceInspectionError::Unavailable(detail) => SourceError::SourceUnavailable(detail),

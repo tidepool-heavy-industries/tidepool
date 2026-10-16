@@ -62,6 +62,7 @@ mod embedded_reflect;
 mod embedded_reflect_tests;
 mod embedded_service;
 mod form_output;
+mod operation_observation;
 #[cfg(test)]
 mod scaffold_admission_tests;
 
@@ -303,7 +304,15 @@ fn with_host_interpreters(
             runtime.store(),
             recovery.clone(),
         ))
-        .with_result_inspection_reader(embedded_reflect::result_reader(runtime.store(), recovery));
+        .with_result_inspection_reader(embedded_reflect::result_reader(
+            runtime.store(),
+            recovery.clone(),
+        ))
+        .with_operation_observation_reader(operation_observation::model_reader(
+            runtime.store(),
+            runtime.scheduler(),
+            recovery,
+        ));
     forest.set_jev_backend(jev_backend(config));
     Ok(forest
         .with_cell_model_factory(models)

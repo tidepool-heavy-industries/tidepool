@@ -903,13 +903,23 @@ where
             ..
         } = admitted;
         let inspection = current_builtin.then(|| {
-            crate::status_tool::parse(
-                request
-                    .tool_call()
-                    .expect("issued status request")
-                    .arguments
-                    .clone(),
-            )
+            let arguments = request
+                .tool_call()
+                .expect("issued status request")
+                .arguments
+                .clone();
+            crate::status_tool::parse(arguments.clone()).and_then(|view| {
+                let operation = if view == crate::status_tool::StatusView::Operation {
+                    crate::status_tool::operation(arguments.clone())?
+                } else {
+                    None
+                };
+                Ok((
+                    view,
+                    operation,
+                    crate::status_tool::operation_after(arguments)?,
+                ))
+            })
         });
         if inspection.is_none() && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
@@ -1053,7 +1063,9 @@ where
         };
         if let Some(inspection) = inspection {
             return WorkbenchDispatch::Owned(match inspection {
-                Ok(view) => self.owned_inspection_task(kernel, owned, view),
+                Ok((view, operation, after)) => {
+                    self.owned_inspection_task(kernel, owned, view, operation, after)
+                }
                 Err(error) => Self::finish_owned_task(
                     owned,
                     Err(workbench_failure(
@@ -1167,10 +1179,17 @@ where
         kernel: &KernelContext,
         owned: OwnedExecution<H, O>,
         view: crate::status_tool::StatusView,
+        operation: Option<exomonad_tool::OriginalOperation>,
+        after: Option<crate::status_tool::OperationReferenceCursor>,
     ) -> OwnedWorkbenchTask<Self> {
         use crate::status_tool::StatusView as View;
         use inspection_wait::{InspectionRequest, InspectionResult};
         let actor = owned.state.effects.context.actor;
+        let operation_reader = self.environment.operation_reader.clone();
+        let source_layers = self.environment.source_layers.clone();
+        let installed_tools = self.installed_tools.clone();
+        let source_observation = self.runtime_observation.clone();
+        let issued_source = owned.state.effects.issued_snapshot.clone();
         let kernel = kernel.clone();
         let status = match view {
             View::Changed => Some((StatusView::Concise, true)),
@@ -1195,6 +1214,33 @@ where
             owned,
             move |owned| {
                 Box::pin(async move {
+                    if view == View::Revisions {
+                        source_effect::refresh_source_observation(
+                            source_layers,
+                            installed_tools,
+                            source_observation,
+                            issued_source,
+                        )
+                        .await;
+                    }
+                    if let Some(operation) = operation {
+                        let inspected = match operation_reader {
+                            Some(reader) => reader(actor, operation)
+                                .await
+                                .map(|value| Some(InspectionResult::Rendered(value.to_string())))
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                                }),
+                            None => Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "operation observation owner is unavailable".into(),
+                            )),
+                        };
+                        return (
+                            inspected,
+                            Ok(std::collections::HashSet::new()),
+                            Ok(std::collections::HashSet::new()),
+                        );
+                    }
                     let (observable, descendants) = if let Some((status, _)) = status {
                         Self::status_observations(&kernel, actor, candidates, status).await
                     } else if view == View::Revisions {
@@ -1251,6 +1297,9 @@ where
                                     &observable,
                                     &descendants,
                                 ),
+                                None if view == View::Operation => {
+                                    behavior.operation_references_text(after.as_ref())
+                                }
                                 None => {
                                     let revisions = descendants.as_ref().map(|descendants| {
                                         behavior.revision_identities_observed(actor, descendants)

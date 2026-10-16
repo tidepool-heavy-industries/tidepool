@@ -45,6 +45,26 @@ pub type ResultInspectionReader = Arc<
         + Sync,
 >;
 
+#[derive(Debug, thiserror::Error)]
+pub enum OperationInspectionError {
+    #[error("operation is outside the current conversation")]
+    Unauthorized,
+    #[error("operation observation is unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// Host-owned projection from existing native, scheduler and Store evidence.
+/// The actor supplies its real identity; arguments cannot select another observer.
+pub type OperationObservationReader = Arc<
+    dyn Fn(
+            crate::ActorRef,
+            exomonad_tool::OriginalOperation,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<serde_json::Value, OperationInspectionError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 /// The answer a caller receives, as the wire types its Haskell row declares.
 pub fn reflection(
     outcome: Result<Vec<ConversationTurn>, ConversationUnavailable>,

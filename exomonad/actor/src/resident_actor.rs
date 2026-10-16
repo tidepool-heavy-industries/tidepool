@@ -507,6 +507,7 @@ struct ResidentEnvironment<H, O> {
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
     conversation_reader: Option<crate::ConversationReader>,
     result_reader: Option<crate::ResultInspectionReader>,
+    operation_reader: Option<crate::OperationObservationReader>,
     usage_pointers: crate::UsagePointerTable,
     recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
@@ -534,6 +535,7 @@ impl<H, O> ResidentEnvironment<H, O> {
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
             result_reader: None,
+            operation_reader: None,
             usage_pointers: crate::UsagePointerTable::default(),
             recovery: None,
         }
@@ -2341,6 +2343,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             result_reader: self.result_reader.clone(),
+            operation_reader: self.operation_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
@@ -5123,6 +5126,37 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         render_watches_view(launched_at, &overview)
     }
 
+    fn operation_references_text(
+        &self,
+        after: Option<&crate::status_tool::OperationReferenceCursor>,
+    ) -> String {
+        // This operational page bounds retained metadata output, not authority.
+        // Detailed observation still authenticates exact Store membership.
+        let (page, total, more) = self
+            .workbench_executions
+            .lock()
+            .hosted_operation_references(
+                after.map(crate::status_tool::OperationReferenceCursor::key),
+                32,
+            );
+        let next_after = more
+            .then(|| {
+                page.last().map(|(finalized, operation)| {
+                    crate::status_tool::OperationReferenceCursor {
+                        stage: if *finalized {
+                            crate::status_tool::OperationReferenceStage::Retained
+                        } else {
+                            crate::status_tool::OperationReferenceStage::Unfinalized
+                        },
+                        operation: operation.clone(),
+                    }
+                })
+            })
+            .flatten();
+        let operations: Vec<_> = page.into_iter().map(|(_, operation)| operation).collect();
+        serde_json::json!({"source":"actor_native_journal","operations":operations,"total":total,"limit":32,"next_after":next_after,"state":"not_queried"}).to_string()
+    }
+
     /// The what-is-live status view: collectors and the command jobs they
     /// watch (finished or not), and persistent bindings with the session
     /// generation that defines them, the exact source of their defining
@@ -5138,20 +5172,19 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// pure helpers this leans on.
     ///
     /// Source drift (is what is running still what is on disk) is published
-    /// from `tidepool`'s composition root into
+    /// from `exomonad-host`'s composition root into
     /// `ActorRuntimeObservation::source_drift`, since the data — the source
     /// layer's active/disk revision, the checkout's Git state, and the
     /// frozen workspace's — lives in `exomonad_host::exomonad::source` and
-    /// `tidepool` depends on `exomonad-actor` (see `tidepool/Cargo.toml`),
+    /// `exomonad-host` depends on `exomonad-actor`,
     /// never the reverse. See `status_rendering::render_source_drift_section`.
     /// One piece is left out rather than
     /// guessed at even there: no build script or embedded string anywhere in
     /// this system records the running binary's build revision, so the
     /// checkout row reports Git's own head and dirty files and says plainly
     /// that the binary-revision comparison is unavailable, rather than
-    /// inventing one. Which agent-spec revision each actor activated is
-    /// omitted for a similar reason: no such tracking exists in
-    /// `exomonad-actor` today, and this view does not invent any.
+    /// inventing one. Source-layer identities and issued/active notebook
+    /// generations come from the explicit revisions refresh owner.
     async fn live_status_text(
         &self,
         kernel: &KernelContext,
@@ -10475,7 +10508,7 @@ where
                 .or(default_workbench.as_ref())
                 .expect("selected workbench");
             if let Some(call) = status_call {
-                let view = crate::status_tool::parse(call.arguments).map_err(|error| {
+                let view = crate::status_tool::parse(call.arguments.clone()).map_err(|error| {
                     workbench_failure(
                         &[],
                         0,
@@ -10484,6 +10517,62 @@ where
                     )
                 })?;
                 let output = match view {
+                    crate::status_tool::StatusView::Operation => {
+                        let operation = crate::status_tool::operation(call.arguments.clone())
+                            .map_err(|error| {
+                                workbench_failure(
+                                    &[],
+                                    0,
+                                    1,
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                                )
+                            })?;
+                        match operation {
+                            Some(operation) => {
+                                let reader = self
+                                    .environment
+                                    .operation_reader
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        workbench_failure(
+                                            &[],
+                                            0,
+                                            1,
+                                            ResidentActorWorkbenchError::ActorProtocol(
+                                                "operation observation owner is unavailable".into(),
+                                            ),
+                                        )
+                                    })?;
+                                reader(context.actor, operation)
+                                    .await
+                                    .map_err(|error| {
+                                        workbench_failure(
+                                            &[],
+                                            0,
+                                            1,
+                                            ResidentActorWorkbenchError::ActorProtocol(
+                                                error.to_string(),
+                                            ),
+                                        )
+                                    })?
+                                    .to_string()
+                            }
+                            None => self.operation_references_text(
+                                crate::status_tool::operation_after(call.arguments)
+                                    .map_err(|error| {
+                                        workbench_failure(
+                                            &[],
+                                            0,
+                                            1,
+                                            ResidentActorWorkbenchError::ActorProtocol(
+                                                error.to_string(),
+                                            ),
+                                        )
+                                    })?
+                                    .as_ref(),
+                            ),
+                        }
+                    }
                     crate::status_tool::StatusView::Changed => {
                         self.status_text(kernel, context.actor, StatusView::Concise, true)
                             .await
@@ -10493,6 +10582,13 @@ where
                             .await
                     }
                     crate::status_tool::StatusView::Revisions => {
+                        source_effect::refresh_source_observation(
+                            self.environment.source_layers.clone(),
+                            self.installed_tools.clone(),
+                            self.runtime_observation.clone(),
+                            effects.issued_snapshot.clone(),
+                        )
+                        .await;
                         self.revisions_status_text(kernel, context.actor).await
                     }
                     crate::status_tool::StatusView::Detailed => {
@@ -14120,6 +14216,15 @@ where
     #[must_use]
     pub fn with_result_inspection_reader(mut self, reader: crate::ResultInspectionReader) -> Self {
         self.environment.result_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_operation_observation_reader(
+        mut self,
+        reader: crate::OperationObservationReader,
+    ) -> Self {
+        self.environment.operation_reader = Some(reader);
         self
     }
 
