@@ -139,8 +139,8 @@ async fn resumed_reply_requires_publication_and_cannot_succeed_after_retirement(
         let owner = ActorRef::first(crate::ActorId(target.id.0 + 100));
         let requests = &fixture.environment.requests;
         let request = requests.reserve(owner, target);
-        requests.mark_queued(owner, target, request).unwrap();
         crate::request::test_support::admit_destination(requests, owner, request);
+        requests.mark_queued(owner, target, request).unwrap();
         requests.present(target, request).unwrap();
         let claim = requests.begin_reply(target, request).unwrap();
         let publication = if retired {

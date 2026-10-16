@@ -771,3 +771,89 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
     drop(behavior);
     owner.finish().await;
 }
+
+#[tokio::test]
+async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_uncertainty() {
+    use crate::request::{RequestCleanupState, ResponseFailure, ResponseObservation};
+    let fixture = Fixture::compile_mode(true);
+    let (mut behavior, owner) = fixture.behavior().await;
+    let target = owner.actor.identity();
+    let parent = behavior.descriptor.placement().session;
+    fixture.with_factory(&mut behavior, false);
+    let (definition, _) = fixture.definition(&behavior, parent).await;
+    let staged = owner
+        .kernel
+        .compiler_lifecycle_scope(behavior.stage_replacement(target, definition))
+        .await
+        .unwrap();
+    behavior.descriptor = staged.descriptor;
+    behavior.boot = None;
+    let requests = Arc::clone(&behavior.environment.requests);
+    let requester = ActorRef::first(crate::ActorId(target.id.0 + 100));
+    let request = requests.reserve(requester, target);
+    requests.mark_queued(requester, target, request).unwrap();
+    requests.present(target, request).unwrap();
+    requests
+        .cancel_request(
+            requester,
+            request,
+            crate::CancellationReason::RequesterCancelled,
+        )
+        .unwrap();
+    let claim = requests
+        .begin_cancellation_acknowledgement(target, request)
+        .unwrap();
+    behavior.accepted_settlement = Some(AcceptedRequestSettlement {
+        transfer: None,
+        kind: AcceptedRequestKind::Cancellation(claim),
+    });
+    // Cleanup may not retire the receiver's own realm as a message realm.
+    behavior.pending_program = Some(PendingActorProgram {
+        transfer: None,
+        resumption: ActorResumption::ReceiveAgain(SuspendedCast {
+            receiver: staged.receiver,
+            handler_realm: behavior.descriptor.placement().resource_scope,
+            cleanup: None,
+        }),
+    });
+    let error = behavior.resume(&owner.kernel).await.unwrap_err();
+    assert!(error
+        .detail
+        .contains("cancelled message lost its actor-owned receiver"));
+    assert!(
+        behavior.suspended_cast.is_some(),
+        "refused cleanup remains owned for shutdown"
+    );
+    assert_eq!(
+        requests.request_cleanup_state(requester, request),
+        Ok(RequestCleanupState::CancellationRequested {
+            reason: crate::CancellationReason::RequesterCancelled,
+            presented: true,
+        })
+    );
+    let machines = Arc::clone(behavior.environment.runner.machines_for_test());
+    let checkout = machines
+        .checkout_run(behavior.descriptor.placement().session)
+        .unwrap();
+    let terminal = ActorTerminal::new(ActorExitKind::Failed, "cancellation cleanup refused");
+    let (_, realm) = behavior
+        .shutdown_components(
+            &owner.kernel,
+            &terminal,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(1),
+        )
+        .await;
+    assert!(matches!(
+        realm,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    assert_eq!(
+        requests.observe_response(requester, request),
+        Ok(ResponseObservation::Unavailable(
+            ResponseFailure::TargetFailed(terminal.summary)
+        ))
+    );
+    drop(checkout);
+    drop(behavior);
+    owner.finish().await;
+}
