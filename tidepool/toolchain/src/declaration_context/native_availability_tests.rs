@@ -361,7 +361,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             &[left_proof, right_proof],
         ),
         Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })
+            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                if artifact == native_entry.descriptor.id)
     ));
 }
 
