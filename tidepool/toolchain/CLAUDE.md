@@ -237,19 +237,29 @@ all retained artifacts. Temporary private issuance must restore the caller's
 namespace and executable roots while retaining the exact dependency bindings.
 
 Resolve carried selections through the owner's preferred-input path before
-deriving fallbacks from current executable roots. Appending the carried proof
-after deriving a fallback retains two choices; it does not replace the fallback.
-Exercise different carried and currently selected bindings for the same original
-through private issuance and request preparation. Include duplicate carried
-proofs, absence of a carried proof, and genuinely conflicting explicit proofs.
-An inventory-only test cannot establish this downstream preference contract.
+deriving fallbacks from current executable roots. Classify a supplied proof using
+its own carrier and group graph against the selected canonical binding. Broader
+custody cannot supply missing groups or veto an exact proof. Ambient discovery
+belongs only to the absence of a supplied or selected proof.
+
+Compiler transport combines authenticated body availability while retaining each
+offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct
+issuance scopes; transport neither selects nor collapses those bindings. Full
+availability requires an individual offer's complete proof. Combining issued
+subsets cannot create Full. The inventory owns execution selection through exact
+root and carrier choices, and refuses any remaining demand ambiguity.
 
 Changes here need a history crossing offer, dependent-product admission, private
-handoff and subsequent compilation. Cover full availability with no selected
-groups, valid subset imports, unavailable dependencies and independently issued
-bindings with equal payloads. Check both acceptance and unchanged executable
-demand, plus refusal when only the required authority is removed. Run the owning
-toolchain test target as well as a real actor/compiler consumer on the join.
+handoff and subsequent compilation. Carry independently issued overlapping
+closures through transport, source selection and target admission. Cover equal
+payloads with distinct carrier or group scopes, repeated proofs, reversed joins,
+Full with no demand, and divergent carried availability and selected demand.
+Check exact scoped execution and refusal of unqualified ambiguous demand,
+unavailable dependencies and conflicting selected products or interfaces. Run
+the owning toolchain target and a real actor/compiler consumer on the join.
+
+Fixture imports read exact binder identities from authenticated original-group
+definitions. Ordinals and naming patterns do not issue binder identity.
 
 ## Execution failure diagnostics
 
