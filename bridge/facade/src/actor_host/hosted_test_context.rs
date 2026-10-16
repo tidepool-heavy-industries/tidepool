@@ -1309,7 +1309,7 @@ impl HostedTestRuntime {
                     | harness::turn::JobOutput::CancelledWithReceipt(Err(error)),
                 )) => Some(error.message().chars().take(2048).collect::<String>()),
                 Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(error))) => {
-                    Some(error.chars().take(2048).collect::<String>())
+                    Some(error.message().chars().take(2048).collect::<String>())
                 }
                 Ok(Some(
                     harness::turn::JobOutput::Completed(Ok(value))
@@ -2245,6 +2245,7 @@ pub(super) fn committed_display_response_fixture(text: &str) -> serde_json::Valu
         total: 1,
         publication: None,
         items: vec![WorkbenchItemReceipt {
+            presentation: None,
             index: 0,
             kind: None,
             span: None,

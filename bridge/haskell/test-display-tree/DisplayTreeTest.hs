@@ -7,6 +7,7 @@
 module Main where
 
 import Test.Tasty.QuickCheck (testProperty, NonNegative(..))
+import qualified Tidepool.Aeson.Value as Json
 import Tidepool.Source
 import Tidepool.Text.Navigation
 import FormViewTest (formViewTests)
@@ -25,7 +26,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "display-tree"
-  [ testProperty "retained literal locations agree with independent String suffix oracle" literalSearchProperty
+  [ testCase "canonicalJsonRetainsStructuralExpansion" canonicalJsonRetainsStructuralExpansion
+  , testProperty "retained literal locations agree with independent String suffix oracle" literalSearchProperty
   , testCase "retainedTextPreservesNewlinesAndBoundsHugeLine" retainedTextPreservesNewlinesAndBoundsHugeLine
   , testProperty "source windows agree with independent String line addresses" sourceWindowProperty
   , testCase "sourceWindowsRetainRevisionAndLineAddresses" sourceWindowsRetainRevisionAndLineAddresses
@@ -492,3 +494,13 @@ retainedTextPreservesNewlinesAndBoundsHugeLine = do
     Right matches -> do
       assertEqual "overlapping unicode matches" [(100000,100002),(100001,100003)] (occurrenceLocations matches)
       assertTrue "contexts bounded independently of line size" (all ((<= 6) . Text.length . sliceText) (occurrenceContexts matches))
+
+canonicalJsonRetainsStructuralExpansion :: IO ()
+canonicalJsonRetainsStructuralExpansion = do
+  let source = Json.object ["semantic" Json..= Text.replicate 1000 "λ\n", "ready" Json..= True]
+      tree = displayTree source
+      state = newDisplayStateWithNotice 64 tree
+      complete = renderAll 128 tree
+  assertEqual "JSON has an ordinary structural renderer" False (Text.isInfixOf "<opaque>" complete)
+  assertEqual "large JSON keeps resumable detail" False (null (displayStateKeys state))
+  assertEqual "the selected page stays bounded" True (Text.length (displayStateText state) <= 64)

@@ -1635,6 +1635,7 @@ fn unconfirmed_invocation_cleanup_preserves_committed_reply_and_receipts() {
         ..Default::default()
     };
     let receipt = WorkbenchItemReceipt {
+        presentation: None,
         index: 0,
         kind: None,
         span: None,

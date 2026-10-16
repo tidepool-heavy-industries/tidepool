@@ -97,6 +97,18 @@ pub fn agent_tools() -> Effect {
                 handling: HandlingClass::Actor,
             },
             Verb {
+                ctor: "AgentToolsPublishResultWith",
+                method: "agent_tools_publish_result_with",
+                args: vec![Arg {
+                    name: "result",
+                    ty: HsType::Value,
+                    rust: RustBinding::HaskellValue,
+                }],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
+            Verb {
                 ctor: "AgentToolsAwaitWith",
                 method: "agent_tools_await_with",
                 args: vec![

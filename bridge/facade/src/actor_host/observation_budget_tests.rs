@@ -372,3 +372,53 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
     );
 })).await;
 }
+
+#[tokio::test]
+async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_reexecution() {
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                include_str!("result_retention_agent_spec.hs"),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["AgentSpec".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        for name in ["throwing", "oversized"] {
+            let policy = campaign.root_installation.policy.clone();
+            let mut running = tokio::spawn(async move {
+                dispatch_structured_tool(policy.as_ref(), name, serde_json::json!("input")).await
+            });
+            let expected = "canonical semantic result λ".repeat(8000);
+            let backend = TestCommands::completed(&expected);
+            tokio::select! {
+                request = backend_request(campaign) => request.supply(Ok(backend.clone())),
+                result = &mut running => panic!("handler ended before its effect: {result:?}"),
+            }
+            let response = running.await.unwrap();
+            assert_eq!(response["status"], "committed", "{response}");
+            assert_eq!(response["items"][0]["value"], expected);
+            assert_eq!(response["items"][0]["presentation"]["status"], "failed");
+            assert!(response["items"][0]["output"].as_str().unwrap().len() < 4096);
+            assert_eq!(backend.executions(), 1);
+        }
+    })).await;
+}

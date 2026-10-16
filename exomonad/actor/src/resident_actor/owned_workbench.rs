@@ -1266,6 +1266,7 @@ where
                         KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Committed,
                             vec![WorkbenchItemReceipt {
+                                presentation: None,
                                 diagnostics: Vec::new(),
                                 index: 0,
                                 kind: None,

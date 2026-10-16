@@ -3122,6 +3122,7 @@ pub(crate) fn tool_control_reply(
             status: tidepool_runtime::session::WorkbenchRunStatus::Committed,
             summary: None,
             items: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                presentation: None,
                 index: 0,
                 kind: None,
                 span: None,

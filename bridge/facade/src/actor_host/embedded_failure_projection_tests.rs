@@ -22,6 +22,7 @@ fn origin() -> OperationId {
 
 fn receipt(index: usize, output: String, dispositions: &[Disposition]) -> WorkbenchItemReceipt {
     WorkbenchItemReceipt {
+        presentation: None,
         index,
         kind: None,
         span: None,
@@ -348,6 +349,7 @@ fn unconfirmed_cancellation_keeps_its_kind_and_bounds_retained_error_output() {
     let JobOutput::CancellationUnconfirmed(message) = output else {
         panic!("projection must preserve unconfirmed cancellation");
     };
+    let message = message.message();
     assert!(message.len() <= TOOL_ERROR_MESSAGE_BYTE_BUDGET);
     assert!(message.contains("native cleanup remains unconfirmed"));
     assert!(message.contains("original-call"));

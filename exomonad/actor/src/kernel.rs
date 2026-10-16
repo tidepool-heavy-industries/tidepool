@@ -1496,6 +1496,7 @@ mod tests {
         let failure = KernelWorkbenchFailure {
             actor: ActorRef::first(crate::ActorId(7)),
             receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                presentation: None,
                 diagnostics: Vec::new(),
                 index: 0,
                 kind: None,
@@ -1532,6 +1533,7 @@ mod tests {
         };
         let receipts = (0..3)
             .map(|index| WorkbenchItemReceipt {
+                presentation: None,
                 index,
                 kind: None,
                 span: None,

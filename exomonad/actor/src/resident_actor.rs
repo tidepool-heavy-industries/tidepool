@@ -506,6 +506,7 @@ struct ResidentEnvironment<H, O> {
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
     conversation_reader: Option<crate::ConversationReader>,
+    result_reader: Option<crate::ResultInspectionReader>,
     usage_pointers: crate::UsagePointerTable,
     recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
@@ -532,6 +533,7 @@ impl<H, O> ResidentEnvironment<H, O> {
             form_registry: Arc::new(Mutex::new(Default::default())),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
+            result_reader: None,
             usage_pointers: crate::UsagePointerTable::default(),
             recovery: None,
         }
@@ -2336,6 +2338,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             form_registry: self.form_registry.clone(),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
+            result_reader: self.result_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
@@ -2603,6 +2606,7 @@ fn workbench_failure_after_operations(
     let mut receipts = completed.to_vec();
     if !operations.is_empty() || failure_layer.is_some() || !recovered_bindings.is_empty() {
         receipts.push(WorkbenchItemReceipt {
+            presentation: None,
             diagnostics: Vec::new(),
             index: failed_index,
             kind: None,
@@ -2666,6 +2670,7 @@ fn workbench_failure_after_unit(
         Some(index) => index,
         None => {
             failure.receipts.push(WorkbenchItemReceipt {
+                presentation: None,
                 diagnostics: Vec::new(),
                 index: failed_index,
                 kind: None,
@@ -2888,6 +2893,7 @@ struct WorkbenchUnitExecution<'a> {
     display_remaining: &'a mut usize,
     command_output: &'a mut Vec<String>,
     recovered_bindings: &'a mut Vec<String>,
+    semantic_value: &'a mut Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -3309,6 +3315,8 @@ impl WorkbenchFragmentExecution {
 
 #[derive(Default)]
 struct WorkbenchUnitState {
+    semantic_value: Option<serde_json::Value>,
+    presentation: Option<tidepool_runtime::session::WorkbenchPresentationOutcome>,
     effect_ordinal: usize,
     operations: Vec<WorkbenchOperationReceipt>,
     command_output: Vec<String>,
@@ -6221,6 +6229,19 @@ where
                     .runner
                     .application_workbench()
                     .resume_structured_introspection(context.clone(), continuation, query, kind)
+                    .await
+            }),
+            ResidentActorBoundary::InspectResult {
+                continuation,
+                reference,
+            } => Box::pin(async move {
+                let outcome = match environment.result_reader.clone() {
+                    Some(reader) => reader(context.actor, reference).await,
+                    None => Err(tidepool_bridge_effects::RfResultError::ResultUnbound),
+                };
+                environment
+                    .runner
+                    .resume_value(context, continuation, outcome)
                     .await
             }),
             ResidentActorBoundary::ReflectConversation {
@@ -9627,6 +9648,49 @@ where
                                 boundary.operation(),
                             )));
                         }
+                        if let ResidentActorBoundary::ScopeResumed { outcome } = boundary {
+                            current.outcome = Some(outcome);
+                            continue;
+                        }
+                        if let ResidentActorBoundary::ToolResultPublication {
+                            continuation,
+                            value,
+                        } = boundary
+                        {
+                            if !unit.named_tool
+                                || execution_state.after_tool_active
+                                || execution_state.initial_context
+                                || unit.semantic_value.is_some()
+                                || !current.scopes.is_empty()
+                                || current.execution.active_realm().is_some()
+                            {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "semantic result publication requires the original unpublished named-tool invocation".into()));
+                            }
+                            // The native structural value is complete before the same
+                            // continuation can demand its pure presenter.
+                            *unit.semantic_value = Some(value);
+                            let runner = self.environment.runner.clone();
+                            let context = context.clone();
+                            current.native_start =
+                                Some(owned_workbench::WorkbenchFragmentRequest::ScopeResume {
+                                    fragment: current
+                                        .fragment
+                                        .take()
+                                        .expect("publication retains its original fragment"),
+                                    operation: Box::pin(async move {
+                                        runner.resume_tool_presentation(context, continuation).await
+                                    }),
+                                });
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        if unit.semantic_value.is_some() {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "a named-tool presenter attempted an effect after semantic publication".into()));
+                        }
                         let effect_owner = match current
                             .scopes
                             .last()
@@ -10411,6 +10475,7 @@ where
                             display_remaining: &mut display_remaining,
                             command_output: &mut command_output,
                             recovered_bindings: &mut recovered_bindings,
+                            semantic_value: &mut None,
                         },
                     )
                     .await?
@@ -10568,6 +10633,7 @@ where
                     workbench_response(
                         WorkbenchRunStatus::Committed,
                         vec![WorkbenchItemReceipt {
+                            presentation: None,
                             diagnostics: Vec::new(),
                             index: 0,
                             kind: None,
@@ -10658,6 +10724,7 @@ where
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
                                     recovered_bindings: &mut cursor.unit.recovered_bindings,
+                                    semantic_value: &mut cursor.unit.semantic_value,
                                 },
                             )
                             .await
@@ -10852,6 +10919,7 @@ where
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
                                     recovered_bindings: &mut cursor.unit.recovered_bindings,
+                                    semantic_value: &mut cursor.unit.semantic_value,
                                 },
                             )
                             .await
@@ -10865,6 +10933,18 @@ where
                             }
                             Ok(FragmentAdvance::ParkGreen) => {
                                 return Ok(WorkbenchRunAdvance::ParkGreen);
+                            }
+                            Err(source)
+                                if cursor.unit.semantic_value.is_some()
+                                    && source.is_tool_presentation_failure() =>
+                            {
+                                let detail =
+                                    crate::bound_workbench_display(&source.to_string(), 2048);
+                                cursor.unit.presentation = Some(tidepool_runtime::session::WorkbenchPresentationOutcome::Failed { detail });
+                                ResidentWorkbenchStep::Committed {
+                                    output: "Tool completed; its presentation failed. Inspect the retained result.".into(),
+                                    value: None, warnings: Vec::new(), installed_bindings: Vec::new(),
+                                }
                             }
                             Err(source) => {
                                 let mut failure = workbench_failure_after_unit(
@@ -10901,6 +10981,22 @@ where
                         warnings,
                         installed_bindings,
                     } => {
+                        if cursor.resident_tool
+                            && !effects.initial_context
+                            && cursor.unit.semantic_value.is_none()
+                        {
+                            return Err(workbench_failure_after_unit(
+                                &cursor.receipts,
+                                cursor.index,
+                                request.items.len(),
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "named tool completed without publishing its semantic result"
+                                        .into(),
+                                ),
+                                std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
+                            ));
+                        }
                         let mut warnings = warnings;
                         let (checked_warnings, diagnostics) = cursor
                             .cell_check
@@ -10948,6 +11044,7 @@ where
                         };
                         let call = hosted_call.or(cell_call);
                         let mut receipt = WorkbenchItemReceipt {
+                            presentation: None,
                             diagnostics,
                             index: cursor.index,
                             kind: None,
@@ -10955,13 +11052,18 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
-                            value: value.clone(),
+                            value: cursor.unit.semantic_value.clone().or(value.clone()),
                             warnings,
                             installed_bindings,
                             operations: Vec::new(),
                             terminal_transfer: None,
                             failure_layer: None,
                         };
+                        if cursor.unit.semantic_value.is_some() {
+                            receipt.presentation = Some(cursor.unit.presentation.take().unwrap_or(
+                                tidepool_runtime::session::WorkbenchPresentationOutcome::Published,
+                            ));
+                        }
                         if let Some(call) = call {
                             if let Some(handler) = installed_tools
                                 .as_ref()
@@ -11030,6 +11132,7 @@ where
                         );
 
                         let mut failure_receipt = WorkbenchItemReceipt {
+                            presentation: None,
                             diagnostics,
                             index: cursor.index,
                             kind: None,
@@ -11100,6 +11203,7 @@ where
                             )
                         })?;
                         let mut receipt = WorkbenchItemReceipt {
+                            presentation: None,
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -11229,6 +11333,7 @@ where
                             AcceptedTerminalKind::Cancellation,
                         );
                         let mut receipt = WorkbenchItemReceipt {
+                            presentation: None,
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -11285,8 +11390,43 @@ where
         &mut self,
         execution_state: &WorkbenchExecutionState,
         kernel: &KernelContext,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+        mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> WorkbenchFinalization {
+        if let (Err(failure), Some(value)) =
+            (&mut result, &execution_state.cursor.unit.semantic_value)
+        {
+            let index = execution_state.cursor.index;
+            if !failure
+                .receipts
+                .iter()
+                .any(|receipt| receipt.index == index)
+            {
+                failure.receipts.push(WorkbenchItemReceipt {
+                    presentation: None,
+                    index,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Diagnostic,
+                    output: "The handler completed; presentation or cleanup did not finish.".into(),
+                    value: None,
+                    diagnostics: Vec::new(),
+                    failure_layer: resident_actor_failure_layer(&failure.source),
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: execution_state.cursor.unit.operations.clone(),
+                    terminal_transfer: None,
+                });
+            }
+            let receipt = failure
+                .receipts
+                .iter_mut()
+                .find(|receipt| receipt.index == index)
+                .expect("captured result has one owning receipt");
+            receipt.value = Some(value.clone());
+            receipt.presentation =
+                Some(tidepool_runtime::session::WorkbenchPresentationOutcome::Interrupted);
+        }
         let context = execution_state.effects.context.clone();
         let checkpoint_boundary = execution_state.request.checkpoint_boundary().cloned();
         execution_state.effects.invocation_work.close();
@@ -12709,6 +12849,7 @@ where
                 return Ok(KernelStep::Continue(workbench_response(
                     WorkbenchRunStatus::Committed,
                     vec![WorkbenchItemReceipt {
+                        presentation: None,
                         index: 0,
                         kind: None,
                         span: None,
@@ -14310,8 +14451,14 @@ where
             .watch_observed_since(owner, watch, occurred_at_unix_ms)
     }
 
-    /// Install the host's reader for an actor's own conversation. Without one,
-    /// `reflect` reports every context unbound rather than reading anything.
+    /// Install exact canonical result inspection under the caller's conversation.
+    #[must_use]
+    pub fn with_result_inspection_reader(mut self, reader: crate::ResultInspectionReader) -> Self {
+        self.environment.result_reader = Some(reader);
+        self
+    }
+
+    /// Install the host's reader for the caller's own conversation.
     #[must_use]
     pub fn with_conversation_reader(mut self, reader: crate::ConversationReader) -> Self {
         self.environment.conversation_reader = Some(reader);
@@ -15297,6 +15444,7 @@ fn cell_check_rejection(
     let total = checked.map_or(1, |analysis| analysis.len().max(1));
     let mut items = (0..total)
         .map(|index| WorkbenchItemReceipt {
+            presentation: None,
             diagnostics: Vec::new(),
             index,
             kind: None,
@@ -15473,6 +15621,7 @@ fn workbench_response(
     let recorded_through = items.last().map_or(0, |item| item.index + 1);
     items.extend((first_not_run.max(recorded_through)..total).map(|index| {
         WorkbenchItemReceipt {
+            presentation: None,
             diagnostics: Vec::new(),
             index,
             kind: cell_check.and_then(|checked| {
@@ -15774,6 +15923,7 @@ mod tests {
                 message: "authored error λ".into(),
             };
             let original: Vec<_> = (0..copies).map(|position| WorkbenchItemReceipt {
+                presentation: None,
                 diagnostics: vec![diagnostic.clone()],
                 index: 1 + position * 3,
                 kind: None, span: None, source_items: Vec::new(),
@@ -15947,6 +16097,7 @@ mod tests {
     #[test]
     fn failed_checkpoint_cleanup_keeps_original_receipts_and_cancellation() {
         let receipt = WorkbenchItemReceipt {
+            presentation: None,
             diagnostics: Vec::new(),
             index: 2,
             kind: None,
@@ -16358,6 +16509,7 @@ mod tests {
             workbench_response(
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
+                    presentation: None,
                     diagnostics: Vec::new(),
                     failure_layer: None,
                     index: 0,
@@ -17113,6 +17265,7 @@ mod tests {
         }
         .into();
         let committed = WorkbenchItemReceipt {
+            presentation: None,
             diagnostics: Vec::new(),
             index: 0,
             kind: None,
@@ -17132,6 +17285,7 @@ mod tests {
             vec![
                 committed.clone(),
                 WorkbenchItemReceipt {
+                    presentation: None,
                     diagnostics: Vec::new(),
                     index: 1,
                     kind: None,
@@ -17229,6 +17383,7 @@ mod tests {
         let response = workbench_response(
             WorkbenchRunStatus::Committed,
             vec![WorkbenchItemReceipt {
+                presentation: None,
                 diagnostics,
                 index: 0,
                 kind: None,

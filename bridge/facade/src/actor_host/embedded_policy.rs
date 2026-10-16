@@ -67,6 +67,13 @@ impl EmbeddedPolicyInstallation {
         self.policy.abort_boxed(boundary)
     }
 
+    pub(super) fn retained_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
+        self.policy.retained_operation(context)
+    }
+
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
         let request_activation = policy
@@ -210,7 +217,10 @@ impl EmbeddedPolicySnapshot {
             context_binding,
         );
         Box::pin(async move {
-            project_model_result(future.await?, &context).map_err(ResidentToolError::Encoding)
+            future
+                .await?
+                .into_json()
+                .map_err(ResidentToolError::Encoding)
         })
     }
 
@@ -273,130 +283,101 @@ impl EmbeddedPolicySnapshot {
     }
 }
 
-// This allowance bounds semantic data exposed to one model response, separately
-// from the actor's equally sized presentation allowance: structured data cannot
-// bypass the model output policy. Native receipts and afterTool retain
-// the complete value. Failed candidates leave room for later useful small values.
-const MODEL_SEMANTIC_VALUE_BYTE_BUDGET: usize = 28 * 1024;
-
-fn bounded_model_value(
-    value: &Value,
-    budget: usize,
-) -> Result<Option<(Value, usize)>, serde_json::Error> {
-    struct Bytes {
-        written: usize,
-        budget: usize,
-        exhausted: bool,
+pub(super) fn project_model_response(
+    mut response: tidepool_runtime::session::WorkbenchResponse,
+    operation: Value,
+) -> Result<Value, serde_json::Error> {
+    for item in &mut response.items {
+        item.value = None;
     }
-    impl std::io::Write for Bytes {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.budget.saturating_sub(self.written) {
-                self.exhausted = true;
-                return Err(std::io::Error::other(
-                    "model semantic value allowance exhausted",
-                ));
-            }
-            self.written += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut bytes = Bytes {
-        written: 0,
-        budget,
-        exhausted: false,
-    };
-    match serde_json::to_writer(&mut bytes, value) {
-        Ok(()) => Ok(Some((value.clone(), bytes.written))),
-        Err(_) if bytes.exhausted => Ok(None),
-        Err(error) => Err(error),
-    }
+    let value = serde_json::to_value(response)?;
+    Ok(project_model_json(value.clone(), operation).unwrap_or(value))
 }
 
-fn project_model_result(
-    response: exomonad_actor::ResidentToolResponse,
-    context: &ToolInvocationContext,
-) -> Result<Value, serde_json::Error> {
-    use tidepool_runtime::session::{
-        WorkbenchDisplayPublication, WorkbenchItemStatus, WorkbenchPublicationOutcome,
-        WorkbenchRunStatus,
-    };
-    let exomonad_actor::ResidentToolResponse::Workbench(mut response) = response else {
-        return response.into_json();
-    };
-    let successful = matches!(response.status, WorkbenchRunStatus::Committed)
-        && matches!(
-            response.publication,
-            Some(WorkbenchPublicationOutcome::Published { .. })
-        );
-    // Move semantic values out before serializing the response: serializing the
-    // full response first would allocate every oversized value just to delete it.
-    let values: Vec<_> = response
-        .items
-        .iter_mut()
-        .map(|item| item.value.take())
-        .collect();
-    let mut projected = serde_json::to_value(&response)?;
-    let mut remaining = MODEL_SEMANTIC_VALUE_BYTE_BUDGET;
-    for (value, encoded) in values
-        .into_iter()
-        .zip(projected["items"].as_array_mut().unwrap())
+/// Ordinary model output follows the authored presentation. The exact operation
+/// keeps canonical semantic JSON in Store, independently of this projection.
+pub(super) fn project_model_json(mut projected: Value, operation: Value) -> Option<Value> {
+    let successful =
+        projected["status"] == "committed" && projected["publication"]["status"] == "published";
+    let is_receipt = projected.get("items").is_some()
+        || projected.get("result").is_some()
+        || projected.get("receipt").is_some();
+    if !is_receipt {
+        return None;
+    }
+    if let Some(fields) = projected.as_object_mut() {
+        fields.remove("result");
+    }
+    if let Some(receipt) = projected.get_mut("receipt") {
+        if let Some(compact) = project_model_json(receipt.clone(), operation.clone()) {
+            *receipt = compact;
+        }
+    }
+    if let Some(items) = projected
+        .get_mut("failure")
+        .and_then(|failure| failure.get_mut("items"))
+        .and_then(Value::as_array_mut)
     {
-        let Some(value) = value else { continue };
-        match bounded_model_value(&value, remaining)? {
-            Some((value, bytes)) => {
-                encoded["value"] = value;
-                remaining -= bytes;
-            }
-            None => {
-                encoded["valueOmitted"] = json!({
-                    "reason": "modelBudget",
-                    "limitBytes": MODEL_SEMANTIC_VALUE_BYTE_BUDGET,
-                    "nativeReceipt": {"availability": "nativeOnly", "operation": context},
-                });
+        for item in items {
+            if let Some(fields) = item.as_object_mut() {
+                fields.remove("value");
             }
         }
     }
-    if successful {
-        let Some(items) = projected.get_mut("items").and_then(Value::as_array_mut) else {
-            return Ok(projected);
+    for (position, item) in projected
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let Some(fields) = item.as_object_mut() else {
+            continue;
         };
-        for (position, (item, encoded)) in response.items.iter().zip(items).enumerate() {
-            if item.status != WorkbenchItemStatus::Committed {
-                continue;
-            }
-            for (operation, encoded) in item.operations.iter().zip(
-                encoded
-                    .get_mut("operations")
-                    .and_then(Value::as_array_mut)
-                    .into_iter()
-                    .flatten(),
-            ) {
-                if matches!(
-                    operation.display_publication,
-                    Some(WorkbenchDisplayPublication::Published { .. })
-                ) && operation
-                    .display
-                    .as_ref()
-                    .is_some_and(|display| item.output.contains(&display.text))
-                {
-                    // Settlement appends exact pages, but afterTool may prune item.output.
-                    // Reference it only while the entire page remains in the final output.
-                    if let Some(display) = encoded.get_mut("display").and_then(Value::as_object_mut)
-                    {
-                        display.remove("text");
-                        display.insert(
-                            "textSource".into(),
-                            json!(format!("/items/{position}/output")),
-                        );
+        fields.remove("value");
+        let output = fields
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if let Some(operations) = fields.get_mut("operations").and_then(Value::as_array_mut) {
+            for operation in operations {
+                let published = operation["displayPublication"]["status"] == "published";
+                if let Some(display) = operation.get_mut("display").and_then(Value::as_object_mut) {
+                    let in_output = display
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| output.contains(text));
+                    if display.remove("text").is_some() {
+                        if successful && published && in_output {
+                            display.insert(
+                                "textSource".into(),
+                                json!(format!("/items/{position}/output")),
+                            );
+                        } else {
+                            display.insert("textOmitted".into(), json!(true));
+                        }
                     }
                 }
             }
         }
     }
-    Ok(projected)
+    projected["resultRef"] = if operation.get("origin").is_some() {
+        json!({"resultRun":operation["origin"]["run"],"resultActor":operation["origin"]["actor"],
+            "resultIncarnation":operation["origin"]["incarnation"],"resultRequest":operation["request"],"resultCall":operation["call"]})
+    } else {
+        operation
+    };
+    Some(projected)
+}
+
+#[cfg(test)]
+fn project_model_result(
+    response: exomonad_actor::ResidentToolResponse,
+    context: &ToolInvocationContext,
+) -> Result<Value, serde_json::Error> {
+    let value = response.into_json()?;
+    Ok(project_model_json(value.clone(), serde_json::to_value(context)?).unwrap_or(value))
 }
 
 /// Validate the transport contract before a generation can be published.
@@ -483,6 +464,7 @@ mod tests {
                 bindings: vec!["observed".into()],
             }),
             items: vec![WorkbenchItemReceipt {
+                presentation: None,
                 index: 0,
                 kind: None,
                 span: None,
@@ -522,231 +504,53 @@ mod tests {
     }
 
     #[test]
-    fn model_success_projects_display_content_once_and_preserves_receipt_facts() {
-        use tidepool_runtime::session::*;
-        let mut response = display_response();
-        let mut declaration = response.items[0].clone();
-        declaration.index = 1;
-        declaration.kind = Some(WorkbenchCellItemKind::Declaration);
-        declaration.output = "accepted declaration".into();
-        declaration.operations.clear();
-        response.items.push(declaration);
-        response.next_index = 2;
-        response.total = 2;
-        let page = WorkbenchDisplayPublicationIdentity {
-            display: (1, 2, 3),
-            page_ordinal: 1,
-        };
-        let full = serde_json::to_value(&response).unwrap();
-        assert!(full["items"][1].get("operations").is_none());
+    fn model_presentation_keeps_published_display_references_and_pruned_pages_canonical() {
+        let response = display_response();
         let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
             response.clone(),
         ))
         .unwrap();
-        let mut expected = full.clone();
-        expected["items"][0]["operations"][0]["display"]
-            .as_object_mut()
-            .unwrap()
-            .remove("text");
-        expected["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
-        assert_eq!(projected, expected);
-        assert!(projected["items"][1].get("operations").is_none());
         assert_eq!(
-            full["items"][0]["operations"][0]["display"]["text"],
-            "observed value"
+            projected["items"][0]["operations"][0]["display"]["textSource"],
+            "/items/0/output"
         );
-
+        assert!(projected["items"][0]["operations"][0]["display"]
+            .get("text")
+            .is_none());
         let mut pruned = response.clone();
         pruned.items[0].output = "selected summary".into();
+        let projected =
+            project_model_result(exomonad_actor::ResidentToolResponse::Workbench(pruned)).unwrap();
+        assert_eq!(projected["items"][0]["output"], "selected summary");
         assert_eq!(
-            project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
-                pruned.clone()
-            ))
-            .unwrap(),
-            serde_json::to_value(pruned).unwrap()
+            projected["items"][0]["operations"][0]["display"]["textOmitted"],
+            true
         );
-
-        // Partial execution and uncertain publication retain the entire receipt.
-        for publication in [
-            WorkbenchPublicationOutcome::NotPublished {
-                reason: WorkbenchNotPublishedReason::Failed,
-            },
-            WorkbenchPublicationOutcome::RecoveryRequired {
-                detail: "publication uncertain".into(),
-            },
-        ] {
-            let mut partial = response.clone();
-            partial.publication = Some(publication);
-            assert_eq!(
-                project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
-                    partial.clone()
-                ))
-                .unwrap(),
-                serde_json::to_value(partial).unwrap()
-            );
-        }
-        let mut uncertain = response;
-        uncertain.items[0].operations[0].display_publication =
-            Some(WorkbenchDisplayPublication::Unconfirmed {
-                publication: page,
-                detail: "store outcome unknown".into(),
-            });
         assert_eq!(
-            project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
-                uncertain.clone()
-            ))
-            .unwrap(),
-            serde_json::to_value(uncertain).unwrap()
+            response.items[0].operations[0]
+                .display
+                .as_ref()
+                .unwrap()
+                .text,
+            "observed value"
         );
     }
 
     #[test]
-    fn semantic_projection_distinguishes_absent_null_and_omitted_values() {
+    fn authored_presentation_omits_all_semantics_but_keeps_canonical_input() {
         let mut response = display_response();
-        let template = response.items[0].clone();
-        let values = [
-            None,
-            Some(Value::Null),
-            Some(json!("λ".repeat(70000))),
-            Some(json!({"answer":42})),
-        ];
-        response.items = values
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let mut item = template.clone();
-                item.index = index;
-                item.value = value.clone();
-                item
-            })
-            .collect();
-        let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
-            response.clone(),
-        ))
-        .unwrap();
-        let items = projected["items"].as_array().unwrap();
-        assert!(items[0].get("value").is_none());
-        assert!(items[0].get("valueOmitted").is_none());
-        assert_eq!(items[1].get("value"), Some(&Value::Null));
-        assert!(items[1].get("valueOmitted").is_none());
-        assert!(items[2].get("value").is_none());
-        assert_eq!(
-            items[2]["valueOmitted"],
-            json!({
-                "reason":"modelBudget", "limitBytes":MODEL_SEMANTIC_VALUE_BYTE_BUDGET,
-            "nativeReceipt":{"availability":"nativeOnly","operation":context()},
-            })
-        );
-        assert_eq!(
-            items[3]["value"],
-            json!({"answer":42}),
-            "failed serialization must not spend the allowance"
-        );
-        assert_eq!(response.items[2].value.as_ref(), values[2].as_ref());
-        for item in items {
-            assert_eq!(item["output"], template.output);
-        }
-    }
-
-    #[test]
-    fn semantic_projection_respects_complete_utf8_and_json_boundaries() {
-        let value = json!({"text":"λ🦀\n\"\\"});
-        let encoded = serde_json::to_vec(&value).unwrap();
-        for limit in 0..=encoded.len() + 1 {
-            let selected = bounded_model_value(&value, limit).unwrap();
-            if limit < encoded.len() {
-                assert!(selected.is_none(), "partial JSON at limit {limit}");
-            } else {
-                assert_eq!(selected, Some((value.clone(), encoded.len())));
-            }
-        }
-    }
-
-    #[test]
-    fn semantic_projection_keeps_small_deep_native_values_without_redecoding() {
-        let value = (0..192).fold(json!(42), |value, _| json!({"nested":value}));
-        let encoded = serde_json::to_vec(&value).unwrap();
-        assert!(encoded.len() < MODEL_SEMANTIC_VALUE_BYTE_BUDGET);
-        // Projection already has a typed Value; the text decoder's depth policy
-        // must not turn a completed native result into an observation failure.
-        assert!(serde_json::from_slice::<Value>(&encoded).is_err());
-        assert_eq!(
-            bounded_model_value(&value, MODEL_SEMANTIC_VALUE_BYTE_BUDGET).unwrap(),
-            Some((value, encoded.len()))
-        );
-    }
-
-    #[test]
-    fn semantic_projection_cannot_multiply_the_allowance_by_item_count() {
-        let mut response = display_response();
-        let value = json!("λ".repeat(256));
-        let bytes = serde_json::to_vec(&value).unwrap().len();
-        assert!(bytes < MODEL_SEMANTIC_VALUE_BYTE_BUDGET);
-        let mut item = response.items[0].clone();
-        item.value = Some(value.clone());
-        response.items = (0..128)
-            .map(|index| {
-                let mut item = item.clone();
-                item.index = index;
-                item
-            })
-            .collect();
+        response.items[0].value = Some(json!({"nested":"λ".repeat(40_000)}));
+        let canonical = response.clone();
         let projected =
             project_model_result(exomonad_actor::ResidentToolResponse::Workbench(response))
                 .unwrap();
-        let items = projected["items"].as_array().unwrap();
-        let kept = items
-            .iter()
-            .filter(|item| item.get("value").is_some())
-            .count();
-        assert_eq!(kept, MODEL_SEMANTIC_VALUE_BYTE_BUDGET / bytes);
-        assert!(kept < items.len());
-        for item in items {
-            if let Some(visible) = item.get("value") {
-                assert_eq!(visible, &value);
-                assert!(item.get("valueOmitted").is_none());
-            } else {
-                assert_eq!(item["valueOmitted"]["reason"], "modelBudget");
-            }
-        }
+        assert!(projected["items"][0].get("value").is_none());
+        assert!(projected.get("resultRef").is_some());
+        assert_eq!(projected["items"][0]["output"], canonical.items[0].output);
+        assert!(canonical.items[0].value.is_some());
     }
 
     proptest::proptest! {
-        #[test]
-        fn semantic_projection_uses_one_allowance_for_arbitrary_item_batches(
-            strings in proptest::collection::vec(proptest::option::of("(?s).{0,2048}"), 0..64),
-        ) {
-            let mut response = display_response();
-            let template = response.items[0].clone();
-            response.items = strings.iter().enumerate().map(|(index, value)| {
-                let mut item = template.clone();
-                item.index = index;
-                item.value = value.as_ref().map(|text| json!({"text":text}));
-                item
-            }).collect();
-            let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(response.clone())).unwrap();
-            let mut remaining = MODEL_SEMANTIC_VALUE_BYTE_BUDGET;
-            let mut visible_bytes = 0;
-            for (item, encoded) in response.items.iter().zip(projected["items"].as_array().unwrap()) {
-                if let Some(value) = &item.value {
-                    let bytes = serde_json::to_vec(value).unwrap().len();
-                    if bytes <= remaining {
-                        proptest::prop_assert_eq!(encoded.get("value"), Some(value));
-                        proptest::prop_assert!(encoded.get("valueOmitted").is_none());
-                        remaining -= bytes;
-                        visible_bytes += bytes;
-                    } else {
-                        proptest::prop_assert!(encoded.get("value").is_none());
-                        proptest::prop_assert_eq!(&encoded["valueOmitted"]["reason"], "modelBudget");
-                    }
-                } else {
-                    proptest::prop_assert!(encoded.get("value").is_none());
-                    proptest::prop_assert!(encoded.get("valueOmitted").is_none());
-                }
-            }
-            proptest::prop_assert!(visible_bytes <= MODEL_SEMANTIC_VALUE_BYTE_BUDGET);
-        }
-
         #[test]
         fn model_projection_preserves_arbitrary_display_values(
             texts in proptest::collection::vec("(?s).{0,128}", 2..8),
@@ -792,13 +596,13 @@ mod tests {
             for (ordinal, original) in response.items[0].operations.iter().enumerate() {
                 let encoded = &projected["items"][0]["operations"][ordinal];
                 let display = original.display.as_ref().unwrap();
-                // Resolve the model's reference or inline value, then verify full page reachability.
-                let visible = if let Some(pointer) = encoded["display"]["textSource"].as_str() {
-                    projected.pointer(pointer).and_then(Value::as_str).unwrap()
+                proptest::prop_assert!(encoded["display"].get("text").is_none());
+                if let Some(pointer) = encoded["display"]["textSource"].as_str() {
+                    let visible = projected.pointer(pointer).and_then(Value::as_str).unwrap();
+                    proptest::prop_assert!(visible.contains(&display.text));
                 } else {
-                    encoded["display"]["text"].as_str().unwrap()
-                };
-                proptest::prop_assert!(visible.contains(&display.text));
+                    proptest::prop_assert_eq!(&encoded["display"]["textOmitted"], &json!(true));
+                }
                 proptest::prop_assert_eq!(&encoded["id"], &serde_json::to_value(&original.id).unwrap());
                 proptest::prop_assert_eq!(&encoded["effect"], &json!(original.effect));
                 proptest::prop_assert_eq!(&encoded["disposition"], &serde_json::to_value(original.disposition).unwrap());

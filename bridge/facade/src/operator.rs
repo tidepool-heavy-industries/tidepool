@@ -1219,6 +1219,7 @@ mod artifact_tests {
             actor: ActorRef::first(ActorId(9)),
             receipts: (0..3)
                 .map(|index| WorkbenchItemReceipt {
+                    presentation: None,
                     index,
                     kind: None,
                     span: None,

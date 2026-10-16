@@ -910,6 +910,75 @@ impl HostActor for EmbeddedHostActor {
 
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
+        if let Some(canonical) = self
+            .store
+            .replay_output_operation(operation)
+            .map_err(|error| error.to_string())?
+        {
+            let has_native_receipts = canonical.0["output"]
+                .as_str()
+                .map(|text| {
+                    serde_json::from_str::<Value>(text)
+                        .map(|value| {
+                            value.get("items").is_some()
+                                || value.get("result").is_some()
+                                || value.get("receipt").is_some()
+                        })
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false);
+            if has_native_receipts
+                && canonical.0["type"] == "function_call_output"
+                && self
+                    .store
+                    .model_output_projection(operation)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            {
+                let context = embedded_invocation_context(&self.identity, operation)
+                    .map_err(|error| error.to_string())?;
+                let owner = self
+                    .installation
+                    .retained_operation(context)
+                    .map_err(|error| error.to_string())?;
+                let reply = owner
+                    .reply()
+                    .ok_or("native operation has no retained result for presentation")?;
+                let identity =
+                    serde_json::to_value(operation).map_err(|error| error.to_string())?;
+                let projected = match reply {
+                    Ok(response) => {
+                        super::embedded_policy::project_model_response(response, identity.clone())
+                            .map_err(|error| error.to_string())?
+                    }
+                    Err(failure) => {
+                        let failure = provider_tool_error(
+                            ResidentToolError::Invocation(failure),
+                            Some(operation),
+                        )
+                        .into_tool_failure();
+                        super::embedded_policy::project_model_json(
+                            failure.output_value(),
+                            identity.clone(),
+                        )
+                        .ok_or("native failure has no canonical presentation receipt")?
+                    }
+                };
+                let projected = match owner.terminal() {
+                    exomonad_actor::HostedOperationTerminal::Settled(
+                        WorkbenchCancellationOutcome::Cancelled { .. },
+                    ) => json!({"error":"job cancelled","receipt":projected}),
+                    exomonad_actor::HostedOperationTerminal::Settled(
+                        WorkbenchCancellationOutcome::Unconfirmed { .. }
+                        | WorkbenchCancellationOutcome::UnknownEvaluation { .. },
+                    ) => json!({"error":"cancellation unconfirmed","receipt":projected}),
+                    _ => projected,
+                };
+                self.store
+                    .publish_model_output_projection(operation, projected)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         self.installation
             .complete(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await
@@ -1614,6 +1683,21 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
     } else {
         ToolFailure::with_metadata(message, metadata)
     };
+    let failure = if let Some(invocation) = invocation.filter(|failure| {
+        failure
+            .receipts()
+            .iter()
+            .any(|receipt| receipt.value.is_some())
+    }) {
+        match serde_json::to_value(
+            json!({"items": invocation.receipts(), "publication": invocation.publication()}),
+        ) {
+            Ok(receipt) => failure.with_result_receipt(receipt),
+            Err(_) => failure,
+        }
+    } else {
+        failure
+    };
     ProviderError::Tool(failure)
 }
 
@@ -1658,6 +1742,29 @@ fn workbench_publication_context(
 
 #[async_trait::async_trait]
 impl Provider for EmbeddedDispatcher {
+    fn model_visible_item(
+        &self,
+        request: &harness::model::RequestId,
+        item: &harness::item::Item,
+    ) -> Result<Option<harness::provider::ModelVisibleItemCandidate>, ProviderError> {
+        let Some(call) = item.0.get("call_id").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        if !matches!(item.0["type"].as_str(), Some("function_call_output")) {
+            return Ok(None);
+        }
+        let Some(operation) = self
+            .store
+            .recorded_operation_for_request(request, &harness::model::CallId(call.into()))
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?
+        else {
+            return Ok(None);
+        };
+        self.store
+            .model_output_projection(&operation)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))
+    }
+
     fn request_activation(&self) -> Option<harness::provider::RequestActivation> {
         self.snapshot.request_activation()
     }
@@ -1843,7 +1950,7 @@ impl Provider for EmbeddedDispatcher {
                 };
                 if let Err(error) = finalized {
                     return unavailable_context_completion(JobOutput::CancellationUnconfirmed(
-                        bounded_tool_error_message(&error, operation.as_ref()),
+                        bounded_tool_error_message(&error, operation.as_ref()).into(),
                     ));
                 }
             }
@@ -1965,7 +2072,7 @@ impl CancellationOwner for EmbeddedCancellationOwner {
     ) -> CancellationAcknowledgment {
         let context = match embedded_invocation_context(&self.identity, operation) {
             Ok(context) => context,
-            Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
+            Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string().into()),
         };
         let cause = Self::native_cause(cause);
         match self.snapshot.cancel(context.clone(), cause).await {
@@ -1975,7 +2082,7 @@ impl CancellationOwner for EmbeddedCancellationOwner {
                         workbench_reply_receipt(reply, Some(operation)),
                     ),
                     Err(error) => CancellationAcknowledgment::Unconfirmed(
-                        bounded_tool_error_message(&error, Some(operation)),
+                        bounded_tool_error_message(&error, Some(operation)).into(),
                     ),
                 }
             }
@@ -1986,11 +2093,21 @@ impl CancellationOwner for EmbeddedCancellationOwner {
                 reply,
                 Some(operation),
             )),
-            Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
-            Err(error) => CancellationAcknowledgment::Unconfirmed(bounded_tool_error_message(
-                &error,
-                Some(operation),
-            )),
+            Ok(outcome) => {
+                let failure = match self.snapshot.retained_operation(context) {
+                    Ok(owner) => match owner.reply() {
+                        Some(reply) => workbench_reply_receipt(reply, Some(operation))
+                            .err()
+                            .unwrap_or_else(|| format!("{outcome:?}").into()),
+                        None => format!("{outcome:?}").into(),
+                    },
+                    Err(error) => bounded_tool_error_message(&error, Some(operation)).into(),
+                };
+                CancellationAcknowledgment::Unconfirmed(failure)
+            }
+            Err(error) => CancellationAcknowledgment::Unconfirmed(
+                bounded_tool_error_message(&error, Some(operation)).into(),
+            ),
         }
     }
 }
@@ -2029,10 +2146,14 @@ fn native_terminal_output(
             | WorkbenchCancellationOutcome::PublicationSettled { .. }
             | WorkbenchCancellationOutcome::NotSleeping { .. },
         ) => JobOutput::Completed(result),
-        Ok(outcome) => JobOutput::CancellationUnconfirmed(format!("{outcome:?}")),
-        Err(error) => {
-            JobOutput::CancellationUnconfirmed(bounded_tool_error_message(&error, operation))
-        }
+        Ok(outcome) => JobOutput::CancellationUnconfirmed(match result {
+            Err(failure) if failure.result_receipt().is_some() => failure,
+            _ => format!("{outcome:?}").into(),
+        }),
+        Err(error) => JobOutput::CancellationUnconfirmed(match result {
+            Err(failure) if failure.result_receipt().is_some() => failure,
+            _ => bounded_tool_error_message(&error, operation).into(),
+        }),
     }
 }
 
@@ -2331,6 +2452,7 @@ mod round_control_tests {
                     exomonad_actor::KernelWorkbenchFailure {
                         actor: ActorRef::first(exomonad_actor::ActorId(7)),
                         receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                            presentation: None,
                             index: 0,
                             kind: None,
                             span: None,

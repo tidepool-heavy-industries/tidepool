@@ -153,7 +153,7 @@ async fn assert_pending(host: &HostedTestRuntime, operation: &OperationId, phase
             }
             JobOutput::Interrupted => json!({"kind":"interrupted"}),
             JobOutput::CancellationUnconfirmed(error) => json!({
-                "kind":"cancellation_unconfirmed", "message":error.chars().take(512).collect::<String>(),
+                "kind":"cancellation_unconfirmed", "message":error.message().chars().take(512).collect::<String>(),
             }),
         };
         let store = host.runtime.store();

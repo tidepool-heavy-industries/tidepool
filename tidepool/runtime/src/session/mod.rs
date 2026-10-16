@@ -154,6 +154,7 @@ pub use resident::{
 
 pub use view::{hide_preamble_exports, HaskellTypeSource, SessionCompileView, SourceImports};
 
+pub use workbench::WorkbenchPresentationOutcome;
 pub use workbench::{
     classify_workbench_item, detect_hoisted_declaration_collision, escape_workbench_haskell_string,
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
