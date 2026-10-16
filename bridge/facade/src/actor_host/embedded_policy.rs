@@ -313,6 +313,9 @@ pub(super) fn project_model_json(mut projected: Value, operation: Value) -> Opti
             *receipt = compact;
         }
     }
+    if let Some(failure) = projected.get_mut("failure").and_then(Value::as_object_mut) {
+        failure.insert("retainedEvidence".into(), json!({"owner":"canonical operation output", "inspection":"inspectResult resultRef", "modelTool":true}));
+    }
     if let Some(items) = projected
         .get_mut("failure")
         .and_then(|failure| failure.get_mut("items"))

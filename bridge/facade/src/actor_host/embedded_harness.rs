@@ -1319,7 +1319,7 @@ impl EmbeddedDispatcher {
 
 const TOOL_ERROR_MESSAGE_BYTE_BUDGET: usize = 8192;
 const FAILURE_INSPECTION: &str =
-    "ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).terminal()";
+    "ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).reply()";
 
 /// Stop formatting at the transport boundary without first allocating the full
 /// diagnostic. Invocation summaries deliberately never format receipt outputs.
@@ -1429,7 +1429,7 @@ fn bounded_tool_error_message(
         .into_tool_failure()
         .message()
         .len();
-    const OMITTED: &str = "\n[Detail or receipt output omitted. Any retained native settlement evidence is for operator inspection; it is not a model-callable tool. Completed effects are not rolled back. Do not repeat effects to retrieve omitted evidence.]";
+    const OMITTED: &str = "\n[Detail or receipt output omitted. Completed effects are not rolled back. When a retained-result reference is issued, inspect it without repeating effects.]";
     let mut out = BoundedErrorMessage {
         text: String::new(),
         limit: TOOL_ERROR_MESSAGE_BYTE_BUDGET - OMITTED.len() - provider_framing_bytes,
@@ -1689,12 +1689,9 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
             .iter()
             .any(|receipt| receipt.value.is_some())
     }) {
-        match serde_json::to_value(
+        failure.with_result_receipt(
             json!({"items": invocation.receipts(), "publication": invocation.publication()}),
-        ) {
-            Ok(receipt) => failure.with_result_receipt(receipt),
-            Err(_) => failure,
-        }
+        )
     } else {
         failure
     };
