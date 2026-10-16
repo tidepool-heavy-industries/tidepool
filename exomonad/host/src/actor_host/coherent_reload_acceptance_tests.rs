@@ -330,6 +330,7 @@ fn configure_workshop_inventory(
 #[tokio::test(flavor = "multi_thread")]
 async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work() {
     let files = tempfile::tempdir().unwrap();
+    let host_trace = super::test_campaign::retain_campaign_trace(files.path());
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
@@ -403,6 +404,14 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 .await
                 .unwrap();
             assert_true_page(host, &round.settled_output("bind-a"));
+            assert!(
+                std::fs::read_to_string(&host_trace)
+                    .expect("retained host trace")
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .any(|row| row["fields"]["message"] == "call timing"),
+                "the real post-startup cell terminal must survive stdout truncation"
+            );
             let baseline = super::test_campaign::dispatch_status(old_request.as_ref(), "revisions").await;
             assert_eq!(baseline["status"], "committed");
             let observed_a = installation.runtime_observation.snapshot().source_drift.layer.current().expect("explicit baseline capture").sample.clone();

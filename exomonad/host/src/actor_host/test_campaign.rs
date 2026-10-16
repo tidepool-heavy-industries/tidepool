@@ -1193,6 +1193,20 @@ pub(super) fn ensure_campaign_tracing() {
     let _ = install_tracing();
 }
 
+/// Keep operation spans outside the runner's bounded stdout capture.
+pub(super) fn retain_campaign_trace(fallback: &std::path::Path) -> std::path::PathBuf {
+    let path = std::env::var_os("TIDEPOOL_TEST_TRACE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| fallback.to_path_buf())
+                .join("host.jsonl")
+        });
+    std::env::set_var("TIDEPOOL_TEST_TRACE", &path);
+    path
+}
+
 pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
     assert_eq!(response["status"], "committed", "{response}");
     let items = response["items"].as_array().unwrap();
@@ -2499,11 +2513,7 @@ mod tests {
 
     async fn applied_capture_retains_production_cell(profile: CampaignTraceProfile) {
         let directory = tempfile::tempdir().unwrap();
-        let path = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| directory.path().to_path_buf())
-            .join("host.jsonl");
-        std::env::set_var("TIDEPOOL_TEST_TRACE", &path);
+        let path = retain_campaign_trace(directory.path());
         std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", profile.name());
         let capture = install_tracing()
             .ok()
