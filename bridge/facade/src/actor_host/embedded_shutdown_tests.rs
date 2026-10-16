@@ -519,9 +519,7 @@ async fn driver_join_after_forest_settlement_preserves_execution_and_cleanup_out
         let authority = ActorWorktreeAuthority::new("shutdown-control", bindings);
         let (_sender, mut lifecycle) = mpsc::channel(1);
         let (lifecycle_projection, _projection) = embedded_projection::LifecycleSender::channel();
-        let (_forest, shutdown) = watch::channel(ApplicationShutdown::ForestSettled(
-            NativeRetirement::Preserve,
-        ));
+        let (_forest, shutdown) = watch::channel(ApplicationShutdown::ForestSettled);
         let mut waiters = HashMap::new();
         let mut notifications = JoinSet::new();
 

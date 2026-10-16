@@ -184,6 +184,75 @@ async fn custody_is_exact_and_released_only_after_last_owner() {
 }
 
 #[tokio::test]
+async fn replacement_transfers_workspace_without_old_guard_release() {
+    let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
+    let original = ActorRef::first(exomonad_actor::ActorId(901));
+    let successor = ActorRef::first(exomonad_actor::ActorId(902));
+    admission
+        .authority
+        .install_grant(original.into(), ActorWorktreeGrant::Repository);
+    let custody = admission
+        .prepare(original, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(original)
+        .unwrap();
+    let tree = admission.authority.bound_worktree(original.into()).unwrap();
+    let principal =
+        WorktreePrincipal::exact_actor("custody-test", successor.id.0, successor.incarnation.0);
+    let transferred = custody.transfer_to(successor).unwrap();
+    assert!(custody.transfer_to(successor).is_err());
+    assert!(admission
+        .authority
+        .bound_worktree(original.into())
+        .is_none());
+    assert_eq!(bindings.lock().active_for_agent(&principal), Some(&tree));
+    drop(custody);
+    assert_eq!(bindings.lock().active_for_agent(&principal), Some(&tree));
+    transferred.actor_stopped(&ActorTerminal::new(
+        ActorExitKind::Completed,
+        "replacement finished",
+    ));
+    drop(transferred);
+    assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn replacement_can_restore_original_workspace_owner_before_cutover() {
+    let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
+    let original = ActorRef::first(exomonad_actor::ActorId(905));
+    let successor = ActorRef::first(exomonad_actor::ActorId(906));
+    admission
+        .authority
+        .install_grant(original.into(), ActorWorktreeGrant::Repository);
+    let custody = admission
+        .prepare(original, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(original)
+        .unwrap();
+    let tree = admission.authority.bound_worktree(original.into()).unwrap();
+    let transferred = custody.transfer_to(successor).unwrap();
+    let restored = transferred.transfer_to(original).unwrap();
+    drop(transferred);
+    drop(custody);
+    assert_eq!(
+        admission.authority.bound_worktree(original.into()),
+        Some(tree.clone())
+    );
+    assert!(admission
+        .authority
+        .bound_worktree(successor.into())
+        .is_none());
+    restored.actor_stopped(&ActorTerminal::new(
+        ActorExitKind::Completed,
+        "original owner finished",
+    ));
+    drop(restored);
+    assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn custody_retains_binding_when_process_cleanup_is_uncertain() {
     let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
@@ -199,6 +268,9 @@ async fn custody_retains_binding_when_process_cleanup_is_uncertain() {
     let bound_tree = admission.authority.bound_worktree(actor.into()).unwrap();
     let backing = admission.manager.lookup(&bound_tree).unwrap().unwrap();
     custody.process_may_exist();
+    assert!(custody
+        .transfer_to(ActorRef::first(exomonad_actor::ActorId(8)))
+        .is_err());
     drop(custody);
     assert!(bindings
         .lock()

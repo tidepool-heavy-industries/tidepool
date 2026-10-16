@@ -1904,10 +1904,6 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         if message != Some(INTENTIONAL_COORDINATOR_FAILURE) {
             std::panic::resume_unwind(payload);
         }
-        assert!(owners_after_shutdown
-            .lock()
-            .values()
-            .all(|owner| owner.native_retirement == NativeRetirement::Preserve));
     } else if let Err(payload) = scenario_result {
         std::panic::resume_unwind(payload);
     }

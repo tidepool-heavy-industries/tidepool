@@ -11,10 +11,7 @@ use harness::{
 };
 
 #[cfg(test)]
-use harness::{
-    server::ClientCommand,
-    transport::{ResponsesProtocol, ResponsesRoute, TransportError},
-};
+use harness::transport::{ResponsesProtocol, ResponsesRoute, TransportError};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, watch},
@@ -938,35 +935,6 @@ where
             return Ok(());
         }
         lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-    }
-}
-
-#[cfg(test)]
-pub(super) async fn submit_browser_command(
-    command: QueuedCommand,
-    root: &harness::embedding::Conversation,
-    control: &ServerControl,
-) -> Result<harness::embedding::InputReceipt, String> {
-    match command.command {
-        ClientCommand::Submit { command: text } => {
-            let receipt = root
-                .input(&command.command_id, "browser", &text)
-                .await
-                .map_err(|error| error.to_string())?;
-            control.publish_command_receipt(harness::server::CommandReceipt {
-                command_id: command.command_id,
-                outcome: harness::server::CommandReceiptOutcome::Admitted {
-                    continuation: receipt.continuation.clone(),
-                    target: None,
-                    envelope_id: receipt.envelope_id.into(),
-                    wake_error: receipt.wake_error.clone(),
-                },
-            });
-            Ok(receipt)
-        }
-        ClientCommand::Host { .. } => {
-            Err("targeted host commands must be routed through the embedded actor owner".into())
-        }
     }
 }
 

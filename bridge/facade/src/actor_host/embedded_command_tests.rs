@@ -772,8 +772,7 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
             .send(LocalResidentDeployment::ReleaseAwait(request))
             .await
             .unwrap();
-        let (forest, shutdown) =
-            watch::channel(ApplicationShutdown::Draining(NativeRetirement::Terminate));
+        let (forest, shutdown) = watch::channel(ApplicationShutdown::Draining);
         let mut waiters = HashMap::new();
         let mut notifications = JoinSet::new();
 
@@ -801,9 +800,7 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
                 assert_eq!(release, ResourceRelease::Released);
                 acknowledge.send(()).unwrap();
             }
-            forest.send_replace(ApplicationShutdown::ForestSettled(
-                NativeRetirement::Terminate,
-            ));
+            forest.send_replace(ApplicationShutdown::ForestSettled);
         };
         let (cleanup, ()) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(cleanup, forest_progress)

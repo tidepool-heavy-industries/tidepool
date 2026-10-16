@@ -122,7 +122,7 @@ async fn application_handoff_keeps_both_typed_failures_and_primary_source() {
         pair.to_string(),
         "application run failed: run detail; application cleanup failed: cleanup detail"
     );
-    retained.unfinished.as_ref().unwrap().abort();
+    retained.task.abort();
 }
 
 #[tokio::test]
@@ -1299,7 +1299,7 @@ fn latest_root_resumability_preserves_terminal_distinctions() {
 }
 
 #[test]
-fn application_retirement_keeps_first_terminal_cleanup_policy() {
+fn application_retirement_keeps_first_terminal() {
     for first in [
         ActorExitKind::Completed,
         ActorExitKind::Cancelled,
@@ -1317,16 +1317,6 @@ fn application_retirement_keeps_first_terminal_cleanup_policy() {
             owner.retired(terminal.clone());
             owner.retired(ActorTerminal::new(late, "late host cleanup"));
             assert_eq!(owner.terminal, Some(terminal));
-            assert!(matches!(
-                (first, owner.native_retirement),
-                (ActorExitKind::Failed, NativeRetirement::Preserve)
-                    | (
-                        ActorExitKind::Completed
-                            | ActorExitKind::Cancelled
-                            | ActorExitKind::Interrupted,
-                        NativeRetirement::Terminate
-                    )
-            ));
         }
     }
 }

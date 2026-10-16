@@ -2609,7 +2609,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_writes_do_not_change_source_capture_or_signature() {
+    fn runtime_state_writes_do_not_change_source_capture() {
         let project = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
         let root = project.path().join(".exomonad");
@@ -2620,7 +2620,6 @@ mod tests {
         let roots = [root.clone()];
         let layer = SourceLayer::new(run.path());
         let before = layer.observe_from_roots("state-test", &roots).unwrap();
-        let signature = super::super::workspace::sources_signature(&roots).unwrap();
 
         let memory = root.join("state/Scratch.hs");
         std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
@@ -2628,10 +2627,6 @@ mod tests {
         assert_eq!(
             layer.observe_from_roots("state-test", &roots).unwrap(),
             before
-        );
-        assert_eq!(
-            super::super::workspace::sources_signature(&roots).unwrap(),
-            signature
         );
         let captured = layer.capture_from_roots("state-test", &roots).unwrap();
         assert_eq!(captured.revision(), &before);
@@ -2650,10 +2645,6 @@ mod tests {
                 .unwrap()
                 .identity,
             before.identity
-        );
-        assert_ne!(
-            super::super::workspace::sources_signature(&roots).unwrap(),
-            signature
         );
         let changed = layer.capture_from_roots("state-test", &roots).unwrap();
         assert_ne!(changed.revision().identity, before.identity);

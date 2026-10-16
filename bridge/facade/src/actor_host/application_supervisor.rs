@@ -978,18 +978,8 @@ pub(super) async fn run_interactive_applications(
         observed_resource_release(actor, &application_owners)
     });
 
-    let native_retirement = if failure.is_some() {
-        NativeRetirement::Preserve
-    } else {
-        match *shutdown.borrow() {
-            ApplicationShutdown::Draining(retirement)
-            | ApplicationShutdown::ForestSettled(retirement) => retirement,
-            ApplicationShutdown::Running => NativeRetirement::Preserve,
-        }
-    };
     for owner in application_owners.lock().values_mut() {
-        owner.native_retirement = native_retirement;
-        owner.cancel();
+        owner.creator_workspace = None;
         if let Some(cancellation) = owner.embedded.cancellation.as_ref() {
             cancellation.send_replace(true);
         }
@@ -1162,7 +1152,10 @@ async fn retire_interactive_application(
     };
     embedded_lifecycle_tx.publish(actor, lifecycle);
     if let Some(resources) = command_resources {
-        let producer = exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0);
+        let producer = exomonad_node::command_resources::CommandActorIdentity::new(
+            actor.id.0,
+            actor.incarnation.0,
+        );
         if let Err(error) = resources.seal_producer(&producer).await {
             tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
         }
@@ -1192,7 +1185,7 @@ pub(super) async fn drain_resident_shutdown<L: Send + 'static>(
     let mut failures = Vec::new();
     let mut driver_failures = Vec::new();
     loop {
-        let forest_settled = matches!(*shutdown.borrow(), ApplicationShutdown::ForestSettled(_));
+        let forest_settled = matches!(*shutdown.borrow(), ApplicationShutdown::ForestSettled);
         let event = if forest_settled {
             // No forest cleanup remains entitled to publish another release
             // request. Consume the already-admitted cleanup events before exit.
@@ -1416,9 +1409,7 @@ mod tests {
                 let (sender, mut lifecycle) = mpsc::channel(1);
                 sender.send(LocalResidentDeployment::DisplayPublished(Arc::clone(&request)))
                     .await.unwrap();
-                let (_forest, shutdown) = watch::channel(ApplicationShutdown::ForestSettled(
-                    NativeRetirement::Preserve,
-                ));
+                let (_forest, shutdown) = watch::channel(ApplicationShutdown::ForestSettled);
                 let result = super::drain_resident_shutdown(
                     &mut lifecycle, &mut tasks, &owners, &campaign.authority,
                     &mut notifications, &projection, None, &mut waiters, shutdown,

@@ -117,7 +117,6 @@ mod provider_attachment;
 pub(crate) mod recipe_checks;
 
 mod root_declaration_recovery;
-mod scoped_custody;
 
 #[cfg(test)]
 mod background_command_example_tests;
@@ -176,7 +175,7 @@ use serde::{Deserialize, Serialize};
 
 use exomonad_node::DurableInbox;
 
-use exomonad_node::{ProcessMountBoundary, TmuxPaneId, BUBBLEWRAP_PROGRAM};
+use exomonad_node::{ProcessMountBoundary, BUBBLEWRAP_PROGRAM};
 
 use exomonad_worktree::{
     ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli, WorktreeId,
@@ -324,12 +323,18 @@ struct ActorWorkspaceAdmission {
     runtime: String,
 }
 
+#[derive(Default)]
+struct WorkspaceCustodyState {
+    process_possible: bool,
+    terminal: Option<ActorTerminal>,
+}
+
 struct ActorWorkspaceCustody {
     runtime: String,
     bindings: Arc<Mutex<BindingTable>>,
     binding: Mutex<Option<ActiveBinding>>,
     actor: ActorRef,
-    state: Arc<Mutex<scoped_custody::CustodyState>>,
+    state: Mutex<WorkspaceCustodyState>,
     workspace: Option<Arc<PreparedWorkspace>>,
     inheritance_notice: Option<String>,
 }
@@ -340,14 +345,7 @@ impl exomonad_actor::WorkspaceCustody for ActorWorkspaceCustody {
         successor: ActorRef,
     ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
         let state = self.state.lock();
-        let process_absent = match state.launch {
-            scoped_custody::LaunchCustody::Unclaimed => true,
-            #[cfg(test)]
-            scoped_custody::LaunchCustody::ScopedNotSpawned => true,
-            scoped_custody::LaunchCustody::ScopedClaimed
-            | scoped_custody::LaunchCustody::Legacy => false,
-        };
-        if !process_absent || state.terminal.is_some() {
+        if state.process_possible || state.terminal.is_some() {
             return Err(WorkspaceAdmissionError {
                 detail: "workspace transfer requires a live actor with no possible native process"
                     .into(),
@@ -376,7 +374,7 @@ impl exomonad_actor::WorkspaceCustody for ActorWorkspaceCustody {
             bindings: self.bindings.clone(),
             binding: Mutex::new(binding.take()),
             actor: successor,
-            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
+            state: Mutex::new(WorkspaceCustodyState::default()),
             workspace: self.workspace.clone(),
             inheritance_notice: self.inheritance_notice.clone(),
         }))
@@ -390,17 +388,14 @@ impl exomonad_actor::WorkspaceCustody for ActorWorkspaceCustody {
             .get_or_insert_with(|| terminal.clone());
     }
     fn process_may_exist(&self) {
-        self.state.lock().launch = scoped_custody::LaunchCustody::Legacy;
+        self.state.lock().process_possible = true;
     }
 }
 
 impl Drop for ActorWorkspaceCustody {
     fn drop(&mut self) {
         let state = self.state.lock();
-        if matches!(
-            state.launch,
-            scoped_custody::LaunchCustody::Legacy | scoped_custody::LaunchCustody::ScopedClaimed
-        ) {
+        if state.process_possible {
             tracing::error!(actor = ?self.actor, "retaining worktree custody: process or host cleanup is unconfirmed");
             return;
         }
@@ -466,7 +461,7 @@ impl ActorWorkspaceAdmission {
             bindings: self.bindings.clone(),
             binding: Mutex::new(Some(binding)),
             actor,
-            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
+            state: Mutex::new(WorkspaceCustodyState::default()),
             workspace,
             inheritance_notice,
         }))
@@ -1312,11 +1307,6 @@ enum DurableActorEvent {
 
 struct InteractiveApplicationOwner {
     creator_workspace: Option<BoundWorkspace>,
-    cancel: Option<oneshot::Sender<NativeRetirement>>,
-    native_retirement: NativeRetirement,
-    pane: Arc<Mutex<Option<TmuxPaneId>>>,
-    custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
-    scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     embedded: EmbeddedApplicationState,
     terminal: Option<ActorTerminal>,
 }
@@ -1344,20 +1334,12 @@ impl EmbeddedApplicationState {
     }
 }
 
-/// Coordination failure does not authorize terminating the native conversation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum NativeRetirement {
-    #[default]
-    Preserve,
-    Terminate,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum ApplicationShutdown {
     #[default]
     Running,
-    Draining(NativeRetirement),
-    ForestSettled(NativeRetirement),
+    Draining,
+    ForestSettled,
 }
 
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
@@ -1432,44 +1414,11 @@ fn embedded_actor_for_task(owners: &InteractiveOwners, task: tokio::task::Id) ->
 }
 
 impl InteractiveApplicationOwner {
-    #[cfg(test)]
-    fn reserve_scoped_process(
-        &mut self,
-        actor: ActorRef,
-    ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
-    {
-        if self.scoped_retention.is_some() {
-            return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
-        }
-        let custody = self
-            .custody
-            .clone()
-            .ok_or(scoped_custody::ScopedClaimError::MissingLease)?;
-        let retention = scoped_custody::reserve(custody, actor)?;
-        let slot = retention.slot.clone();
-        self.scoped_retention = Some(retention);
-        Ok(slot)
-    }
-
     fn embedded() -> Self {
         Self {
             creator_workspace: None,
-            cancel: None,
-            native_retirement: NativeRetirement::Preserve,
-            pane: Arc::new(Mutex::new(None)),
-            custody: None,
-            scoped_retention: None,
             embedded: EmbeddedApplicationState::new(),
             terminal: None,
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.creator_workspace = None;
-        if let Some(cancel) = self.cancel.take() {
-            // best-effort: the receiver may already have been dropped if the
-            // cancellation race resolved on the other side first.
-            cancel.send(self.native_retirement).ok();
         }
     }
 
@@ -1477,33 +1426,24 @@ impl InteractiveApplicationOwner {
         if self.terminal.is_some() {
             return;
         }
-        self.native_retirement = match terminal.kind {
-            ActorExitKind::Failed => NativeRetirement::Preserve,
-            ActorExitKind::Completed | ActorExitKind::Cancelled | ActorExitKind::Interrupted => {
-                NativeRetirement::Terminate
-            }
-        };
-        if let Some(custody) = &self.custody {
-            custody.actor_stopped(&terminal);
-        }
         self.terminal.get_or_insert(terminal);
-        self.cancel();
+        self.creator_workspace = None;
     }
 }
 
 /// Returned to run's real host caller, not formatted into a resource-free error.
 /// The host retains this error through shutdown. Dropping it at process exit is
-/// not settlement, nor continuity of process handles across host death.
+/// not settlement of the unfinished supervisor.
 pub(crate) struct RetainedInteractiveFleet {
     owners: InteractiveOwners,
-    unfinished: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    task: tokio::task::JoinHandle<Result<(), String>>,
     failures: Vec<Box<dyn std::error::Error>>,
 }
 impl fmt::Debug for RetainedInteractiveFleet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RetainedInteractiveFleet")
             .field("actors", &self.owners.lock().keys().collect::<Vec<_>>())
-            .field("unfinished", &self.unfinished.is_some())
+            .field("unfinished", &!self.task.is_finished())
             .field("failures", &self.failures)
             .finish()
     }
@@ -1513,7 +1453,7 @@ impl fmt::Display for RetainedInteractiveFleet {
         for error in &self.failures {
             write!(f, "{error}; ")?;
         }
-        write!(f, "addressable actor resources retained: host work/process settlement remains unsupported")
+        write!(f, "actor host task remains unfinished")
     }
 }
 impl std::error::Error for RetainedInteractiveFleet {
@@ -1564,173 +1504,20 @@ fn application_run_cleanup_error(
     }
 }
 
-/// Host-only operations. These never select a launch mode, release the command
-/// gate, establish host-work quiescence, or settle workspace custody.
-#[cfg(test)]
-pub(crate) enum RetainedProcessOperation {
-    Observe,
-    #[cfg(test)]
-    Pin,
-    Stop,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) enum RetainedProcessState {
-    Reserved,
-    Blocked,
-    Pinned,
-    Released,
-    ReleaseUnconfirmed,
-    Stopping,
-    #[allow(
-        dead_code,
-        reason = "carried to keep the cleanup handle's own drop-time effects \
-                  alive on the observation; tests only match the variant"
-    )]
-    ProcessStopped(Option<exomonad_node::ServiceScopeCleanup>),
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct RetainedProcessObservation {
-    pub(crate) actor: ActorRef,
-    pub(crate) actor_terminal: Option<ActorTerminal>,
-    pub(crate) process: RetainedProcessState,
-}
-
-#[cfg(test)]
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RetainedProcessError {
-    #[error("exact actor has no retained scoped process")]
-    NoScopedActor,
-    #[error("retained process observation deadline elapsed")]
-    Deadline,
-    #[error(transparent)]
-    Scope(#[from] exomonad_node::ServiceScopeError),
-    #[error("retained process supervisor: {0}")]
-    Supervisor(String),
-}
-
-#[cfg(test)]
-impl RetainedInteractiveFleet {
-    /// Recover the actual resource-bearing error after the host's ordinary
-    /// Box<dyn Error> propagation. Crate visibility lets exomonad own a subsequent
-    /// recovery policy without exposing this mechanism to authored programs.
-    pub(crate) fn from_error<'a>(
-        error: &'a mut (dyn std::error::Error + 'static),
-    ) -> Option<&'a mut Self> {
-        error.downcast_mut::<Self>()
-    }
-
-    /// Blocking, deadline-bounded host operation: call outside an actor turn.
-    /// Exact identity includes incarnation. Even ProcessStopped is status only;
-    /// the row remains owned by this carrier after every result or error.
-    pub(crate) fn recover_process(
-        &self,
-        actor: ActorRef,
-        operation: RetainedProcessOperation,
-        deadline: std::time::Instant,
-    ) -> Result<RetainedProcessObservation, RetainedProcessError> {
-        if std::time::Instant::now() >= deadline {
-            return Err(RetainedProcessError::Deadline);
-        }
-        let rows = self
-            .owners
-            .try_lock_until(deadline)
-            .ok_or(RetainedProcessError::Deadline)?;
-        let slot = rows
-            .get(&actor)
-            .and_then(|row| row.scoped_retention.as_ref())
-            .map(|retention| retention.slot.clone())
-            .ok_or(RetainedProcessError::NoScopedActor)?;
-        let actor_terminal = rows.get(&actor).and_then(|row| row.terminal.clone());
-        drop(rows);
-        let map_observation = |observation| match observation {
-            scoped_custody::ScopedProcessObservation::Reserved => RetainedProcessState::Reserved,
-            scoped_custody::ScopedProcessObservation::Blocked => RetainedProcessState::Blocked,
-            scoped_custody::ScopedProcessObservation::Pinned => RetainedProcessState::Pinned,
-            scoped_custody::ScopedProcessObservation::Released => RetainedProcessState::Released,
-            scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
-                RetainedProcessState::ReleaseUnconfirmed
-            }
-            scoped_custody::ScopedProcessObservation::Stopping => RetainedProcessState::Stopping,
-            scoped_custody::ScopedProcessObservation::ProcessStopped => {
-                RetainedProcessState::ProcessStopped(None)
-            }
-        };
-        let process = match operation {
-            RetainedProcessOperation::Observe => map_observation(
-                scoped_custody::observe_slot(&slot, deadline)
-                    .map_err(|error| RetainedProcessError::Supervisor(error.to_string()))?,
-            ),
-            RetainedProcessOperation::Stop => {
-                #[cfg(test)]
-                {
-                    let mut direct = slot
-                        .try_lock_until(deadline)
-                        .ok_or(RetainedProcessError::Deadline)?;
-                    if let scoped_custody::ScopedProcessSlot::Owned(scope) = &mut *direct {
-                        let status = scope.terminate_and_wait(deadline)?;
-                        RetainedProcessState::ProcessStopped(Some(status))
-                    } else {
-                        drop(direct);
-                        map_observation(
-                            scoped_custody::stop_supervisor_slot(&slot, deadline).map_err(
-                                |error| RetainedProcessError::Supervisor(error.to_string()),
-                            )?,
-                        )
-                    }
-                }
-                #[cfg(not(test))]
-                {
-                    map_observation(
-                        scoped_custody::stop_supervisor_slot(&slot, deadline)
-                            .map_err(|error| RetainedProcessError::Supervisor(error.to_string()))?,
-                    )
-                }
-            }
-            #[cfg(test)]
-            RetainedProcessOperation::Pin => {
-                let mut slot = slot
-                    .try_lock_until(deadline)
-                    .ok_or(RetainedProcessError::Deadline)?;
-                match &mut *slot {
-                    scoped_custody::ScopedProcessSlot::Owned(scope) => {
-                        scope.pin_init(deadline)?;
-                        RetainedProcessState::Pinned
-                    }
-                    _ => return Err(exomonad_node::ServiceScopeError::WrongPhase.into()),
-                }
-            }
-        };
-        Ok(RetainedProcessObservation {
-            actor,
-            actor_terminal,
-            process,
-        })
-    }
-}
-
 fn handoff_application_owners(
     owners: InteractiveOwners,
     task: tokio::task::JoinHandle<Result<(), String>>,
     cleanup: Result<(), Box<dyn std::error::Error>>,
     run_result: Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let retained = owners
-        .lock()
-        .values()
-        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
-    let unfinished = !task.is_finished();
-    if retained || unfinished {
+    if !task.is_finished() {
         let failures = application_run_cleanup_error(cleanup, run_result)
             .err()
             .into_iter()
             .collect();
         return Err(Box::new(RetainedInteractiveFleet {
             owners,
-            unfinished: unfinished.then_some(task),
+            task,
             failures,
         }));
     }
@@ -2636,12 +2423,7 @@ async fn run_owned(
             }
         }
     }.await;
-    let retirement = if result.is_ok() {
-        NativeRetirement::Terminate
-    } else {
-        NativeRetirement::Preserve
-    };
-    shutdown.send_replace(ApplicationShutdown::Draining(retirement));
+    shutdown.send_replace(ApplicationShutdown::Draining);
     operator.shutdown().await;
     let forest_shutdown = if host_stopped {
         forest.interrupt_for_host_stop().await
@@ -2652,7 +2434,7 @@ async fn run_owned(
     if let Some(observer) = &shutdown_observer {
         observer.forest_shutdown(&forest_shutdown);
     }
-    shutdown.send_replace(ApplicationShutdown::ForestSettled(retirement));
+    shutdown.send_replace(ApplicationShutdown::ForestSettled);
     let cleanup = if !applications_finished {
         await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
     } else {
