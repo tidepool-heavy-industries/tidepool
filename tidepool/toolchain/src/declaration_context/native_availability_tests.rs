@@ -1674,7 +1674,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                 let issue = |index: usize, marker: &str, version| {
                     let marker = product(marker, version);
                     inventory
-                        .admit_shared(
+                        .admit_shared_with_demand(
                             &base,
                             vec![
                                 entries[0].clone(),
@@ -1683,6 +1683,10 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
                                     marker.module_interface().unwrap().clone(),
                                 )),
                             ],
+                            NativeArtifactDemand::CertifiedTargetImports(&[source_import(
+                                &products[index],
+                                7,
+                            )]),
                         )
                         .unwrap()
                 };
