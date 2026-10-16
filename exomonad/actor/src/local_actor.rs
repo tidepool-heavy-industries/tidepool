@@ -5743,25 +5743,22 @@ mod tests {
             let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
             let (first_tx, first_rx) = oneshot::channel();
             actor
-                .address()
-                .send_message(KernelMessage::Tool {
+                .admit_mailbox(KernelMessage::Tool {
                     invocation: tool_invocation("first"),
                     reply: first_tx.into(),
                 })
+                .await
                 .unwrap();
             let control = crate::WorkbenchExecutionControl::untracked();
             actor.hosted_cell().publish_transport(control.clone());
             let (reply, mut receive) = oneshot::channel();
+            let expansion = crate::DisplayExpansionRequest {
+                identity: (11, 12, 13),
+                key: 14,
+            };
             actor
-                .address()
-                .send_message(KernelMessage::ExpandDisplay {
-                    request: crate::DisplayExpansionRequest {
-                        identity: (11, 12, 13),
-                        key: 14,
-                    },
-                    control: Some(control.clone()),
-                    reply: reply.into(),
-                })
+                .submit_display_expansion(expansion, Some(control.clone()), reply.into())
+                .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !fixture.calls.lock().contains(&"first-start") {
@@ -5774,6 +5771,35 @@ mod tests {
                 receive.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
+            assert!(!fixture.calls.lock().contains(&"display-expansion"));
+            tokio::time::timeout(Duration::from_secs(2), actor.seal_hosted_work())
+                .await
+                .expect("seal remains responsive while the original call is parked")
+                .expect("seal admits no later display expansion");
+            let rejected_control = crate::WorkbenchExecutionControl::untracked();
+            let (rejected_reply, rejected_receive) = oneshot::channel();
+            assert_eq!(
+                actor
+                    .submit_display_expansion(
+                        expansion,
+                        Some(rejected_control.clone()),
+                        rejected_reply.into(),
+                    )
+                    .await,
+                Err(KernelCallFailure::MailboxClosed(actor.identity()))
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), rejected_receive)
+                    .await
+                    .expect("refused admission releases its reply sender")
+                    .is_err(),
+                "refused admission issues no execution reply"
+            );
+            assert!(
+                rejected_control.terminal_reply().is_none(),
+                "never-admitted expansion has no actor-owned terminal result"
+            );
+            assert!(control.terminal_reply().is_none());
             assert!(!fixture.calls.lock().contains(&"display-expansion"));
             if cancel {
                 assert!(control.request_cancellation());
