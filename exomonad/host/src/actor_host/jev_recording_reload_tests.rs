@@ -287,7 +287,10 @@ async fn installed_batch_notebook_example_executes_against_mocked_provider() {
                 assert_eq!(displays.len(), 4, "{receipt}");
                 assert!(displays[0].contains("Evaluation"), "{displays:?}");
                 assert!(
-                    displays[1].contains("call") && displays[1].contains("other"),
+                    displays[1].contains("call")
+                        && displays[1].contains("other")
+                        && displays[1].contains("fixture:src/main.rs:136")
+                        && displays[1].contains("excerpt"),
                     "{displays:?}"
                 );
                 assert!(displays[2].contains("Doubt"), "{displays:?}");

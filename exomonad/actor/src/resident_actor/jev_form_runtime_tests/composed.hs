@@ -1,4 +1,6 @@
 import Project.EvidencePattern
+import qualified Tidepool.Aeson.Value as Json
+import qualified Data.Text as Text
 _ <- do
   let require condition message = if condition then pure () else error message
       intent = "repair the E0061 call"
@@ -13,6 +15,20 @@ _ <- do
     "distribution lost original typed evidence rows"
   require (length [() | (mass, Selected row) <- allRows, mass == 0, evidenceSource row == "fixture:src/main.rs:136"] == 1)
     "distribution dropped a zero-mass original row"
+  let metadata = Composed.distributionMetadata answer
+      keys = [key | (key, _, _) <- metadata]
+  require (keys == ["none", "insufficient", "call", "other"])
+    "exhaustive handlers lost authored key order"
+  require ([(key, mass) | (key, mass, _) <- metadata, mass == 0] == [("other", 0)])
+    "metadata dropped a zero-mass nonwinning payload"
+  require (length [() | (key, _, facts) <- metadata,
+      key == "call", lookup "source" facts == Just "fixture:src/main.rs:83"] == 1)
+    "metadata lost the original payload source"
+  let recorded = Json.encodeValue (Composed.decisionEvidence "issued-source-original"
+        intent original [("execution", "not attempted")] evaluation)
+  require (all (`Text.isInfixOf` recorded)
+      ["issued-source-original", "execution_outcomes", "not attempted", "observation_archive", "fixture:src/main.rs:136"])
+    "serializable evidence lost input, source, distribution or explicit execution status"
   first <- either (error . tshow) pure (J.customPolicy 0.6 0.2 0.7)
   second <- either (error . tshow) pure (J.customPolicy 0.9 0.5 0.9)
   let (accepted, doubtful) = Composed.compareBatchPolicies first second answer
