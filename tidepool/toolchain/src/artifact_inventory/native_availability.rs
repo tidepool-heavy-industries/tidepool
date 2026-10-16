@@ -1,5 +1,34 @@
 use super::*;
 
+/// Consuming exact native support must respect a selected compiler role. An
+/// absent role grants no namespace intent; an incompatible selected role cannot
+/// be bypassed by retaining a historical implementation beside it.
+pub(crate) fn validate_consumed_native_namespace(
+    dependency: &ArtifactEntry,
+    namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+) -> Result<(), CompileError> {
+    let ArtifactPayload::Original(product) = &dependency.payload else {
+        return Err(failure("issued native dependency is not an original"));
+    };
+    let Some(selected) = namespace.get(&dependency.descriptor.owner) else {
+        return Ok(());
+    };
+    let canonical = match &selected.payload {
+        ArtifactPayload::Canonical(interface) => Some(interface),
+        ArtifactPayload::Original(product) => product.module_interface(),
+        ArtifactPayload::Interface(..) => None,
+    };
+    if canonical != product.module_interface()
+        || (matches!(selected.payload, ArtifactPayload::Original(_))
+            && selected.descriptor.id != dependency.descriptor.id)
+    {
+        return Err(failure(
+            "issued native dependency conflicts with request interface",
+        ));
+    }
+    Ok(())
+}
+
 /// One availability issuance and exactly the graph custody supporting it.
 /// Propagation can retain or narrow this owner, never rediscover another proof.
 #[derive(Clone, Debug, PartialEq, Eq)]

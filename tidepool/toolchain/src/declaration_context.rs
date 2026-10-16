@@ -967,20 +967,11 @@ impl NativeCompilerTransport {
                     .get(&group.binding.artifact())
                     .ok_or_else(|| failure("issued native dependency is outside request custody"))?
                     .clone();
-                let ArtifactPayload::Original(product) = &entry.payload else {
-                    return Err(failure("issued native dependency is not an original"));
-                };
+                crate::artifact_inventory::validate_consumed_native_namespace(
+                    &entry,
+                    &metadata.entries,
+                )?;
                 let owner = &entry.descriptor.owner;
-                if let Some(selected) = metadata.entries.get(owner) {
-                    if canonical_source_interface(selected) != product.module_interface()
-                        || (matches!(selected.payload, ArtifactPayload::Original(_))
-                            && selected.descriptor.id != entry.descriptor.id)
-                    {
-                        return Err(failure(
-                            "issued native dependency conflicts with request interface",
-                        ));
-                    }
-                }
                 metadata.entries.insert(owner.clone(), entry);
                 availability
                     .entry(group.binding.artifact())

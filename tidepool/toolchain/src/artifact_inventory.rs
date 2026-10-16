@@ -18,7 +18,7 @@ mod compiler_projection;
 mod native_availability;
 pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
-pub(crate) use native_availability::IssuedNativeOffer;
+pub(crate) use native_availability::{validate_consumed_native_namespace, IssuedNativeOffer};
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
@@ -3429,6 +3429,7 @@ impl ArtifactInventory {
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect::<BTreeMap<_, _>>();
         selected.extend(supplied.clone());
+        let mut consumed_namespace = None;
         let namespace_ids = match root_intent {
             ArtifactRootIntent::Certified(issued) => Some(
                 issued
@@ -3438,7 +3439,13 @@ impl ArtifactInventory {
             ArtifactRootIntent::Projected(projection, _)
             | ArtifactRootIntent::Offered(projection, _)
             | ArtifactRootIntent::PrivateAvailability(projection, _) => {
-                projection.entries_from_artifacts(&selected)?;
+                let namespace = projection.entries_from_artifacts(&selected)?;
+                if matches!(
+                    root_intent,
+                    ArtifactRootIntent::Offered(..) | ArtifactRootIntent::PrivateAvailability(..)
+                ) {
+                    consumed_namespace = Some(namespace);
+                }
                 let ids = projection
                     .roles()
                     .into_iter()
@@ -3507,6 +3514,12 @@ impl ArtifactInventory {
                     .as_ref()
                     .is_none_or(|closure| closure.contains(&InventoryNodeKey::Group(**group)))
             }) {
+                if let Some(namespace) = &consumed_namespace {
+                    let dependency = selected.get(&group.binding.artifact()).ok_or_else(|| {
+                        failure("issued native dependency is outside request custody")
+                    })?;
+                    validate_consumed_native_namespace(dependency, namespace)?;
+                }
                 let key = NativeGroupKey {
                     artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
