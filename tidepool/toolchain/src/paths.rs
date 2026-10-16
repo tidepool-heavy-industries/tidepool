@@ -208,30 +208,6 @@ pub fn effects_dir() -> PathBuf {
     cache_dir().join("effects")
 }
 
-/// Root dir for one run's listen-channel durable state (the UDS socket, the
-/// durable frames log, and the durable ack cursor) — `<cache_dir>/listen/<run_id>/`.
-/// `run_id` is an opaque identifier the host process supplies (e.g. a
-/// self-iterating harness's run lease id) and is used verbatim as a single
-/// path segment; callers are responsible for supplying a filesystem-safe id.
-pub fn listen_dir(run_id: &str) -> PathBuf {
-    cache_dir().join("listen").join(run_id)
-}
-
-/// The listen channel's UDS socket path for `run_id`.
-pub fn listen_sock(run_id: &str) -> PathBuf {
-    listen_dir(run_id).join("listen.sock")
-}
-
-/// The listen channel's durable, append-only frames log for `run_id`.
-pub fn listen_frames_path(run_id: &str) -> PathBuf {
-    listen_dir(run_id).join("frames.jsonl")
-}
-
-/// The listen channel's durable ack cursor file for `run_id`.
-pub fn listen_cursor_path(run_id: &str) -> PathBuf {
-    listen_dir(run_id).join("cursor")
-}
-
 /// Existing user-global secrets dirs (canonical config first, then legacy).
 pub fn global_secrets_dirs() -> Vec<PathBuf> {
     existing_roots("secrets")

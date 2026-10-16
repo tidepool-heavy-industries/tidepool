@@ -121,12 +121,7 @@ fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {
         .with_stdlib()
         .with_effects_module()
         .with_include(scratch.path().to_path_buf());
-    let outcome = harness.run_with(
-        &source,
-        "result",
-        handlers,
-        tidepool_mcp::CapturedOutput::new(),
-    );
+    let outcome = harness.run_with(&source, handlers, tidepool_mcp::CapturedOutput::new());
     assert!(outcome.is_ok(), "Cargo fixture failed: {:?}", outcome.err());
     assert_eq!(outcome.json(), serde_json::json!([true, true, true, true]));
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);

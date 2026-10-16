@@ -116,7 +116,7 @@ fn run() {
         assertions: Vec::new(),
     };
     let result = tidepool_testing::with_settlement(|settlement| {
-        tidepool_runtime::compile_and_run(&source, "result", &refs, &mut capture, &(), settlement)
+        tidepool_runtime::compile_and_run(&source, &refs, &mut capture, &(), settlement)
     });
     assert!(result.is_ok(), "actual outer recipe capture: {result:?}");
     assert_eq!(capture.cells.len(), 7, "outer recipe cell count");

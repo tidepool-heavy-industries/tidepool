@@ -298,7 +298,7 @@ reports evidence; it does not merge, prune, move branches or block pushes.
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |
-| Machine-session checkout, parked continuations and source sequencing | `tidepool/runtime/src/session/{registry,kernel,workbench}.rs` |
+| Machine-session checkout, parked continuations and source sequencing | `tidepool/runtime/src/session/{registry,resident,workbench}.rs` |
 | Durable JSONL append/read mechanism | `tidepool/repr/src/jsonl.rs`; format versions belong to each durable owner |
 | Effect schemas and generated bridge | `tidepool-protocol`; generated consumers in `tidepool-mcp` and `haskell` |
 

@@ -1985,7 +1985,7 @@ mod tests {
         ];
 
         let harness = EvalHarness::new().with_stdlib().with_effects_module();
-        let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
+        let out = harness.run_with(&source, handlers, CapturedOutput::new());
         assert_eq!(
             out.json(),
             serde_json::json!({

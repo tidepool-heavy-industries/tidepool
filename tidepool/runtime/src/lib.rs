@@ -134,8 +134,7 @@ pub fn compile_haskell(
     })
 }
 
-/// Default JIT allocation nursery size (64 MiB), used by [`compile_and_run`]
-/// and [`compile_and_run`].
+/// Default JIT allocation nursery size (64 MiB), used by [`compile_and_run`].
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 
 /// Stack size for eval threads. The JIT's clean recursion-overflow guard needs
@@ -145,52 +144,18 @@ pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 /// drift — a smaller test stack made the overflow probes diverge from real evals.
 pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 
-/// Compile one `Eff` expression and run it with the given effect handlers,
-/// using the specified nursery size.
+/// Compile a scaffolded `Eff` program and run its prepared entry with the
+/// given effect handlers, using the specified nursery size.
 ///
-/// # Arguments
-/// * `preamble` - Module header, pragmas, and imports (e.g. from
-///   `tidepool_mcp::build_preamble`) — everything before the compiled
-///   binding. Must NOT itself import `Tidepool.Internal.Resume` or define
-///   anything named `__resume`/`__applyEntry`/
-///   `__applyValue`/`__prepared`/`__tidepoolInEffectRow`/`__workbenchValue`:
-///   [`session::assemble_expression_module`] owns those names.
-/// * `target` - Name for the assembled top-level binding (only used inside
-///   the assembled module; the actual compile target is always
-///   [`session::PREPARED_SCAFFOLD_TARGET`] — see below).
-/// * `effect_stack` - The row `expression`'s `Eff` type is pinned to while
-///   GHC infers it (e.g. `"'[Console, Ask]"`), exactly
-///   [`session::assemble_expression_module`]'s `effect_stack` parameter.
-/// * `expression` - The `Eff effect_stack a` computation to run — a single
-///   Haskell expression (a `do { ... }` block is one expression, so a
-///   caller with a statement sequence can pass `tidepool_mcp::wrap_do(...)`
-///   of it directly).
-/// * `include` - Search paths for Haskell modules.
-/// * `handlers` - Effect dispatchers for the prepared machine.
-/// * `user` - User context for effect handlers.
-/// * `nursery_size` - Size of the allocation nursery in bytes.
-///
-/// # Why pieces, not a whole module string
-///
-/// A prepared program's `Tidepool.Internal.Resume.Done`/`Suspended` are only
-/// reachable — hence observable via `run_settled` — when the compiled module
-/// defines the fixed-named scaffold bindings `session::turn`'s assembly
-/// helpers write. Splicing that scaffold into an arbitrary ALREADY-ASSEMBLED
-/// module string is not safe in general (a bare append breaks Haskell's
-/// import-before-declarations layout rule); every caller that already
-/// builds its source from a preamble + one expression already has the
-/// pieces this needs, so building the scaffolded module is this crate's
-/// job via the SAME assembly `session::turn`'s own resident-turn machinery
-/// uses ([`session::assemble_expression_module`]), not a second assembler
-/// or a caller-side splice.
-///
-/// # Returns
-/// * `Ok(EvalResult)` on successful execution.
-/// * `Err(RuntimeError)` for compilation or execution errors.
-#[allow(clippy::too_many_arguments)]
+/// `source` must include the scaffold produced by
+/// [`session::assemble_expression_module`] (or an equivalent owning assembler).
+/// The entry is always [`session::PREPARED_SCAFFOLD_TARGET`]. To compile and
+/// execute a selected named target, use [`compile_targets`] followed by
+/// [`run_compiled_target`]. `include` supplies the Haskell module search paths;
+/// `handlers` and `user` provide effect dispatch and its context. `settlement`
+/// receives the compiler transaction close observation.
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     source: &str,
-    target: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
@@ -199,7 +164,6 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_cancellable(
         source,
-        target,
         include,
         handlers,
         user,
@@ -219,11 +183,8 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// eval/repl servers turn a turn timeout into an actual abort instead of a
 /// permanently-parked thread.
 ///
-/// A bare one-shot run outside any session: it assembles the expression
-/// through the exact same scaffold `session::turn`'s resident-turn assembly
-/// uses ([`session::assemble_expression_module`] +
-/// [`session::PREPARED_SCAFFOLD_TARGET`] as the compile target — see this
-/// function's sibling doc for why), bootstraps a standalone
+/// A one-shot run outside any session compiles the scaffolded source at
+/// [`session::PREPARED_SCAFFOLD_TARGET`], bootstraps a standalone
 /// [`session::prepared::PreparedEngine`] from the compiled prepared program,
 /// runs its settled entry to completion, and drops the engine (and its
 /// heap) once done. A request no installed handler recognizes is reported
@@ -234,7 +195,6 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 #[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     source: &str,
-    target: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
@@ -242,7 +202,6 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     on_ready: impl FnOnce(CancelHandle),
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<EvalResult, RuntimeError> {
-    let _ = target;
     let include_owned = include
         .iter()
         .map(|path| path.to_path_buf())
@@ -434,13 +393,11 @@ fn run_installed_program<U, H: DispatchEffect<U>>(
     }
 }
 
-/// Compile one `Eff` expression and run it with the given effect handlers,
-/// using the default nursery size (64 MiB). See
-/// [`compile_and_run_with_nursery_size`] for the full argument doc and why
-/// this takes assembly pieces rather than a whole module string.
+/// Compile a scaffolded `Eff` program and run its prepared entry with the
+/// given effect handlers and default nursery size (64 MiB). See
+/// [`compile_and_run_with_nursery_size`] for the source and dispatch contract.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
     source: &str,
-    target: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
@@ -448,7 +405,6 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_with_nursery_size(
         source,
-        target,
         include,
         handlers,
         user,

@@ -302,22 +302,21 @@ impl EvalHarness {
     /// Compile + run an EFFECTFUL expression against `handlers` (user context
     /// `()`). `handlers` is any `frunk` HList of `EffectHandler`s (e.g.
     /// [`mock::min_stack`]).
-    pub fn run<H>(&self, source: &str, target: &str, handlers: H) -> Outcome
+    pub fn run<H>(&self, source: &str, handlers: H) -> Outcome
     where
         H: DispatchEffect<()> + Send + 'static,
     {
-        self.run_with(source, target, handlers, ())
+        self.run_with(source, handlers, ())
     }
 
     /// As [`run`](Self::run) but with an explicit user context `U`.
-    pub fn run_with<U, H>(&self, source: &str, target: &str, mut handlers: H, user: U) -> Outcome
+    pub fn run_with<U, H>(&self, source: &str, mut handlers: H, user: U) -> Outcome
     where
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
     {
         let includes = self.owned_includes();
         let source = source.to_owned();
-        let target = target.to_owned();
         let nursery = self.nursery;
         Outcome(with_eval_stack(move || {
             let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
@@ -325,7 +324,6 @@ impl EvalHarness {
                 Some(n) => crate::with_settlement(|settlement| {
                     compile_and_run_with_nursery_size(
                         &source,
-                        &target,
                         &refs,
                         &mut handlers,
                         &user,
@@ -334,7 +332,7 @@ impl EvalHarness {
                     )
                 }),
                 None => crate::with_settlement(|settlement| {
-                    compile_and_run(&source, &target, &refs, &mut handlers, &user, settlement)
+                    compile_and_run(&source, &refs, &mut handlers, &user, settlement)
                 }),
             }
         }))
@@ -343,29 +341,22 @@ impl EvalHarness {
     /// As [`run`](Self::run) but hands `handlers` back alongside the
     /// [`Outcome`] — for dispatchers whose post-eval state (write counts,
     /// stored files, recorded calls) IS the assertion.
-    pub fn run_owned<H>(&self, source: &str, target: &str, handlers: H) -> (Outcome, H)
+    pub fn run_owned<H>(&self, source: &str, handlers: H) -> (Outcome, H)
     where
         H: DispatchEffect<()> + Send + 'static,
     {
-        self.run_with_owned(source, target, handlers, ())
+        self.run_with_owned(source, handlers, ())
     }
 
     /// As [`run_with`](Self::run_with) but hands `handlers` back alongside the
     /// [`Outcome`].
-    pub fn run_with_owned<U, H>(
-        &self,
-        source: &str,
-        target: &str,
-        mut handlers: H,
-        user: U,
-    ) -> (Outcome, H)
+    pub fn run_with_owned<U, H>(&self, source: &str, mut handlers: H, user: U) -> (Outcome, H)
     where
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
     {
         let includes = self.owned_includes();
         let source = source.to_owned();
-        let target = target.to_owned();
         let nursery = self.nursery;
         let (result, handlers) = with_eval_stack(move || {
             let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
@@ -373,7 +364,6 @@ impl EvalHarness {
                 Some(n) => crate::with_settlement(|settlement| {
                     compile_and_run_with_nursery_size(
                         &source,
-                        &target,
                         &refs,
                         &mut handlers,
                         &user,
@@ -382,7 +372,7 @@ impl EvalHarness {
                     )
                 }),
                 None => crate::with_settlement(|settlement| {
-                    compile_and_run(&source, &target, &refs, &mut handlers, &user, settlement)
+                    compile_and_run(&source, &refs, &mut handlers, &user, settlement)
                 }),
             };
             (result, handlers)

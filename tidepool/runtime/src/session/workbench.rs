@@ -1832,7 +1832,6 @@ mod tests {
                 tidepool_testing::with_settlement(|settlement| {
                     crate::compile_and_run(
                         &source,
-                        "__result",
                         &include
                             .iter()
                             .map(std::path::PathBuf::as_path)

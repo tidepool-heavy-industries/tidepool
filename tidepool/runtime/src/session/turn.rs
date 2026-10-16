@@ -2257,7 +2257,6 @@ pub fn assemble_expression_module(
         expression,
         lift,
         ExpressionResult::Raw,
-        None,
     )
 }
 
@@ -2265,7 +2264,6 @@ pub fn assemble_expression_module(
 enum ExpressionResult {
     Raw,
     OpaqueToken,
-    Observation,
 }
 
 fn assemble_expression_module_with_result(
@@ -2275,7 +2273,6 @@ fn assemble_expression_module_with_result(
     expression: &str,
     lift: ExpressionLift,
     result: ExpressionResult,
-    checked_expression_type: Option<&str>,
 ) -> String {
     let mut out = if matches!(lift, ExpressionLift::Pure) {
         insert_preamble_imports(
@@ -2317,9 +2314,6 @@ fn assemble_expression_module_with_result(
     if matches!(lift, ExpressionLift::Pure) {
         out.push_str("__workbenchValue = let {\n");
     }
-    if let Some(ty) = checked_expression_type {
-        out.push_str(&format!(" __value :: ({ty});\n"));
-    }
     match lift {
         ExpressionLift::Effectful => out.push_str(" __value =\n"),
         ExpressionLift::Pure => out.push_str(" __value = __tidepoolPureWorkbenchValue $ "),
@@ -2338,10 +2332,6 @@ fn assemble_expression_module_with_result(
         (ExpressionLift::Pure, ExpressionResult::OpaqueToken) => {
             "pure (__workbenchValue `seq` T.pack \"<opaque value>\")"
         }
-        (ExpressionLift::Effectful, ExpressionResult::Observation) => {
-            "do { __value <- __workbenchValue ; pure (\\() -> __value) }"
-        }
-        (ExpressionLift::Pure, ExpressionResult::Observation) => "pure (\\() -> __workbenchValue)",
     };
     out.push_str(target);
     out.push_str(" = __tidepoolInEffectRow $ ");
@@ -2349,27 +2339,6 @@ fn assemble_expression_module_with_result(
     out.push('\n');
     out.push_str(&prepared_scaffold_binding(target));
     out
-}
-
-/// Capture one bare observation as a typed thunk. Effects run once, while
-/// retaining the result does not deep-force an arbitrary payload or its Show.
-pub fn assemble_observation_module(
-    preamble: &str,
-    target: &str,
-    effect_stack: &str,
-    expression: &str,
-    lift: ExpressionLift,
-    checked_expression_type: Option<&str>,
-) -> String {
-    assemble_expression_module_with_result(
-        preamble,
-        target,
-        effect_stack,
-        expression,
-        lift,
-        ExpressionResult::Observation,
-        checked_expression_type,
-    )
 }
 
 /// Assemble an expression result without requiring a rendering instance.
@@ -2390,7 +2359,6 @@ pub fn assemble_opaque_expression_module(
         expression,
         lift,
         ExpressionResult::OpaqueToken,
-        None,
     )
 }
 

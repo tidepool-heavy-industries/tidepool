@@ -61,14 +61,7 @@ fn run(code: &str) -> (Vec<String>, Result<serde_json::Value, RuntimeError>) {
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];
     let out = tidepool_testing::with_settlement(|settlement| {
-        compile_and_run(
-            &source,
-            "result",
-            &include,
-            &mut handlers,
-            &captured,
-            settlement,
-        )
+        compile_and_run(&source, &include, &mut handlers, &captured, settlement)
     })
     .map(|result| result.to_json());
     (captured.drain(), out)

@@ -32,41 +32,40 @@ pub(crate) fn prelude_include() -> std::path::PathBuf {
 }
 
 pub(crate) fn jit_test_source(code: &[&str]) -> String {
-    let decls = tidepool_mcp::standard_decls();
-    let preamble = tidepool_mcp::build_preamble(&decls, false);
-    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    jit_source_with_decls(code, &tidepool_mcp::standard_decls())
+}
+
+fn jit_source_with_decls(code: &[&str], decls: &[tidepool_mcp::EffectDecl]) -> String {
+    let preamble = tidepool_mcp::build_preamble(decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(decls);
     let code_str = tidepool_mcp::wrap_do(&code.join("\n"));
     tidepool_mcp::template_haskell(&preamble, &stack, &code_str, "", "", None)
 }
 
 pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {
-    let source = jit_test_source(code);
     let include = prelude_include();
-    let effects_dirs =
-        tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).unwrap();
-    let mut include_paths: Vec<&std::path::Path> = vec![include.as_path()];
-    include_paths.push(effects_dirs.core.as_path());
-    include_paths.push(effects_dirs.orchestration.as_path());
-    let kv_path = std::env::temp_dir().join("tidepool_jit_test_kv.json");
-    let cwd = repo_root();
+    let store = tempfile::tempdir().unwrap();
     let captured = CapturedOutput::new();
-    let mut handlers = frunk::hlist![
-        ConsoleHandler,
-        KvHandler::new(
-            &tidepool_atomic_write::DirectoryAnchor::open_existing(std::env::temp_dir()).unwrap(),
-            kv_path.file_name().unwrap()
+    let mut handlers = build_base_stack(&HandlerConfig {
+        cwd: repo_root(),
+        kv_store: KvHandler::new(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(store.path()).unwrap(),
+            "kv.json",
         )
         .unwrap(),
-        FsReadHandler::new(cwd.clone()),
-        FsWriteHandler::new(cwd.clone()),
-        HttpHandler,
-        ExecHandler::new(cwd.clone()),
-        LlmHandler::new("ollama:llama3.2".to_string())
+        llm_model: "ollama:llama3.2".to_string(),
+    });
+    let decls = base_decls(&handlers);
+    let source = jit_source_with_decls(code, &decls);
+    let effects_dirs = tidepool_mcp::ensure_effects_module(&decls).unwrap();
+    let include_paths = [
+        include.as_path(),
+        effects_dirs.core.as_path(),
+        effects_dirs.orchestration.as_path(),
     ];
     let result = tidepool_testing::with_settlement(|settlement| {
         tidepool_runtime::compile_and_run(
             &source,
-            "result",
             &include_paths,
             &mut handlers,
             &captured,

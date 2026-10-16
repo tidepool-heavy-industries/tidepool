@@ -6750,39 +6750,6 @@ where
         self.run_transient_with_sites(name_hint, code, settlement)
     }
 
-    /// Evaluate a compiler-checked pure inspection of retained values without
-    /// extending their lifetime. The caller must compile a pure result lifted
-    /// into Eff, so this run cannot export slot-dependent closures via effects.
-    pub fn run_inspection_with_sites(
-        &mut self,
-        code: TurnCode<'_>,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_transient_with_sites("actor_observation_preview", code, settlement)
-    }
-
-    /// Run a compiler-generated pure preview against a committed binding.
-    /// The mounted binding retains its value if rendering fails.
-    pub fn run_mounted_inspection_with_sites(
-        &mut self,
-        code: TurnCode<'_>,
-        binding: SessionVarId,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<ResidentOutcome, ResidentError> {
-        let entry = self
-            .state
-            .bindings()
-            .get(binding)
-            .ok_or(BindingAliasError::MissingSource(binding))?;
-        let BoundValue { handle, .. } = &entry.value;
-        self.run_prepared_with_argument(
-            code,
-            PreparedTurnMode::Value(ResultObservation::Presentation),
-            Some(*handle),
-            settlement,
-        )
-    }
-
     fn validate_mounted_activation_input(
         &self,
         mounted: &MountedActivationInput,
@@ -11501,7 +11468,7 @@ mod authored_publication_tests {
 #[allow(
     clippy::items_after_test_module,
     reason = "this test module sits next to the host-binding-authority code it covers; the \
-              suspension-seam impl and eval-thread types below it belong at module end"
+              eval-thread types below it belong at module end"
 )]
 mod host_binding_authority_tests {
     use super::*;
@@ -11526,44 +11493,6 @@ mod host_binding_authority_tests {
             host_authority: None,
         };
         assert!(require_host_binding_authority(&binder, HostBindingType::JSON_VALUE).is_err());
-    }
-}
-
-/// The kernel's generalized suspension seam
-/// ([`super::kernel::SuspendableSession`]), implemented directly against this
-/// session's own [`Self::resume`]/[`Self::abort`]. This type already has the
-/// shape the kernel requires: one obligation-carrying [`ResidentHole`] token
-/// and one resume/abort entry point per token. `Context = ()`: this session owns
-/// its captured-output buffer and handler stack as fields, so a call needs
-/// nothing extra beyond the hole and the answer.
-impl<H, O> super::kernel::SuspendableSession for ResidentSession<H, O>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    type Hole = ResidentHole;
-    type Answer = HaskellValue;
-    type Context = ();
-    type Outcome = ResidentOutcome;
-    type Error = ResidentError;
-
-    fn resume(
-        &mut self,
-        hole: Self::Hole,
-        answer: Self::Answer,
-        (): Self::Context,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<Self::Outcome, Self::Error> {
-        Self::resume(self, hole, answer, settlement)
-    }
-
-    fn abort(
-        &mut self,
-        hole: Self::Hole,
-        reason: String,
-        (): Self::Context,
-    ) -> Result<Self::Outcome, Self::Error> {
-        Self::abort(self, hole.cont_id(), reason)
     }
 }
 

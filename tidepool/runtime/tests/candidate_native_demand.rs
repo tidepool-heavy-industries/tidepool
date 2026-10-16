@@ -141,10 +141,27 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     );
 
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let cancelled = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_and_run_cancellable(
+            CONSUMER,
+            &include_refs,
+            &mut handlers,
+            &(),
+            1024 * 1024,
+            |cancel| cancel.cancel(),
+            settlement,
+        )
+    })
+    .expect_err("the one-shot ready callback can cancel before execution");
+    assert!(matches!(
+        cancelled,
+        tidepool_runtime::RuntimeError::Prepared(
+            tidepool_runtime::session::prepared::PreparedRuntimeError::Cancelled
+        )
+    ));
     let executed = tidepool_testing::with_settlement(|settlement| {
         tidepool_runtime::compile_and_run_cancellable(
             CONSUMER,
-            "result",
             &include_refs,
             &mut handlers,
             &(),

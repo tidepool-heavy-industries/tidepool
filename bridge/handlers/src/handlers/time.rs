@@ -113,7 +113,6 @@ mod tests {
         let result = tidepool_testing::with_settlement(|settlement| {
             tidepool_runtime::compile_and_run(
                 &source,
-                "result",
                 &include_paths,
                 &mut handlers,
                 &captured,

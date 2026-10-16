@@ -32,7 +32,6 @@ mod recovery_test_fixture;
 pub use lexical_projection::CertifiedDeclarationProjection;
 pub use published_source::PendingPublishedSourceOriginals;
 pub mod inspection;
-pub mod kernel;
 mod paired_publication;
 pub mod persistent;
 mod planned_cell;
@@ -80,7 +79,6 @@ pub use inspection::{
     InspectionResult, NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
     TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
 };
-pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
     DeclarationPlaneCommit, DurablePublicBootstrap, MachineLease, MaterializationSetCommit,
