@@ -222,6 +222,252 @@ fn issued_mode(ordinals: &[u32]) -> Value {
     ])
 }
 
+fn ordered_offer_retention(
+    context: &ArtifactView,
+    offers: &[crate::artifact_inventory::IssuedNativeOffer],
+) -> Result<ArtifactView, CompileError> {
+    offers
+        .iter()
+        .try_fold(context.clone(), |view, offer| view.merge(offer.custody()))
+}
+
+fn assert_retention_result_matches(
+    expected: Result<ArtifactView, CompileError>,
+    actual: Result<ArtifactView, CompileError>,
+) {
+    match (expected, actual) {
+        (Ok(expected), Ok(actual)) => {
+            assert_eq!(
+                actual.capture_graph_selection(),
+                expected.capture_graph_selection()
+            );
+            assert_eq!(
+                actual.binding_dependencies(),
+                expected.binding_dependencies()
+            );
+            assert_eq!(actual.entries(), expected.entries());
+            assert_eq!(
+                actual.selected_native_groups(),
+                expected.selected_native_groups()
+            );
+        }
+        (
+            Err(CompileError::ArtifactInventory(expected)),
+            Err(CompileError::ArtifactInventory(actual)),
+        ) => {
+            assert_eq!(actual.failure, expected.failure);
+            let evidence = |error: &crate::artifact_inventory::ArtifactInventoryError| {
+                error.owner_conflict.as_ref().map(|evidence| {
+                    match evidence {
+                    crate::artifact_inventory::ArtifactOwnerConflictEvidence::ArtifactSelection {
+                        existing, incoming, existing_in_parent,
+                    } => (existing.descriptor.id, incoming.descriptor.id, *existing_in_parent),
+                    _ => panic!("merge conflict must retain artifact selection evidence"),
+                }
+                })
+            };
+            assert_eq!(evidence(&actual), evidence(&expected));
+        }
+        (expected, actual) => panic!(
+            "retention differs from ordered merge fold: expected={expected:?}, actual={actual:?}"
+        ),
+    }
+}
+
+fn assert_offer_retention_matches_ordered_fold(
+    context: &ArtifactView,
+    projection: &CompilerInputProjection,
+    offers: &[crate::artifact_inventory::IssuedNativeOffer],
+) {
+    for end in 0..=offers.len() {
+        let prefix = &offers[..end];
+        assert_retention_result_matches(
+            ordered_offer_retention(context, prefix),
+            retain_native_offers(context, prefix),
+        );
+        assert_retention_result_matches(
+            ordered_offer_retention(context, prefix),
+            crate::artifact_inventory::CompilerSourceSupport::new(
+                projection.clone(),
+                context.clone(),
+                prefix.iter().cloned(),
+            )
+            .map(|support| support.artifacts),
+        );
+    }
+}
+
+fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool) {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let inventory = ArtifactInventory::default();
+    let entries = (0..3)
+        .map(|index| {
+            Arc::new(
+                ArtifactEntry::original(
+                    producer.sha256(),
+                    product(&format!("Retention{index}"), 91 + index),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let baseline = inventory
+        .admit_shared(&inventory.empty_view(), vec![entries[0].clone()])
+        .unwrap();
+    let mut offers = Vec::new();
+    for entry in &entries {
+        let issuer = if foreign {
+            ArtifactInventory::default()
+        } else {
+            inventory.clone()
+        };
+        let source = issuer
+            .admit_shared(&issuer.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
+            .unwrap()
+            .unwrap();
+        let full = IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap();
+        assert!(full.is_full());
+        let partial = full
+            .within_projection(&projection, &issuer.empty_view())
+            .unwrap()
+            .unwrap();
+        assert!(!partial.is_full());
+        let empty = IssuedNativeOffer::issue(entry.descriptor.id, &source, None).unwrap();
+        offers.extend([full, partial, empty]);
+    }
+    let selected = indices
+        .iter()
+        .map(|index| offers[*index % offers.len()].clone())
+        .collect::<Vec<_>>();
+    let context = if baseline_empty {
+        inventory.empty_view()
+    } else {
+        baseline
+    };
+    let projection = CompilerInputProjection::from_issued_entries(&context.root_entries()).unwrap();
+    assert_offer_retention_matches_ordered_fold(&context, &projection, &selected);
+}
+
+#[test]
+fn issued_offer_retention_matches_ordered_fold_across_inventory_and_mode_histories() {
+    for foreign in [false, true] {
+        for empty in [false, true] {
+            for indices in [
+                vec![],
+                vec![0, 1, 2],
+                vec![8, 7, 6, 5, 4, 3, 2, 1, 0],
+                vec![0, 0, 3, 0, 6, 3, 0],
+            ] {
+                replay_offer_retention(&indices, foreign, empty);
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_issued_offer_retention_preserves_every_ordered_prefix() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{contextualize_config, Config, TestCaseError, TestRunner};
+    let config = Config {
+        cases: 32,
+        source_file: Some(file!()),
+        test_name: Some(concat!(
+            module_path!(),
+            "::generated_issued_offer_retention_preserves_every_ordered_prefix"
+        )),
+        ..Config::default()
+    };
+    TestRunner::new(contextualize_config(config))
+        .run(
+            &(
+                prop::collection::vec(0usize..9, 0..17),
+                any::<bool>(),
+                any::<bool>(),
+            ),
+            |(indices, foreign, empty)| {
+                std::panic::catch_unwind(|| replay_offer_retention(&indices, foreign, empty))
+                    .map_err(|panic| {
+                        let reason = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| {
+                                panic
+                                    .downcast_ref::<&str>()
+                                    .map(|value| (*value).to_owned())
+                            })
+                            .unwrap_or_else(|| "non-string panic".into());
+                        TestCaseError::fail(format!(
+                            "indices={indices:?}, foreign={foreign}, empty={empty}: {reason}"
+                        ))
+                    })
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn issued_offer_retention_records_cumulative_prefix_work() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let inventory = ArtifactInventory::default();
+    let entries = (0..32)
+        .map(|index| {
+            Arc::new(
+                ArtifactEntry::original(
+                    producer.sha256(),
+                    product(&format!("RetainedWork{index}"), 90),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source = inventory
+        .admit_shared(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    let offers = entries
+        .iter()
+        .map(|entry| {
+            let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
+                .unwrap()
+                .unwrap();
+            IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap()
+        })
+        .collect::<Vec<_>>();
+    // Warm only immutable inputs. The cumulative result views have not been read.
+    source.entries();
+    for offer in &offers {
+        offer.custody().entries();
+    }
+    let mut current = source.clone();
+    let before = inventory.metrics();
+    for (index, offer) in offers.iter().enumerate() {
+        let previous = inventory.metrics();
+        current = current.merge(offer.custody()).unwrap();
+        let merged = inventory.metrics();
+        current.entries();
+        let observed = inventory.metrics();
+        eprintln!("ordered_prefix={index} merge_graph_visits={} merge_entry_copies={} owner_lookups={} result_graph_visits={} result_entry_copies={}",
+            merged.graph_visits - previous.graph_visits, merged.entry_handle_copies - previous.entry_handle_copies,
+            merged.admission_owner_lookups - previous.admission_owner_lookups,
+            observed.graph_visits - merged.graph_visits, observed.entry_handle_copies - merged.entry_handle_copies);
+    }
+    let after = inventory.metrics();
+    assert_eq!(
+        current.capture_graph_selection().native_groups,
+        source.capture_graph_selection().native_groups
+    );
+    eprintln!(
+        "ordered_fold_total graph_visits={} entry_copies={} owner_lookups={}",
+        after.graph_visits - before.graph_visits,
+        after.entry_handle_copies - before.entry_handle_copies,
+        after.admission_owner_lookups - before.admission_owner_lookups
+    );
+}
+
 #[test]
 fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallback() {
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
@@ -3356,6 +3602,11 @@ fn replay_native_transport_history(
         .artifacts
         .retain_original_custody(&private[0].artifacts)
         .unwrap();
+    assert_offer_retention_matches_ordered_fold(
+        base_context.artifact_view(),
+        base_context.compiler_input_projection(),
+        &joined.native_offers,
+    );
     let request = ExactCompileContext::new(base_context.clone())
         .prepare_compilation_with_private_input(
             &root.path().join("request"),
