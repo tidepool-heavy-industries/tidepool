@@ -16693,16 +16693,20 @@ pub(crate) mod tests {
             let marker_source = format!("module {marker} where");
             let marker_input = directory.join(format!("{marker}.hs"));
             std::fs::write(&marker_input, &marker_source).unwrap();
+            let marker_interface = marker.as_bytes().to_vec();
+            assert_ne!(marker_interface, parsed.products()[0].interface);
             let marker_bytes =
                 tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
                     unit: "main".into(),
                     module: marker.clone(),
-                    interface: vec![0x42],
+                    interface: marker_interface.clone(),
                     groups: vec![],
                 }]);
-            let marker_parsed =
-                ParsedModuleProducts::decode(&marker_bytes, &empty_package_bundle_for(&marker))
-                    .unwrap();
+            let marker_parsed = ParsedModuleProducts::decode(
+                &marker_bytes,
+                &empty_package_bundle_for_interface(&marker, &marker_interface),
+            )
+            .unwrap();
             let mut marker_evidence = evidence(&marker_source);
             marker_evidence.modules[0].module = marker.clone();
             let mut marker_worker = marker_evidence.clone();
@@ -16711,10 +16715,15 @@ pub(crate) mod tests {
             let marker_worker = serde_json::to_vec(&marker_worker).unwrap();
             let mut marker_receipt = receipt(&marker_bytes, &marker_evidence, &marker_source);
             marker_receipt.module = marker;
+            marker_receipt.skinny_iface_sha256 = sha(&marker_interface);
             marker_receipt.dependency_witness_sha256 = sha(&marker_worker);
             let marker_packet = CertifiedReceipt {
                 source_recipe: WorkerExecutionSource::Ordinary,
-                finalization: fixture_finalization(Some(root.path()), &[marker_receipt.clone()]),
+                finalization: fixture_finalization_from_products(
+                    Some(root.path()),
+                    &[marker_receipt.clone()],
+                    &marker_parsed,
+                ),
                 modules: vec![marker_receipt],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
