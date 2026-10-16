@@ -84,11 +84,21 @@ impl IssuedNativeOffer {
                 )?);
             }
             if proofs.is_empty() {
-                proofs.extend(NativeOriginalRequirement::from_issued_group_custody(
+                let complete = match NativeOriginalRequirement::from_issued_group_custody(
                     original,
                     role.interface(),
                     source,
-                )?);
+                ) {
+                    Ok(proof) => proof,
+                    // Optional baseline discovery has no issued group choice.
+                    // Competing custody cannot issue Full or prevent a separate
+                    // exact private offer from supplying its own authority.
+                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original) => {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                };
+                proofs.extend(complete);
             }
             if proofs.is_empty() {
                 offers.push(Self::issue(original, source, None)?);

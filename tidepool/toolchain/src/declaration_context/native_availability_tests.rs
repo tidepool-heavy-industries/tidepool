@@ -940,6 +940,124 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
 }
 
 #[test]
+fn optional_baseline_census_preserves_competing_exact_private_issuances() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement, NativeRequirementRoot,
+    };
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("OptionalCensus", 102);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone())
+        .descriptor
+        .id;
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let issue = |module, version| {
+        let marker = product(module, version);
+        let source = inventory
+            .admit_shared(
+                &base,
+                vec![
+                    Arc::new(ArtifactEntry::canonical(
+                        marker.module_interface().unwrap().clone(),
+                    )),
+                    entry.clone(),
+                ],
+            )
+            .unwrap();
+        let proof = NativeOriginalRequirement::from_issued_group_custody(
+            entry.descriptor.id,
+            canonical,
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap()
+    };
+    let left = issue("OptionalCensusLeft", 103);
+    let right = issue("OptionalCensusRight", 104);
+    let left_groups = left.issued_group_carriers().unwrap();
+    let right_groups = right.issued_group_carriers().unwrap();
+    assert_ne!(
+        left_groups.keys().collect::<Vec<_>>(),
+        right_groups.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        left_groups.values().collect::<Vec<_>>(),
+        right_groups.values().collect::<Vec<_>>(),
+        "independent group issuers retain the same artifact carrier"
+    );
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    for reverse in [false, true] {
+        let alternatives = if reverse {
+            [right.clone(), left.clone()]
+        } else {
+            [left.clone(), right.clone()]
+        };
+        let ambiguous = retain_native_offers(&base, &alternatives).unwrap();
+        assert!(ambiguous.selected_native_groups().is_empty());
+        assert!(
+            matches!(NativeOriginalRequirement::from_issued_group_custody(entry.descriptor.id, canonical, &ambiguous),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == entry.descriptor.id)),
+            "explicit complete issuance remains strict"
+        );
+        let context = Arc::new(ExactDeclarationContext::from_facts(
+            DeclarationContextFacts {
+                producer: producer.sha256(),
+                inventory: ambiguous,
+                compiler_projection: projection.clone(),
+                lexical: Default::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            },
+        ));
+        let baseline = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&context, None)
+            .unwrap();
+        let empty = &baseline.native_transport.availability[&entry.descriptor.id];
+        assert!(!empty.permits(7));
+        assert!(!empty.permits(9001));
+        assert!(empty
+            .offers()
+            .iter()
+            .all(|offer| offer.proof().is_none() && !offer.is_full()));
+        assert!(
+            matches!(baseline.artifacts.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: entry.descriptor.id, original_ordinal: 7,
+        }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == entry.descriptor.id)),
+            "a real demand without an exact choice must still refuse"
+        );
+        for chosen in [&left, &right] {
+            let private = OriginalCompilerInputs {
+                projection: projection.clone(),
+                artifacts: retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
+                native_offers: vec![chosen.clone()],
+            };
+            let root = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(context.clone())
+                .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+                .unwrap();
+            assert_eq!(wire_mode(&request, "OptionalCensus"), full_mode());
+            assert!(request.groups.is_empty());
+            let requirements = request.compiler_inputs().native_original_requirements();
+            assert_eq!(requirements.as_slice(), &[chosen.proof().unwrap().clone()]);
+            assert_eq!(
+                requirements[0]
+                    .issued_group_carriers(&request.compiler_inputs().artifacts)
+                    .unwrap(),
+                chosen.issued_group_carriers().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn advertised_unselected_body_preserves_historical_generation_identity_only() {
     use crate::artifact_inventory::{
         ExactArtifactSelection, IssuedNativeOffer, NativeGroupKey, NativeOriginalRequirement,
