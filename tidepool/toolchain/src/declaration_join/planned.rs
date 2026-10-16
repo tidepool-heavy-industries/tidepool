@@ -777,6 +777,16 @@ pub(crate) fn certify_same_offer_planned_declaration(
         }),
         &source_admission.home_imports()?,
     )?;
+    let issued_inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        source_selection,
+        sealed_artifacts,
+    )?;
+    let artifact_context = Arc::new(
+        artifact_context
+            .as_ref()
+            .clone()
+            .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
+    );
     let (_scratch, artifacts, original_imports, mut source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
             originals,
@@ -840,8 +850,15 @@ pub(crate) fn certify_same_offer_planned_declaration(
         authored_compiler_projection(&artifact_context, &artifacts, selected)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        artifacts,
-        compiler_projection,
+        compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+            compiler_projection,
+            artifacts,
+            artifact_context
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .cloned(),
+        )?,
         lexical_exports: inventory.selection.exports.clone(),
         introduced_exports: inventory.selection.exports,
         instances: inventory.selection.instances,

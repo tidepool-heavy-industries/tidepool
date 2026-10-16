@@ -154,12 +154,101 @@ pub struct CompilerInputProjection {
 
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompilerSourceSupport {
-    projection: CompilerInputProjection,
-    artifacts: ArtifactView,
+    pub(crate) projection: CompilerInputProjection,
+    pub(crate) artifacts: ArtifactView,
+    pub(crate) native_offers: Arc<[IssuedNativeOffer]>,
 }
 
 impl CompilerSourceSupport {
+    pub(crate) fn new(
+        projection: CompilerInputProjection,
+        artifacts: ArtifactView,
+        native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
+    ) -> Result<Self, CompileError> {
+        projection.validate(&artifacts)?;
+        let mut offers = Vec::new();
+        let mut retained = artifacts;
+        for offer in native_offers {
+            if !offers.contains(&offer) {
+                retained = retained.merge(offer.custody())?;
+                offers.push(offer);
+            }
+        }
+        Ok(Self {
+            projection,
+            artifacts: retained,
+            native_offers: offers.into(),
+        })
+    }
+
+    /// Issue availability at a checked original input ingress from its exact
+    /// selected graph. Custody outside that selection cannot supply bodies.
+    pub(crate) fn from_selected_issuance(
+        projection: CompilerInputProjection,
+        artifacts: ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let mut offers = Vec::new();
+        for role in projection.roles() {
+            if let Some(original) = role.original() {
+                let proof = NativeOriginalRequirement::from_role(role.clone())
+                    .map(|proof| Ok(Some(proof)))
+                    .unwrap_or_else(|| {
+                        NativeOriginalRequirement::from_selected_view(original, &artifacts)
+                    })?;
+                offers.push(IssuedNativeOffer::issue(original, &artifacts, proof)?);
+            }
+        }
+        Self::new(projection, artifacts, offers)
+    }
+
+    pub(crate) fn native_offer_observations(&self) -> Result<BTreeSet<[u8; 32]>, CompileError> {
+        self.native_offers
+            .iter()
+            .map(|offer| offer.snapshot_facts().identity())
+            .collect()
+    }
+
+    pub(crate) fn native_offers(&self) -> &[IssuedNativeOffer] {
+        &self.native_offers
+    }
+
+    pub(crate) fn source_support(
+        &self,
+        owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Self, CompileError> {
+        let selected = self.projection.source_support(&self.artifacts, owners)?;
+        let offers = self
+            .native_offers
+            .iter()
+            .filter_map(
+                |offer| match offer.is_relevant_to_support(&selected.projection) {
+                    Ok(true) => Some(Ok(offer.clone())),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(selected.projection, selected.artifacts, offers)
+    }
+
+    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        let (artifacts, projection) = self.artifacts.merge_compiler_inputs(
+            &self.projection,
+            &other.artifacts,
+            &other.projection,
+        )?;
+        Self::new(
+            projection,
+            artifacts,
+            self.native_offers
+                .iter()
+                .chain(other.native_offers.iter())
+                .cloned(),
+        )
+    }
+
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
     }
@@ -209,10 +298,7 @@ impl CompilerInputProjection {
             projection.admit_role(owner, role)?;
         }
         let artifacts = view.select_compiler_support(&projection)?;
-        Ok(CompilerSourceSupport {
-            projection,
-            artifacts,
-        })
+        CompilerSourceSupport::new(projection, artifacts, [])
     }
 
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {

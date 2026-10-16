@@ -339,15 +339,105 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     let descriptor = ContextDescriptor {
-        version: 1,
+        version: 2,
         producer: [0; 32],
         selection: selection.root().clone(),
         roles: roles.root().clone(),
         lexical: lexical.root().clone(),
+        offers: lexical.root().clone(),
     };
     let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
     install(&store, materializer.finish().unwrap());
     assert!(
         matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
+    );
+}
+
+#[test]
+fn native_offer_classes_round_trip_and_change_context_identity() {
+    let store = MemoryBlockstore::new();
+    let selection = crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(
+        ExactSelectionSnapshot::default(),
+    ));
+    let mut snapshot = ExactContextSnapshot::empty();
+    for body in [
+        NativeOfferSnapshotBody::Empty(selection.clone()),
+        NativeOfferSnapshotBody::Partial(selection.clone()),
+        NativeOfferSnapshotBody::Full(selection),
+    ] {
+        let fact = NativeOfferSnapshotFacts {
+            original: ArtifactId([1; 32]),
+            interface: ArtifactId([2; 32]),
+            owner: ExactModuleIdentity {
+                unit: "home".into(),
+                module: "Offer".into(),
+            },
+            body,
+        };
+        snapshot.offers.insert(fact.identity().unwrap(), fact);
+    }
+    let mut reordered = snapshot.clone();
+    reordered.offers = snapshot
+        .offers
+        .values()
+        .rev()
+        .cloned()
+        .chain(snapshot.offers.values().cloned())
+        .map(|fact| (fact.identity().unwrap(), fact))
+        .collect();
+    assert_eq!(reordered.offers.len(), 3);
+    let mut canonical = Materializer::new(&store);
+    let reordered_receipt = canonical.materialize_context(None, &reordered).unwrap();
+    install(&store, canonical.finish().unwrap());
+    let mut materializer = Materializer::new(&store);
+    let receipt = materializer.materialize_context(None, &snapshot).unwrap();
+    install(&store, materializer.finish().unwrap());
+    assert_eq!(receipt.root(), reordered_receipt.root());
+    let restored = hydrate_context(&store, receipt.root()).unwrap();
+    assert_eq!(restored.snapshot().offers, snapshot.offers);
+    let offered_selections = restored
+        .snapshot()
+        .native_offers()
+        .map(|fact| match &fact.body {
+            NativeOfferSnapshotBody::Empty(selection)
+            | NativeOfferSnapshotBody::Partial(selection)
+            | NativeOfferSnapshotBody::Full(selection) => selection.snapshot(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(offered_selections.len(), 3);
+    for selection in &offered_selections {
+        assert!(Arc::ptr_eq(selection, restored.snapshot().selection()));
+    }
+
+    let mut materializer = Materializer::new(&store);
+    let same = materializer
+        .materialize_context(Some(&restored), &snapshot)
+        .unwrap();
+    assert_eq!(same.root(), receipt.root());
+    assert_eq!(
+        materializer.finish().unwrap().metrics(),
+        MaterializationMetrics::default()
+    );
+    let mut changed = snapshot.clone();
+    let full = changed
+        .offers
+        .iter()
+        .find(|(_, fact)| matches!(fact.body, NativeOfferSnapshotBody::Full(_)))
+        .map(|(key, _)| *key)
+        .unwrap();
+    changed.offers.remove(&full);
+    let mut materializer = Materializer::new(&store);
+    let changed = materializer
+        .materialize_context(Some(&restored), &changed)
+        .unwrap();
+    assert_ne!(changed.root(), receipt.root());
+    install(&store, materializer.finish().unwrap());
+    assert_eq!(
+        hydrate_context(&store, changed.root())
+            .unwrap()
+            .snapshot()
+            .offers
+            .len(),
+        2
     );
 }

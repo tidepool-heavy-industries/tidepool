@@ -659,3 +659,92 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
     );
 })).await;
 }
+
+/// A choice keeps its original effectful payload across notebook compilations.
+/// The read target is created only after inspection, so the later cell must
+/// execute the retained action rather than reuse an eagerly read value.
+#[tokio::test]
+async fn reloaded_choice_retains_a_file_read_continuation_across_cells() {
+    use exomonad_actor::{JevBackend, JevCallFailure};
+
+    struct ChoiceJev {
+        requests: Mutex<Vec<serde_json::Value>>,
+    }
+    impl JevBackend for ChoiceJev {
+        fn ask(
+            &self,
+            request: String,
+        ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["questions"]["next"]["type"], "choice", "{request}");
+            self.requests.lock().push(request);
+            Box::pin(async {
+                Ok(serde_json::json!({
+                    "model": "jev-test",
+                    "answers": {"next": {
+                        "type": "choice", "choice": "search", "confidence": 0.88,
+                        "probabilities": {"search": 0.88, "page": 0.07, "patch": 0.05}
+                    }},
+                    "usage": {}
+                })
+                .to_string())
+            })
+        }
+    }
+
+    let phase_started = std::time::Instant::now();
+    eprintln!("choice-probe phase=start");
+    let backend = Arc::new(ChoiceJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let campaign = TestCampaign::start_with_conversation(
+        |admission| admission,
+        |config| {
+            config.jev = Some(backend.clone() as exomonad_actor::JevBackendHandle);
+            super::test_campaign::pinned_jev_workspace_with(config, |project| {
+                project.haskell.source_roots.insert(0, ".".into());
+            });
+        },
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
+    )
+    .await;
+    eprintln!(
+        "choice-probe phase=admitted elapsed={:?}",
+        phase_started.elapsed()
+    );
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let authored = campaign._repository.path().join(".exomonad/Persona");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(authored.join("ChoiceProbe.hs"), include_str!("fixtures/choice_probe.hs")).unwrap();
+        let policy = campaign.root_installation.policy.clone();
+        let reloaded = dispatch_structured_tool(
+            policy.as_ref(), "reload", serde_json::json!({"also_check": ["Persona.ChoiceProbe"]}),
+        ).await;
+        assert_eq!(reloaded["status"], "committed", "{reloaded}");
+        assert_eq!(reloaded["items"][0]["value"]["Right"]["tag"], "ReloadPublished", "{reloaded}");
+        eprintln!("choice-probe phase=reloaded elapsed={:?}", phase_started.elapsed());
+        let policy = policy.snapshot_for_request().expect("reloaded source generation");
+        let observed = committed(policy.as_ref(), r#"import qualified Persona.ChoiceProbe as Probe
+probeResult <- Probe.observe "Inspect the original selected action without running it"
+_ <- case fmap Probe.inspect probeResult of
+  Right (masses, key, path) | key == "search" && path == "choice/search.txt" && lookup "search" masses == Just 0.88 && lookup "page" masses == Just 0.07 && lookup "patch" masses == Just 0.05 -> pure ()
+  _ -> error "choice inspection lost its keyed masses or original payload""#).await;
+        assert_eq!(observed["status"], "committed", "{observed}");
+        assert_eq!(backend.requests.lock().len(), 1);
+        eprintln!("choice-probe phase=observed elapsed={:?}", phase_started.elapsed());
+        let reads = campaign._repository.path().join("choice");
+        std::fs::create_dir_all(&reads).unwrap();
+        std::fs::write(reads.join("search.txt"), "selected continuation read after observation\n").unwrap();
+        let result = displayed(campaign, policy.as_ref(), r#"probeRead <- case probeResult of { Left err -> pure (Left err); Right response -> Right <$> Probe.runSelected response }
+_ <- case probeRead of
+  Right (Right body) | body == "selected continuation read after observation\n" -> pure ()
+  _ -> error "retained choice did not execute its original file read"
+display (case fmap Probe.inspect probeResult of { Right (masses, key, path) -> key == "search" && path == "choice/search.txt" && lookup "search" masses == Just 0.88 && lookup "page" masses == Just 0.07 && lookup "patch" masses == Just 0.05 && length masses == 3; _ -> False })"#).await;
+        assert_eq!(super::test_campaign::committed_display_text(&result),
+            "True", "{result}");
+        eprintln!("choice-probe phase=continued-and-reinspected elapsed={:?}", phase_started.elapsed());
+        assert_eq!(backend.requests.lock().len(), 1, "running and reinspecting a retained choice must not repeat inference");
+    })).await;
+}

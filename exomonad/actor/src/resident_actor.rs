@@ -2939,6 +2939,60 @@ fn settle_prepared_operations(
     }
 }
 
+// Explicit Console output belongs to the authored action, independently of
+// the return-value presenter. Automatic command observations can be replaced
+// by that presenter while their original evidence remains in the command owner.
+#[derive(Debug, PartialEq, Eq)]
+enum WorkbenchEffectOutput {
+    Explicit(String),
+    AutomaticCommand(String),
+}
+
+fn render_effect_output(output: &[WorkbenchEffectOutput]) -> String {
+    output
+        .iter()
+        .map(|entry| match entry {
+            WorkbenchEffectOutput::Explicit(text)
+            | WorkbenchEffectOutput::AutomaticCommand(text) => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Named tools do not spend the explicit-output allowance on automatic command
+// observations that their return presenter replaces. Ordinary notebook units
+// retain one shared allowance. The final response still has its aggregate cap.
+#[derive(Default)]
+struct WorkbenchDisplayBudget {
+    explicit: usize,
+    automatic_command: usize,
+}
+
+impl WorkbenchDisplayBudget {
+    fn new(allowance: usize) -> Self {
+        Self {
+            explicit: allowance,
+            automatic_command: allowance,
+        }
+    }
+
+    fn command_allowance(&self, named_tool: bool) -> usize {
+        if named_tool {
+            self.automatic_command
+        } else {
+            self.explicit
+        }
+    }
+
+    fn command_remaining(&mut self, named_tool: bool) -> &mut usize {
+        if named_tool {
+            &mut self.automatic_command
+        } else {
+            &mut self.explicit
+        }
+    }
+}
+
 struct WorkbenchUnitExecution<'a> {
     execution: Option<&'a WorkbenchExecutionId>,
     input_unit_index: usize,
@@ -2946,8 +3000,8 @@ struct WorkbenchUnitExecution<'a> {
     named_tool: bool,
     operations: &'a mut Vec<WorkbenchOperationReceipt>,
     effect_ordinal: &'a mut usize,
-    display_remaining: &'a mut usize,
-    command_output: &'a mut Vec<String>,
+    display_budget: &'a mut WorkbenchDisplayBudget,
+    effect_output: &'a mut Vec<WorkbenchEffectOutput>,
     recovered_bindings: &'a mut Vec<String>,
     semantic_value: &'a mut Option<serde_json::Value>,
 }
@@ -3389,9 +3443,9 @@ struct WorkbenchUnitState {
     presentation: Option<tidepool_runtime::session::WorkbenchPresentationOutcome>,
     effect_ordinal: usize,
     operations: Vec<WorkbenchOperationReceipt>,
-    command_output: Vec<String>,
+    effect_output: Vec<WorkbenchEffectOutput>,
     recovered_bindings: Vec<String>,
-    display_remaining: usize,
+    display_budget: WorkbenchDisplayBudget,
 }
 
 impl Default for WorkbenchCursor {
@@ -9765,11 +9819,13 @@ where
                             // The native structural value is complete before the same
                             // continuation can demand its pure presenter.
                             *unit.semantic_value = Some(value);
-                            // A named tool's presenter owns its ordinary body.
-                            // Effect evidence remains in operation receipts and
-                            // their retained command/display owners.
-                            unit.command_output.clear();
-                            *unit.display_remaining = NAMED_TOOL_PRESENTATION_BYTES;
+                            // Preserve explicitly authored Console/display output. The
+                            // return presenter can replace automatic command observations,
+                            // whose original evidence remains with the command owner.
+                            unit.effect_output.retain(|entry| {
+                                matches!(entry, WorkbenchEffectOutput::Explicit(_))
+                            });
+                            unit.display_budget.explicit = NAMED_TOOL_PRESENTATION_BYTES;
                             let runner = self.environment.runner.clone();
                             let context = context.clone();
                             current.native_start =
@@ -10008,7 +10064,9 @@ where
                                 success_disposition,
                                 wait: OwnedWorkbenchWait::Display {
                                     boundary,
-                                    allowance: display_character_allowance(*unit.display_remaining),
+                                    allowance: display_character_allowance(
+                                        unit.display_budget.explicit,
+                                    ),
                                     operation: unit.execution.map(|execution| {
                                         WorkbenchOperationId {
                                             execution: execution.clone(),
@@ -10028,7 +10086,7 @@ where
                             .native(&self.environment, context)
                             .prepare_display(
                                 boundary,
-                                display_character_allowance(*unit.display_remaining),
+                                display_character_allowance(unit.display_budget.explicit),
                                 unit.execution.map(|execution| WorkbenchOperationId {
                                     execution: execution.clone(),
                                     input_unit_index: unit.input_unit_index,
@@ -10038,7 +10096,7 @@ where
                                     owner: execution_state.display_receipt_owner.clone(),
                                     settlement: display_settlement,
                                     fragment: &mut *next_fragment,
-                                    remaining: &mut *unit.display_remaining,
+                                    remaining: &mut unit.display_budget.explicit,
                                 }),
                                 crate::request::sources::CallbackExecution {
                                     context: context.clone(),
@@ -10060,18 +10118,20 @@ where
                                 .expect("display retains its effect stamp")
                                 .display = Some(display.clone());
                             if !rendered.is_empty() {
-                                unit.command_output.push(rendered);
+                                unit.effect_output
+                                    .push(WorkbenchEffectOutput::Explicit(rendered));
                             }
                         }
                         if let ResidentActorBoundary::Console { text, .. } = &boundary {
                             let rendered = crate::workbench_display::bounded_output(
                                 text,
-                                (*unit.display_remaining).min(32768),
+                                (unit.display_budget.explicit).min(32768),
                             );
-                            let rendered =
-                                next_fragment.present_output(&rendered, unit.display_remaining);
+                            let rendered = next_fragment
+                                .present_output(&rendered, &mut unit.display_budget.explicit);
                             if !rendered.is_empty() {
-                                unit.command_output.push(rendered);
+                                unit.effect_output
+                                    .push(WorkbenchEffectOutput::Explicit(rendered));
                             }
                         }
                         let boundary = {
@@ -10319,7 +10379,9 @@ where
                                                 summarize: !unit.named_tool
                                                     && next_fragment.summarizes_bound_commands(),
                                                 named_tool: unit.named_tool,
-                                                display_remaining: *unit.display_remaining,
+                                                display_remaining: unit
+                                                    .display_budget
+                                                    .command_allowance(unit.named_tool),
                                             },
                                             self.descriptor
                                                 .capabilities()
@@ -10331,8 +10393,8 @@ where
                                         &self.environment.commands,
                                         context.actor,
                                         next_fragment,
-                                        unit.display_remaining,
-                                        unit.command_output,
+                                        unit.display_budget.command_remaining(unit.named_tool),
+                                        unit.effect_output,
                                         unit.recovered_bindings,
                                     )?;
                                 }
@@ -10670,7 +10732,7 @@ where
             while cursor.index < request.items.len() {
                 let source = request.items[cursor.index].clone();
                 if let Some(mut receipt) = cursor.completed.take() {
-                    let command_prefix = cursor.unit.command_output.join("\n");
+                    let command_prefix = render_effect_output(&cursor.unit.effect_output);
                     if let Some(checked) = &cursor.cell_check {
                         let spent = if checked.items[cursor.index].verdict.kind
                             == tidepool_runtime::session::TurnKind::Expr
@@ -10722,8 +10784,8 @@ where
                                     named_tool: true,
                                     operations: &mut cursor.unit.operations,
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
-                                    display_remaining: &mut cursor.unit.display_remaining,
-                                    command_output: &mut cursor.unit.command_output,
+                                    display_budget: &mut cursor.unit.display_budget,
+                                    effect_output: &mut cursor.unit.effect_output,
                                     recovered_bindings: &mut cursor.unit.recovered_bindings,
                                     semantic_value: &mut cursor.unit.semantic_value,
                                 },
@@ -10778,17 +10840,20 @@ where
                             } else {
                                 60usize * 1024
                             };
-                            cursor.unit.display_remaining = display_budget.saturating_sub(
-                                cursor
-                                    .receipts
-                                    .iter()
-                                    .map(|item| item.output.len() + 1)
-                                    .sum::<usize>(),
+                            cursor.unit.display_budget = WorkbenchDisplayBudget::new(
+                                display_budget.saturating_sub(
+                                    cursor
+                                        .receipts
+                                        .iter()
+                                        .map(|item| item.output.len() + 1)
+                                        .sum::<usize>(),
+                                ),
                             );
                             if request.tool_call().is_none() {
-                                cursor.unit.display_remaining = cursor
+                                cursor.unit.display_budget.explicit = cursor
                                     .unit
-                                    .display_remaining
+                                    .display_budget
+                                    .explicit
                                     .min(cursor.cell_display_remaining);
                             }
                             let block = ParsedBlock {
@@ -10916,8 +10981,8 @@ where
                                     named_tool: request.tool_call().is_some(),
                                     operations: &mut cursor.unit.operations,
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
-                                    display_remaining: &mut cursor.unit.display_remaining,
-                                    command_output: &mut cursor.unit.command_output,
+                                    display_budget: &mut cursor.unit.display_budget,
+                                    effect_output: &mut cursor.unit.effect_output,
                                     recovered_bindings: &mut cursor.unit.recovered_bindings,
                                     semantic_value: &mut cursor.unit.semantic_value,
                                 },
@@ -10962,7 +11027,7 @@ where
                                 {
                                     receipt.output = format!(
                                         "{}\n{}",
-                                        cursor.unit.command_output.join("\n"),
+                                        render_effect_output(&cursor.unit.effect_output),
                                         receipt.output
                                     );
                                 }
@@ -10973,7 +11038,7 @@ where
                     cursor.running = None;
                 }
                 let step = step.expect("a unit settled or returned its owned watch");
-                let command_prefix = cursor.unit.command_output.join("\n");
+                let command_prefix = render_effect_output(&cursor.unit.effect_output);
                 match step {
                     ResidentWorkbenchStep::Committed {
                         output,
@@ -11005,7 +11070,10 @@ where
                             .unwrap_or_default();
                         warnings.extend(checked_warnings);
                         let output = if request.tool_call().is_some() {
-                            crate::bound_workbench_display(&output, cursor.unit.display_remaining)
+                            crate::bound_workbench_display(
+                                &output,
+                                cursor.unit.display_budget.explicit,
+                            )
                         } else {
                             output
                         };
@@ -11074,7 +11142,7 @@ where
                                         std::mem::take(&mut receipt.output),
                                         receipt.value.clone(),
                                         self.after_tool.begin(),
-                                        cursor.unit.display_remaining,
+                                        cursor.unit.display_budget.explicit,
                                     );
                                     let span = tracing::info_span!("after_tool_slot",
                                         slot = %crate::after_tool::AFTER_TOOL_SLOT,
@@ -11103,7 +11171,10 @@ where
                             diagnostics,
                         } = rejection;
                         let output = if request.tool_call().is_some() {
-                            crate::bound_workbench_display(&output, cursor.unit.display_remaining)
+                            crate::bound_workbench_display(
+                                &output,
+                                cursor.unit.display_budget.explicit,
+                            )
                         } else {
                             output
                         };

@@ -29,8 +29,8 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Vec<ArtifactId>, CompileError> {
-        let metadata = self.facts.inventory.metadata_snapshot();
-        let roles = self.facts.compiler_projection.roles();
+        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
+        let roles = self.facts.compiler_support.projection.roles();
         let issued = roles
             .iter()
             .find_map(|role| match role {
@@ -42,11 +42,14 @@ impl ExactDeclarationContext {
                 _ => None,
             })
             .unwrap_or_else(|| {
-                crate::artifact_inventory::ExactArtifactSelection::capture(&self.facts.inventory)
+                crate::artifact_inventory::ExactArtifactSelection::capture(
+                    &self.facts.compiler_support.artifacts,
+                )
             });
         let issuer = self
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .select_issued(vec![original], &issued)?;
         let mut roots = BTreeSet::from([original]);
         for node in self.published_lexical_closure(root)? {
@@ -122,7 +125,8 @@ impl ExactDeclarationContext {
         }
         let closure = self
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .select_issued(self.published_artifact_roots(root, *original)?, selection)?;
         let metadata = closure.metadata_snapshot();
         let entry = metadata
@@ -180,7 +184,8 @@ impl ExactDeclarationContext {
     pub(super) fn validate_published_source_originals(&self) -> Result<(), CompileError> {
         let roles = self
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .into_iter()
             .filter(CompilerInputRole::is_published_source_original)
@@ -188,7 +193,7 @@ impl ExactDeclarationContext {
         if roles.is_empty() {
             return Ok(());
         }
-        let metadata = self.facts.inventory.metadata_snapshot();
+        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
         for role in roles {
             if let CompilerInputRole::PublishedSourceOriginal {
                 interface,
@@ -217,7 +222,8 @@ impl ExactDeclarationContext {
     ) -> Result<Vec<Arc<PublishedSourceOriginalSelection>>, CompileError> {
         if !self
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .iter()
             .any(CompilerInputRole::is_published_source_original)
@@ -225,9 +231,10 @@ impl ExactDeclarationContext {
             return Ok(Vec::new());
         }
         self.normalize()?;
-        let metadata = self.facts.inventory.metadata_snapshot();
+        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
         self.facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .into_iter()
             .filter_map(|role| {
@@ -330,24 +337,31 @@ impl ExactDeclarationContext {
         original: ArtifactId,
     ) -> Result<Self, CompileError> {
         let roots = self.published_artifact_roots(root, original)?;
-        let inventory =
-            match self.facts.compiler_projection.roles().iter().find(|role| {
-                role.original() == Some(original) && role.is_published_source_original()
-            }) {
-                Some(CompilerInputRole::PublishedSourceOriginal { selection, .. }) => {
-                    self.facts.inventory.select_issued(roots, selection)?
-                }
-                _ => self
-                    .facts
-                    .inventory
-                    .select_publication_roots(original, roots)?,
-            };
+        let inventory = match self
+            .facts
+            .compiler_support
+            .projection
+            .roles()
+            .iter()
+            .find(|role| role.original() == Some(original) && role.is_published_source_original())
+        {
+            Some(CompilerInputRole::PublishedSourceOriginal { selection, .. }) => self
+                .facts
+                .compiler_support
+                .artifacts
+                .select_issued(roots, selection)?,
+            _ => self
+                .facts
+                .compiler_support
+                .artifacts
+                .select_publication_roots(original, roots)?,
+        };
         let ids = inventory
             .descriptors()
             .into_iter()
             .map(|row| row.id)
             .collect::<BTreeSet<_>>();
-        let metadata = self.facts.inventory.metadata_snapshot();
+        let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
         let lexical = self.published_lexical_closure(root)?;
         let owners = lexical
             .iter()
@@ -355,7 +369,8 @@ impl ExactDeclarationContext {
             .collect::<BTreeSet<_>>();
         let roles = self
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .into_iter()
             .filter(|role| {
@@ -382,8 +397,11 @@ impl ExactDeclarationContext {
             .collect::<Vec<_>>();
         Self::from_facts(DeclarationContextFacts {
             producer: self.facts.producer,
-            compiler_projection: CompilerInputProjection::restore(&inventory, &roles)?,
-            inventory,
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                CompilerInputProjection::restore(&inventory, &roles)?,
+                inventory,
+                self.facts.compiler_support.native_offers.iter().cloned(),
+            )?,
             lexical: self
                 .facts
                 .lexical
@@ -424,7 +442,8 @@ impl ExactDeclarationContext {
         let mut context = self.published_context_for_root(root, entry.descriptor.id)?;
         let interface = context
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .into_iter()
             .find(|role| role.original() == Some(entry.descriptor.id))
@@ -436,7 +455,7 @@ impl ExactDeclarationContext {
             source_revision: revision.into(),
             original_input_identity: input_identity.into(),
             selection: crate::artifact_inventory::ExactArtifactSelection::capture(
-                &context.facts.inventory,
+                &context.facts.compiler_support.artifacts,
             ),
             selection_sha256: [0; 32],
         };
@@ -449,7 +468,8 @@ impl ExactDeclarationContext {
         }
         context
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .admit_role(root.clone(), role)?;
         Ok(Arc::new(PublishedSourceOriginalSelection {
             context: Arc::new(context.finish()?),
@@ -475,14 +495,23 @@ impl ExactDeclarationContext {
         {
             let updated = self
                 .facts
-                .compiler_projection
-                .merge(&incoming.facts.compiler_projection)?;
-            self = self.rebuild(|facts| facts.compiler_projection = updated);
+                .compiler_support
+                .projection
+                .merge(&incoming.facts.compiler_support.projection)?;
+            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         {
-            let updated = self.facts.inventory.merge(&incoming.facts.inventory)?;
-            self = self.rebuild(|facts| facts.inventory = updated);
+            let updated = self
+                .facts
+                .compiler_support
+                .artifacts
+                .merge(&incoming.facts.compiler_support.artifacts)?;
+            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
+        self.facts.compiler_support = self
+            .facts
+            .compiler_support
+            .merge(&incoming.facts.compiler_support)?;
         {
             let updated = self.facts.lexical.replace(lexical)?;
             self = self.rebuild(|facts| facts.lexical = updated);
@@ -493,7 +522,8 @@ impl ExactDeclarationContext {
     pub(super) fn published_scope_value(&self) -> Result<Value, CompileError> {
         if !self
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .roles()
             .iter()
             .any(CompilerInputRole::is_published_source_original)
@@ -504,7 +534,8 @@ impl ExactDeclarationContext {
         let metadata = self.compiler_metadata_snapshot()?;
         Ok(Value::Array(
             self.facts
-                .compiler_projection
+                .compiler_support
+                .projection
                 .roles()
                 .into_iter()
                 .filter_map(|role| {
@@ -538,7 +569,8 @@ impl ExactDeclarationContext {
                     let selected = context.compiler_metadata_snapshot()?;
                     let dependencies = context
                         .facts
-                        .compiler_projection
+                        .compiler_support
+                        .projection
                         .roles()
                         .into_iter()
                         .filter_map(|role| {
@@ -818,7 +850,7 @@ mod tests {
             let continued = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &admitted,
-                published.facts.compiler_projection.clone(),
+                published.facts.compiler_support.projection.clone(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
@@ -840,7 +872,7 @@ mod tests {
             let with_ambient = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &ambient,
-                published.facts.compiler_projection.clone(),
+                published.facts.compiler_support.projection.clone(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],

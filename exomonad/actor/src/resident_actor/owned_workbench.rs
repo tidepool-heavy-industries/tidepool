@@ -1452,8 +1452,8 @@ where
             .expect("original slot budget")
             .frame
             .remaining_display_budget();
-        owned.state.cursor.unit.display_remaining =
-            owned.state.cursor.unit.display_remaining.min(budget);
+        owned.state.cursor.unit.display_budget.explicit =
+            owned.state.cursor.unit.display_budget.explicit.min(budget);
         Self::owned_step_task(
             owned,
             |owned| {
@@ -1739,7 +1739,7 @@ where
                                     .fragment
                                     .as_mut()
                                     .expect("display owns its fragment"),
-                                remaining: &mut cursor.unit.display_remaining,
+                                remaining: &mut cursor.unit.display_budget.explicit,
                             };
                             let prepared = current
                                 .execution
@@ -1767,7 +1767,10 @@ where
                                     .display = Some(display.clone());
                                 let rendered = display.text.clone();
                                 if !rendered.is_empty() {
-                                    cursor.unit.command_output.push(rendered);
+                                    cursor
+                                        .unit
+                                        .effect_output
+                                        .push(WorkbenchEffectOutput::Explicit(rendered));
                                 }
                             }
                             prepared
@@ -1901,7 +1904,12 @@ where
                         .expect("presentation retains its fragment")
                         .summarizes_bound_commands(),
                 named_tool,
-                display_remaining: owned.state.cursor.unit.display_remaining,
+                display_remaining: owned
+                    .state
+                    .cursor
+                    .unit
+                    .display_budget
+                    .command_allowance(named_tool),
             };
             let environment = self.environment.clone();
             let permitted = self
@@ -1966,8 +1974,8 @@ where
                                     &environment.commands,
                                     owned.state.effects.context.actor,
                                     fragment,
-                                    &mut cursor.unit.display_remaining,
-                                    &mut cursor.unit.command_output,
+                                    cursor.unit.display_budget.command_remaining(named_tool),
+                                    &mut cursor.unit.effect_output,
                                     &mut cursor.unit.recovered_bindings,
                                 )
                             });

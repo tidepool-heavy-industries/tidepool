@@ -559,6 +559,107 @@ async fn read_lookup_capture(
     );
 }
 
+// Exercise the installed provider boundary and its actual native-envelope
+// projection. Canonical operation metadata alone must not satisfy these checks.
+async fn lookup_model_output(
+    installed: &exomonad_actor::LocalResidentInstallation,
+    name: &str,
+    arguments: serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    use harness::model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId};
+    let call = uuid::Uuid::new_v4().simple().to_string();
+    let operation = OperationId {
+        origin: ConversationIdentity::Embedded {
+            run: "lookup-model-output".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: installed.actor.identity().incarnation.0.to_string(),
+        },
+        request: RequestId(call.clone()),
+        call: CallId(call),
+    };
+    let original = super::embedded_policy::native_original(&operation).unwrap();
+    let (context, completion) = super::test_campaign::original_tool_call(original);
+    let installation =
+        super::embedded_policy::EmbeddedPolicyInstallation::from_installation(installed);
+    let snapshot = installation
+        .request_snapshot()
+        .expect("issued lookup request snapshot");
+    let encoded = snapshot
+        .dispatch(
+            name.into(),
+            exomonad_tool::ToolArguments::Structured(arguments),
+            context,
+            None,
+            None,
+        )
+        .await
+        .expect("installed lookup provider dispatch");
+    installed
+        .policy
+        .complete_boxed(completion)
+        .await
+        .expect("lookup completion retains its original operation");
+    let mut item = harness::item::Item::tool_output(
+        &operation.call,
+        harness::item::ToolKind::Function,
+        &harness::turn::JobOutput::Completed(Ok(encoded.clone())),
+    );
+    let output_format = harness::provider::OutputFormat::NativeReceiptV1;
+    item.0["output_format"] = serde_json::to_value(output_format).unwrap();
+    let recorded = harness::store::RecordedToolOutput {
+        item,
+        terminal: harness::store::TerminalOutcome::Success,
+        output_format,
+    };
+    let projected = super::embedded_policy::project_retained_result(&recorded, &operation)
+        .expect("native lookup projection")
+        .expect("native format has a projection");
+    (encoded["nativeResult"]["body"].clone(), projected)
+}
+
+#[tokio::test]
+async fn native_lookup_model_output_preserves_displayed_index_and_selected_sections() {
+    let (campaign, backend) = lookup_campaign().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+        let installed = campaign.root_installation.clone();
+        campaign.drive_actor_output(&store, async {
+            let (canonical, projected) = lookup_model_output(&installed, "lookup",
+                serde_json::json!({"queries":["LookupFixture.relatedRoot"]})).await;
+            let retained = lookup_capture_receipt(&canonical);
+            assert!(lookup_presented_output(&projected).contains("relatedRoot"),
+                "lookup must deliver its displayed index beside the returned reference: {projected}");
+            assert!(projected["items"][0].get("value").is_none(),
+                "canonical semantic result stays retained: {projected}");
+            let lookups = backend.scoring_requests().len();
+            for (requested, expected) in [
+                (serde_json::json!({"tag":"LookupIndex"}), "relatedRoot"),
+                (lookup_signature_selection("PrimaryLookup", 1), "LookupCaptureExcerpt"),
+            ] {
+                let (_, selected) = lookup_model_output(&installed, "read_lookup", serde_json::json!({
+                    "retainedActor":retained.lookup_capture_actor,
+                    "retainedIncarnation":retained.lookup_capture_incarnation,
+                    "retainedSlot":retained.lookup_capture_slot,
+                    "requested":requested,
+                })).await;
+                assert!(lookup_presented_output(&selected).contains(expected),
+                    "retained selection must deliver its displayed text, not just acknowledgement: {selected}");
+                for operation in selected["items"].as_array().unwrap().iter()
+                    .flat_map(|item| item["operations"].as_array().unwrap()) {
+                    if let Some(display) = operation.get("display") {
+                        let pointer = display["textSource"].as_str()
+                            .expect("published page is present in ordinary model output");
+                        assert!(selected.pointer(pointer).and_then(serde_json::Value::as_str).is_some());
+                        assert!(display.get("textOmitted").is_none());
+                    }
+                }
+            }
+            assert_eq!(backend.scoring_requests().len(), lookups,
+                "reading retained pages must not repeat lookup enrichment");
+        }).await;
+    })).await;
+}
+
 #[tokio::test]
 async fn template_lookup_batches_related_declarations_and_recovers_from_jev_failure() {
     let (campaign, backend) = lookup_campaign().await;

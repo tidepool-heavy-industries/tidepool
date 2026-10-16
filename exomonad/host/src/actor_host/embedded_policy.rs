@@ -507,15 +507,22 @@ pub(super) fn project_retained_result(
 }
 
 #[cfg(test)]
+pub(super) fn project_workbench_model_output(
+    response: Value,
+    context: &ToolInvocationContext,
+) -> Result<Value, serde_json::Error> {
+    Ok(compact_workbench(response, serde_json::to_value(context)?))
+}
+
+#[cfg(test)]
 fn project_model_result(
     response: exomonad_actor::ResidentToolResponse,
     context: &ToolInvocationContext,
 ) -> Result<Value, serde_json::Error> {
     match response {
-        exomonad_actor::ResidentToolResponse::Workbench(body) => Ok(compact_workbench(
-            serde_json::to_value(body)?,
-            serde_json::to_value(context)?,
-        )),
+        exomonad_actor::ResidentToolResponse::Workbench(body) => {
+            project_workbench_model_output(serde_json::to_value(body)?, context)
+        }
         exomonad_actor::ResidentToolResponse::Value(body) => Ok(body),
     }
 }

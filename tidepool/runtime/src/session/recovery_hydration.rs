@@ -141,7 +141,7 @@ fn hydrate_context_roots(
                 .binding_dependencies()
                 .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?,
         );
-        receipts.push((receipt, selection));
+        receipts.push(receipt);
     }
     let artifacts = bindings
         .iter()
@@ -181,13 +181,9 @@ fn hydrate_context_roots(
     )
     .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let mut restored = Vec::new();
-    for (receipt, selection) in receipts {
+    for receipt in receipts {
         let snapshot = receipt.snapshot();
-        let mut context = inventory.context_with_graph_selection(
-            &selection,
-            &snapshot.compiler_roles(),
-            snapshot.lexical(),
-        )?;
+        let mut context = inventory.context_with_snapshot(snapshot)?;
         if context.toolchain_identity_sha256() != snapshot.producer_sha256() {
             return Err(SessionError::WrongPublicManifestTicket);
         }

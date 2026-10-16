@@ -7391,18 +7391,18 @@ mod tests {
             assert_eq!(retained.lexical, lexical);
             assert_eq!(
                 retained
-                    .compiler_artifacts
+                    .compiler_support.artifacts
                     .capture_graph_selection()
                     .native_groups,
                 prefix.capture_graph_selection().native_groups
             );
             assert_eq!(inventory.metrics().issued_scope_nodes, before_retention);
             assert_eq!(
-                retained.compiler_artifacts.namespace()[&id],
+                retained.compiler_support.artifacts.namespace()[&id],
                 prefix.namespace()[&id]
             );
             assert_eq!(
-                retained.compiler_artifacts.namespace()[&child.descriptor.id],
+                retained.compiler_support.artifacts.namespace()[&child.descriptor.id],
                 prefix.namespace()[&child.descriptor.id]
             );
             let hidden = Arc::new(entry("UnselectedCompilerRole", &[]));

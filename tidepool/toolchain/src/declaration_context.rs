@@ -43,8 +43,7 @@ pub struct ExactDeclarationContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeclarationContextFacts {
     producer: [u8; 32],
-    inventory: ArtifactView,
-    compiler_projection: CompilerInputProjection,
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     lexical: crate::exact_context::ExactLexicalSnapshot,
     template_imports: Option<Arc<RetainedTemplateImports>>,
     original_instance_environment: OriginalInstanceEnvironment,
@@ -73,8 +72,11 @@ impl std::fmt::Debug for ExactDeclarationContext {
         formatter
             .debug_struct("ExactDeclarationContext")
             .field("producer", &self.facts.producer)
-            .field("inventory", &self.facts.inventory)
-            .field("compiler_projection", &self.facts.compiler_projection)
+            .field("inventory", &self.facts.compiler_support.artifacts)
+            .field(
+                "compiler_projection",
+                &self.facts.compiler_support.projection,
+            )
             .field("lexical", &self.facts.lexical)
             .field("template_imports", &self.facts.template_imports)
             .field(
@@ -102,7 +104,7 @@ impl Eq for ExactDeclarationContext {}
 /// remain independently owned byte custody for future execution.
 pub(crate) struct RetainedValueSourceSurface {
     pub(crate) artifacts: ArtifactView,
-    pub(crate) compiler_artifacts: ArtifactView,
+    pub(crate) compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     pub(crate) lexical: Vec<ExactLexicalNode>,
 }
 
@@ -209,8 +211,9 @@ impl PreparedValueSourceSupport {
         let source_owners = lexical.iter().map(|node| node.owner.clone()).collect();
         let support = self
             .context
-            .compiler_input_projection()
-            .source_support(self.context.artifact_view(), &source_owners)?;
+            .facts
+            .compiler_support
+            .source_support(&source_owners)?;
         // The value already owns its exact graph; source roles retain their
         // issued namespace and group handles without choosing new body demand.
         let compiler_artifacts = value.merge(support.artifacts())?;
@@ -221,7 +224,11 @@ impl PreparedValueSourceSupport {
             .retain_original_custody(&compiler_artifacts)?;
         Ok(RetainedValueSourceSurface {
             artifacts,
-            compiler_artifacts,
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                support.projection().clone(),
+                compiler_artifacts,
+                support.native_offers().iter().cloned(),
+            )?,
             lexical,
         })
     }
@@ -323,7 +330,6 @@ pub(crate) struct OriginalCompilerInputs {
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
 }
 
-#[cfg(test)]
 fn native_requirement_facts(
     offers: &[crate::artifact_inventory::IssuedNativeOffer],
 ) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
@@ -418,6 +424,10 @@ fn capture_native_original_requirements(
 }
 
 impl OriginalCompilerInputs {
+    pub(crate) fn native_offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
+        &self.native_offers
+    }
+
     /// Complete a physical segment's new-product promises while all of its
     /// checked type outputs remain in private custody. Item selections carry
     /// these issued offers; their narrower type roles never reissue the body.
@@ -452,65 +462,87 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
-        let metadata = context.facts.inventory.metadata_snapshot();
-        let issued = context
-            .facts
-            .compiler_projection
+        let metadata = context.facts.compiler_support.artifacts.metadata_snapshot();
+        let authored = context
+            .compiler_input_projection()
             .roles()
-            .into_iter()
-            .map(|role| (role.interface(), role.original()))
-            .collect::<BTreeMap<_, _>>();
-        let mut products = Vec::new();
-        let mut availability = Vec::new();
-        for (id, entry) in &metadata.artifacts {
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                continue;
-            };
-            let Some(interface) = product.module_interface().filter(|interface| {
+            .iter()
+            .filter_map(|role| {
+                let entry = metadata.artifacts.get(&role.interface())?;
+                let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                    return None;
+                };
                 matches!(
                     interface.origin(),
                     crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                 )
-            }) else {
-                continue;
-            };
-            let canonical = ArtifactEntry::canonical(interface.clone()).descriptor.id;
-            let Some(original) = issued.get(&canonical) else {
-                // Exact historical children stay selected dependencies, not
-                // independent names in the current compiler namespace.
-                continue;
-            };
-            if original.is_some_and(|original| original != *id) {
-                continue;
-            }
-            // A complete body must retain one exact issued carrier graph.
-            // Neither selected ordinal unions nor byte custody issue this fact.
-            let proof =
-                crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
-                    *id,
-                    canonical,
-                    &context.facts.inventory,
-                )?;
-            if let Some(proof) = proof {
-                products.push(product.clone());
-                availability.push(proof);
-            }
-        }
-        // Validate the complete issued private namespace together: an authored
-        // original can depend on a configured original with only a public type
-        // role. Independent validation would reject that legitimate closure.
-        products.extend_from_slice(configured);
-        if products.is_empty() {
-            Ok(None)
+                .then(|| entry.descriptor.owner.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let carried = if authored.is_empty() {
+            None
         } else {
-            Self::from_native_availability_with_requirements(
-                context,
-                producer,
-                &products,
-                &availability,
-            )
-            .map(Some)
+            let mut projection = context
+                .compiler_input_projection()
+                .for_source_owners(&authored);
+            for offer in context.facts.compiler_support.native_offers() {
+                let facts = offer.snapshot_facts();
+                if !authored.contains(&facts.owner) {
+                    continue;
+                }
+                let Some(role) = context
+                    .compiler_input_projection()
+                    .snapshot_roles()
+                    .get(&facts.owner)
+                else {
+                    continue;
+                };
+                if role.interface() != facts.interface
+                    || role
+                        .original()
+                        .is_some_and(|original| original != facts.original)
+                {
+                    continue;
+                }
+                projection.admit_role(
+                    facts.owner,
+                    CompilerInputRole::ReusableOriginal {
+                        interface: facts.interface,
+                        original: facts.original,
+                    },
+                )?;
+            }
+            let native_offers = preserve_native_offers(
+                &projection,
+                context.artifact_view(),
+                context.facts.compiler_support.native_offers(),
+            )?;
+            Some(Self {
+                projection,
+                artifacts: retain_native_offers(context.artifact_view(), &native_offers)?,
+                native_offers,
+            })
+        };
+        let carried = carried.filter(|input| {
+            input
+                .projection
+                .roles()
+                .iter()
+                .any(|role| role.original().is_some())
+        });
+        if configured.is_empty() {
+            return Ok(carried);
         }
+        let configured = Self::from_native_availability_with_requirements(
+            context,
+            producer,
+            configured,
+            &native_requirement_facts(context.facts.compiler_support.native_offers()),
+        )?;
+        Ok(Some(match carried {
+            Some(carried) => carried.merge(&configured)?,
+            None => configured,
+        }))
     }
 
     pub(crate) fn from_selection(
@@ -591,8 +623,8 @@ impl OriginalCompilerInputs {
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
     ) -> Result<Self, CompileError> {
         Self::issue_complete_native_availability(
-            &context.facts.inventory,
-            &context.facts.compiler_projection,
+            &context.facts.compiler_support.artifacts,
+            &context.facts.compiler_support.projection,
             producer.sha256(),
             products,
             availability,
@@ -1177,21 +1209,14 @@ impl ProtectedScaffoldRequirements {
         #[cfg(test)]
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
         let declaration_semantic_sha256 = context.semantic_sha256();
-        let mut projection = context.facts.compiler_projection.merge(&self.projection)?;
+        let mut projection = context
+            .facts
+            .compiler_support
+            .projection
+            .merge(&self.projection)?;
         // Baseline context and protected scaffold are independent issuance
         // ingresses. Private custody must not fill a missing baseline proof.
-        let mut native_offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-            &context.facts.compiler_projection,
-            context.artifact_view(),
-            &[],
-        )?;
-        native_offers.extend(
-            crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-                &self.projection,
-                context.artifact_view(),
-                &[],
-            )?,
-        );
+        let mut native_offers = context.facts.compiler_support.native_offers.to_vec();
         let artifacts = match private {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
@@ -1346,7 +1371,8 @@ impl ExactCompileContext {
         let effective = self
             .declarations
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .merge(&protected_projection)?;
         crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
             &effective,
@@ -1900,14 +1926,41 @@ impl RecoveredArtifactInventory {
             inventory.recover_selection(&inventory.empty_view(), entries, selection, &edges)?;
         let compiler_projection = CompilerInputProjection::restore(&restored, roles)?;
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                compiler_projection,
+                restored,
+                [],
+            )?,
+
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection,
-            inventory: restored,
+
             lexical: crate::exact_context::ExactLexicalSnapshot::default().replace(lexical)?,
         });
         context.finish()
+    }
+
+    pub fn context_with_snapshot(
+        &self,
+        snapshot: &crate::exact_context::ExactContextSnapshot,
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        let graph = snapshot.graph_selection().map_err(failure)?;
+        let mut context = self.context_with_graph_selection(
+            &graph,
+            &snapshot.compiler_roles(),
+            snapshot.lexical(),
+        )?;
+        let offers = snapshot
+            .native_offers()
+            .map(|fact| fact.restore(context.artifact_view()))
+            .collect::<Result<Vec<_>, _>>()?;
+        context.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            context.facts.compiler_support.projection.clone(),
+            context.artifact_view().clone(),
+            offers,
+        )?;
+        Ok(context)
     }
 
     fn capture_inputs(
@@ -1926,11 +1979,16 @@ impl RecoveredArtifactInventory {
         )>,
     ) -> Result<Self, RecoveryInventoryError> {
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                CompilerInputProjection::default(),
+                ArtifactInventory::default().empty_view(),
+                [],
+            )?,
+
             producer: [0; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection: CompilerInputProjection::default(),
-            inventory: ArtifactInventory::default().empty_view(),
+
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
         });
         let mut validation = PackageInterfaceValidation::default();
@@ -2237,12 +2295,25 @@ impl RecoveredArtifactInventory {
             Some(roles) => CompilerInputProjection::restore(&restored, roles)?,
             None => compiler_projection.expect("direct input issuer"),
         };
+        let compiler_support = if roles.is_none() {
+            crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                compiler_projection,
+                restored,
+            )?
+        } else {
+            crate::artifact_inventory::CompilerSourceSupport::new(
+                compiler_projection,
+                restored,
+                [],
+            )?
+        };
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support,
+
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection,
-            inventory: restored,
+
             lexical: crate::exact_context::ExactLexicalSnapshot::default().replace(lexical)?,
         });
         context.finish()
@@ -3595,13 +3666,24 @@ impl ExactProductAdmission<'_> {
         {
             required.extend(owners.iter().cloned());
         }
-        let context = ExactDeclarationContext::from_authenticated_execution(
+        let mut context = ExactDeclarationContext::from_authenticated_execution(
             self.request.producer_sha256,
             artifacts,
             projection,
             lexical,
             self.source.generated_source_owner()?,
             &required.into_iter().collect::<Vec<_>>(),
+        )?;
+        context.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            context.facts.compiler_support.projection.clone(),
+            context.facts.compiler_support.artifacts.clone(),
+            inherited
+                .facts
+                .compiler_support
+                .native_offers
+                .iter()
+                .chain(inputs.native_offers.iter())
+                .cloned(),
         )?;
         Ok(Arc::new(context))
     }
@@ -3936,9 +4018,10 @@ impl ExactCompilationRequest {
         if self
             .context()
             .facts
-            .compiler_projection
-            .merge(&context.facts.compiler_projection)?
-            != context.facts.compiler_projection
+            .compiler_support
+            .projection
+            .merge(&context.facts.compiler_support.projection)?
+            != context.facts.compiler_support.projection
         {
             return Err(failure("program context removed an issued compiler role"));
         }
@@ -4243,15 +4326,31 @@ impl ExactCompilationRequest {
             .cloned()
             .collect::<BTreeSet<_>>();
         let persistent = issued.for_source_owners(&persistent_owners);
-        let (inventory, projection) = context.facts.inventory.merge_compiler_inputs(
-            &context.facts.compiler_projection,
-            support,
-            &persistent,
+        let (inventory, projection) = context
+            .facts
+            .compiler_support
+            .artifacts
+            .merge_compiler_inputs(
+                &context.facts.compiler_support.projection,
+                support,
+                &persistent,
+            )?;
+        let incoming_offers = selection
+            .issued_native_availability()
+            .flat_map(|availability| availability.offers().iter().cloned())
+            .collect::<Vec<_>>();
+        let retained = crate::artifact_inventory::CompilerSourceSupport::new(
+            projection,
+            inventory,
+            context
+                .facts
+                .compiler_support
+                .native_offers
+                .iter()
+                .cloned()
+                .chain(incoming_offers),
         )?;
-        context = context.rebuild(|facts| {
-            facts.inventory = inventory;
-            facts.compiler_projection = projection;
-        });
+        context = context.rebuild(|facts| facts.compiler_support = retained);
         let context = Arc::new(context.finish()?);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -4328,7 +4427,7 @@ impl ExactCompilationRequest {
         let program_support = ProgramSourceSupport::extend(
             self.program_support.as_ref(),
             fresh.clone(),
-            context.facts.compiler_projection.clone(),
+            context.facts.compiler_support.projection.clone(),
             imports
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
@@ -5235,12 +5334,17 @@ impl ExactDeclarationContext {
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
         Self::from_facts(DeclarationContextFacts {
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                CompilerInputProjection::default(),
+                ArtifactInventory::default().empty_view(),
+                [],
+            )?,
+
             producer: [0; 32],
-            inventory: ArtifactInventory::default().empty_view(),
+
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection: CompilerInputProjection::default(),
         })
         .extend(authored, joins, lexical)
     }
@@ -5374,15 +5478,26 @@ impl ExactDeclarationContext {
             let incoming = certificate
                 .compiler_input_projection()
                 .for_source_owners(&selected_sources);
-            let (inventory, projection) = self.facts.inventory.merge_compiler_inputs(
-                &self.facts.compiler_projection,
-                certificate.artifact_view(),
-                &incoming,
+            let (inventory, projection) = self
+                .facts
+                .compiler_support
+                .artifacts
+                .merge_compiler_inputs(
+                    &self.facts.compiler_support.projection,
+                    certificate.artifact_view(),
+                    &incoming,
+                )?;
+            let offers = self
+                .facts
+                .compiler_support
+                .native_offers
+                .iter()
+                .chain(certificate.compiler_source_support().native_offers().iter())
+                .cloned();
+            let support = crate::artifact_inventory::CompilerSourceSupport::new(
+                projection, inventory, offers,
             )?;
-            self = self.rebuild(|facts| {
-                facts.inventory = inventory;
-                facts.compiler_projection = projection;
-            });
+            self = self.rebuild(|facts| facts.compiler_support = support);
         }
         for join in joins {
             self = self.admit_producer(join.toolchain_identity_sha256())?;
@@ -5399,7 +5514,12 @@ impl ExactDeclarationContext {
             // Bind the join against its issuer's exact graph before combining
             // independently scoped native custody.
             let source = join.context().artifact_view();
-            let namespace = join.context().facts.compiler_projection.merge(&issued)?;
+            let namespace = join
+                .context()
+                .facts
+                .compiler_support
+                .projection
+                .merge(&issued)?;
             let joined = source
                 .inventory()
                 .admit_projected_with_native_requirements(
@@ -5412,18 +5532,30 @@ impl ExactDeclarationContext {
             let incoming = join
                 .context()
                 .facts
-                .compiler_projection
+                .compiler_support
+                .projection
                 .for_source_owners(&selected_sources)
                 .merge(&issued)?;
-            let (inventory, projection) = self.facts.inventory.merge_compiler_inputs(
-                &self.facts.compiler_projection,
-                &joined,
-                &incoming,
+            let (inventory, projection) = self
+                .facts
+                .compiler_support
+                .artifacts
+                .merge_compiler_inputs(
+                    &self.facts.compiler_support.projection,
+                    &joined,
+                    &incoming,
+                )?;
+            let offers = self
+                .facts
+                .compiler_support
+                .native_offers
+                .iter()
+                .chain(join.context().facts.compiler_support.native_offers.iter())
+                .cloned();
+            let support = crate::artifact_inventory::CompilerSourceSupport::new(
+                projection, inventory, offers,
             )?;
-            self = self.rebuild(|facts| {
-                facts.inventory = inventory;
-                facts.compiler_projection = projection;
-            });
+            self = self.rebuild(|facts| facts.compiler_support = support);
         }
         {
             let updated = self.facts.lexical.replace(lexical)?;
@@ -5508,20 +5640,39 @@ impl ExactDeclarationContext {
         {
             let updated = self
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .inventory()
-                .admit_shared(&self.facts.inventory, entries)?;
-            self = self.rebuild(|facts| facts.inventory = updated);
+                .admit_shared(&self.facts.compiler_support.artifacts, entries)?;
+            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
-        let types = CompilerInputProjection::from_interface_view(&self.facts.inventory)?;
+        let types =
+            CompilerInputProjection::from_interface_view(&self.facts.compiler_support.artifacts)?;
         {
             let updated = self
                 .facts
-                .compiler_projection
+                .compiler_support
+                .projection
                 .merge(&types)?
                 .merge(&issued)?;
-            self = self.rebuild(|facts| facts.compiler_projection = updated);
+            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
+        let incoming = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+            issued.clone(),
+            self.facts.compiler_support.artifacts.clone(),
+        )?;
+        let offers = self
+            .facts
+            .compiler_support
+            .native_offers
+            .iter()
+            .cloned()
+            .chain(incoming.native_offers().iter().cloned());
+        self.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            self.facts.compiler_support.projection.clone(),
+            self.facts.compiler_support.artifacts.clone(),
+            offers,
+        )?;
         self.finish()
     }
 
@@ -5529,7 +5680,7 @@ impl ExactDeclarationContext {
         self.facts.producer
     }
     pub fn artifact_view(&self) -> &ArtifactView {
-        &self.facts.inventory
+        &self.facts.compiler_support.artifacts
     }
     pub(crate) fn compiler_original_products(
         &self,
@@ -5544,20 +5695,43 @@ impl ExactDeclarationContext {
             })
             .collect())
     }
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.facts.compiler_support
+    }
+    pub(crate) fn retain_issued_native_offers(
+        mut self,
+        offers: impl IntoIterator<Item = crate::artifact_inventory::IssuedNativeOffer>,
+    ) -> Result<Self, CompileError> {
+        let retained = self
+            .facts
+            .compiler_support
+            .native_offers
+            .iter()
+            .cloned()
+            .chain(offers);
+        self.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            self.facts.compiler_support.projection.clone(),
+            self.facts.compiler_support.artifacts.clone(),
+            retained,
+        )?;
+        self.finish()
+    }
     pub fn compiler_input_projection(&self) -> &CompilerInputProjection {
-        &self.facts.compiler_projection
+        &self.facts.compiler_support.projection
     }
     pub fn compiler_input_roles(&self) -> Vec<CompilerInputRole> {
-        self.facts.compiler_projection.roles()
+        self.facts.compiler_support.projection.roles()
     }
     pub(crate) fn with_compiler_input_projection(
         mut self,
         projection: CompilerInputProjection,
     ) -> Result<Self, CompileError> {
-        projection.validate(&self.facts.inventory)?;
+        projection.validate(&self.facts.compiler_support.artifacts)?;
         {
             let updated = projection;
-            self = self.rebuild(|facts| facts.compiler_projection = updated);
+            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         self.finish()
     }
@@ -5565,8 +5739,9 @@ impl ExactDeclarationContext {
         &self,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
         self.facts
-            .compiler_projection
-            .project_metadata(self.facts.inventory.metadata_snapshot())
+            .compiler_support
+            .projection
+            .project_metadata(self.facts.compiler_support.artifacts.metadata_snapshot())
     }
     /// Merge retained interface custody without granting authored imports.
     pub fn extend_interface_artifacts(
@@ -5583,15 +5758,16 @@ impl ExactDeclarationContext {
             .collect::<Vec<_>>();
         let interfaces = artifacts.interface_projection(&owners)?;
         {
-            let updated = self.facts.inventory.merge(&interfaces)?;
-            self = self.rebuild(|facts| facts.inventory = updated);
+            let updated = self.facts.compiler_support.artifacts.merge(&interfaces)?;
+            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = self
                 .facts
-                .compiler_projection
+                .compiler_support
+                .projection
                 .merge(&CompilerInputProjection::from_interface_view(&interfaces)?)?;
-            self = self.rebuild(|facts| facts.compiler_projection = updated);
+            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         self.finish()
     }
@@ -5603,19 +5779,11 @@ impl ExactDeclarationContext {
         support: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<Self, CompileError> {
         let artifacts = support.artifacts();
-        let projection = support.projection();
         for descriptor in artifacts.descriptors() {
             self = self.admit_producer(descriptor.producer_sha256)?;
         }
-        let (inventory, projection) = self.facts.inventory.merge_compiler_inputs(
-            &self.facts.compiler_projection,
-            artifacts,
-            projection,
-        )?;
-        self = self.rebuild(|facts| {
-            facts.inventory = inventory;
-            facts.compiler_projection = projection;
-        });
+        let support = self.facts.compiler_support.merge(support)?;
+        self = self.rebuild(|facts| facts.compiler_support = support);
         self.finish()
     }
 
@@ -5642,11 +5810,11 @@ impl ExactDeclarationContext {
         }
         {
             let updated = interfaces;
-            context = context.rebuild(|facts| facts.inventory = updated);
+            context = context.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = projection;
-            context = context.rebuild(|facts| facts.compiler_projection = updated);
+            context = context.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         context.finish()
     }
@@ -5668,16 +5836,22 @@ impl ExactDeclarationContext {
         }
         {
             let updated = artifacts.clone();
-            context = context.rebuild(|facts| facts.inventory = updated);
+            context = context.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = projection;
-            context = context.rebuild(|facts| facts.compiler_projection = updated);
+            context = context.rebuild(|facts| facts.compiler_support.projection = updated);
         }
+        context.facts.compiler_support =
+            crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                context.facts.compiler_support.projection.clone(),
+                artifacts.clone(),
+            )?;
         context
             .facts
-            .compiler_projection
-            .validate(&context.facts.inventory)?;
+            .compiler_support
+            .projection
+            .validate(&context.facts.compiler_support.artifacts)?;
         {
             let updated = context.facts.lexical.replace(lexical)?;
             context = context.rebuild(|facts| facts.lexical = updated);
@@ -5763,7 +5937,7 @@ impl ExactDeclarationContext {
         &self,
         roots: Vec<crate::artifact_inventory::ArtifactId>,
     ) -> Result<Self, CompileError> {
-        let selected = self.facts.inventory.select_roots(roots)?;
+        let selected = self.facts.compiler_support.artifacts.select_roots(roots)?;
         let projection = CompilerInputProjection::from_interface_view(&selected)?;
         Self::from_authenticated_interfaces(self.facts.producer, &selected, projection)
     }
@@ -5871,7 +6045,8 @@ impl ExactDeclarationContext {
         let input_ids = input.artifact_view().artifact_ids();
         let excluded_value_roots = context
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .into_iter()
             .filter_map(|entry| {
@@ -5891,12 +6066,17 @@ impl ExactDeclarationContext {
             .collect::<BTreeSet<_>>();
         let inventory = context
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .without_value_interface_roots(&excluded_value_roots)?;
-        let projection = context.facts.compiler_projection.within_view(&inventory);
+        let projection = context
+            .facts
+            .compiler_support
+            .projection
+            .within_view(&inventory);
         context = context.rebuild(|facts| {
-            facts.inventory = inventory;
-            facts.compiler_projection = projection;
+            facts.compiler_support.artifacts = inventory;
+            facts.compiler_support.projection = projection;
         });
         let context = context.finish()?;
         if context.original_preview_interface_graph()? != graph {
@@ -5941,13 +6121,14 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
-        self.facts.inventory.interface_owners()
+        self.facts.compiler_support.artifacts.interface_owners()
     }
     pub(crate) fn module_interfaces(
         &self,
     ) -> Vec<crate::certified_products::CertifiedModuleInterface> {
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -5988,7 +6169,7 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        self.materialize_recovery_entries(root, &self.facts.inventory.entries())
+        self.materialize_recovery_entries(root, &self.facts.compiler_support.artifacts.entries())
     }
 
     /// Materialize only newly referenced immutable payloads from this exact view.
@@ -6009,7 +6190,11 @@ impl ExactDeclarationContext {
         }
         self.materialize_recovery_entries(
             root,
-            &self.facts.inventory.entries_for_artifacts(artifacts)?,
+            &self
+                .facts
+                .compiler_support
+                .artifacts
+                .entries_for_artifacts(artifacts)?,
         )
     }
 
@@ -6088,7 +6273,11 @@ impl ExactDeclarationContext {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let entries = self.facts.inventory.entries_for_artifacts(artifacts)?;
+        let entries = self
+            .facts
+            .compiler_support
+            .artifacts
+            .entries_for_artifacts(artifacts)?;
         let mut work = recovery_artifacts::RecoveryArtifactWork::default();
         let mut joined = Vec::new();
         let mut values = Vec::new();
@@ -6124,7 +6313,7 @@ impl ExactDeclarationContext {
         generation: u64,
     ) -> Result<crate::artifact_inventory::ArtifactId, CompileError> {
         use crate::certified_products::CanonicalOrigin;
-        let entries = self.facts.inventory.entries();
+        let entries = self.facts.compiler_support.artifacts.entries();
         let roots = entries
             .iter()
             .filter(|entry| match &entry.payload {
@@ -6156,13 +6345,15 @@ impl ExactDeclarationContext {
         owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Vec<crate::artifact_inventory::NativeBindingRequirement>, CompileError> {
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .authored_native_binding_custody_requirements(owners)
     }
 
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -6173,7 +6364,8 @@ impl ExactDeclarationContext {
     }
     pub fn joined_interfaces(&self) -> Vec<CertifiedJoinedInterface> {
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -6189,8 +6381,28 @@ impl ExactDeclarationContext {
     pub fn snapshot(&self) -> crate::exact_context::ExactContextSnapshot {
         crate::exact_context::ExactContextSnapshot {
             producer: self.facts.producer,
-            selection: self.facts.inventory.selection_snapshot().clone(),
-            roles: self.facts.compiler_projection.snapshot_roles().clone(),
+            selection: self
+                .facts
+                .compiler_support
+                .artifacts
+                .selection_snapshot()
+                .clone(),
+            roles: self
+                .facts
+                .compiler_support
+                .projection
+                .snapshot_roles()
+                .clone(),
+            offers: self
+                .facts
+                .compiler_support
+                .native_offers
+                .iter()
+                .map(|offer| {
+                    let facts = offer.snapshot_facts();
+                    (facts.identity().expect("issued offer identity"), facts)
+                })
+                .collect(),
             lexical: self.facts.lexical.clone(),
         }
     }
@@ -6207,12 +6419,19 @@ impl ExactDeclarationContext {
                 "restored compiler context differs from exact snapshot",
             ));
         }
+        if self.snapshot().offers != snapshot.offers {
+            return Err(failure(
+                "restored compiler availability differs from exact snapshot",
+            ));
+        }
         let mut facts = self.facts.clone();
         facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .bind_snapshot_roles(&snapshot.roles)?;
         facts
-            .inventory
+            .compiler_support
+            .artifacts
             .bind_selection_snapshot_baseline(snapshot.selection.clone())?;
         facts.lexical = snapshot.lexical.clone();
         *self = Self::from_facts(facts);
@@ -6225,7 +6444,8 @@ impl ExactDeclarationContext {
 
     pub fn value_interfaces(&self) -> Vec<CertifiedValueInterface> {
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -6246,11 +6466,6 @@ impl ExactDeclarationContext {
         values: &[Arc<CertifiedValueInterface>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            &self.facts.compiler_projection,
-            &self.facts.inventory,
-            &[],
-        )?;
         let mut entries = Vec::new();
         for value in values {
             self = self.admit_producer(value.interface().toolchain_identity_sha256())?;
@@ -6262,23 +6477,29 @@ impl ExactDeclarationContext {
         }
         let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        let projection = self.facts.compiler_projection.merge(&issued)?;
+        let projection = self.facts.compiler_support.projection.merge(&issued)?;
+        let offers = preserve_native_offers(
+            &projection,
+            &self.facts.compiler_support.artifacts,
+            self.facts.compiler_support.native_offers(),
+        )?;
         {
             let updated = self
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .inventory()
-                .admit_projected_with_native_requirements(
-                    &self.facts.inventory,
+                .admit_projected_with_native_offers(
+                    &self.facts.compiler_support.artifacts,
                     entries,
                     &projection,
-                    &requirements,
+                    &offers,
                 )?;
-            self = self.rebuild(|facts| facts.inventory = updated);
+            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = projection;
-            self = self.rebuild(|facts| facts.compiler_projection = updated);
+            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         {
             let updated = self.facts.lexical.replace(lexical)?;
@@ -6300,19 +6521,19 @@ impl ExactDeclarationContext {
             let interface = value.certified_interface();
             lexical.extend_from_slice(value.source_lexical());
             self = self.admit_producer(interface.interface().toolchain_identity_sha256())?;
-            let (inventory, projection) = self.facts.inventory.merge_compiler_inputs(
-                &self.facts.compiler_projection,
-                value.compiler_artifact_view(),
-                value.compiler_input_projection(),
-            )?;
-            self = self.rebuild(|facts| {
-                facts.inventory = inventory;
-                facts.compiler_projection = projection;
-            });
+            let support = self
+                .facts
+                .compiler_support
+                .merge(value.compiler_source_support())?;
+            self = self.rebuild(|facts| facts.compiler_support = support);
             if let Some(retained) = value.template_imports() {
                 {
-                    let updated = self.facts.inventory.merge(&retained.artifacts)?;
-                    self = self.rebuild(|facts| facts.inventory = updated);
+                    let updated = self
+                        .facts
+                        .compiler_support
+                        .artifacts
+                        .merge(&retained.artifacts)?;
+                    self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
                 }
                 {
                     let updated = Some(match &self.facts.template_imports {
@@ -6382,7 +6603,7 @@ impl ExactDeclarationContext {
             self.semantic_issuances
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             use sha2::Digest;
-            let metadata = self.facts.inventory.metadata_snapshot();
+            let metadata = self.facts.compiler_support.artifacts.metadata_snapshot();
             let semantics: Arc<[u8]> = self.semantic_bytes_from_metadata(&metadata).into();
             let digest = sha2::Sha256::digest(&semantics).into();
             ContextObservation {
@@ -6399,8 +6620,18 @@ impl ExactDeclarationContext {
     pub fn same_authenticated_context(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
             || (self == other
-                && self.facts.inventory.metadata_snapshot().dependencies()
-                    == other.facts.inventory.metadata_snapshot().dependencies())
+                && self
+                    .facts
+                    .compiler_support
+                    .artifacts
+                    .metadata_snapshot()
+                    .dependencies()
+                    == other
+                        .facts
+                        .compiler_support
+                        .artifacts
+                        .metadata_snapshot()
+                        .dependencies())
     }
 
     pub(crate) fn display_identity(&self, witness: &[u8]) -> [u8; 32] {
@@ -6467,9 +6698,9 @@ impl ExactDeclarationContext {
                     self.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "6"
+                    "8"
                 } else {
-                    "7"
+                    "9"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -6478,9 +6709,14 @@ impl ExactDeclarationContext {
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
                     self.facts
-                        .compiler_projection
+                        .compiler_support
+                        .projection
                         .semantic_observations()
                         .expect("issued role observation"),
+                    self.facts
+                        .compiler_support
+                        .native_offer_observations()
+                        .expect("issued native offer observation"),
                 ))
                 .expect("inventory encoding"),
             )
@@ -6605,9 +6841,9 @@ impl ExactDeclarationContext {
                     self.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "6"
+                    "8"
                 } else {
-                    "7"
+                    "9"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -6616,9 +6852,14 @@ impl ExactDeclarationContext {
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
                     self.facts
-                        .compiler_projection
+                        .compiler_support
+                        .projection
                         .semantic_observations()
                         .expect("issued role observation"),
+                    self.facts
+                        .compiler_support
+                        .native_offer_observations()
+                        .expect("issued native offer observation"),
                 ))
                 .expect("inventory encoding"),
             )
@@ -6732,7 +6973,11 @@ impl ExactDeclarationContext {
         artifacts: &[DeclarationArtifact],
         metadata: &CompilerArtifactMetadata,
     ) -> Result<(), CompileError> {
-        let retained = self.facts.inventory.retained_materialization(metadata)?;
+        let retained = self
+            .facts
+            .compiler_support
+            .artifacts
+            .retained_materialization(metadata)?;
         let rows = retained
             .as_ref()
             .map(|retained| retained.selected_rows(metadata))
@@ -6840,9 +7085,10 @@ impl ExactDeclarationContext {
         {
             let updated = self
                 .facts
-                .inventory
-                .with_compiler_projection(&self.facts.compiler_projection)?;
-            self = self.rebuild(|facts| facts.inventory = updated);
+                .compiler_support
+                .artifacts
+                .with_compiler_projection(&self.facts.compiler_support.projection)?;
+            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         self.normalize()?;
         Ok(self)
@@ -7099,7 +7345,8 @@ impl ExactDeclarationContext {
         if !root.is_absolute()
             || self
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .retained_materialization(&metadata)?
                 .is_some()
             || self.facts.producer
@@ -7115,7 +7362,8 @@ impl ExactDeclarationContext {
         std::fs::create_dir_all(root)?;
 
         self.facts
-            .inventory
+            .compiler_support
+            .artifacts
             .retain_materialization(&metadata, |parents| {
                 if !parents.is_empty() {
                     return Err(failure(
@@ -7503,12 +7751,14 @@ impl ExactDeclarationContext {
         std::fs::create_dir_all(root)?;
         let reused = self
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .retained_materialization(metadata)?
             .is_some();
         let retained = self
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .retain_materialization(&metadata, |parents| {
                 let directory = tempfile::Builder::new()
                     .prefix("tidepool-exact-artifacts-")
@@ -8262,12 +8512,12 @@ mod tests {
     }
 
     #[test]
-    fn context_observation_wire_preserves_v6_v7_and_missing_owner_order() {
+    fn context_observation_wire_preserves_v8_v9_and_missing_owner_order() {
         let base = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         assert_context_observation_wire(&base);
         assert_eq!(
             hex(&base.semantic_sha256()),
-            "2a876d7c68aec718c8d2e1e4ee033729e2dc09734f42289d8808affd256f3ae7"
+            "38c954e31cc17c0b3ea10155e2490d5b3d8155009a7374ba19ac49b53bef0c91"
         );
         let mut complete = base.clone();
         complete = complete.rebuild(|facts| {
@@ -8278,7 +8528,7 @@ mod tests {
         assert_context_observation_wire(&complete);
         assert_eq!(
             hex(&complete.semantic_sha256()),
-            "50bd3d77e4717562be500a7062fe14110271812469fcb774509c7d056a0437c3"
+            "79cefd269cead0be57b9b3d3b4369ee4965a3fdd56479c79f67f11c406e3e497"
         );
         let mut missing = base.clone();
         missing = missing.rebuild(|facts| {
@@ -8291,7 +8541,7 @@ mod tests {
         assert_context_observation_wire(&missing);
         assert_eq!(
             hex(&missing.semantic_sha256()),
-            "73808193ddf0821edf5d002b0a70d83ad48299f2f630d525191c6323801dbaf4"
+            "bdb20f1087c6e7392613622f3e4860c8e3a4a317e1feaa4a2c916298db958f8d"
         );
         let reversed = {
             let mut context = missing.clone();
@@ -9200,8 +9450,8 @@ mod tests {
             text("2"),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
-                    context.facts.inventory.descriptors(),
-                    context.facts.inventory.dependencies(),
+                    context.facts.compiler_support.artifacts.descriptors(),
+                    context.facts.compiler_support.artifacts.dependencies(),
                 ))
                 .expect("inventory encoding"),
             )
@@ -9779,11 +10029,17 @@ mod tests {
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                compiler_projection,
+                view,
+                [],
+            )
+            .unwrap(),
+
             producer: producer_sha256,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection,
-            inventory: view,
+
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
                 .replace(vec![
                     ExactLexicalNode {
@@ -9897,7 +10153,8 @@ mod tests {
             ));
         let view = base
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .inventory()
             .admit(base.artifact_view(), vec![canonical])
             .unwrap();
@@ -9950,7 +10207,8 @@ mod tests {
         };
         let observations = context
             .facts
-            .compiler_projection
+            .compiler_support
+            .projection
             .semantic_observations()
             .unwrap();
         let compact = serde_json::to_vec(&observations).unwrap();
@@ -9977,7 +10235,8 @@ mod tests {
             serde_json::to_vec(
                 &context
                     .facts
-                    .compiler_projection
+                    .compiler_support
+                    .projection
                     .semantic_observations()
                     .unwrap()
             )
@@ -9993,7 +10252,9 @@ mod tests {
         let interface_only = context
             .as_ref()
             .clone()
-            .with_compiler_input_projection(context.facts.compiler_projection.interface_only())
+            .with_compiler_input_projection(
+                context.facts.compiler_support.projection.interface_only(),
+            )
             .unwrap();
         assert_ne!(interface_only.semantic_sha256(), digest);
         eprintln!(
@@ -10281,7 +10542,7 @@ mod tests {
             lexical.iter_mut().find(|node| node.owner.module == "PrivateSourceTarget").unwrap().imports.push(identity("fixture","Beta"));
             lexical.push(ExactLexicalNode { owner: identity("fixture","Beta"), imports: vec![] });
             let source = ExactDeclarationContext::from_authenticated_execution(
-                issued.facts.producer, issued.artifact_view(), issued.facts.compiler_projection.clone(), lexical,
+                issued.facts.producer, issued.artifact_view(), issued.facts.compiler_support.projection.clone(), lexical,
                 identity("fixture","PrivateSourceTarget"), &[identity("fixture","PrivateSourceTarget"),identity("fixture","Alpha"),identity("fixture","Beta")],
             ).unwrap();
             let alpha = source.issue_published_source_original("revision","input",&identity("fixture","Alpha")).unwrap();
@@ -10341,7 +10602,7 @@ mod tests {
                     binding_edges: restored.snapshot().binding_dependencies().unwrap(),
                     interfaces: view.interface_dependencies(),
                 };
-                let mut recovered = inventory.context_with_graph_selection(&graph,&restored.snapshot().compiler_roles(),restored.snapshot().lexical()).unwrap();
+                let mut recovered = inventory.context_with_snapshot(restored.snapshot()).unwrap();
                 proptest::prop_assert_eq!(recovered.original_instance_environment(),&OriginalInstanceEnvironment::Unknown);
                 assert_context_observation_wire(&recovered);
                 recovered.bind_snapshot_baseline(&restored).unwrap();
@@ -10537,7 +10798,7 @@ mod tests {
                 }
                 issued.normalize().unwrap();
                 let before = issued.semantic_sha256();
-                let custody = issued.facts.inventory.descriptors();
+                let custody = issued.facts.compiler_support.artifacts.descriptors();
                 let retained = issued.facts.template_imports.clone();
                 let selection = issued
                     .issue_published_source_original("revision", "input", &owners[root_index])
@@ -10554,7 +10815,8 @@ mod tests {
                 );
                 assert!(selected
                     .facts
-                    .inventory
+                    .compiler_support
+                    .artifacts
                     .descriptors()
                     .iter()
                     .all(|entry| entry.owner == owners[root_index]));
@@ -10606,15 +10868,18 @@ mod tests {
                 if template_mask & (1 << (1 - root_index)) != 0 {
                     let mut missing = issued.clone();
                     {
-                        let updated = selected.facts.inventory.clone();
-                        missing = missing.rebuild(|facts| facts.inventory = updated);
+                        let updated = selected.facts.compiler_support.artifacts.clone();
+                        missing =
+                            missing.rebuild(|facts| facts.compiler_support.artifacts = updated);
                     }
                     {
                         let updated = issued
                             .facts
-                            .compiler_projection
-                            .within_view(&missing.facts.inventory);
-                        missing = missing.rebuild(|facts| facts.compiler_projection = updated);
+                            .compiler_support
+                            .projection
+                            .within_view(&missing.facts.compiler_support.artifacts);
+                        missing =
+                            missing.rebuild(|facts| facts.compiler_support.projection = updated);
                     }
                     {
                         let updated = selected.facts.lexical.clone();
@@ -10623,7 +10888,10 @@ mod tests {
                     assert!(missing.normalize().is_err());
                 }
                 assert_eq!(issued.semantic_sha256(), before);
-                assert_eq!(issued.facts.inventory.descriptors(), custody);
+                assert_eq!(
+                    issued.facts.compiler_support.artifacts.descriptors(),
+                    custody
+                );
                 assert_eq!(issued.facts.template_imports, retained);
                 issued.normalize().unwrap();
             }
@@ -10669,17 +10937,19 @@ mod tests {
         {
             let updated = narrowed
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .select_roots(vec![interface])
                 .unwrap();
-            narrowed = narrowed.rebuild(|facts| facts.inventory = updated);
+            narrowed = narrowed.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = narrowed
                 .facts
-                .compiler_projection
-                .within_view(&narrowed.facts.inventory);
-            narrowed = narrowed.rebuild(|facts| facts.compiler_projection = updated);
+                .compiler_support
+                .projection
+                .within_view(&narrowed.facts.compiler_support.artifacts);
+            narrowed = narrowed.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         assert!(
             narrowed.normalize().is_err(),
@@ -11051,7 +11321,8 @@ mod tests {
         assert_ne!(variant.owner(), original.owner());
         let mut entries = issued
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .into_iter()
             .filter(|entry| {
@@ -11067,13 +11338,14 @@ mod tests {
             let updated = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            issued = issued.rebuild(|facts| facts.inventory = updated);
+            issued = issued.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
-            let updated =
-                CompilerInputProjection::from_issued_entries(&issued.facts.inventory.entries())
-                    .unwrap();
-            issued = issued.rebuild(|facts| facts.compiler_projection = updated);
+            let updated = CompilerInputProjection::from_issued_entries(
+                &issued.facts.compiler_support.artifacts.entries(),
+            )
+            .unwrap();
+            issued = issued.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         let replacement = issued
             .issue_published_source_original("revision", "input", &root)
@@ -11116,7 +11388,7 @@ mod tests {
                         let groups = view.selected_native_groups().into_iter().collect::<Vec<_>>();
                         let roles = context.compiler_input_roles();
                         proptest::prop_assert!(inventory.context_with_roles(&ids, &groups, &roles, context.facts.lexical.to_vec()).is_err());
-                        context = inventory.context_with_graph_selection(&graph, &roles, context.facts.lexical.to_vec()).unwrap();
+                        context = inventory.context_with_snapshot(&context.snapshot()).unwrap();
                         let reopened = context.published_source_original_selections().unwrap();
                         proptest::prop_assert_eq!(reopened.len(), 1);
                         context = context.with_published_source_originals(&reopened[0]).unwrap();
@@ -11297,7 +11569,8 @@ mod tests {
         let (initial, producer) = metadata_fixture();
         let existing = initial
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries_for_owners(std::iter::once(identity("fixture", "Alpha")))
             .unwrap();
         let ArtifactPayload::Original(product) = &existing[&identity("fixture", "Alpha")].payload
@@ -11336,11 +11609,12 @@ mod tests {
         {
             let updated = context
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .inventory()
-                .admit_shared(&context.facts.inventory, vec![variant])
+                .admit_shared(&context.facts.compiler_support.artifacts, vec![variant])
                 .unwrap();
-            context = context.rebuild(|facts| facts.inventory = updated);
+            context = context.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         let context = Arc::new(context);
         assert_ne!(initial.semantic_sha256(), context.semantic_sha256());
@@ -11389,7 +11663,7 @@ mod tests {
     fn exact_scope_evidence_uses_admitted_artifact_roles() {
         let (context, _) = metadata_fixture();
         let root = tempfile::tempdir().unwrap();
-        let metadata = context.facts.inventory.metadata_snapshot();
+        let metadata = context.facts.compiler_support.artifacts.metadata_snapshot();
         for entry in metadata.entries.values() {
             let value = scope_interface_evidence(
                 entry,
@@ -11453,9 +11727,19 @@ mod tests {
         let (context, _) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
         let artifacts = context.materialize_scratch(&directory).unwrap().artifacts;
-        let before = context.facts.inventory.inventory().metrics();
+        let before = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         context.validate_artifacts(&artifacts).unwrap();
-        let after = context.facts.inventory.inventory().metrics();
+        let after = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         // Materialization already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
@@ -11483,7 +11767,8 @@ mod tests {
         assert!(context.validate_artifacts(&foreign).is_err());
         let mut entries = context
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .entries()
             .iter()
             .map(|entry| entry.as_ref().clone())
@@ -11498,7 +11783,7 @@ mod tests {
         let mut wrong_kind = context.as_ref().clone();
         {
             let updated = inventory.admit(&inventory.empty_view(), entries).unwrap();
-            wrong_kind = wrong_kind.rebuild(|facts| facts.inventory = updated);
+            wrong_kind = wrong_kind.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         assert!(wrong_kind.validate_artifacts(&artifacts).is_err());
         let paths = [
@@ -11520,7 +11805,12 @@ mod tests {
         let (context, producer) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
         let expected = context.semantic_sha256();
-        let before = context.facts.inventory.inventory().metrics();
+        let before = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         let request = context
             .prepare_compilation_authorizing(directory.path(), &producer, |semantic_sha256| {
                 assert_eq!(semantic_sha256, expected);
@@ -11530,7 +11820,12 @@ mod tests {
                 ]))
             })
             .unwrap();
-        let after = context.facts.inventory.inventory().metrics();
+        let after = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         // The expected identity query already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(request.semantic_sha256, expected);
@@ -11608,7 +11903,8 @@ mod tests {
             || {
                 context
                     .facts
-                    .inventory
+                    .compiler_support
+                    .artifacts
                     .retain_materialization(&metadata, |parents| {
                         let directory = tempfile::tempdir().unwrap();
                         let result = context
@@ -11627,7 +11923,8 @@ mod tests {
             &retained,
             &context
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .retained_materialization(&metadata)
                 .unwrap()
                 .unwrap()
@@ -11923,8 +12220,8 @@ mod tests {
             .unwrap();
         let projection = request.compiler_inputs().projection.within_view(&inventory);
         captured = captured.rebuild(|facts| {
-            facts.inventory = inventory;
-            facts.compiler_projection = projection;
+            facts.compiler_support.artifacts = inventory;
+            facts.compiler_support.projection = projection;
             facts.lexical = crate::exact_context::ExactLexicalSnapshot::default();
         });
         captured.normalize().unwrap();
@@ -11936,7 +12233,13 @@ mod tests {
                 .retained
                 .artifacts[&id],
         );
-        let proof = Arc::clone(captured.facts.inventory.selection_snapshot());
+        let proof = Arc::clone(
+            captured
+                .facts
+                .compiler_support
+                .artifacts
+                .selection_snapshot(),
+        );
         drop(request);
         drop(late);
         drop(completed);
@@ -12164,10 +12467,11 @@ mod tests {
         {
             let updated = joined
                 .facts
-                .inventory
-                .merge(&right.facts.inventory)
+                .compiler_support
+                .artifacts
+                .merge(&right.facts.compiler_support.artifacts)
                 .unwrap();
-            joined = joined.rebuild(|facts| facts.inventory = updated);
+            joined = joined.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         joined.normalize().unwrap();
         let joined = Arc::new(joined);
@@ -12226,7 +12530,11 @@ mod tests {
         let replacement_owner = replacement_request.materialization.as_ref().unwrap();
         let selected = RetainedArtifactMaterialization::selected_group_refs(
             [joined_owner.as_ref(), replacement_owner.as_ref()],
-            &replacement.facts.inventory.metadata_snapshot(),
+            &replacement
+                .facts
+                .compiler_support
+                .artifacts
+                .metadata_snapshot(),
         );
         assert_eq!(
             selected.len(),
@@ -12280,13 +12588,16 @@ mod tests {
                 && row.kind == ArtifactKind::OriginalModule));
         assert_eq!(
             surface
-                .compiler_artifacts
+                .compiler_support
+                .artifacts
                 .descriptors()
                 .iter()
                 .any(|row| row.owner == identity("fixture", "Epoch")),
             demands_epoch
         );
-        let attached = child.artifact_view().merge(&surface.compiler_artifacts);
+        let attached = child
+            .artifact_view()
+            .merge(&surface.compiler_support.artifacts);
         assert_eq!(attached.is_ok(), !demands_epoch || old_epoch == new_epoch);
         if old_epoch != new_epoch {
             assert!(child.artifact_view().merge(&surface.artifacts).is_err());
@@ -12387,7 +12698,7 @@ mod tests {
         let mut next = context.as_ref().clone();
         {
             let updated = retained;
-            next = next.rebuild(|facts| facts.inventory = updated);
+            next = next.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = next.facts.lexical.replace(lexical).unwrap();
@@ -12395,7 +12706,8 @@ mod tests {
         }
         assert!(next
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .descriptors()
             .iter()
             .all(|descriptor| descriptor.owner.module != "Joined"));
@@ -12405,7 +12717,8 @@ mod tests {
         );
         let hidden_original = next
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .descriptors()
             .into_iter()
             .find(|descriptor| {
@@ -12421,7 +12734,7 @@ mod tests {
             .unwrap();
         let projection = context
             .compiler_input_projection()
-            .within_view(&next.facts.inventory);
+            .within_view(&next.facts.compiler_support.artifacts);
         let next = next.with_compiler_input_projection(projection).unwrap();
         assert!(next.compiler_input_roles().contains(&hidden_role));
         let next = Arc::new(next);
@@ -12547,7 +12860,8 @@ mod tests {
             );
             let retained = context
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .retained_materialization(&context.compiler_metadata_snapshot().unwrap())
                 .unwrap()
                 .unwrap();
@@ -12571,9 +12885,19 @@ mod tests {
     fn metadata_identity_is_path_independent_and_tracks_graph_selection() {
         let (context, _) = metadata_fixture();
         let expected = context.semantic_sha256();
-        let before = context.facts.inventory.inventory().metrics();
+        let before = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         assert_eq!(context.semantic_sha256(), expected);
-        let after = context.facts.inventory.inventory().metrics();
+        let after = context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory()
+            .metrics();
         // The first identity query already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
@@ -12618,10 +12942,11 @@ mod tests {
         {
             let updated = context
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .interface_projection(&owners)
                 .unwrap();
-            type_only = type_only.rebuild(|facts| facts.inventory = updated);
+            type_only = type_only.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         assert!(type_only.normalize().is_err());
         let type_only = type_only
@@ -13016,14 +13341,19 @@ mod tests {
             .collect::<Vec<_>>();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
+                compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                    CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                    inventory
+                        .admit_shared(&inventory.empty_view(), entries)
+                        .unwrap(),
+                    [],
+                )
+                .unwrap(),
+
                 producer: [7; 32],
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 template_imports: None,
-                compiler_projection: CompilerInputProjection::from_issued_entries(&entries)
-                    .unwrap(),
-                inventory: inventory
-                    .admit_shared(&inventory.empty_view(), entries)
-                    .unwrap(),
+
                 lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             },
         ));
@@ -13576,14 +13906,20 @@ mod tests {
         let compiler_projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
+                compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                    compiler_projection,
+                    inventory
+                        .admit_shared(&inventory.empty_view(), entries)
+                        .unwrap(),
+                    [],
+                )
+                .unwrap(),
+
                 producer: [7; 32],
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 template_imports: None,
-                compiler_projection,
+
                 lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-                inventory: inventory
-                    .admit_shared(&inventory.empty_view(), entries)
-                    .unwrap(),
             },
         ));
         request.inputs = ExactRequestInputs::for_context(Arc::clone(&context));
@@ -14044,7 +14380,7 @@ mod tests {
                     let support = ProgramSourceSupport::extend(
                         None,
                         view.clone(),
-                        parent.facts.compiler_projection.clone(),
+                        parent.facts.compiler_support.projection.clone(),
                         [],
                     )
                     .unwrap();
@@ -14076,7 +14412,7 @@ mod tests {
                     let reopened = ProgramSourceSupport::extend(
                         Some(&support),
                         view.clone(),
-                        parent.facts.compiler_projection.clone(),
+                        parent.facts.compiler_support.projection.clone(),
                         [],
                     )
                     .unwrap();
@@ -14086,7 +14422,8 @@ mod tests {
                         assert!(
                             parent
                                 .facts
-                                .compiler_projection
+                                .compiler_support
+                                .projection
                                 .within_view(&view)
                                 .validate(&view)
                                 .is_err(),
@@ -14135,7 +14472,7 @@ mod tests {
             let updated = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            issued = issued.rebuild(|facts| facts.inventory = updated);
+            issued = issued.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         issued.normalize().unwrap();
         let publication = issued
@@ -15752,10 +16089,11 @@ mod tests {
         {
             let updated = public
                 .facts
-                .inventory
+                .compiler_support
+                .artifacts
                 .merge(&support_view(&[second]))
                 .unwrap();
-            public = public.rebuild(|facts| facts.inventory = updated);
+            public = public.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         let projection = public.compiler_input_projection().interface_only();
         let public = Arc::new(public.with_compiler_input_projection(projection).unwrap());
@@ -15969,7 +16307,8 @@ mod tests {
         .unwrap();
         assert!(dependent_context
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .metadata_snapshot()
             .selected_native_groups
             .iter()
@@ -16007,17 +16346,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![changed.product().owner().clone()]
         );
-        let inventory = dependent_context.facts.inventory.inventory();
+        let inventory = dependent_context
+            .facts
+            .compiler_support
+            .artifacts
+            .inventory();
         let type_only = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                dependent_context.facts.compiler_support.projection.clone(),
+                inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        dependent_context.facts.compiler_support.artifacts.entries(),
+                        &BTreeSet::new(),
+                    )
+                    .unwrap(),
+                [],
+            )
+            .unwrap(),
+
             producer: dependent_context.facts.producer,
-            inventory: inventory
-                .admit_recovery_selection(
-                    &inventory.empty_view(),
-                    dependent_context.facts.inventory.entries(),
-                    &BTreeSet::new(),
-                )
-                .unwrap(),
-            compiler_projection: dependent_context.facts.compiler_projection.clone(),
+
             lexical: dependent_context.facts.lexical.clone(),
             template_imports: dependent_context.facts.template_imports.clone(),
             original_instance_environment: dependent_context
@@ -16027,7 +16376,8 @@ mod tests {
         });
         assert!(type_only
             .facts
-            .inventory
+            .compiler_support
+            .artifacts
             .metadata_snapshot()
             .selected_native_groups
             .is_empty());
@@ -16266,14 +16616,17 @@ mod tests {
                 .artifact_view()
                 .interface_projection(&[identity("main", &owner.module_name())])
                 .unwrap();
-            type_baseline = type_baseline.rebuild(|facts| facts.inventory = updated);
+            type_baseline =
+                type_baseline.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
             let updated = context
                 .facts
-                .compiler_projection
+                .compiler_support
+                .projection
                 .within_view(type_baseline.artifact_view());
-            type_baseline = type_baseline.rebuild(|facts| facts.compiler_projection = updated);
+            type_baseline =
+                type_baseline.rebuild(|facts| facts.compiler_support.projection = updated);
         }
         type_baseline.normalize().unwrap();
         assert!(!type_baseline
@@ -16484,13 +16837,19 @@ mod tests {
                 CompilerInputProjection::from_issued_entries(&entries).unwrap();
             Arc::new(ExactDeclarationContext::from_facts(
                 DeclarationContextFacts {
+                    compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
+                        compiler_projection,
+                        inventory
+                            .admit_shared(&inventory.empty_view(), entries)
+                            .unwrap(),
+                        [],
+                    )
+                    .unwrap(),
+
                     producer: [7; 32],
                     original_instance_environment: OriginalInstanceEnvironment::Unknown,
                     template_imports: None,
-                    compiler_projection,
-                    inventory: inventory
-                        .admit_shared(&inventory.empty_view(), entries)
-                        .unwrap(),
+
                     lexical: crate::exact_context::ExactLexicalSnapshot::default()
                         .replace(if selected {
                             vec![ExactLexicalNode {
@@ -16511,7 +16870,7 @@ mod tests {
         let joined_target = ExactDeclarationContext::from_authenticated_execution(
             initial.facts.producer,
             initial.artifact_view(),
-            initial.facts.compiler_projection.clone(),
+            initial.facts.compiler_support.projection.clone(),
             initial.lexical_graph().to_vec(),
             identity("main", "CapturedInterface"),
             &[identity("main", "CapturedInterface")],
@@ -16529,7 +16888,7 @@ mod tests {
                 "OriginalTarget",
                 BTreeMap::new(),
             ));
-        let inventory = initial.facts.inventory.inventory();
+        let inventory = initial.facts.compiler_support.artifacts.inventory();
         let retained = inventory
             .admit(initial.artifact_view(), vec![canonical_target])
             .unwrap();
