@@ -458,7 +458,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
                 return None;
             }
             // The group-to-carrier edge only represents graph custody.
-            if matches!((source, target), (InventoryNodeKey::Group(group), InventoryNodeKey::Artifact(carrier)) if carrier.artifact == group.binding.artifact)
+            if matches!((source, target), (InventoryNodeKey::Group(group), InventoryNodeKey::Artifact(carrier)) if carrier.artifact == group.binding.artifact())
                 && matches!(&edge, ArtifactDependency::Interface)
             {
                 None
@@ -490,7 +490,7 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .iter()
         .filter_map(|key| match key {
             InventoryNodeKey::Group(group) => Some(NativeGroupKey {
-                artifact: group.binding.artifact,
+                artifact: group.binding.artifact(),
                 original_ordinal: group.original_ordinal,
             }),
             InventoryNodeKey::Artifact(_) => None,
@@ -872,7 +872,7 @@ fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
         .roots
         .keys()
         .find_map(|root| match root {
-            InventoryNodeKey::Group(group) => Some(group.binding.artifact),
+            InventoryNodeKey::Group(group) => Some(group.binding.artifact()),
             _ => None,
         })
         .expect("fixture admits native groups");

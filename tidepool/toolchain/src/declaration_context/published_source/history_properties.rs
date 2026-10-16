@@ -300,7 +300,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let imports = [import];
                     let groups = context.artifact_view().native_groups_for_target(None, &imports).unwrap();
                     let issuer_originals = expected_roles.iter().filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
-                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact))
+                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
                         .all(|group| original.artifact_view().contains_issued_native_group(*group));
                     let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
                     prop_assert_eq!(selected.len(), usize::from(issued_groups),

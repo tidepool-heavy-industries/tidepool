@@ -313,12 +313,12 @@ impl ExactDeclarationContext {
                 let native_root = root_original.is_some_and(|original| {
                     groups
                         .iter()
-                        .any(|group| group.binding.artifact == original)
+                        .any(|group| group.binding.artifact() == original)
                 });
                 (lexical.contains(selection.public_root()) || native_root)
                     && groups
                         .iter()
-                        .filter(|group| originals.contains(&group.binding.artifact))
+                        .filter(|group| originals.contains(&group.binding.artifact()))
                         .all(|group| issuer.contains_issued_native_group(*group))
             })
             .collect())

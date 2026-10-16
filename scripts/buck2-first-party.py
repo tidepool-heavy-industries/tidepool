@@ -948,6 +948,8 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        "native_group_issuer_is_not_artifact": (),
+        "native_group_issuer_fields_are_private": (),
         "compiler_cell_requires_settled": (),
         "compiler_renderer_requires_settled": (),
         "compiler_settled_consumed_once": (),
@@ -1474,6 +1476,7 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool-runtime":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
+    if package_name in ("tidepool-runtime", "tidepool-toolchain"):
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
     if package_name == "tidepool-testing":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
@@ -1671,7 +1674,7 @@ tidepool_buildscript_run(
     selected_tests = [target for target in tests if not (
         package_name == "tidepool-runtime" and target["name"] == "compile_fail"
     )]
-    if package_name == "tidepool-runtime" and libraries:
+    if package_name in ("tidepool-runtime", "tidepool-toolchain") and libraries:
         rules.append(compile_fail_cases(package, libraries[0]))
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])

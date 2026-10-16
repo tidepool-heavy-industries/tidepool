@@ -9,6 +9,8 @@ load("//build/rust:executable_resource.bzl", "runtime_executable")
 
 load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 
+load("//build/rust:compile_fail.bzl", "rust_compile_fail")
+
 rust_filegroup(
     name = "tidepool_toolchain_sources",
     mapped_srcs = {
@@ -1113,6 +1115,28 @@ tidepool_rust_test_cases(
 runtime_executable(
     name = "candidate_fixture_issuer",
     executable = ":tidepool_toolchain_unit_tests_binary",
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_native_group_issuer_fields_are_private",
+    source = "tests/compile_fail/native_group_issuer_fields_are_private.rs",
+    control = "tests/compile_pass/native_group_issuer_fields_are_private.rs",
+    expected = "tests/compile_fail/native_group_issuer_fields_are_private.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_native_group_issuer_is_not_artifact",
+    source = "tests/compile_fail/native_group_issuer_is_not_artifact.rs",
+    control = "tests/compile_pass/native_group_issuer_is_not_artifact.rs",
+    expected = "tests/compile_fail/native_group_issuer_is_not_artifact.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
     visibility = ["PUBLIC"],
 )
 

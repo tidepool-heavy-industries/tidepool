@@ -816,7 +816,7 @@ impl OriginalCompilerInputs {
                                 .native_groups
                                 .iter()
                                 .filter(|group| {
-                                    group.binding.artifact == required.artifact
+                                    group.binding.artifact() == required.artifact
                                         && group.original_ordinal == required.original_ordinal
                                 })
                                 .copied()
@@ -1035,7 +1035,7 @@ impl NativeCompilerTransport {
             if matches!(offer, NativeCompilerAvailability::Full(_)) {
                 if !groups
                     .keys()
-                    .any(|group| group.binding.artifact == offer.original())
+                    .any(|group| group.binding.artifact() == offer.original())
                 {
                     return Err(failure("full native offer has no issued carrier"));
                 }
@@ -1045,7 +1045,7 @@ impl NativeCompilerTransport {
                 let entry = metadata
                     .retained
                     .artifacts
-                    .get(&group.binding.artifact)
+                    .get(&group.binding.artifact())
                     .ok_or_else(|| failure("issued native dependency is outside request custody"))?
                     .clone();
                 let ArtifactPayload::Original(product) = &entry.payload else {
@@ -1064,7 +1064,7 @@ impl NativeCompilerTransport {
                 }
                 metadata.entries.insert(owner.clone(), entry);
                 availability
-                    .entry(group.binding.artifact)
+                    .entry(group.binding.artifact())
                     .or_default()
                     .insert(group.original_ordinal);
             }
@@ -1806,7 +1806,7 @@ impl RecoveredArtifactInventory {
             ArtifactBindingNode::Artifact(binding) => available.contains(&binding),
             ArtifactBindingNode::Group(group) => captured
                 .entries
-                .get(&group.binding.artifact)
+                .get(&group.binding.artifact())
                 .is_some_and(|entry| match &entry.payload {
                     ArtifactPayload::Original(product) => {
                         crate::certified_products::original_native_group_definitions(
@@ -8679,7 +8679,10 @@ mod tests {
             .iter()
             .find(|group| group.original_ordinal == 7)
             .unwrap();
-        assert!(!selection.bindings.contains(&group.binding));
+        assert!(!selection.bindings.iter().any(|binding| {
+            (binding.artifact, binding.selection)
+                == (group.binding.artifact(), group.binding.selection())
+        }));
         let roles = CompilerInputProjection::from_issued_entries(&later.entries())
             .unwrap()
             .roles();
@@ -8748,13 +8751,14 @@ mod tests {
             .context_with_graph_selection(&missing, &roles, vec![])
             .is_err());
         let mut wrong = selection.clone();
-        wrong
+        let selected = wrong
             .native_groups
             .iter_mut()
             .find(|selected| **selected == group)
-            .unwrap()
-            .binding
-            .selection = carrier.selection;
+            .unwrap();
+        let mut decoded = serde_json::to_value(*selected).unwrap();
+        decoded["binding"]["selection"] = serde_json::to_value(carrier.selection).unwrap();
+        *selected = serde_json::from_value(decoded).unwrap();
         assert!(recovered
             .context_with_graph_selection(&wrong, &roles, vec![])
             .is_err());
@@ -10978,7 +10982,7 @@ mod tests {
         assert!(!groups.is_empty());
         assert!(groups
             .iter()
-            .all(|group| group.binding.artifact != published_original));
+            .all(|group| group.binding.artifact() != published_original));
         assert_eq!(
             context
                 .published_source_original_selections_for_target(&groups, &imports)

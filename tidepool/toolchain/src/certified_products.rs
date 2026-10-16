@@ -5801,7 +5801,7 @@ pub(crate) fn validate_available_originals_with_validation(
                 .groups()
                 .iter()
                 .map(|group| crate::artifact_inventory::NativeGroupKey {
-                    artifact: group.binding.artifact,
+                    artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 })
                 .collect::<BTreeSet<_>>();

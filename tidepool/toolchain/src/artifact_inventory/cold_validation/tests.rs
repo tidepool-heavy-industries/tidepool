@@ -38,7 +38,7 @@ impl Fixture {
         ordinal: u32,
     ) -> ArtifactBindingNode {
         let node = ArtifactBindingNode::Group(NativeGroupBinding {
-            binding: ArtifactBinding {
+            binding: NativeGroupIssuer {
                 artifact: artifact.artifact(),
                 selection: ArtifactSelectionId([scope; 32]),
             },
@@ -113,7 +113,7 @@ fn transitive_oracle(
                 .collect::<BTreeSet<_>>(),
             ArtifactBindingNode::Group(group) => {
                 let key = NativeGroupKey {
-                    artifact: group.binding.artifact,
+                    artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 };
                 owners

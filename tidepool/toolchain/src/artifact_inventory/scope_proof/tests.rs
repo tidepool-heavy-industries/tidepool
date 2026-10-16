@@ -72,6 +72,25 @@ fn scope_identity_hashes_only_own_complete_rows_and_typed_references() {
 }
 
 #[test]
+fn native_group_issuer_preserves_wire_shape() {
+    let wire = serde_json::json!({
+        "binding": { "artifact": vec![5u8; 32], "selection": vec![9u8; 32] },
+        "original_ordinal": 11,
+    });
+    let group: NativeGroupBinding = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(group.binding.artifact(), ArtifactId([5; 32]));
+    assert_eq!(group.binding.selection(), ArtifactSelectionId([9; 32]));
+    assert_eq!(serde_json::to_value(group).unwrap(), wire);
+    let node = ArtifactBindingNode::Group(group);
+    assert_eq!(
+        serde_json::to_value(node).unwrap(),
+        serde_json::json!({ "group": wire }),
+    );
+    assert_eq!(node.artifact(), group.binding.artifact());
+    assert_eq!(node.selection(), group.binding.selection());
+}
+
+#[test]
 fn same_scope_cycles_are_valid_and_group_scope_does_not_create_a_carrier() {
     let provisional = ArtifactSelectionId([0; 32]);
     let issued = ScopeProofV3::issue(
@@ -90,7 +109,7 @@ fn same_scope_cycles_are_valid_and_group_scope_does_not_create_a_carrier() {
     let carrier = ScopeProofV3::issue(&rows(&[(node(5, 0), vec![])]), provisional).unwrap();
     let carrier_node = carrier.nodes[0];
     let group = ArtifactBindingNode::Group(NativeGroupBinding {
-        binding: ArtifactBinding {
+        binding: NativeGroupIssuer {
             artifact: ArtifactId([5; 32]),
             selection: provisional,
         },

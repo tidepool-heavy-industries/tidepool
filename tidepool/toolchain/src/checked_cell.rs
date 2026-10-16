@@ -5578,12 +5578,11 @@ mod tests {
             let view = context.artifact_view();
             let projection = context.compiler_input_projection();
             let graph = view.capture_graph_selection();
-            let source_roots =
-                |graph: &crate::artifact_inventory::ArtifactGraphSelection| {
-                    graph.roots.iter().filter(|root| matches!(root,
-                    ArtifactBindingNode::Group(group) if group.binding.artifact == native_id
+            let source_roots = |graph: &crate::artifact_inventory::ArtifactGraphSelection| {
+                graph.roots.iter().filter(|root| matches!(root,
+                    ArtifactBindingNode::Group(group) if group.binding.artifact() == native_id
                 )).copied().collect::<BTreeSet<_>>()
-                };
+            };
             assert_eq!(
                 source_roots(&graph),
                 source_roots(&sources[first].artifact_view().capture_graph_selection())
@@ -5600,7 +5599,7 @@ mod tests {
                 graph
                     .native_groups
                     .iter()
-                    .filter(|group| group.binding.artifact == native_id)
+                    .filter(|group| group.binding.artifact() == native_id)
                     .count(),
                 2
             );

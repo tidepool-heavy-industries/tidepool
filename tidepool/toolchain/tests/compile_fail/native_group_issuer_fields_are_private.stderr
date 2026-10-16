@@ -1,0 +1,2 @@
+error[E0451]: fields `artifact` and `selection` of struct `NativeGroupIssuer` are private
+ --> tests/compile_fail/native_group_issuer_fields_are_private.rs:4:9

@@ -1254,21 +1254,25 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertIn("source-ambiguous Reindeer target", result.stderr)
 
     def test_compile_fail_contract_registers_declared_metadata_and_valid_control(self):
-        stem = "machine_lease_double_borrow"
-        self.write(f"tidepool/runtime/tests/compile_fail/{stem}.rs", "fn main() {}\n")
-        self.write(f"tidepool/runtime/tests/compile_fail/{stem}.stderr", "error[E0499]: borrow\n")
-        self.write(f"tidepool/runtime/tests/compile_pass/{stem}.rs", "fn main() {}\n")
-        result = self.generate()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        buck, _ = self.groups("tidepool/runtime")
-        contract = self.rule("tidepool/runtime", f"compile_fail_{stem}", "rust_compile_fail")
-        self.assertEqual(contract["dependencies"]["tidepool_runtime"], ":tidepool_runtime")
-        self.assertEqual(contract["control"], "tests/compile_pass/machine_lease_double_borrow.rs")
-        self.assertFalse(any("trybuild" in value for value in contract["dependencies"].values()))
-        (self.root / f"tidepool/runtime/tests/compile_pass/{stem}.rs").unlink()
-        refused = self.generate()
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("needs pinned diagnostic and valid control", refused.stderr)
+        for package, library, stem in (
+            ("tidepool/runtime", "tidepool_runtime", "machine_lease_double_borrow"),
+            ("tidepool/toolchain", "tidepool_toolchain", "native_group_issuer_is_not_artifact"),
+        ):
+            with self.subTest(package=package):
+                self.write(f"{package}/tests/compile_fail/{stem}.rs", "fn main() {}\n")
+                self.write(f"{package}/tests/compile_fail/{stem}.stderr", "error[E0499]: borrow\n")
+                self.write(f"{package}/tests/compile_pass/{stem}.rs", "fn main() {}\n")
+                result = self.generate()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                contract = self.rule(package, f"compile_fail_{stem}", "rust_compile_fail")
+                self.assertEqual(contract["dependencies"][library], f":{library}")
+                self.assertEqual(contract["control"], f"tests/compile_pass/{stem}.rs")
+                self.assertFalse(any("trybuild" in value for value in contract["dependencies"].values()))
+                (self.root / f"{package}/tests/compile_pass/{stem}.rs").unlink()
+                refused = self.generate()
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("needs pinned diagnostic and valid control", refused.stderr)
+                self.write(f"{package}/tests/compile_pass/{stem}.rs", "fn main() {}\n")
 
     def test_runtime_tests_separate_native_admission_from_compiler_resources(self):
         result = self.generate()

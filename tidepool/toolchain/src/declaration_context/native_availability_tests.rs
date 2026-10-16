@@ -282,7 +282,8 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .unwrap()
             .into_iter()
             .find(|group| {
-                group.binding.artifact == native_entry.descriptor.id && group.original_ordinal == 7
+                group.binding.artifact() == native_entry.descriptor.id
+                    && group.original_ordinal == 7
             })
             .unwrap()
     };
@@ -948,11 +949,11 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let groups = &proof.selection.graph_selection().native_groups;
     assert!(groups
         .iter()
-        .any(|group| group.binding.artifact == helper_id && group.original_ordinal == 7));
+        .any(|group| group.binding.artifact() == helper_id && group.original_ordinal == 7));
     assert!(
         !groups
             .iter()
-            .any(|group| group.binding.artifact == helper_id && group.original_ordinal == 9001),
+            .any(|group| group.binding.artifact() == helper_id && group.original_ordinal == 9001),
         "unrelated helper body is outside the authored closure"
     );
     let input =
@@ -1998,7 +1999,7 @@ impl NativeTransportModel {
                 .iter()
                 .copied()
                 .filter(|group| {
-                    group.binding.artifact == id && group.original_ordinal == logical.ordinal
+                    group.binding.artifact() == id && group.original_ordinal == logical.ordinal
                 })
                 .collect::<Vec<_>>();
             let [handle] = handles.as_slice() else {
@@ -2205,7 +2206,7 @@ fn replay_native_transport_history(
     let child = |index: usize| {
         expected[index]
             .iter()
-            .find(|(group, _)| group.binding.artifact == entries[0].descriptor.id)
+            .find(|(group, _)| group.binding.artifact() == entries[0].descriptor.id)
             .map(|(group, carrier)| (*group, *carrier))
             .unwrap()
     };
@@ -2506,7 +2507,7 @@ fn replay_native_transport_history(
         .native_groups
         .iter()
         .copied()
-        .filter(|group| group.binding.artifact == dependent_entry.descriptor.id)
+        .filter(|group| group.binding.artifact() == dependent_entry.descriptor.id)
         .collect::<Vec<_>>();
     let [dependent_group] = dependent_groups.as_slice() else {
         panic!("one new dependent group")

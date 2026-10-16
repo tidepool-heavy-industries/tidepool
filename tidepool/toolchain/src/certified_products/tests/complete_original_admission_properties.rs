@@ -43,7 +43,7 @@ fn explicit_roots(view: &ArtifactView) -> BTreeSet<(String, Option<u32>)> {
             let (id, ordinal) = match node {
                 ArtifactBindingNode::Artifact(binding) => (binding.artifact, None),
                 ArtifactBindingNode::Group(group) => {
-                    (group.binding.artifact, Some(group.original_ordinal))
+                    (group.binding.artifact(), Some(group.original_ordinal))
                 }
             };
             let entry = entries

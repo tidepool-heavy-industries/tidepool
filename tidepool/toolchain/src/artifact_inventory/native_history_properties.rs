@@ -315,23 +315,28 @@ struct Rows {
 
 impl Rows {
     fn register(&mut self, catalog: &Catalog, handle: ArtifactBindingNode) -> Physical {
-        let (binding, fact) = match handle {
-            ArtifactBindingNode::Artifact(binding) => (binding, Fact::Carrier(binding.artifact)),
+        let (selection, fact) = match handle {
+            ArtifactBindingNode::Artifact(binding) => {
+                (binding.selection, Fact::Carrier(binding.artifact))
+            }
             ArtifactBindingNode::Group(group) => {
                 let node = catalog
                     .originals
                     .iter()
-                    .position(|entry| entry.descriptor.id == group.binding.artifact)
+                    .position(|entry| entry.descriptor.id == group.binding.artifact())
                     .expect("issued group must name a catalog original");
                 assert!(
                     ORDINALS.contains(&group.original_ordinal),
                     "unexpected issued ordinal"
                 );
-                (group.binding, Fact::Group((node, group.original_ordinal)))
+                (
+                    group.binding.selection(),
+                    Fact::Group((node, group.original_ordinal)),
+                )
             }
         };
         let next = self.scopes.len();
-        let scope = *self.scopes.entry(binding.selection).or_insert(next);
+        let scope = *self.scopes.entry(selection).or_insert(next);
         let key = Physical { scope, fact };
         // No alias may overwrite an earlier correspondence, including one whose
         // live inventory rows have since been released.
@@ -954,7 +959,7 @@ fn check_native_selection_index(
             .nodes
             .iter()
             .filter_map(|node| match node {
-                InventoryNodeKey::Group(group) if group.binding.artifact == carrier.artifact => {
+                InventoryNodeKey::Group(group) if group.binding.artifact() == carrier.artifact => {
                     Some(group.original_ordinal)
                 }
                 _ => None,
@@ -1598,7 +1603,7 @@ fn retained_body_enters_demand_only_after_explicit_selection() {
         .native_groups
         .iter()
         .find(|group| {
-            group.binding.artifact == body.artifact
+            group.binding.artifact() == body.artifact
                 && group.original_ordinal == body.original_ordinal
         })
         .expect("the exact carrier keeps its already issued body bytes");
@@ -1864,7 +1869,7 @@ fn cold_native_history(
             .native_groups
             .iter()
             .map(|group| NativeGroupKey {
-                artifact: group.binding.artifact,
+                artifact: group.binding.artifact(),
                 original_ordinal: group.original_ordinal,
             })
             .collect::<BTreeSet<_>>(),
@@ -1918,7 +1923,7 @@ fn cold_later_group_history(
         .native_groups
         .iter()
         .find(|group| {
-            group.binding.artifact == catalog.originals[0].descriptor.id
+            group.binding.artifact() == catalog.originals[0].descriptor.id
                 && group.original_ordinal == 29
         })
         .unwrap();
@@ -1935,7 +1940,7 @@ fn cold_later_group_history(
         BTreeSet::from([ArtifactBindingNode::Artifact(old_root_carrier)])
     );
     prop_assert_ne!(
-        group.binding.selection,
+        group.binding.selection(),
         old_root_carrier.selection,
         "new group retains the exact earlier carrier"
     );
@@ -2610,8 +2615,8 @@ fn duplicate_carrier_edge_recovery_refuses_without_changing_issued_resolution() 
                         return None;
                     };
                     (*label == ArtifactDependency::Interface
-                        && carrier.artifact == group.binding.artifact)
-                        .then_some((*group, carrier))
+                        && carrier.artifact == group.binding.artifact())
+                    .then_some((*group, carrier))
                 })
             })
             .expect("production admission issued a group and exact carrier");

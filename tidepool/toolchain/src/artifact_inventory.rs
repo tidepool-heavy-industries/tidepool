@@ -64,12 +64,31 @@ pub struct ArtifactBinding {
     pub selection: ArtifactSelectionId,
 }
 
+/// Identity of a group node's issuer. Its scope is independent of the artifact
+/// carrier selected by the group's authenticated interface edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGroupIssuer {
+    artifact: ArtifactId,
+    selection: ArtifactSelectionId,
+}
+
+impl NativeGroupIssuer {
+    pub fn artifact(self) -> ArtifactId {
+        self.artifact
+    }
+
+    pub fn selection(self) -> ArtifactSelectionId {
+        self.selection
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeGroupBinding {
     /// Payload and issuing scope of this group node, not an artifact-node
     /// endpoint. Its recorded carrier edge can target an inherited scope.
-    pub binding: ArtifactBinding,
+    pub binding: NativeGroupIssuer,
     pub original_ordinal: u32,
 }
 
@@ -300,7 +319,8 @@ impl IssuedTargetNativeSelection {
     ) -> Result<NativeRequirements, CompileError> {
         let key = entry.native_group_key();
         let mut candidates = self.roots.iter().filter(|group| {
-            group.binding.artifact == key.artifact && group.original_ordinal == key.original_ordinal
+            group.binding.artifact() == key.artifact
+                && group.original_ordinal == key.original_ordinal
         });
         let binding = *candidates
             .next()
@@ -334,7 +354,7 @@ impl IssuedTargetNativeSelection {
         let ids = self
             .roots
             .iter()
-            .map(|group| group.binding.artifact)
+            .map(|group| group.binding.artifact())
             .collect::<BTreeSet<_>>();
         let entries = ids
             .iter()
@@ -348,7 +368,7 @@ impl IssuedTargetNativeSelection {
             .roots
             .iter()
             .map(|group| NativeGroupKey {
-                artifact: group.binding.artifact,
+                artifact: group.binding.artifact(),
                 original_ordinal: group.original_ordinal,
             })
             .collect::<BTreeSet<_>>();
@@ -471,7 +491,7 @@ impl NativeOriginalRequirement {
                 let mut carriers = state.outgoing(InventoryNodeKey::Group(*group)).filter_map(
                     |(target, dependency)| match target {
                         InventoryNodeKey::Artifact(carrier)
-                            if carrier.artifact == group.binding.artifact
+                            if carrier.artifact == group.binding.artifact()
                                 && *dependency == ArtifactDependency::Interface =>
                         {
                             Some(carrier)
@@ -515,7 +535,7 @@ impl NativeOriginalRequirement {
                 .roots
                 .iter()
                 .filter_map(|root| match root {
-                    InventoryNodeKey::Group(group) if group.binding.artifact == self.original => {
+                    InventoryNodeKey::Group(group) if group.binding.artifact() == self.original => {
                         Some(*root)
                     }
                     _ => None,
@@ -641,7 +661,7 @@ impl NativeOriginalRequirement {
             .iter()
             .filter(|node| {
                 matches!(node,
-                InventoryNodeKey::Group(group) if group.binding.artifact == original)
+                InventoryNodeKey::Group(group) if group.binding.artifact() == original)
             })
             .copied()
             .collect::<Vec<_>>();
@@ -865,27 +885,18 @@ enum LogicalNodeKey {
     Artifact(ArtifactId),
     Group(NativeGroupKey),
 }
-impl LogicalNodeKey {
-    fn artifact(self) -> ArtifactId {
-        match self {
-            Self::Artifact(id) => id,
-            Self::Group(key) => key.artifact,
-        }
-    }
-}
-
 type InventoryNodeKey = ArtifactBindingNode;
 impl ArtifactBindingNode {
     pub fn artifact(self) -> ArtifactId {
         match self {
             Self::Artifact(binding) => binding.artifact,
-            Self::Group(group) => group.binding.artifact,
+            Self::Group(group) => group.binding.artifact(),
         }
     }
     pub fn selection(self) -> ArtifactSelectionId {
         match self {
             Self::Artifact(binding) => binding.selection,
-            Self::Group(group) => group.binding.selection,
+            Self::Group(group) => group.binding.selection(),
         }
     }
     /// Typed node membership does not reconstruct a group's artifact carrier.
@@ -903,7 +914,7 @@ impl ArtifactBindingNode {
         match self {
             Self::Artifact(binding) => LogicalNodeKey::Artifact(binding.artifact),
             Self::Group(group) => LogicalNodeKey::Group(NativeGroupKey {
-                artifact: group.binding.artifact,
+                artifact: group.binding.artifact(),
                 original_ordinal: group.original_ordinal,
             }),
         }
@@ -911,14 +922,16 @@ impl ArtifactBindingNode {
 }
 impl LogicalNodeKey {
     fn bind(self, selection: ArtifactSelectionId) -> InventoryNodeKey {
-        let binding = ArtifactBinding {
-            artifact: self.artifact(),
-            selection,
-        };
         match self {
-            Self::Artifact(_) => InventoryNodeKey::Artifact(binding),
+            Self::Artifact(artifact) => InventoryNodeKey::Artifact(ArtifactBinding {
+                artifact,
+                selection,
+            }),
             Self::Group(group) => InventoryNodeKey::Group(NativeGroupBinding {
-                binding,
+                binding: NativeGroupIssuer {
+                    artifact: group.artifact,
+                    selection,
+                },
                 original_ordinal: group.original_ordinal,
             }),
         }
@@ -2582,7 +2595,7 @@ impl ArtifactInventory {
         for group in &graph.native_groups {
             groups
                 .entry(NativeGroupKey {
-                    artifact: group.binding.artifact,
+                    artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 })
                 .or_default()
@@ -2596,12 +2609,12 @@ impl ArtifactInventory {
                 let ArtifactBindingNode::Group(group) = root else {
                     continue;
                 };
-                if group.binding.artifact != requirement.original {
+                if group.binding.artifact() != requirement.original {
                     continue;
                 }
                 qualified
                     .entry(NativeGroupKey {
-                        artifact: group.binding.artifact,
+                        artifact: group.binding.artifact(),
                         original_ordinal: group.original_ordinal,
                     })
                     .or_default()
@@ -3075,7 +3088,7 @@ impl ArtifactInventory {
             for group in &issued_groups {
                 fixed.groups.insert(
                     NativeGroupKey {
-                        artifact: group.binding.artifact,
+                        artifact: group.binding.artifact(),
                         original_ordinal: group.original_ordinal,
                     },
                     BTreeSet::from([*group]),
@@ -3387,7 +3400,7 @@ impl ArtifactInventory {
             }
             for group in &graph.native_groups {
                 let key = NativeGroupKey {
-                    artifact: group.binding.artifact,
+                    artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 };
                 required_groups.entry(key).or_default().insert(*group);
@@ -3396,7 +3409,7 @@ impl ArtifactInventory {
                 let ArtifactBindingNode::Group(group) = root else {
                     continue;
                 };
-                if group.binding.artifact == *original {
+                if group.binding.artifact() == *original {
                     required_roots
                         .entry(NativeGroupKey {
                             artifact: *original,
@@ -3477,7 +3490,7 @@ impl ArtifactInventory {
                 parent_nodes.iter().copied().filter(|node| match node {
                     InventoryNodeKey::Group(group) => {
                         let key = NativeGroupKey {
-                            artifact: group.binding.artifact,
+                            artifact: group.binding.artifact(),
                             original_ordinal: group.original_ordinal,
                         };
                         ids.contains(&key.artifact)
@@ -3864,7 +3877,7 @@ impl ArtifactInventory {
             }
         }
         for group in &groups {
-            if !entries.get(&group.binding.artifact).is_some_and(|entry| {
+            if !entries.get(&group.binding.artifact()).is_some_and(|entry| {
                 entry
                     .native_group_ordinals
                     .contains(&group.original_ordinal)
@@ -4148,14 +4161,14 @@ impl NativeSelectionIndex {
             };
             index
                 .ordinals
-                .entry(group.binding.artifact)
+                .entry(group.binding.artifact())
                 .or_default()
                 .insert(group.original_ordinal);
             for (target, label) in state.outgoing(*key) {
                 let InventoryNodeKey::Artifact(carrier) = target else {
                     continue;
                 };
-                if carrier.artifact != group.binding.artifact
+                if carrier.artifact != group.binding.artifact()
                     || *label != ArtifactDependency::Interface
                 {
                     continue;
@@ -4439,7 +4452,7 @@ fn native_groups(nodes: &imbl::OrdSet<InventoryNodeKey>) -> BTreeSet<NativeGroup
         .iter()
         .filter_map(|key| match key {
             InventoryNodeKey::Group(key) => Some(NativeGroupKey {
-                artifact: key.binding.artifact,
+                artifact: key.binding.artifact(),
                 original_ordinal: key.original_ordinal,
             }),
             _ => None,
@@ -4459,7 +4472,7 @@ fn resolve_group_binding(
         let InventoryNodeKey::Group(group) = key else {
             return None;
         };
-        if group.binding.artifact != carrier.artifact || group.original_ordinal != ordinal {
+        if group.binding.artifact() != carrier.artifact || group.original_ordinal != ordinal {
             return None;
         }
         state
@@ -4521,7 +4534,7 @@ fn projected_dependencies(
         for (target, label) in state.outgoing(*key) {
             // The group-to-carrier custody edge has no public dependency row.
             if matches!((key, target), (InventoryNodeKey::Group(group), InventoryNodeKey::Artifact(carrier))
-                if carrier.artifact == group.binding.artifact)
+                if carrier.artifact == group.binding.artifact())
                 && matches!(label, ArtifactDependency::Interface)
             {
                 continue;
@@ -5138,7 +5151,7 @@ impl ArtifactView {
             }
 
             let ArtifactPayload::Original(product) =
-                &self.lease.payloads[&key.binding.artifact].payload
+                &self.lease.payloads[&key.binding.artifact()].payload
             else {
                 return Err(failure("selected native group lacks original payload"));
             };
@@ -5187,7 +5200,7 @@ impl ArtifactView {
             groups
                 .into_iter()
                 .map(|group| NativeGroupKey {
-                    artifact: group.binding.artifact,
+                    artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 })
                 .collect(),
@@ -5255,10 +5268,10 @@ impl ArtifactView {
                 continue;
             }
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            for package in &self.lease.payloads[&key.binding.artifact].retained_packages {
+            for package in &self.lease.payloads[&key.binding.artifact()].retained_packages {
                 if key.original_ordinal == package.dependent_ordinal {
                     packages.insert(NativePackageRequirement {
-                        artifact_id: key.binding.artifact,
+                        artifact_id: key.binding.artifact(),
                         identity: package.identity.clone(),
                         generation: package.generation,
                         interface_digest: package.interface_digest,
@@ -5337,7 +5350,7 @@ impl ArtifactView {
             .collect::<Result<Vec<_>, _>>()?;
         selected.extend(self.roots().iter().copied().filter(|node| {
             matches!(node,
-            InventoryNodeKey::Group(group) if group.binding.artifact == original)
+            InventoryNodeKey::Group(group) if group.binding.artifact() == original)
         }));
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
@@ -5370,11 +5383,11 @@ impl ArtifactView {
             })
             .collect::<Result<Vec<_>, _>>()?;
         custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
-            InventoryNodeKey::Group(group) if group.binding.artifact != original && ids.contains(&group.binding.artifact))));
-        if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact == original)) {
+            InventoryNodeKey::Group(group) if group.binding.artifact() != original && ids.contains(&group.binding.artifact()))));
+        if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact() == original)) {
             let carrier = namespace[&original];
             let ordinals = owned.iter().filter_map(|node| match node {
-                InventoryNodeKey::Group(group) if group.binding.artifact == original => Some(group.original_ordinal),
+                InventoryNodeKey::Group(group) if group.binding.artifact() == original => Some(group.original_ordinal),
                 _ => None,
             }).collect::<BTreeSet<_>>();
             for ordinal in ordinals {
@@ -5612,7 +5625,7 @@ impl ArtifactView {
                         let InventoryNodeKey::Artifact(carrier) = carrier_node else {
                             return None;
                         };
-                        if carrier.artifact != group.binding.artifact
+                        if carrier.artifact != group.binding.artifact()
                             || *label != ArtifactDependency::Interface
                         {
                             return None;
@@ -5681,7 +5694,7 @@ impl ArtifactView {
             !selected_nodes.contains(node)
                 && state.outgoing(*node).any(|(target, label)| {
                     matches!(target, InventoryNodeKey::Artifact(carrier)
-                        if carrier.artifact == group.binding.artifact)
+                        if carrier.artifact == group.binding.artifact())
                         && *label == ArtifactDependency::Interface
                         && retained_nodes.contains(&target)
                 })
@@ -5722,14 +5735,14 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         let issued = self.roots().iter().copied().collect::<BTreeSet<_>>();
         roots.extend(issued.iter().copied().filter(|node| {
-            matches!(node, InventoryNodeKey::Group(group) if ids.contains(&group.binding.artifact))
+            matches!(node, InventoryNodeKey::Group(group) if ids.contains(&group.binding.artifact()))
         }));
         let custody = owned
             .iter()
             .copied()
             .filter(|node| {
                 matches!(node, InventoryNodeKey::Group(group)
-                if ids.contains(&group.binding.artifact) && !issued.contains(node))
+                if ids.contains(&group.binding.artifact()) && !issued.contains(node))
             })
             .collect::<Vec<_>>();
         drop(state);
@@ -5867,7 +5880,7 @@ impl ArtifactView {
                 .admission_roots
                 .iter()
                 .filter_map(|node| match node {
-                    InventoryNodeKey::Group(group) if ids.contains(&group.binding.artifact) => {
+                    InventoryNodeKey::Group(group) if ids.contains(&group.binding.artifact()) => {
                         Some(*node)
                     }
                     _ => None,
@@ -5887,7 +5900,7 @@ impl ArtifactView {
                         !selected.iter().any(|node| {
                             matches!(node,
                         InventoryNodeKey::Group(group)
-                        if group.binding.artifact == *id && group.original_ordinal == *ordinal)
+                        if group.binding.artifact() == *id && group.original_ordinal == *ordinal)
                         })
                     })
             {
@@ -6122,7 +6135,7 @@ impl ArtifactView {
                     let ArtifactBindingNode::Group(group) = root else {
                         continue;
                     };
-                    if group.binding.artifact != original {
+                    if group.binding.artifact() != original {
                         continue;
                     }
                     let key = NativeGroupKey {
@@ -6307,7 +6320,7 @@ impl ArtifactView {
                                 let projection = view.read_projection(&state);
                                 let matching = || projection.nodes.iter().filter_map(|node| match node {
                                     InventoryNodeKey::Group(group)
-                                        if group.binding.artifact == *artifact
+                                        if group.binding.artifact() == *artifact
                                             && group.original_ordinal == *dependent_ordinal => Some(*group),
                                     _ => None,
                                 });
@@ -6703,7 +6716,7 @@ mod tests {
                 proptest::prop_assert!(proof.selection.graph_selection().roots.iter()
                     .all(|root| matches!(root, ArtifactBindingNode::Artifact(_))));
                 proptest::prop_assert_eq!(proof.selection.graph_selection().native_groups.iter()
-                    .filter(|group| group.binding.artifact == id).count(), count as usize);
+                    .filter(|group| group.binding.artifact() == id).count(), count as usize);
                 proptest::prop_assert_eq!(ExactArtifactSelection::capture(&view), before);
             }
         }
@@ -6886,7 +6899,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(
-            selected.first().unwrap().binding.artifact,
+            selected.first().unwrap().binding.artifact(),
             native.descriptor.id
         );
         assert_eq!(selected.first().unwrap().original_ordinal, 7);
@@ -6985,7 +6998,7 @@ mod tests {
                         ArtifactBindingNode::Group(source),
                         ArtifactBindingNode::Group(target),
                         ArtifactDependency::NativeGroup { .. },
-                    ) if source.binding.artifact == id => Some(target),
+                    ) if source.binding.artifact() == id => Some(target),
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
@@ -7144,7 +7157,7 @@ mod tests {
                 let same_carrier = before
                     .native_groups
                     .iter()
-                    .filter(|group| group.binding.artifact == id && group.original_ordinal == 7)
+                    .filter(|group| group.binding.artifact() == id && group.original_ordinal == 7)
                     .collect::<Vec<_>>();
                 assert!(
                     same_carrier.len() > 1,
@@ -7497,7 +7510,7 @@ mod tests {
                 view.capture_graph_selection()
                     .native_groups
                     .iter()
-                    .filter(|group| group.binding.artifact == id)
+                    .filter(|group| group.binding.artifact() == id)
                     .map(|group| group.original_ordinal)
                     .collect::<BTreeSet<_>>(),
                 ordinals.iter().copied().collect()
@@ -8118,7 +8131,7 @@ mod tests {
             assert_eq!(groups.len(), 2);
             let consumer_group = *groups
                 .iter()
-                .find(|group| group.binding.artifact == consumer.descriptor.id)
+                .find(|group| group.binding.artifact() == consumer.descriptor.id)
                 .unwrap();
             let carrier = first
                 .binding_dependencies()
@@ -8132,7 +8145,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            assert_ne!(carrier.selection, consumer_group.binding.selection);
+            assert_ne!(carrier.selection, consumer_group.binding.selection());
             let before = inventory.metrics();
             let examined = inventory
                 .0
@@ -9092,8 +9105,11 @@ mod tests {
         assert_eq!(old_carrier, new_carrier);
         assert_eq!(old_child.artifact, values.descriptor.id);
         assert_eq!(new_child.artifact, next.descriptor.id);
-        assert_ne!(old_group.binding.selection, changed_group.binding.selection);
-        assert_ne!(new_carrier.selection, changed_group.binding.selection);
+        assert_ne!(
+            old_group.binding.selection(),
+            changed_group.binding.selection()
+        );
+        assert_ne!(new_carrier.selection, changed_group.binding.selection());
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
@@ -9275,7 +9291,7 @@ mod tests {
             view.capture_graph_selection()
                 .native_groups
                 .into_iter()
-                .filter(|group| group.binding.artifact == native.descriptor.id)
+                .filter(|group| group.binding.artifact() == native.descriptor.id)
                 .map(|group| {
                     (
                         group.original_ordinal,
@@ -9791,13 +9807,13 @@ mod tests {
             .capture_graph_selection()
             .native_groups
             .into_iter()
-            .find(|group| group.binding.artifact == child.descriptor.id)
+            .find(|group| group.binding.artifact() == child.descriptor.id)
             .unwrap();
         let sibling_child = sibling
             .capture_graph_selection()
             .native_groups
             .into_iter()
-            .find(|group| group.binding.artifact == child.descriptor.id)
+            .find(|group| group.binding.artifact() == child.descriptor.id)
             .unwrap();
         assert_ne!(original_child, sibling_child);
         let projection = CompilerInputProjection::from_issued_entries(&[
@@ -9860,7 +9876,7 @@ mod tests {
             assert!(!expected.contains(&sibling_child));
             assert!(!expected
                 .iter()
-                .any(|group| group.binding.artifact == unrelated.descriptor.id));
+                .any(|group| group.binding.artifact() == unrelated.descriptor.id));
             for (joined, use_certified) in [
                 original.merge(&sibling).unwrap(),
                 sibling.merge(&original).unwrap(),
@@ -10826,7 +10842,7 @@ mod tests {
             proptest::prop_assert_eq!(carrier.artifact, native.descriptor.id);
             proptest::prop_assert_eq!(canonical.artifact, canonical_id);
             proptest::prop_assert_eq!(old_values.artifact, old_values_id);
-            proptest::prop_assert_eq!(old_group.binding.artifact, native.descriptor.id);
+            proptest::prop_assert_eq!(old_group.binding.artifact(), native.descriptor.id);
             let mut original_model = NativeHistoryModel::authored(carrier, canonical, old_values, old_group);
             original_model.roots.insert(ArtifactBindingNode::Artifact(canonical));
             original_model.check(&old)?;
@@ -10841,8 +10857,8 @@ mod tests {
             proptest::prop_assert_eq!(current_graph.native_groups.len(), 2);
             let new_group = *current_graph.native_groups.iter().find(|group| **group != old_group).unwrap();
             proptest::prop_assert_eq!(new_group.original_ordinal, 7);
-            proptest::prop_assert_eq!(new_group.binding.artifact, native.descriptor.id);
-            proptest::prop_assert_ne!(new_group.binding.selection, carrier.selection);
+            proptest::prop_assert_eq!(new_group.binding.artifact(), native.descriptor.id);
+            proptest::prop_assert_ne!(new_group.binding.selection(), carrier.selection);
             proptest::prop_assert_eq!(view.namespace()[&native.descriptor.id], carrier);
             let mut model = original_model.clone();
             let new_values = view.namespace()[&new_child_id];
@@ -11086,7 +11102,7 @@ mod tests {
                 assert_eq!(
                     issued
                         .iter()
-                        .map(|group| (group.binding.artifact, group.original_ordinal))
+                        .map(|group| (group.binding.artifact(), group.original_ordinal))
                         .collect::<BTreeSet<_>>(),
                     (7..7 + groups)
                         .map(|ordinal| (original.descriptor.id, ordinal))
@@ -11348,13 +11364,13 @@ mod tests {
         let helper_groups = expected
             .groups
             .iter()
-            .filter(|group| group.binding.artifact == helper.descriptor.id)
+            .filter(|group| group.binding.artifact() == helper.descriptor.id)
             .copied()
             .collect::<Vec<_>>();
         assert_eq!(helper_groups.len(), 2);
         assert_ne!(
-            helper_groups[0].binding.selection,
-            helper_groups[1].binding.selection
+            helper_groups[0].binding.selection(),
+            helper_groups[1].binding.selection()
         );
         let carriers = expected
             .rows
@@ -11364,7 +11380,7 @@ mod tests {
                     ArtifactBindingNode::Group(group),
                     ArtifactBindingNode::Artifact(carrier),
                     ArtifactDependency::Interface,
-                ) if group.binding.artifact == helper.descriptor.id
+                ) if group.binding.artifact() == helper.descriptor.id
                     && carrier.artifact == helper.descriptor.id =>
                 {
                     Some(*carrier)
@@ -11439,7 +11455,7 @@ mod tests {
                 .unwrap();
             let helper_group = *actual
                 .iter()
-                .find(|group| group.binding.artifact == helper.descriptor.id)
+                .find(|group| group.binding.artifact() == helper.descriptor.id)
                 .unwrap();
             assert!(issuer.contains_issued_native_group(helper_group));
             assert_eq!(
@@ -11487,8 +11503,8 @@ mod tests {
                 .merge_selected(&issuers[1 - first], &projection)
                 .unwrap();
             assert!(!joined.selection_snapshot().roots.is_empty());
-            assert!(joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == originals[0].descriptor.id)));
-            assert!(!joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == helper.descriptor.id)));
+            assert!(joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact() == originals[0].descriptor.id)));
+            assert!(!joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id)));
             // Reproduce the old retention rule as a control: exact descendants
             // become roots and private compiler input recapture must refuse.
             let legacy_roots = joined
@@ -11543,7 +11559,7 @@ mod tests {
             expected
                 .check(&support)
                 .expect("support preserves issuing groups");
-            assert!(!support.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == helper.descriptor.id)));
+            assert!(!support.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id)));
             let recovery = ArtifactInventory::default();
             let restored = recovery
                 .recover_selection(
@@ -11929,7 +11945,7 @@ mod tests {
                 model
                     .groups
                     .iter()
-                    .filter(|group| group.binding.artifact == helper.descriptor.id)
+                    .filter(|group| group.binding.artifact() == helper.descriptor.id)
                     .count(),
                 2 * count as usize
             );
@@ -12284,7 +12300,7 @@ mod tests {
                         let mut forged = graph.clone();
                         let group = graph.native_groups[0];
                         forged.custody_roots.push(ArtifactBindingNode::Group(NativeGroupBinding {
-                            binding: ArtifactBinding { selection: ArtifactSelectionId([0xff;32]), ..group.binding },
+                            binding: NativeGroupIssuer { selection: ArtifactSelectionId([0xff;32]), ..group.binding },
                             ..group
                         }));
                         proptest::prop_assert!(inventory.recover_selection(&inventory.empty_view(), view.entries(), &forged, &view.binding_dependencies()).is_err());
@@ -12301,7 +12317,7 @@ mod tests {
                     if expected.len() == before { break; }
                 }
                 let expected_groups = expected.iter().filter_map(|node| match node {
-                    ArtifactBindingNode::Group(group) => Some(NativeGroupKey { artifact: group.binding.artifact, original_ordinal: group.original_ordinal }),
+                    ArtifactBindingNode::Group(group) => Some(NativeGroupKey { artifact: group.binding.artifact(), original_ordinal: group.original_ordinal }),
                     _ => None,
                 }).collect::<BTreeSet<_>>();
                 proptest::prop_assert_eq!(view.roots().iter().copied().collect::<BTreeSet<_>>(), selected_roots.clone());
@@ -12576,7 +12592,7 @@ mod tests {
         assert!(!historical_groups.is_empty());
         assert!(historical_groups
             .iter()
-            .any(|group| group.binding.artifact == old.descriptor.id));
+            .any(|group| group.binding.artifact() == old.descriptor.id));
         assert!(current
             .published_source_original_selections_for_target(
                 &historical_groups,
@@ -12749,8 +12765,11 @@ mod tests {
             .iter()
             .find(|group| group.original_ordinal == 7)
             .unwrap();
-        assert_ne!(group.binding.selection, original_binding.selection);
-        assert!(!graph.bindings.contains(&group.binding));
+        assert_ne!(group.binding.selection(), original_binding.selection);
+        assert!(!graph.bindings.iter().any(|binding| {
+            (binding.artifact, binding.selection)
+                == (group.binding.artifact(), group.binding.selection())
+        }));
         let edges = demanded.binding_dependencies();
         assert!(edges.contains(&(
             ArtifactBindingNode::Group(group),
@@ -12781,7 +12800,7 @@ mod tests {
                 .native_groups
                 .iter()
                 .any(|group| group.original_ordinal == 7
-                    && group.binding.selection != original_binding.selection));
+                    && group.binding.selection() != original_binding.selection));
             assert!(proof
                 .selection
                 .graph_selection()
@@ -12805,7 +12824,7 @@ mod tests {
                 .native_groups
                 .iter()
                 .any(|group| group.original_ordinal == 7
-                    && group.binding.selection != original_binding.selection));
+                    && group.binding.selection() != original_binding.selection));
             view.native_requirements_from_roots(&[NativeRequirementRoot::Group {
                 artifact: native_id,
                 original_ordinal: 7,
@@ -12908,10 +12927,10 @@ mod tests {
                 .iter()
                 .find(|(source, target, label)| {
                     matches!(source, ArtifactBindingNode::Group(group)
-                        if group.binding.artifact == inspection.descriptor.id
+                        if group.binding.artifact() == inspection.descriptor.id
                             && group.original_ordinal == 118)
                         && matches!(target, ArtifactBindingNode::Group(group)
-                            if group.binding.artifact == wire.descriptor.id
+                            if group.binding.artifact() == wire.descriptor.id
                                 && group.original_ordinal == 5)
                         && *label
                             == ArtifactDependency::NativeGroup {
@@ -12982,9 +13001,9 @@ mod tests {
             let edges = demanded.binding_dependencies();
             let demanded_edge = edges.iter().find(|(source, target, label)| {
                 matches!(source, ArtifactBindingNode::Group(group)
-                    if group.binding.artifact == inspection.descriptor.id && group.original_ordinal == 118)
+                    if group.binding.artifact() == inspection.descriptor.id && group.original_ordinal == 118)
                     && matches!(target, ArtifactBindingNode::Group(group)
-                        if group.binding.artifact == wire.descriptor.id && group.original_ordinal == 5)
+                        if group.binding.artifact() == wire.descriptor.id && group.original_ordinal == 5)
                     && *label == ArtifactDependency::NativeGroup { dependent_ordinal: 118, required_ordinal: 5 }
             }).expect("first or repeated late demand retains exact issued native dependency");
             if let Some(exact_edge) = &exact_edge {
@@ -13007,7 +13026,7 @@ mod tests {
                 .native_groups_for_target(None, &[issued_source(&inspection, 118)])
                 .unwrap()
                 .iter()
-                .any(|group| group.binding.artifact == inspection.descriptor.id
+                .any(|group| group.binding.artifact() == inspection.descriptor.id
                     && group.original_ordinal == 118));
         }
     }
@@ -13062,7 +13081,7 @@ mod tests {
                 .flat_map(|requirement| requirement.selection.graph_selection().roots.iter())
                 .filter_map(|node| match node {
                     ArtifactBindingNode::Group(group)
-                        if group.binding.artifact == native.descriptor.id =>
+                        if group.binding.artifact() == native.descriptor.id =>
                     {
                         Some(*group)
                     }
@@ -13153,7 +13172,7 @@ mod tests {
                 .flat_map(|requirement| requirement.selection.graph_selection().roots.iter())
                 .filter_map(|root| match root {
                     InventoryNodeKey::Group(group)
-                        if group.binding.artifact == native.descriptor.id =>
+                        if group.binding.artifact() == native.descriptor.id =>
                     {
                         Some(*group)
                     }
