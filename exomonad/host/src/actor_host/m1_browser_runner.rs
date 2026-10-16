@@ -403,6 +403,23 @@ async fn verify_cancelled_resident_call(
     Ok(())
 }
 
+fn browser_model_reply(
+    recorded: &harness::store::RecordedToolOutput,
+    operation: &harness::model::OperationId,
+    invocation: &harness::item::ToolCall,
+) -> Result<harness::item::Item, String> {
+    if invocation.call_id != operation.call {
+        return Err("raw display invocation belongs to another call".into());
+    }
+    let projection = super::super::embedded_policy::project_retained_result(recorded, operation)?
+        .ok_or("raw display operation has no native model projection")?;
+    Ok(harness::item::Item::tool_output(
+        &invocation.call_id,
+        invocation.input.kind(),
+        &harness::turn::JobOutput::Completed(Ok(projection)),
+    ))
+}
+
 /// Join the originating provider call, notebook receipt and Store-owned row.
 fn committed_browser_display(
     fixture: &HostedTestRuntime,
@@ -441,13 +458,21 @@ fn committed_browser_display(
     {
         return Err("raw display claim belongs to another actor or operation".into());
     }
-    if store
-        .replay_output_operation(&claim.operation)
+    let recorded = store
+        .inspect_embedded_result(&target, &claim.operation)
         .map_err(|error| error.to_string())?
-        .as_ref()
-        != Some(*reply)
-    {
-        return Err("raw display reply differs from the retained original operation output".into());
+        .ok_or("raw display operation has no retained result")?;
+    let invocation = store
+        .invocation_item(&claim.operation.request, &claim.operation.call)
+        .map_err(|error| error.to_string())?
+        .ok_or("raw display operation has no original invocation")?;
+    store
+        .model_output_projection(&claim.operation)
+        .map_err(|error| error.to_string())?
+        .ok_or("raw display operation has no certified model projection")?;
+    let expected = browser_model_reply(&recorded, &claim.operation, &invocation)?;
+    if *reply != &expected {
+        return Err("raw display reply differs from its retained model projection".into());
     }
     let actor = fixture.context.actor.identity();
     let origin = ActorOutputOrigin {
@@ -952,5 +977,75 @@ fn browser_reply_observation_allows_pending_and_successful_calls() {
             json!({"type":"custom_tool_call_output", "call_id":"browser-real-cell", "output":malformed.to_string()}),
         );
         assert!(validate_completed_replies(&[item]).is_err());
+    }
+}
+
+#[test]
+fn browser_model_reply_keeps_issued_kind_and_refuses_other_operations() {
+    use harness::{
+        item::Item,
+        model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
+        provider::OutputFormat,
+        store::{RecordedToolOutput, TerminalOutcome},
+        turn::JobOutput,
+    };
+    let operation = OperationId {
+        origin: ConversationIdentity::Embedded {
+            run: "browser-projection".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        },
+        request: RequestId("issued-request".into()),
+        call: CallId("browser-real-cell".into()),
+    };
+    let body = json!({"text":"42\n[authored brackets remain literal] λ"});
+    let encoded = super::super::embedded_policy::encode_native_result(
+        exomonad_actor::ResidentToolResponse::Value(body.clone()),
+        super::super::embedded_policy::native_original(&operation).unwrap(),
+    )
+    .unwrap();
+    for (issued, kind) in [
+        (
+            json!({"type":"custom_tool_call", "name":"probe", "call_id":operation.call.0, "input":"display 42"}),
+            harness::item::ToolKind::Custom,
+        ),
+        (
+            json!({"type":"function_call", "name":"haskell", "call_id":operation.call.0, "arguments":"{}"}),
+            harness::item::ToolKind::Function,
+        ),
+    ] {
+        let invocation = Item(issued).tool_call().unwrap().unwrap();
+        let mut canonical = Item::tool_output(
+            &operation.call,
+            kind,
+            &JobOutput::Completed(Ok(encoded.clone())),
+        );
+        canonical.0["output_format"] = json!("native_receipt_v1");
+        let recorded = RecordedToolOutput {
+            item: canonical,
+            terminal: TerminalOutcome::Success,
+            output_format: OutputFormat::NativeReceiptV1,
+        };
+        let expected = Item::tool_output(
+            &operation.call,
+            kind,
+            &JobOutput::Completed(Ok(body.clone())),
+        );
+        assert_ne!(recorded.item, expected);
+        assert_eq!(
+            browser_model_reply(&recorded, &operation, &invocation).unwrap(),
+            expected
+        );
+        let mut foreign = operation.clone();
+        foreign.request = RequestId("another-request".into());
+        assert!(browser_model_reply(&recorded, &foreign, &invocation).is_err());
+        let mut another_call = invocation.clone();
+        another_call.call_id = CallId("another-call".into());
+        assert!(browser_model_reply(&recorded, &operation, &another_call).is_err());
+        let opaque = RecordedToolOutput {
+            output_format: OutputFormat::LegacyOpaque,
+            ..recorded
+        };
+        assert!(browser_model_reply(&opaque, &operation, &invocation).is_err());
     }
 }
