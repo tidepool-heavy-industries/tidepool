@@ -16910,9 +16910,21 @@ pub(crate) mod tests {
                 // Production certification issues a complete current product even
                 // when the target has not demanded every body. The private-input
                 // handoff must preserve that issuance for a later notebook cell.
+                let output_view =
+                    crate::declaration_context::certified_product_artifact_view_with_validation(
+                        canonical_producer,
+                        &certified.recovery_products,
+                        &certified.module_interfaces,
+                        &certified.value_interfaces,
+                        Some(&request.compiler_inputs().artifacts),
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .unwrap();
+                assert!(output_view.selected_native_groups().is_empty());
                 let private = OriginalCompilerInputs::from_selection(
                     &certified.source_selection,
-                    &certified.artifact_view,
+                    &output_view,
                 )
                 .unwrap();
                 let next =
@@ -16934,7 +16946,7 @@ pub(crate) mod tests {
                         let row = row.as_array().unwrap();
                         row[0].as_text() == Some(&owner.unit)
                             && row[1].as_text() == Some(&owner.module)
-                            && row[2].as_text() == Some(&owner.module_version)
+                            && row[2].as_text() == Some(hex(&owner.module_version.0).as_str())
                     })
                     .unwrap()
                     .as_array()
