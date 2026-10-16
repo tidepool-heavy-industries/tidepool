@@ -1081,12 +1081,21 @@ pub trait KernelBehavior: Send + 'static {
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>>;
 
-    fn workbench<'a>(
+    fn expand_display<'a>(
         &'a mut self,
         context: &'a KernelContext,
-        invocation: crate::ActorWorkbenchInvocation,
-        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
+        _request: crate::DisplayExpansionRequest,
+        _control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+        Box::pin(async move {
+            Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor: context.identity(),
+                detail: "display expansion is unsupported".into(),
+                diagnostic: None,
+            })
+        })
+    }
 
     /// Capture a resident tool call as an owned actor task. The default keeps
     /// its stateful effects in the existing serial behavior transfer.
@@ -1111,21 +1120,17 @@ pub trait KernelBehavior: Send + 'static {
 
     /// Hand execution-owned work to a task while retaining actor-owned state
     /// on the mailbox turn. The sequential form keeps an invocation intact
-    /// for behaviors whose work remains actor-owned.
+    /// for behaviors whose work remains actor-owned. A sequential decision must
+    /// not acquire execution authority or perform admission effects: the mailbox
+    /// can defer it and dispatch the same invocation again after task progress.
     fn dispatch_workbench(
         &mut self,
-        _context: &KernelContext,
+        context: &KernelContext,
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> WorkbenchDispatch<Self>
     where
-        Self: Sized,
-    {
-        WorkbenchDispatch::Sequential {
-            invocation,
-            control,
-        }
-    }
+        Self: Sized;
 
     fn reconcile_workbench_cancellation(
         &self,
@@ -1539,7 +1544,13 @@ async fn handle_parked_message<B: KernelBehavior>(
                         control,
                         reply,
                     } => {
-                        start_workbench(myself, state, invocation, control, reply);
+                        if matches!(
+                            start_workbench(myself, state, invocation, control, reply),
+                            WorkbenchStart::Deferred
+                        ) {
+                            // A serial executor must await actual task progress.
+                            return Ok(());
+                        }
                     }
                     settlement => apply_hosted_settlement(state, settlement).await,
                 }
@@ -2220,6 +2231,34 @@ where
             | KernelMessage::ToolAborted { .. }) => {
                 apply_hosted_settlement(state, settlement).await;
             }
+            KernelMessage::ExpandDisplay {
+                request,
+                control,
+                reply,
+            } => {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
+                    let rejection = Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                        diagnostic: None,
+                    });
+                    if let Some(control) = control {
+                        control.settle_not_admitted(rejection.clone());
+                        state.mailbox_admission.hosted_cell().complete(&control);
+                    }
+                    reply.send(rejection).ok();
+                } else {
+                    start_workbench_ingress(
+                        &myself,
+                        state,
+                        WorkbenchIngress::Expansion(request),
+                        control,
+                        reply,
+                    );
+                    return Ok(());
+                }
+            }
             KernelMessage::Workbench {
                 invocation,
                 control,
@@ -2351,15 +2390,43 @@ where
     }
 }
 
+enum WorkbenchIngress {
+    Notebook(crate::ActorWorkbenchInvocation),
+    Expansion(crate::DisplayExpansionRequest),
+}
+
+enum WorkbenchStart {
+    Started,
+    Settled,
+    Deferred,
+}
+
 fn start_workbench<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
     invocation: crate::ActorWorkbenchInvocation,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
-) {
+) -> WorkbenchStart {
+    start_workbench_ingress(
+        myself,
+        state,
+        WorkbenchIngress::Notebook(invocation),
+        control,
+        reply,
+    )
+}
+
+fn start_workbench_ingress<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    ingress: WorkbenchIngress,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
+) -> WorkbenchStart {
     assert!(
-        state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, &invocation.request),
+        state.pending_tasks.is_empty()
+            || matches!(&ingress, WorkbenchIngress::Notebook(invocation) if can_admit_deferred_workbench(state, &invocation.request)),
         "workbench admission requires an independent owned-task lane"
     );
     let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
@@ -2375,10 +2442,13 @@ fn start_workbench<B: KernelBehavior>(
             state.mailbox_admission.hosted_cell().complete(&control);
         }
         reply.send(failure).ok();
-        return;
+        return WorkbenchStart::Settled;
     };
     state.next_task_generation = generation;
-    let execution = invocation.request.execution_id().cloned();
+    let execution = match &ingress {
+        WorkbenchIngress::Notebook(invocation) => invocation.request.execution_id().cloned(),
+        WorkbenchIngress::Expansion(_) => None,
+    };
     let step = crate::WorkbenchStepKey::new(state.context.identity, generation, execution.clone());
     let concurrent = !state.pending_tasks.is_empty();
     let mut pending = PendingActorTask::Workbench(PendingWorkbench {
@@ -2387,15 +2457,35 @@ fn start_workbench<B: KernelBehavior>(
         control: control.clone(),
         execution,
         serial: false,
-        publication: state
-            .behavior
-            .serializes_workbench_publication(&invocation.request),
+        publication: matches!(&ingress, WorkbenchIngress::Notebook(invocation) if state.behavior.serializes_workbench_publication(&invocation.request)),
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
-    let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state
-            .behavior
-            .dispatch_workbench(&state.context, invocation, control)
+    let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ingress {
+        WorkbenchIngress::Notebook(invocation) => {
+            state
+                .behavior
+                .dispatch_workbench(&state.context, invocation, control)
+        }
+        WorkbenchIngress::Expansion(request) => {
+            WorkbenchDispatch::Owned(OwnedActorTask::serial(move |mut behavior: B, context| {
+                Box::pin(async move {
+                    let result = if control
+                        .as_ref()
+                        .is_some_and(|control| control.cancellation_requested())
+                    {
+                        Err(KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
+                            actor: context.identity(),
+                            detail: "display expansion was cancelled before admission".into(),
+                            diagnostic: None,
+                        })
+                    } else {
+                        behavior.expand_display(&context, request, control).await
+                    };
+                    (behavior, OwnedActorCompletion::new(move |_| result))
+                })
+            }))
+        }
     })) {
         Ok(dispatch) => dispatch,
         Err(_) => {
@@ -2405,7 +2495,7 @@ fn start_workbench<B: KernelBehavior>(
                 pending,
                 "workbench dispatch panicked; execution outcome is unconfirmed".into(),
             );
-            return;
+            return WorkbenchStart::Settled;
         }
     };
     let task = match dispatch {
@@ -2413,6 +2503,7 @@ fn start_workbench<B: KernelBehavior>(
         WorkbenchDispatch::Sequential {
             invocation,
             control,
+            executor: _,
         } if concurrent => {
             if let Some(control) = pending
                 .workbench()
@@ -2433,16 +2524,14 @@ fn start_workbench<B: KernelBehavior>(
                     PendingActorTask::Kernel(_) => unreachable!("workbench admission"),
                 },
             });
-            return;
+            return WorkbenchStart::Deferred;
         }
         WorkbenchDispatch::Sequential {
             invocation,
             control,
-        } => OwnedActorTask::serial(move |mut behavior: B, context| {
-            Box::pin(async move {
-                let result = behavior.workbench(&context, invocation, control).await;
-                (behavior, OwnedActorCompletion::new(move |_| result))
-            })
+            executor,
+        } => OwnedActorTask::serial(move |behavior, context| {
+            executor(behavior, context, invocation, control)
         }),
     };
     if let Some(control) = pending
@@ -2462,6 +2551,7 @@ fn start_workbench<B: KernelBehavior>(
     let previous = state.pending_tasks.insert(generation, pending);
     assert!(previous.is_none(), "actor execution generation is unique");
     spawn_actor_task(myself, state, generation, task);
+    WorkbenchStart::Started
 }
 
 fn has_independent_workbench_tasks<B: KernelBehavior>(state: &LocalActorState<B>) -> bool {
@@ -3180,9 +3270,9 @@ fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
         // ContinueLater owns progress while the behavior has no mailbox
         // receiver. It remains exclusive until every parked task has settled.
         KernelMessage::Resume { .. } => Some(DeferredControl::ActorContinuation),
-        KernelMessage::Workbench { .. } | KernelMessage::ReplaceSpec { .. } => {
-            Some(DeferredControl::Workbench)
-        }
+        KernelMessage::Workbench { .. }
+        | KernelMessage::ExpandDisplay { .. }
+        | KernelMessage::ReplaceSpec { .. } => Some(DeferredControl::Workbench),
         KernelMessage::Tool { .. } | KernelMessage::ToolWithHostedCheckpoint { .. } => {
             Some(DeferredControl::HostedInvocation)
         }
@@ -4037,6 +4127,7 @@ mod tests {
         owned_successor_source: Option<String>,
         owned_successor_panics: bool,
         dispatch_panics: bool,
+        sequential_probe: Option<(Arc<AtomicUsize>, Arc<crate::WorkbenchExecutionControl>)>,
         kernel_probe: Option<KernelProbe>,
     }
 
@@ -4058,13 +4149,54 @@ mod tests {
         HangRealmForever(Arc<Notify>),
     }
 
+    impl ProbeBehavior {
+        fn workbench(
+            &mut self,
+            _context: &KernelContext,
+            invocation: crate::ActorWorkbenchInvocation,
+            control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+            let gate = if invocation.request.cell_source() == Some("serial-custody") {
+                let (_, expected) = self.sequential_probe.as_ref().unwrap();
+                assert!(Arc::ptr_eq(control.as_ref().unwrap(), expected));
+                assert_eq!(
+                    invocation.request.execution_id(),
+                    Some(&tidepool_runtime::session::WorkbenchExecutionId::from_digest([29; 16]))
+                );
+                None
+            } else {
+                self.workbench_gate.clone()
+            };
+            let panics = self.workbench_panics;
+            Box::pin(async move {
+                self.calls.lock().push("workbench-start");
+                if let Some((entered, release)) = gate {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                if panics {
+                    panic!("workbench probe panic");
+                }
+                self.calls.lock().push("workbench-end");
+                Ok(KernelStep::Continue(WorkbenchResponse {
+                    status: WorkbenchRunStatus::Committed,
+                    summary: None,
+                    items: Vec::new(),
+                    next_index: 0,
+                    total: 0,
+                    publication: None,
+                }))
+            })
+        }
+    }
+
     impl KernelBehavior for ProbeBehavior {
         fn allows_independent_workbench_admission(&self) -> bool {
             self.independent_workbench_admission
         }
 
         fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
-            request.cell_source() == Some("reload")
+            matches!(request.cell_source(), Some("reload" | "serial-custody"))
         }
 
         fn replacement_staged(&self) -> bool {
@@ -4334,30 +4466,27 @@ mod tests {
             })
         }
 
-        fn workbench(
-            &mut self,
-            _context: &KernelContext,
-            _invocation: crate::ActorWorkbenchInvocation,
-            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-            let gate = self.workbench_gate.clone();
-            let panics = self.workbench_panics;
-            Box::pin(async move {
-                self.calls.lock().push("workbench-start");
-                if let Some((entered, release)) = gate {
-                    entered.notify_one();
-                    release.notified().await;
+        fn expand_display<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+            request: crate::DisplayExpansionRequest,
+            _control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+            assert_eq!(
+                request,
+                crate::DisplayExpansionRequest {
+                    identity: (11, 12, 13),
+                    key: 14
                 }
-                if panics {
-                    panic!("workbench probe panic");
-                }
-                self.calls.lock().push("workbench-end");
+            );
+            self.calls.lock().push("display-expansion");
+            Box::pin(async {
                 Ok(KernelStep::Continue(WorkbenchResponse {
                     status: WorkbenchRunStatus::Committed,
                     summary: None,
                     items: Vec::new(),
-                    next_index: 0,
-                    total: 0,
+                    next_index: 1,
+                    total: 1,
                     publication: None,
                 }))
             })
@@ -4372,10 +4501,23 @@ mod tests {
             if self.dispatch_panics {
                 panic!("workbench dispatch probe panic");
             }
-            if !self.owned_workbench {
+            if invocation.request.cell_source() == Some("serial-custody") {
+                self.sequential_probe
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            if !self.owned_workbench || invocation.request.cell_source() == Some("serial-custody") {
                 return WorkbenchDispatch::Sequential {
                     invocation,
                     control,
+                    executor: |mut behavior, context, invocation, control| {
+                        Box::pin(async move {
+                            let result = behavior.workbench(&context, invocation, control).await;
+                            (behavior, OwnedActorCompletion::new(move |_| result))
+                        })
+                    },
                 };
             }
             let calls = Arc::clone(&self.calls);
@@ -4547,6 +4689,24 @@ mod tests {
 
     struct FailingChild;
 
+    impl FailingChild {
+        fn workbench<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+            _invocation: crate::ActorWorkbenchInvocation,
+            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+            Box::pin(async move {
+                Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor: context.identity(),
+                    detail: "child has no workbench".into(),
+                    diagnostic: None,
+                })
+            })
+        }
+    }
+
     impl KernelBehavior for FailingChild {
         fn start(
             &mut self,
@@ -4595,20 +4755,22 @@ mod tests {
             })
         }
 
-        fn workbench<'a>(
-            &'a mut self,
-            context: &'a KernelContext,
-            _invocation: crate::ActorWorkbenchInvocation,
-            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-            Box::pin(async move {
-                Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor: context.identity(),
-                    detail: "child has no workbench".into(),
-                    diagnostic: None,
-                })
-            })
+        fn dispatch_workbench(
+            &mut self,
+            _context: &KernelContext,
+            invocation: crate::ActorWorkbenchInvocation,
+            control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> crate::WorkbenchDispatch<Self> {
+            crate::WorkbenchDispatch::Sequential {
+                invocation,
+                control,
+                executor: |mut behavior, context, invocation, control| {
+                    Box::pin(async move {
+                        let result = behavior.workbench(&context, invocation, control).await;
+                        (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                    })
+                },
+            }
         }
 
         fn external_application_failed(
@@ -4685,6 +4847,7 @@ mod tests {
                 owned_successor_source: None,
                 owned_successor_panics: false,
                 dispatch_panics: false,
+                sequential_probe: None,
                 kernel_probe: None,
             },
             calls,
@@ -4977,6 +5140,154 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sequential_dispatch_retains_exact_invocation_across_repeated_deferral() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.independent_workbench_admission = true;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let control = crate::WorkbenchExecutionControl::untracked();
+        fixture.behavior.sequential_probe = Some((attempts.clone(), control.clone()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((entered.clone(), release.clone()));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let first = send_workbench(&actor);
+        entered.notified().await;
+        let second = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("serial-custody").with_execution_id(
+                tidepool_runtime::session::WorkbenchExecutionId::from_digest([29; 16]),
+            ),
+            Some(control.clone()),
+        );
+        for count in 1..=3 {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while attempts.load(Ordering::SeqCst) < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                count,
+                "deferral awaits actual progress without spinning"
+            );
+            if count < 3 {
+                actor
+                    .address()
+                    .send_message(KernelMessage::DrainMailbox)
+                    .unwrap();
+            }
+        }
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(first.await.unwrap().is_ok());
+        assert!(tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &[
+                "workbench-start",
+                "workbench-end",
+                "workbench-start",
+                "workbench-end"
+            ]
+        );
+        assert!(control.terminal_reply().is_some());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+                diagnostic: None,
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn display_expansion_queues_behind_active_call_and_cancelled_callback_never_runs() {
+        for cancel in [false, true] {
+            let mut fixture = behavior(false);
+            fixture.behavior.mailbox_ready = false;
+            let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+            let (first_tx, first_rx) = oneshot::channel();
+            actor
+                .address()
+                .send_message(KernelMessage::Tool {
+                    invocation: tool_invocation("first"),
+                    reply: first_tx.into(),
+                })
+                .unwrap();
+            let control = crate::WorkbenchExecutionControl::untracked();
+            actor.hosted_cell().publish_transport(control.clone());
+            let (reply, mut receive) = oneshot::channel();
+            actor
+                .address()
+                .send_message(KernelMessage::ExpandDisplay {
+                    request: crate::DisplayExpansionRequest {
+                        identity: (11, 12, 13),
+                        key: 14,
+                    },
+                    control: Some(control.clone()),
+                    reply: reply.into(),
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !fixture.calls.lock().contains(&"first-start") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                receive.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(!fixture.calls.lock().contains(&"display-expansion"));
+            if cancel {
+                assert!(control.request_cancellation());
+            }
+            fixture.release.notify_one();
+            assert!(first_rx.await.unwrap().is_ok());
+            let result = tokio::time::timeout(Duration::from_secs(2), receive)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_err(), cancel);
+            assert_eq!(
+                fixture
+                    .calls
+                    .lock()
+                    .iter()
+                    .filter(|call| **call == "display-expansion")
+                    .count(),
+                usize::from(!cancel)
+            );
+            assert!(control.terminal_reply().is_some());
+            assert!(actor
+                .hosted_cell()
+                .find(|current| std::ptr::eq(current, control.as_ref()))
+                .is_none());
+            actor
+                .shutdown(ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "done".into(),
+                    diagnostic: None,
+                })
+                .await
+                .unwrap();
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -8144,6 +8455,26 @@ mod tests {
         paused: Arc<AtomicBool>,
     }
 
+    impl PausingProbe {
+        fn workbench(
+            &mut self,
+            _context: &KernelContext,
+            _invocation: crate::ActorWorkbenchInvocation,
+            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+            Box::pin(async {
+                Ok(KernelStep::Continue(WorkbenchResponse {
+                    status: WorkbenchRunStatus::Committed,
+                    summary: None,
+                    items: Vec::new(),
+                    next_index: 0,
+                    total: 0,
+                    publication: None,
+                }))
+            })
+        }
+    }
+
     impl KernelBehavior for PausingProbe {
         fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
             if self.paused.load(Ordering::SeqCst) {
@@ -8255,22 +8586,22 @@ mod tests {
             })
         }
 
-        fn workbench(
+        fn dispatch_workbench(
             &mut self,
             _context: &KernelContext,
-            _invocation: crate::ActorWorkbenchInvocation,
-            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-            Box::pin(async {
-                Ok(KernelStep::Continue(WorkbenchResponse {
-                    status: WorkbenchRunStatus::Committed,
-                    summary: None,
-                    items: Vec::new(),
-                    next_index: 0,
-                    total: 0,
-                    publication: None,
-                }))
-            })
+            invocation: crate::ActorWorkbenchInvocation,
+            control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> crate::WorkbenchDispatch<Self> {
+            crate::WorkbenchDispatch::Sequential {
+                invocation,
+                control,
+                executor: |mut behavior, context, invocation, control| {
+                    Box::pin(async move {
+                        let result = behavior.workbench(&context, invocation, control).await;
+                        (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                    })
+                },
+            }
         }
 
         fn external_application_failed(

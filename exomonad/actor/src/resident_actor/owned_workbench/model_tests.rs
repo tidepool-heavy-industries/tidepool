@@ -108,7 +108,6 @@ fn execution_with_id(
             cell_span: cell_execution_span(&context, &request),
             effects: WorkbenchEffectState {
                 display_receipt_owner: None,
-                park_effects: true,
                 context,
                 public_visibility: None,
                 control: Some(control),

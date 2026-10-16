@@ -54,15 +54,6 @@ impl KernelBehavior for CompletionProbe {
         Box::pin(async { panic!("completion probe has no tools") })
     }
 
-    fn workbench<'a>(
-        &'a mut self,
-        _context: &'a KernelContext,
-        _invocation: crate::ActorWorkbenchInvocation,
-        _control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        Box::pin(async { panic!("completion probe requires owned dispatch") })
-    }
-
     fn dispatch_workbench(
         &mut self,
         context: &KernelContext,

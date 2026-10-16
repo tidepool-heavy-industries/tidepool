@@ -234,5 +234,42 @@ pub enum WorkbenchDispatch<B> {
     Sequential {
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        /// Stateless executor: admission retains the original payload until
+        /// sequential eligibility, so deferred dispatch cannot lose custody.
+        executor: fn(
+            B,
+            std::sync::Arc<super::KernelContext>,
+            crate::ActorWorkbenchInvocation,
+            Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'static, (B, OwnedWorkbenchCompletion<B>)>,
     },
+}
+
+#[cfg(test)]
+impl<B: Send + 'static, T: Send + 'static> OwnedActorTask<B, T> {
+    /// Test behavior decorators retain the resident's execution-owned driver.
+    pub(crate) fn project_behavior<C: Send + 'static>(
+        self,
+        project: fn(&mut C) -> &mut B,
+    ) -> OwnedActorTask<C, T> {
+        let run = match self.into_execution() {
+            ActorTaskExecution::Owned(run) => run,
+            ActorTaskExecution::Serial(_) => {
+                panic!("owned behavior decorator requires owned dispatch")
+            }
+        };
+        OwnedActorTask::new(Box::pin(async move {
+            let completion = run.await;
+            OwnedActorCompletion::advance_async(move |outer, context| {
+                Box::pin(async move {
+                    match completion.finish(project(outer), context).await? {
+                        ActorAdvance::Complete(step) => Ok(ActorAdvance::Complete(step)),
+                        ActorAdvance::Park(task) => {
+                            Ok(ActorAdvance::Park(task.project_behavior(project)))
+                        }
+                    }
+                })
+            })
+        }))
+    }
 }

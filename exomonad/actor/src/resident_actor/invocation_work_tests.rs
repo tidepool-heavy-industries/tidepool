@@ -717,6 +717,18 @@ struct ShutdownGate {
     calls: AtomicUsize,
 }
 
+impl Owner {
+    fn workbench<'a>(
+        &'a mut self,
+        _: &'a KernelContext,
+        _: crate::ActorWorkbenchInvocation,
+        _: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> BoxFuture<'a, Result<crate::KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>>
+    {
+        Box::pin(async { panic!("fixture has no workbench") })
+    }
+}
+
 impl crate::KernelBehavior for Owner {
     fn start<'a>(
         &'a mut self,
@@ -764,14 +776,22 @@ impl crate::KernelBehavior for Owner {
         Box::pin(async { panic!("fixture has no tools") })
     }
 
-    fn workbench<'a>(
-        &'a mut self,
-        _: &'a KernelContext,
-        _: crate::ActorWorkbenchInvocation,
-        _: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<crate::KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>>
-    {
-        Box::pin(async { panic!("fixture has no workbench") })
+    fn dispatch_workbench(
+        &mut self,
+        _context: &KernelContext,
+        invocation: crate::ActorWorkbenchInvocation,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> crate::WorkbenchDispatch<Self> {
+        crate::WorkbenchDispatch::Sequential {
+            invocation,
+            control,
+            executor: |mut behavior, context, invocation, control| {
+                Box::pin(async move {
+                    let result = behavior.workbench(&context, invocation, control).await;
+                    (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                })
+            },
+        }
     }
 
     fn external_application_failed<'a>(

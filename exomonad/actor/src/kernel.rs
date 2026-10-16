@@ -299,10 +299,16 @@ impl std::error::Error for KernelWorkbenchFailure {}
 pub type KernelInvocationReply = Result<serde_json::Value, KernelInvocationFailure>;
 pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailure>;
 
+/// An existing display callback, addressed by its exact retained actor slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayExpansionRequest {
+    pub identity: (i64, i64, i64),
+    pub key: i64,
+}
+
 /// Actor-owned authority beside the transport-neutral workbench request.
 /// The runtime request and its exact execution journal never contain a handler.
 pub struct ActorWorkbenchInvocation {
-    pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
     pub(crate) hosted_checkpoint_capture:
@@ -314,7 +320,6 @@ pub struct ActorWorkbenchInvocation {
 impl ActorWorkbenchInvocation {
     pub fn unbound(request: WorkbenchRequest) -> Self {
         Self {
-            display_expansion: None,
             request,
             installed_tools: None,
             hosted_checkpoint_capture: None,
@@ -323,21 +328,12 @@ impl ActorWorkbenchInvocation {
         }
     }
 
-    /// Execute an existing display callback through the actor's serialized mailbox.
-    /// Identity and key are validated against the actor's retained display slots.
-    pub fn for_display_expansion(identity: (i64, i64, i64), key: i64) -> Self {
-        let mut invocation = Self::unbound(WorkbenchRequest::from_cell_input(""));
-        invocation.display_expansion = Some((identity, key));
-        invocation
-    }
-
     pub(crate) fn issued(
         request: WorkbenchRequest,
         installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {
-            display_expansion: None,
             request,
             installed_tools,
             hosted_checkpoint_capture,
@@ -423,6 +419,11 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    ExpandDisplay {
+        request: DisplayExpansionRequest,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        reply: RpcReplyPort<KernelWorkbenchReply>,
+    },
     /// Wakes the actor when its one admitted task returns a fenced completion.
     ActorStepCompleted {
         step: WorkbenchStepKey,
@@ -483,6 +484,7 @@ impl KernelMessage {
             Self::Tool { .. } => "Tool",
             Self::ToolWithHostedCheckpoint { .. } => "ToolWithHostedCheckpoint",
             Self::Workbench { .. } => "Workbench",
+            Self::ExpandDisplay { .. } => "ExpandDisplay",
             Self::ActorStepCompleted { .. } => "ActorStepCompleted",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
@@ -537,6 +539,10 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("ToolWithHostedCheckpoint")
                 .field("invocation", invocation)
                 .finish_non_exhaustive(),
+            Self::ExpandDisplay { request, .. } => formatter
+                .debug_tuple("ExpandDisplay")
+                .field(request)
+                .finish(),
             Self::Workbench { invocation, .. } => formatter
                 .debug_struct("Workbench")
                 .field("request", &invocation.request)

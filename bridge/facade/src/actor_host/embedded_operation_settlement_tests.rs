@@ -14,6 +14,20 @@ use harness::{
 // These admission tests have no machine or execution authority. A real actor
 // supplies the mailbox/lifecycle owner; reaching its native workbench is a bug.
 struct AdmissionSentinel;
+impl AdmissionSentinel {
+    fn workbench<'a>(
+        &'a mut self,
+        _: &'a KernelContext,
+        _: exomonad_actor::ActorWorkbenchInvocation,
+        _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
+    ) -> BoxFuture<
+        'a,
+        Result<KernelStep<tidepool_runtime::session::WorkbenchResponse>, KernelInvocationFailure>,
+    > {
+        panic!("no native workbench admitted")
+    }
+}
+
 impl KernelBehavior for AdmissionSentinel {
     fn start<'a>(
         &'a mut self,
@@ -46,16 +60,25 @@ impl KernelBehavior for AdmissionSentinel {
     ) -> BoxFuture<'a, Result<KernelStep<Value>, KernelInvocationFailure>> {
         panic!("no native tool admitted")
     }
-    fn workbench<'a>(
-        &'a mut self,
-        _: &'a KernelContext,
-        _: exomonad_actor::ActorWorkbenchInvocation,
-        _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<
-        'a,
-        Result<KernelStep<tidepool_runtime::session::WorkbenchResponse>, KernelInvocationFailure>,
-    > {
-        panic!("no native workbench admitted")
+    fn dispatch_workbench(
+        &mut self,
+        _context: &KernelContext,
+        invocation: exomonad_actor::ActorWorkbenchInvocation,
+        control: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
+    ) -> exomonad_actor::WorkbenchDispatch<Self> {
+        exomonad_actor::WorkbenchDispatch::Sequential {
+            invocation,
+            control,
+            executor: |mut behavior, context, invocation, control| {
+                Box::pin(async move {
+                    let result = behavior.workbench(&context, invocation, control).await;
+                    (
+                        behavior,
+                        exomonad_actor::OwnedActorCompletion::new(move |_| result),
+                    )
+                })
+            },
+        }
     }
     fn external_application_failed<'a>(
         &'a mut self,

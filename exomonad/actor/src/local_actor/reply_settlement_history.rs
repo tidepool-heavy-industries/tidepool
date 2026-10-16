@@ -37,6 +37,17 @@ fn response(status: WorkbenchRunStatus) -> WorkbenchResponse {
     }
 }
 
+impl ReplyDriver {
+    fn workbench<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        _: crate::ActorWorkbenchInvocation,
+        _: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+        Box::pin(async move { self.accept_reply(context.identity()) })
+    }
+}
+
 impl KernelBehavior for ReplyDriver {
     fn accepts_mailbox(&self) -> bool {
         !self.accepted
@@ -110,14 +121,7 @@ impl KernelBehavior for ReplyDriver {
             })
         })
     }
-    fn workbench<'a>(
-        &'a mut self,
-        context: &'a KernelContext,
-        _: crate::ActorWorkbenchInvocation,
-        _: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        Box::pin(async move { self.accept_reply(context.identity()) })
-    }
+
     fn dispatch_resume(
         &mut self,
         context: &KernelContext,

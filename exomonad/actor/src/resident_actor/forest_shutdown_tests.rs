@@ -178,13 +178,20 @@ impl KernelBehavior for ObservedBehavior {
         self.inner.tool(context, invocation, capture)
     }
 
-    fn workbench<'a>(
-        &'a mut self,
-        context: &'a KernelContext,
+    fn dispatch_workbench(
+        &mut self,
+        context: &KernelContext,
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        self.inner.workbench(context, invocation, control)
+    ) -> crate::WorkbenchDispatch<Self> {
+        match self.inner.dispatch_workbench(context, invocation, control) {
+            crate::WorkbenchDispatch::Owned(task) => crate::WorkbenchDispatch::Owned(
+                task.project_behavior(|outer: &mut Self| &mut outer.inner),
+            ),
+            crate::WorkbenchDispatch::Sequential { .. } => {
+                unreachable!("resident notebook dispatch is owned")
+            }
+        }
     }
 
     fn external_application_failed<'a>(

@@ -556,11 +556,14 @@ async fn expand_display(
             );
         }
     };
-    submit_invocation(
-        state,
-        session,
-        exomonad_actor::ActorWorkbenchInvocation::for_display_expansion(input.identity, input.key),
-    )
+    submit_message(state, session, move |reply| KernelMessage::ExpandDisplay {
+        request: exomonad_actor::DisplayExpansionRequest {
+            identity: input.identity,
+            key: input.key,
+        },
+        control: None,
+        reply: reply.into(),
+    })
     .await
 }
 
@@ -597,6 +600,21 @@ async fn submit_invocation(
     session: String,
     invocation: exomonad_actor::ActorWorkbenchInvocation,
 ) -> Response {
+    submit_message(state, session, move |reply| KernelMessage::Workbench {
+        invocation,
+        control: None,
+        reply: reply.into(),
+    })
+    .await
+}
+
+async fn submit_message(
+    state: AttachmentState,
+    session: String,
+    message: impl FnOnce(
+        tokio::sync::oneshot::Sender<exomonad_actor::KernelWorkbenchReply>,
+    ) -> KernelMessage,
+) -> Response {
     let sessions = state.sessions.lock().await;
     let Some(LocalOperator::Available(actor)) = sessions
         .get(&session)
@@ -609,15 +627,7 @@ async fn submit_invocation(
         );
     };
     let (reply, receive) = tokio::sync::oneshot::channel();
-    if actor
-        .address()
-        .send_message(KernelMessage::Workbench {
-            invocation,
-            control: None,
-            reply: reply.into(),
-        })
-        .is_err()
-    {
+    if actor.address().send_message(message(reply)).is_err() {
         return error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -1137,6 +1147,20 @@ mod lifecycle_tests {
         fail_shutdown: bool,
     }
 
+    impl LifecycleBehavior {
+        fn workbench<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: exomonad_actor::ActorWorkbenchInvocation,
+            _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<
+            'a,
+            Result<KernelStep<WorkbenchResponse>, exomonad_actor::KernelInvocationFailure>,
+        > {
+            Box::pin(async { panic!("unexpected workbench") })
+        }
+    }
+
     impl KernelBehavior for LifecycleBehavior {
         fn start<'a>(
             &'a mut self,
@@ -1172,16 +1196,25 @@ mod lifecycle_tests {
         > {
             Box::pin(async { panic!("unexpected tool") })
         }
-        fn workbench<'a>(
-            &'a mut self,
-            _: &'a KernelContext,
-            _: exomonad_actor::ActorWorkbenchInvocation,
-            _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<
-            'a,
-            Result<KernelStep<WorkbenchResponse>, exomonad_actor::KernelInvocationFailure>,
-        > {
-            Box::pin(async { panic!("unexpected workbench") })
+        fn dispatch_workbench(
+            &mut self,
+            _context: &KernelContext,
+            invocation: exomonad_actor::ActorWorkbenchInvocation,
+            control: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
+        ) -> exomonad_actor::WorkbenchDispatch<Self> {
+            exomonad_actor::WorkbenchDispatch::Sequential {
+                invocation,
+                control,
+                executor: |mut behavior, context, invocation, control| {
+                    Box::pin(async move {
+                        let result = behavior.workbench(&context, invocation, control).await;
+                        (
+                            behavior,
+                            exomonad_actor::OwnedActorCompletion::new(move |_| result),
+                        )
+                    })
+                },
+            }
         }
         fn external_application_failed<'a>(
             &'a mut self,

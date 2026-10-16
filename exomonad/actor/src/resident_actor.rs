@@ -3041,7 +3041,6 @@ where
 
 struct WorkbenchEffectState {
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
-    park_effects: bool,
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
@@ -8533,19 +8532,7 @@ where
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
         loop {
-            if !execution_state.park_effects {
-                if let Some(request) = current.native_start.take() {
-                    current.native_result = Some(
-                        owned_workbench::advance_fragment(
-                            workbench,
-                            &self.environment.runner,
-                            context.clone(),
-                            request,
-                        )
-                        .await,
-                    );
-                }
-            }
+            {}
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
                     input_unit_index: unit.input_unit_index,
@@ -8568,10 +8555,9 @@ where
                             ),
                         ),
                     )?;
-                    if execution_state.park_effects {
+                    {
                         return Ok(FragmentAdvance::ParkNative);
                     }
-                    continue;
                 }
                 None => {
                     let request = match current.resume_failure.take() {
@@ -8589,10 +8575,9 @@ where
                                     ),
                                 ),
                             )?;
-                            if execution_state.park_effects {
+                            {
                                 return Ok(FragmentAdvance::ParkNative);
                             }
-                            continue;
                         }
                         None if !current.scopes.is_empty()
                             || current
@@ -8631,24 +8616,16 @@ where
                                 .expect("running unit owns its outcome"),
                         },
                     };
-                    if execution_state.park_effects {
+                    {
                         assert!(
                             current.native_start.is_none(),
                             "one captured native request"
                         );
                         current.native_start = Some(request);
-                        if execution_state.park_effects {
+                        {
                             return Ok(FragmentAdvance::ParkNative);
                         }
-                        continue;
                     }
-                    owned_workbench::advance_fragment(
-                        workbench,
-                        &self.environment.runner,
-                        context.clone(),
-                        request,
-                    )
-                    .await?
                 }
             };
             match native {
@@ -8667,10 +8644,9 @@ where
                             ),
                         ),
                     )?;
-                    if execution_state.park_effects {
+                    {
                         return Ok(FragmentAdvance::ParkNative);
                     }
-                    continue;
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
                     current.outcome = Some(outcome);
@@ -8700,12 +8676,7 @@ where
                     };
                     let boundary = match boundary {
                         ResidentActorBoundary::Green(boundary) => {
-                            if !execution_state.park_effects {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "async requires an independently admitted notebook execution"
-                                        .into(),
-                                ));
-                            }
+                            {}
                             return self.prepare_green_boundary(
                                 kernel,
                                 context,
@@ -8753,10 +8724,9 @@ where
                                             }),
                                         },
                                     );
-                                    if execution_state.park_effects {
+                                    {
                                         return Ok(FragmentAdvance::ParkNative);
                                     }
-                                    continue;
                                 }
                             };
                             let frame = scopes::ScopeFrame {
@@ -8780,10 +8750,9 @@ where
                                     token,
                                     work,
                                 });
-                            if execution_state.park_effects {
+                            {
                                 return Ok(FragmentAdvance::ParkNative);
                             }
-                            continue;
                         }
                         ResidentActorBoundary::ScopeDone { token, .. }
                             if !current.scopes.is_empty() =>
@@ -8803,10 +8772,9 @@ where
                                 )
                             };
                             self.prepare_scope_finish(kernel, context, current, body)?;
-                            if execution_state.park_effects {
+                            {
                                 return Ok(FragmentAdvance::ParkNative);
                             }
-                            continue;
                         }
                         ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
                             self.prepare_scope_finish(
@@ -8819,10 +8787,9 @@ where
                                     ),
                                 ),
                             )?;
-                            if execution_state.park_effects {
+                            {
                                 return Ok(FragmentAdvance::ParkNative);
                             }
-                            continue;
                         }
                         boundary => boundary,
                     };
@@ -8908,13 +8875,11 @@ where
                         }
                         _ => {}
                     }
-                    if execution_state.park_effects
-                        && matches!(
-                            &boundary,
-                            ResidentActorBoundary::DisplayPublish { .. }
-                                | ResidentActorBoundary::DisplayExpand { .. }
-                        )
-                    {
+                    if matches!(
+                        &boundary,
+                        ResidentActorBoundary::DisplayPublish { .. }
+                            | ResidentActorBoundary::DisplayExpand { .. }
+                    ) {
                         current.parked_effect = Some(ParkedWorkbenchEffect {
                             display: None,
                             success_disposition,
@@ -8978,7 +8943,7 @@ where
                             unit.command_output.push(rendered);
                         }
                     }
-                    let boundary = if execution_state.park_effects {
+                    let boundary = {
                         let captured = match boundary {
                             ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
                                 self.prepare_child_launch(context, effect_owner.clone(), start),
@@ -9025,8 +8990,6 @@ where
                             }
                             Err(boundary) => boundary,
                         }
-                    } else {
-                        boundary
                     };
                     match boundary {
                         ResidentActorBoundary::ReplyAttempt(attempt) => match self
@@ -9069,9 +9032,7 @@ where
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
-                                if execution_state.park_effects
-                                    && !execution_state.after_tool_active
-                                {
+                                if !execution_state.after_tool_active {
                                     current.native_start = Some(
                                         owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
                                             continuation: attempt.continuation,
@@ -9151,9 +9112,7 @@ where
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
-                                    if execution_state.park_effects
-                                        && !execution_state.after_tool_active
-                                    {
+                                    if !execution_state.after_tool_active {
                                         current.native_start = Some(
                                             owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
                                                 continuation: acknowledgement.continuation,
@@ -9326,10 +9285,9 @@ where
                                         return Err(error);
                                     }
                                     self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
-                                    if execution_state.park_effects {
+                                    {
                                         return Ok(FragmentAdvance::ParkNative);
                                     }
-                                    continue;
                                 }
                             });
                         }
@@ -10028,12 +9986,11 @@ where
                                 request: request_start,
                                 span: unit_span,
                             };
-                            if effects.park_effects {
+                            {
                                 assert!(cursor.starting.is_none(), "one pending native unit");
                                 cursor.starting = Some(start);
                                 return Ok(WorkbenchRunAdvance::ParkUnit);
                             }
-                            owned_workbench::begin_unit(workbench, context.clone(), start).await
                         }
                     };
                     let started = match started {
@@ -10198,7 +10155,7 @@ where
                                         .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
                                 })
                             {
-                                if effects.park_effects {
+                                {
                                     let frame = after_tool_wait::capture(
                                         handler,
                                         call,
@@ -10224,18 +10181,6 @@ where
                                     effects.after_tool_active = true;
                                     return Ok(WorkbenchRunAdvance::ParkAfterToolStart);
                                 }
-                                receipt.output = self
-                                    .annotate_tool_result(
-                                        kernel,
-                                        context,
-                                        effects,
-                                        workbench,
-                                        handler.tools(),
-                                        &call,
-                                        receipt.output,
-                                        receipt.value.clone(),
-                                    )
-                                    .await;
                             }
                         }
                         cursor.completed = Some(receipt);
@@ -10769,21 +10714,6 @@ where
             );
         }
         (result, notifications)
-    }
-
-    // Builtin and unconverted ingress retain their serial driver until their
-    // owned-step conversion. Hosted authored executions use the sync advances.
-    async fn finalize_serial_workbench_execution(
-        &mut self,
-        execution_state: &mut WorkbenchExecutionState,
-        kernel: &KernelContext,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        let finalization = self.begin_workbench_finalization(execution_state, kernel, result);
-        let result = settle_workbench_finalization(self.environment.clone(), finalization).await;
-        let (result, notifications) = self.complete_workbench_finalization(execution_state, result);
-        self.publish_watch_notifications(notifications).await;
-        result
     }
 
     // The admitted journal retains the same scope tree used by Green waits and
@@ -11884,271 +11814,84 @@ where
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> crate::WorkbenchDispatch<Self> {
-        if invocation.display_expansion.is_some() {
-            return crate::WorkbenchDispatch::Sequential {
-                invocation,
-                control,
-            };
-        }
         self.dispatch_owned_workbench(kernel, invocation, control)
     }
 
-    fn workbench<'a>(
+    fn expand_display<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        invocation: crate::ActorWorkbenchInvocation,
+        request: crate::DisplayExpansionRequest,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
-            if let Some((identity, key)) = invocation.display_expansion {
-                let context = self.context(kernel.identity());
-                if control
-                    .as_ref()
-                    .is_some_and(|control| control.cancellation_requested())
-                {
-                    return Err(KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor: context.actor,
-                        detail: "display actor is unavailable or invocation was cancelled".into(),
-                        diagnostic: None,
-                    });
-                }
-                let expansion = self.expand_display(
-                    &context,
-                    identity,
-                    key,
-                    DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
-                    None,
-                );
-                let output = match control {
-                    Some(control) => {
-                        crate::resident_workbench::with_execution_control(control, expansion).await
-                    }
-                    None => expansion.await,
-                }
-                .map_err(|error| KernelInvocationFailure::Rejected {
+            let crate::DisplayExpansionRequest { identity, key } = request;
+            let context = self.context(kernel.identity());
+            if control
+                .as_ref()
+                .is_some_and(|control| control.cancellation_requested())
+            {
+                return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor: context.actor,
-                    detail: error.to_string(),
-                    diagnostic: error.failure_diagnostic(),
-                })?;
-                let operation = WorkbenchOperationReceipt {
-                    display_publication: None,
-                    id: WorkbenchOperationId {
-                        execution: WorkbenchExecutionId::from_digest(
-                            *uuid::Uuid::new_v4().as_bytes(),
-                        ),
-                        input_unit_index: 0,
-                        effect_ordinal: 0,
-                    },
-                    effect: "expand".into(),
-                    disposition: WorkbenchOperationDisposition::Committed,
-                    display: Some(output.clone()),
-                };
-                return Ok(KernelStep::Continue(workbench_response(
-                    WorkbenchRunStatus::Committed,
-                    vec![WorkbenchItemReceipt {
-                        index: 0,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Committed,
-                        output: output.page.text,
-                        value: None,
-                        diagnostics: Vec::new(),
-                        failure_layer: None,
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: vec![operation],
-                        terminal_transfer: None,
-                    }],
-                    1,
-                    1,
-                    None,
-                )));
-            }
-            let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
-            let WorkbenchAdmission {
-                context,
-                request,
-                installed_tools,
-                admitted_source,
-                compilation_authority,
-                public_owner: _public_owner,
-                current_builtin,
-                capture,
-                context_binding,
-                control,
-                invocation,
-            } = match admitted {
-                WorkbenchPreflight::Retained(reply) => return reply.map(KernelStep::Continue),
-                WorkbenchPreflight::Admitted(admitted) => admitted,
-            };
-            let admitted_workbench = compilation_authority.and_then(|authority| {
-                self.active_workbench().map(|workbench| {
-                    workbench
-                        .with_compilation_authority(authority)
-                        .with_json_input(
-                            request
-                                .input
-                                .as_ref()
-                                .map(tidepool_runtime::session::normalize_workbench_input),
-                        )
-                })
-            });
-            let execution = request.execution_id().cloned();
-            let retained_request = execution.as_ref().map(|_| request.clone());
-            let public_visibility = if current_builtin {
-                None
-            } else {
-                Some(
-                    self.environment
-                        .runner
-                        .public_visibility_snapshot(context.clone())
-                        .await
-                        .map_err(|error| KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor: context.actor,
-                            detail: format!("cannot capture public workbench view: {error}"),
-                            diagnostic: None,
-                        })?,
-                )
-            };
-            if let Some(execution) = &execution {
-                // Persist the fence in the forest-retained journal before effects
-                // can run; actor termination cannot turn uncertainty into replay.
-                self.workbench_executions.lock().begin(
-                    execution,
-                    request.clone(),
-                    invocation.as_ref(),
-                );
-                self.workbench_executions.lock().bind_provider_finalization(
-                    execution,
-                    invocation.as_ref(),
-                    control.as_ref(),
-                );
-            }
-            let local_execution_id = execution.clone().unwrap_or_else(|| {
-                WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
-            });
-            let reservation_owner = RequestReservationOwner::Workbench {
-                execution: local_execution_id.clone(),
-                attempt: crate::request::WorkbenchReservationAttempt::fresh(),
-            };
-            let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
-            self.workbench_executions.lock().retain_invocation_work(
-                invocation_work.clone(),
-                execution.as_ref(),
-                invocation.as_ref(),
-            );
-            let display_receipt_owner = execution.as_ref().and_then(|execution| {
-                self.workbench_executions
-                    .lock()
-                    .display_receipt_owner(execution, invocation.as_ref())
-            });
-            if let (Some(owner), Some(control)) = (&display_receipt_owner, &control) {
-                control.bind_receipt_owner(owner.clone());
-            }
-            let mut execution_state = WorkbenchExecutionState {
-                cell_span: cell_execution_span(&context, &request),
-                effects: WorkbenchEffectState {
-                    display_receipt_owner,
-                    park_effects: false,
-                    context: context.clone(),
-                    public_visibility,
-                    control,
-                    model: None,
-                    context_binding,
-                    installed_tools,
-                    admitted_source,
-                    reservation_owner,
-                    invocation_work,
-                    publication: CheckpointPublication::Workbench {
-                        boundary: request.checkpoint_boundary().cloned(),
-                        capture,
-                    },
-                    after_tool_active: false,
-                    terminal_transfer: None,
-                },
-                request,
-                replay_request: retained_request,
-                invocation,
-                cursor: WorkbenchCursor::default(),
-            };
-            // One INFO line per hosted tool call or cell, breaking down
-            // where its wall time went (checkout wait/hold, compile, Jev,
-            // exec) — see `crate::call_timing`. The scope wraps the whole
-            // call so every nested site it awaits (workbench compiles,
-            // resolved effects) can add to it as a task-local.
-            let call_kind = execution_state
-                .request
-                .tool_call()
-                .map(|call| call.name.clone())
-                .unwrap_or_else(|| "cell".to_string());
-            let (call_actor, call_incarnation) = actor_address(context.actor);
-            let call_scope = crate::call_timing::CallScope::new(
-                call_kind,
-                call_actor as u64,
-                call_incarnation as u64,
-            );
-            if let Some(public) = &execution_state.effects.public_visibility {
-                tracing::debug!(
-                    actor = ?context.actor,
-                    scope = ?public.scope,
-                    epoch = public.epoch,
-                    declaration_tip = public.declaration_tip.0,
-                    binding_count = public.bindings.len(),
-                    "workbench public view admitted"
-                );
-            }
-            let compiler_owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
-                work: execution_state.effects.invocation_work.clone(),
-                control: execution_state.effects.control.clone(),
-            };
-            let result = compiler_owner
-                .scope(call_scope.run(self.execute_workbench(
-                    kernel,
-                    &mut execution_state,
-                    admitted_workbench.as_ref(),
-                )))
-                .await
-                .and_then(|advance| {
-                    match advance {
-                    WorkbenchRunAdvance::Complete(step) => Ok(step),
-                    WorkbenchRunAdvance::ParkGreen => Err(workbench_failure(
-                        &execution_state.cursor.receipts,
-                        execution_state.cursor.index,
-                        execution_state.request.items.len(),
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "async frontier reached a serial workbench without owned task admission"
-                                .into(),
-                        ),
-                    )),
-                    WorkbenchRunAdvance::ParkEffect
-                    | WorkbenchRunAdvance::ParkUnit
-                    | WorkbenchRunAdvance::ParkNative
-                    | WorkbenchRunAdvance::ParkAfterToolStart
-                    | WorkbenchRunAdvance::ParkAfterToolFinish => {
-                        unreachable!("legacy workbench remains serial")
-                    }
-                }
+                    detail: "display actor is unavailable or invocation was cancelled".into(),
+                    diagnostic: None,
                 });
-            let call_outcome = match &result {
-                Ok(
-                    KernelStep::Continue(response)
-                    | KernelStep::ContinueLater(response)
-                    | KernelStep::Stop {
-                        output: response, ..
-                    },
-                ) => format!("{:?}", response.status),
-                Err(_) => "error".to_string(),
+            }
+            let expansion = ResidentKernelBehavior::expand_display(
+                self,
+                &context,
+                identity,
+                key,
+                DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                None,
+            );
+            let output = match control {
+                Some(control) => {
+                    crate::resident_workbench::with_execution_control(control, expansion).await
+                }
+                None => expansion.await,
+            }
+            .map_err(|error| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor: context.actor,
+                detail: error.to_string(),
+                diagnostic: error.failure_diagnostic(),
+            })?;
+            let operation = WorkbenchOperationReceipt {
+                display_publication: None,
+                id: WorkbenchOperationId {
+                    execution: WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()),
+                    input_unit_index: 0,
+                    effect_ordinal: 0,
+                },
+                effect: "expand".into(),
+                disposition: WorkbenchOperationDisposition::Committed,
+                display: Some(output.clone()),
             };
-            call_scope.finish(&call_outcome);
-            self.finalize_serial_workbench_execution(&mut execution_state, kernel, result)
-                .await
+            Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output: output.page.text,
+                    value: None,
+                    diagnostics: Vec::new(),
+                    failure_layer: None,
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: vec![operation],
+                    terminal_transfer: None,
+                }],
+                1,
+                1,
+                None,
+            )))
         })
     }
 
