@@ -314,7 +314,8 @@ impl Drop for Process {
 }
 
 async fn observed(root: &Path, phase: &str, suffix: &str, process: &mut Process) -> Value {
-    tokio::time::timeout(DEADLINE, async {
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(DEADLINE, async {
         loop {
             process.assert_live();
             if let Ok(error) = std::fs::read_to_string(evidence(root, phase, "failure.json")) {
@@ -326,8 +327,23 @@ async fn observed(root: &Path, phase: &str, suffix: &str, process: &mut Process)
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("missing {phase}.{suffix}; inspect owned subprocess log"))
+    .await;
+    eprintln!(
+        "outer-restart-observation {}",
+        json!({
+            "phase":phase,
+            "observation":suffix,
+            "budget_ms":DEADLINE.as_millis(),
+            "elapsed_ms":started.elapsed().as_millis(),
+            "observed":result.is_ok(),
+        }),
+    );
+    result.unwrap_or_else(|_| {
+        panic!(
+            "missing {phase}.{suffix} after {:?} (budget {DEADLINE:?}); inspect owned subprocess log",
+            started.elapsed(),
+        )
+    })
 }
 
 struct ResourceService {
@@ -769,6 +785,17 @@ async fn outer_host_stop_and_crash_restore_accepted_source_and_selected_account_
     fixture
         .input(&first, "Establish accepted B and retained declarations.")
         .await;
+    // A successor request is issued after the preceding native output settles.
+    // Bound each of the four distinct notebook calls through that observation.
+    for index in 1..=4 {
+        observed(
+            fixture.root(),
+            "fresh",
+            &format!("request-{index}.json"),
+            &mut fresh,
+        )
+        .await;
+    }
     observed(fixture.root(), "fresh", "final.json", &mut fresh).await;
     let source_b = source::SourceLayer::new(&fixture.run)
         .reopen_active()
