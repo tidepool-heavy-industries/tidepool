@@ -14,5 +14,11 @@ transactionPreview <- case C.previewContext transactionBefore transactionPatch o
 C.ContextStaged transactionHandle <- C.stageContext transactionPatch
 transactionLocal <- C.inspectContextTransaction transactionHandle
 display (case transactionLocal of C.ContextTransactionStaged -> True; _ -> False)
+transactionRepeated <- C.stageContext transactionPatch
+display (case transactionRepeated of C.ContextStaged repeated -> repeated == transactionHandle; _ -> False)
+transactionSecond <- C.stageContext (C.contextPatch [C.appendNote "must-refuse-second-batch" []])
+display (case transactionSecond of
+  C.ContextStageRefused problems -> map C.contextProblemCode problems == [C.ContextProblemAlreadyStaged]
+  _ -> False)
 transactionStillCommitted <- C.getContext
 display (any ((== "parent-original") . C.targetText) (C.textTargets transactionStillCommitted))

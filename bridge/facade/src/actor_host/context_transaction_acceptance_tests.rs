@@ -892,7 +892,7 @@ async fn resident_targeted_transaction_reconciles_after_cell_and_retains_origina
             .filter(|item| item["output"] == "True")
             .count()
     };
-    assert_eq!(true_displays(&staged_output), 2, "{staged_output}");
+    assert_eq!(true_displays(&staged_output), 4, "{staged_output}");
     assert_context_operations_uncommitted(&staged_output);
     assert_eq!(committed.request.model, model);
     assert_eq!(committed.request.pinned_effort, effort);
