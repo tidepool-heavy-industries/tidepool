@@ -3617,7 +3617,11 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                     .collect(),
             )
             .unwrap();
-        let custody = full.retain_original_custody(&selected).unwrap();
+        let custody = full
+            .merge(&selected)
+            .unwrap()
+            .retain_original_custody(&selected)
+            .unwrap();
         let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
             &projection,
             &selected,
