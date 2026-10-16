@@ -1397,7 +1397,7 @@ impl ExactHostBindingPrototype {
         let producer = execution.item.cell.producer;
         // A package-only type still belongs to this original compiler producer.
         let mut context = (*context).clone();
-        context.admit_producer(producer)?;
+        context = context.admit_producer(producer)?;
         let context = Arc::new(context);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&encode_signature(signature), &mut encoded)

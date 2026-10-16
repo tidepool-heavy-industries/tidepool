@@ -34,14 +34,16 @@ fn type_context(products: &[CertifiedRecoveryProduct]) -> Arc<ExactDeclarationCo
     let view = inventory
         .admit_shared(&inventory.empty_view(), entries)
         .unwrap();
-    Arc::new(ExactDeclarationContext {
-        producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
-        inventory: view,
-        compiler_projection: projection,
-        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-        template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
-    })
+    Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            inventory: view,
+            compiler_projection: projection,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ))
 }
 
 fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
@@ -137,14 +139,16 @@ fn partial_context(
     let view = inventory
         .admit_recovery_selection(&inventory.empty_view(), entries, &groups)
         .unwrap();
-    Arc::new(ExactDeclarationContext {
-        producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
-        inventory: view,
-        compiler_projection: projection,
-        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-        template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
-    })
+    Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            inventory: view,
+            compiler_projection: projection,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ))
 }
 
 fn wire_groups(request: &ExactCompilationRequest) -> BTreeMap<String, Vec<u32>> {
@@ -251,8 +255,16 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
                         assert_eq!(rows.contains_key("ExtraNative"), unrelated);
                         assert!(!rows.contains_key("UnusedNative"));
                         assert_eq!(
-                            request.compiler_inputs().metadata.selected_native_groups,
-                            before.inventory.metadata_snapshot().selected_native_groups
+                            request
+                                .compiler_inputs()
+                                .metadata
+                                .retained
+                                .selected_native_groups,
+                            before
+                                .facts
+                                .inventory
+                                .metadata_snapshot()
+                                .selected_native_groups
                         );
                         assert_eq!(request.context().as_ref(), &before);
                     }
@@ -305,8 +317,16 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
     assert_eq!(rows["UnusedNative"], vec![7, 9001]);
     assert_eq!(context.as_ref(), &before);
     assert_eq!(
-        request.compiler_inputs().metadata.selected_native_groups,
-        before.inventory.metadata_snapshot().selected_native_groups
+        request
+            .compiler_inputs()
+            .metadata
+            .retained
+            .selected_native_groups,
+        before
+            .facts
+            .inventory
+            .metadata_snapshot()
+            .selected_native_groups
     );
 }
 
@@ -318,12 +338,15 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
         .unwrap()
         .extend_checked_original_products(producer.sha256(), std::slice::from_ref(&native))
         .unwrap();
-    context.compiler_projection = context.compiler_projection.interface_only();
+    {
+        let updated = context.facts.compiler_projection.interface_only();
+        context = context.rebuild(|facts| facts.compiler_projection = updated);
+    }
     assert!(context
         .compiler_input_roles()
         .iter()
         .all(|role| role.original().is_none()));
-    let keys = context.inventory.selected_native_groups();
+    let keys = context.facts.inventory.selected_native_groups();
     assert_eq!(
         keys.iter()
             .map(|key| key.original_ordinal)
@@ -386,7 +409,7 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
         .iter()
         .all(|role| role.original().is_none()));
     assert_eq!(
-        context.original_instance_environment,
+        context.facts.original_instance_environment,
         OriginalInstanceEnvironment::Unknown
     );
     let baseline_scope = scope(&baseline);
@@ -410,8 +433,16 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
     );
     assert!(request.groups.is_empty());
     assert_eq!(
-        request.compiler_inputs().metadata.selected_native_groups,
-        baseline.compiler_inputs().metadata.selected_native_groups
+        request
+            .compiler_inputs()
+            .metadata
+            .retained
+            .selected_native_groups,
+        baseline
+            .compiler_inputs()
+            .metadata
+            .retained
+            .selected_native_groups
     );
     let mut command = tidepool_extract_cmd::ExtractCmd::with_bin(
         tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(
@@ -450,15 +481,22 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     let interface =
         fixture_module_core(first.module_interface().unwrap(), b"changed-Core".to_vec());
     let entry = Arc::new(ArtifactEntry::canonical(interface));
-    changed.inventory = changed
-        .inventory
-        .inventory()
-        .admit_shared(
-            &changed.inventory.inventory().empty_view(),
-            vec![Arc::clone(&entry)],
-        )
-        .unwrap();
-    changed.compiler_projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+    {
+        let updated = changed
+            .facts
+            .inventory
+            .inventory()
+            .admit_shared(
+                &changed.facts.inventory.inventory().empty_view(),
+                vec![Arc::clone(&entry)],
+            )
+            .unwrap();
+        changed = changed.rebuild(|facts| facts.inventory = updated);
+    }
+    {
+        let updated = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+        changed = changed.rebuild(|facts| facts.compiler_projection = updated);
+    }
     assert!(OriginalCompilerInputs::from_native_availability(
         &changed,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -479,12 +517,17 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         })
         .collect::<Vec<_>>();
     let mut ambiguous = context.as_ref().clone();
-    ambiguous.inventory = ambiguous
-        .inventory
-        .inventory()
-        .admit_shared(&ambiguous.inventory, entries.clone())
-        .unwrap();
+    {
+        let updated = ambiguous
+            .facts
+            .inventory
+            .inventory()
+            .admit_shared(&ambiguous.facts.inventory, entries.clone())
+            .unwrap();
+        ambiguous = ambiguous.rebuild(|facts| facts.inventory = updated);
+    }
     assert!(ambiguous
+        .facts
         .inventory
         .metadata_snapshot()
         .ambiguous_native_owners
@@ -496,8 +539,11 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .is_err());
     // An issued winner remains explicit even when other versions stay in custody.
-    ambiguous.compiler_projection =
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
+    {
+        let updated =
+            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
+        ambiguous = ambiguous.rebuild(|facts| facts.compiler_projection = updated);
+    }
     assert!(OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -560,17 +606,21 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             products.len()
         );
         let mut context = type_context(std::slice::from_ref(current)).as_ref().clone();
-        context.inventory = context
-            .inventory
-            .inventory()
-            .admit_shared_with_demand(
-                &context.inventory,
-                entries.clone(),
-                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-            )
-            .expect("same-canonical body variants retain legal byte custody");
+        {
+            let updated = context
+                .facts
+                .inventory
+                .inventory()
+                .admit_shared_with_demand(
+                    &context.facts.inventory,
+                    entries.clone(),
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .expect("same-canonical body variants retain legal byte custody");
+            context = context.rebuild(|facts| facts.inventory = updated);
+        }
         context.compiler_metadata_snapshot().unwrap();
-        let custody = context.inventory.selected_native_groups();
+        let custody = context.facts.inventory.selected_native_groups();
         assert!(custody.is_empty());
         assert!(
             OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[],)
@@ -588,7 +638,10 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             "a canonical-only role cannot choose among retained native bodies"
         );
         let mut unissued = context.clone();
-        unissued.compiler_projection = CompilerInputProjection::default();
+        {
+            let updated = CompilerInputProjection::default();
+            unissued = unissued.rebuild(|facts| facts.compiler_projection = updated);
+        }
         assert!(
             OriginalCompilerInputs::from_native_availability(
                 &unissued,
@@ -599,8 +652,11 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             "absence of an issuing role preserves ambiguous custody refusal"
         );
 
-        context.compiler_projection =
-            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
+        {
+            let updated =
+                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
+            context = context.rebuild(|facts| facts.compiler_projection = updated);
+        }
         context.compiler_metadata_snapshot().unwrap();
         let private = OriginalCompilerInputs::from_native_availability(
             &context,
@@ -626,7 +682,11 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             vec![current.clone()]
         );
         assert_eq!(
-            request.compiler_inputs().metadata.selected_native_groups,
+            request
+                .compiler_inputs()
+                .metadata
+                .retained
+                .selected_native_groups,
             custody
         );
         let wire = scope(&request);
@@ -645,15 +705,19 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
 
         // The inventory issuer explicitly selects complete original censuses;
         // the compiler issuer still names exactly one of those native bodies.
-        context.inventory = context
-            .inventory
-            .inventory()
-            .admit_shared(&context.inventory, entries)
-            .unwrap();
+        {
+            let updated = context
+                .facts
+                .inventory
+                .inventory()
+                .admit_shared(&context.facts.inventory, entries)
+                .unwrap();
+            context = context.rebuild(|facts| facts.inventory = updated);
+        }
         context.compiler_metadata_snapshot().unwrap();
-        let groups = context.inventory.selected_native_groups();
+        let groups = context.facts.inventory.selected_native_groups();
         assert_eq!(groups.len(), products.len() * 2);
-        let dependencies = context.inventory.dependencies();
+        let dependencies = context.facts.inventory.dependencies();
         let private =
             OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
                 .unwrap()
@@ -692,10 +756,13 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 text(hex(&current.owner().product_sha256)),
             ]
         );
-        assert_eq!(context.inventory.selected_native_groups(), groups);
-        assert_eq!(context.inventory.dependencies(), dependencies);
+        assert_eq!(context.facts.inventory.selected_native_groups(), groups);
+        assert_eq!(context.facts.inventory.dependencies(), dependencies);
         let mut canonical_only = context.clone();
-        canonical_only.compiler_projection = canonical_only.compiler_projection.interface_only();
+        {
+            let updated = canonical_only.facts.compiler_projection.interface_only();
+            canonical_only = canonical_only.rebuild(|facts| facts.compiler_projection = updated);
+        }
         assert!(
             OriginalCompilerInputs::from_selected_authored_declarations(
                 &canonical_only,
@@ -721,10 +788,11 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         assert_ne!(different.module_interface(), current.module_interface());
         let different = Arc::new(ArtifactEntry::original(producer.sha256(), different).unwrap());
         let error = context
+            .facts
             .inventory
             .inventory()
             .admit_shared_with_demand(
-                &context.inventory,
+                &context.facts.inventory,
                 vec![different],
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )
@@ -742,8 +810,8 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             ),
             "a differing canonical carrier cannot join this reachable owner namespace"
         );
-        assert_eq!(context.inventory.selected_native_groups(), groups);
-        assert_eq!(context.inventory.dependencies(), dependencies);
+        assert_eq!(context.facts.inventory.selected_native_groups(), groups);
+        assert_eq!(context.facts.inventory.dependencies(), dependencies);
     }
 }
 
@@ -809,9 +877,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
         ExactDeclarationContext::new(std::slice::from_ref(certificate), &[], vec![]).unwrap();
     let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
     let authored_root = native_context.authored_native_root(generation).unwrap();
-    let selected_before = native_context.inventory.selected_native_groups();
+    let selected_before = native_context.facts.inventory.selected_native_groups();
     let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
-        let before = context.inventory.selected_native_groups();
+        let before = context.facts.inventory.selected_native_groups();
         let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
             producer_bytes,
             &[root.to_path_buf()],
@@ -852,7 +920,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 "custody or partial demand grants no full original offer"
             );
         }
-        assert_eq!(context.inventory.selected_native_groups(), before);
+        assert_eq!(context.facts.inventory.selected_native_groups(), before);
     };
     let authored_groups = selected_before
         .iter()
@@ -893,6 +961,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         native_request
             .compiler_inputs()
             .metadata
+            .retained
             .selected_native_groups,
         selected_before
     );
@@ -914,11 +983,15 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 .collect(),
         };
         let mut partial = native_context.clone();
-        let view = partial.inventory.inventory().admit_recovery_selection(
-            &partial.inventory.inventory().empty_view(),
-            partial.inventory.entries(),
-            &selected,
-        );
+        let view = partial
+            .facts
+            .inventory
+            .inventory()
+            .admit_recovery_selection(
+                &partial.facts.inventory.inventory().empty_view(),
+                partial.facts.inventory.entries(),
+                &selected,
+            );
         let Ok(view) = view else {
             assert!(
                 omitted.is_some(),
@@ -928,8 +1001,11 @@ pub(crate) fn assert_selected_authored_private_inputs(
             // admission before private compiler input can be constructed.
             continue;
         };
-        partial.inventory = view;
-        assert_eq!(partial.inventory.selected_native_groups(), selected);
+        {
+            let updated = view;
+            partial = partial.rebuild(|facts| facts.inventory = updated);
+        }
+        assert_eq!(partial.facts.inventory.selected_native_groups(), selected);
         let private =
             OriginalCompilerInputs::from_selected_authored_declarations(&partial, producer, &[])
                 .unwrap();
@@ -945,6 +1021,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         );
         if omitted.is_some()
             && partial
+                .facts
                 .inventory
                 .selected_native_groups()
                 .iter()

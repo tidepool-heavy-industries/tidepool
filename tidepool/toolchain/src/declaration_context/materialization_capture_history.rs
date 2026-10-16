@@ -25,9 +25,21 @@ fn captured_materialization_context(
     roots: Vec<ArtifactId>,
 ) -> Arc<ExactDeclarationContext> {
     let mut selected = source.as_ref().clone();
-    selected.inventory = source.inventory.select_roots(roots).unwrap();
-    selected.compiler_projection = source.compiler_projection.within_view(&selected.inventory);
-    selected.lexical = crate::exact_context::ExactLexicalSnapshot::default();
+    {
+        let updated = source.facts.inventory.select_roots(roots).unwrap();
+        selected = selected.rebuild(|facts| facts.inventory = updated);
+    }
+    {
+        let updated = source
+            .facts
+            .compiler_projection
+            .within_view(&selected.facts.inventory);
+        selected = selected.rebuild(|facts| facts.compiler_projection = updated);
+    }
+    {
+        let updated = crate::exact_context::ExactLexicalSnapshot::default();
+        selected = selected.rebuild(|facts| facts.lexical = updated);
+    }
     selected.normalize().unwrap();
     Arc::new(selected)
 }
@@ -52,13 +64,13 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         let module = format!("CaptureHistory{index}");
         let product = crate::certified_products::fixture_finalized_product(
             support_product(&module),
-            context.producer,
+            context.facts.producer,
         );
         context = Arc::new(
             context
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(context.producer, &[product])
+                .extend_checked_original_products(context.facts.producer, &[product])
                 .unwrap(),
         );
         ids.push(
@@ -269,6 +281,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let materialize = |context: &Arc<ExactDeclarationContext>| {
         let metadata = context.compiler_metadata_snapshot().unwrap();
         context
+            .facts
             .inventory
             .retain_materialization(&metadata, |parents| {
                 context.materialize_retained_artifacts(

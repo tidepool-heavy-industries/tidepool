@@ -179,7 +179,7 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
             "unselected interface acquired a compiler role: chosen={chosen}"
         );
         assert_eq!(effective.metadata.entries.len(), 2);
-        assert_eq!(effective.metadata.artifacts.len(), 4);
+        assert_eq!(effective.metadata.retained.artifacts.len(), 4);
         let chosen_entry = &effective.metadata.entries[&entries[chosen].descriptor.owner];
         assert_eq!(chosen_entry.descriptor.id, entries[chosen].descriptor.id);
         assert_eq!(
@@ -240,7 +240,10 @@ fn compiler_issuer_refuses_missing_paired_canonical_artifact() {
     let paired = ArtifactEntry::canonical(original.module_interface().unwrap().clone())
         .descriptor
         .id;
-    assert!(metadata.artifacts.remove(&paired).is_some());
+    assert!(Arc::make_mut(&mut metadata)
+        .artifacts
+        .remove(&paired)
+        .is_some());
     assert!(metadata.artifacts.contains_key(&entries[0].descriptor.id));
     assert!(matches!(
         CertifiedSourceSelection::from_compiler_projection(

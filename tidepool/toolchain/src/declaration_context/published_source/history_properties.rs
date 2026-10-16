@@ -176,10 +176,10 @@ fn continued_context(
     // This is the original_execution_context production construction boundary:
     // original instance evidence and its issued compiler projection travel together.
     ExactDeclarationContext::from_authenticated_execution(
-        context.producer,
+        context.facts.producer,
         view,
-        context.compiler_projection.clone(),
-        context.lexical.to_vec(),
+        context.facts.compiler_projection.clone(),
+        context.facts.lexical.to_vec(),
         root.descriptor.owner.clone(),
         &[root.descriptor.owner.clone()],
     )
@@ -210,7 +210,7 @@ fn restored(
         &edges,
     )
     .unwrap()
-    .context_with_graph_selection(&selection, roles, context.lexical.to_vec())
+    .context_with_graph_selection(&selection, roles, context.facts.lexical.to_vec())
 }
 
 fn property_config() -> proptest::test_runner::Config {
@@ -288,7 +288,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         },
                     };
                     let view = context
-                        .inventory
+                        .facts.inventory
                         .inventory()
                         .admit_shared_with_demand(
                             context.artifact_view(),
