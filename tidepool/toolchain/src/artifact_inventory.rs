@@ -4319,6 +4319,7 @@ fn admitted_closure(
     seen
 }
 
+#[track_caller]
 fn validate_issued_selection(
     state: &InventoryState,
     owned: &imbl::OrdSet<InventoryNodeKey>,
@@ -4366,6 +4367,33 @@ fn validate_issued_selection(
         || admitted_closure(state, seeds) != expected
         || !expected.is_subset(owned)
     {
+        if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+        {
+            let closure = admitted_closure(
+                state,
+                graph.roots.iter().chain(&graph.custody_roots).copied(),
+            );
+            let missing_owned = expected
+                .iter()
+                .filter(|node| !owned.contains(node))
+                .take(8)
+                .collect::<Vec<_>>();
+            let missing_closure = expected
+                .iter()
+                .filter(|node| !closure.contains(node))
+                .take(8)
+                .collect::<Vec<_>>();
+            let extra_closure = closure
+                .iter()
+                .filter(|node| !expected.contains(node))
+                .take(8)
+                .collect::<Vec<_>>();
+            tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                caller = %std::panic::Location::caller(), expected_count = expected.len(),
+                owned_count = owned.len(), closure_count = closure.len(),
+                ?missing_owned, ?missing_closure, ?extra_closure,
+                "issued exact selection validation refused");
+        }
         return Err(failure(
             "issued selection differs from exact retained bindings",
         ));
