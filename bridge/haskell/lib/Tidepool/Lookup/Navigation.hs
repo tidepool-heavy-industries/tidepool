@@ -10,6 +10,9 @@ module Tidepool.Lookup.Navigation
   , LookupCaptureExcerpt(..), LookupCaptureIssue(..), retainLookupCapture
   , lookupCaptureIndex, renderLookupCaptureIndex, lookupCaptureReceipts
   , selectLookupCapture, selectLookupCaptureMany
+  , LookupLiteralQuery(..), LookupLiteralSearch(..), LookupLiteralMatch(..)
+  , LookupCaptureTextSelection(..), LookupCaptureText(..)
+  , searchLookupCapture, selectLookupCaptureText, selectLookupCaptureTextMany
   ) where
 
 import Prelude
@@ -20,7 +23,7 @@ import Tidepool.Aeson.Schema (JsonSchema)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Lookup
-import Tidepool.Text.Navigation (retainedLines)
+import Tidepool.Text.Navigation (retainedLines, literalSearch, LiteralMatches(..), TextSlice(..), TextSelectionIssue)
 import Tidepool.Inspection.Display
 import Tidepool.Inspection.Tree
 
@@ -65,7 +68,81 @@ data LookupCaptureExcerpt = LookupCaptureExcerpt
 data LookupCaptureIssue = CaptureNotRetained LookupCapturePart
   | CaptureRefused LookupCapturePart LookupSearchReceipt (Maybe Text)
   | CaptureViewMismatch Text Text | CaptureSelectionIssue LookupSelectionIssue
+  | CaptureTextIssue TextSelectionIssue | CaptureInvalidTextRange Int Int Int
+  | CaptureInvalidSearchBounds Int Int
   deriving (Eq, Show)
+
+-- | Offsets are 0-based half-open Unicode scalar ranges in one complete
+-- retained section, independent of its line lengths or display truncation.
+data LookupCaptureTextSelection = LookupCaptureTextSelection
+  { textCapture :: LookupCapturePart, textAddress :: LookupAddress
+  , textStart :: Int, textEnd :: Int }
+  deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
+data LookupCaptureText = LookupCaptureText
+  { captureTextSelection :: LookupCaptureTextSelection
+  , captureTextBatchIdentity :: Text, captureTextView :: Text
+  , captureTextLocator :: Maybe Text, captureTextSourceIdentity :: Maybe Text
+  , captureTextUnavailable :: [Text], captureTextSlice :: TextSlice
+  } deriving (Eq, Show)
+-- | Caller-selected presentation budgets. Zero matches requests the count only;
+-- negative limits or radii are refused. No upstream lookup policy is involved.
+data LookupLiteralQuery = LookupLiteralQuery
+  { literalCapture :: LookupCapturePart, literalAddress :: LookupAddress
+  , literalNeedle :: Text, literalRadius :: Int, literalLimit :: Int }
+  deriving (Eq, Show, Generic, FromJSON, ToJSON, JsonSchema)
+data LookupLiteralMatch = LookupLiteralMatch
+  { literalMatchSelection :: LookupCaptureTextSelection
+  , literalContextSelection :: LookupCaptureTextSelection
+  , literalMatchContext :: TextSlice }
+  deriving (Eq, Show)
+data LookupLiteralSearch = LookupLiteralSearch
+  { literalSource :: LookupCaptureTextSelection
+  , literalBatchIdentity :: Text, literalView :: Text
+  , literalLocator :: Maybe Text, literalSourceIdentity :: Maybe Text
+  , literalUnavailable :: [Text], literalCount :: Int
+  , literalMatches :: [LookupLiteralMatch], literalOmitted :: Int }
+  deriving (Eq, Show)
+
+-- | Search only the named captured section. Counts cover all overlapping
+-- occurrences; only the requested prefix receives contexts and reusable ranges.
+searchLookupCapture :: RetainedLookupCapture -> LookupLiteralQuery -> Either LookupCaptureIssue LookupLiteralSearch
+searchLookupCapture captured query = do
+  selected <- selectLookupCapture captured (LookupCaptureSelection part (LookupSelection at Nothing))
+  if literalRadius query < 0 || literalLimit query < 0
+    then Left (CaptureInvalidSearchBounds (literalRadius query) (literalLimit query))
+    else pure ()
+  let excerpt = captureExcerpt selected
+      source = excerptText excerpt
+      location start end = LookupCaptureTextSelection part at start end
+  matches <- either (Left . CaptureTextIssue) Right
+    (literalSearch (excerptBatchIdentity excerpt) (literalRadius query) (literalNeedle query) source)
+  let bounded = take (literalLimit query) (zip (occurrenceLocations matches) (occurrenceContexts matches))
+      hits = [LookupLiteralMatch (location start end) (location (sliceStart context) (sliceEnd context)) context
+             | ((start, end), context) <- bounded]
+  pure (LookupLiteralSearch (location 0 (T.length source))
+    (excerptBatchIdentity excerpt) (excerptView excerpt) (excerptLocator excerpt) (excerptSourceIdentity excerpt)
+    (excerptUnavailable excerpt) (occurrenceCount matches) hits (occurrenceCount matches - length hits))
+  where part = literalCapture query
+        at = literalAddress query
+
+selectLookupCaptureText :: RetainedLookupCapture -> LookupCaptureTextSelection -> Either LookupCaptureIssue LookupCaptureText
+selectLookupCaptureText captured selection = do
+  selected <- selectLookupCapture captured (LookupCaptureSelection (textCapture selection)
+    (LookupSelection (textAddress selection) Nothing))
+  let excerpt = captureExcerpt selected
+      source = excerptText excerpt
+      size = T.length source
+      start = textStart selection
+      end = textEnd selection
+  if start < 0 || end < start || end > size
+    then Left (CaptureInvalidTextRange start end size)
+    else pure (LookupCaptureText selection (excerptBatchIdentity excerpt) (excerptView excerpt)
+      (excerptLocator excerpt) (excerptSourceIdentity excerpt) (excerptUnavailable excerpt)
+      (TextSlice (excerptBatchIdentity excerpt) start end (T.take (end - start) (T.drop start source))
+        (start > 0) (end < size)))
+
+selectLookupCaptureTextMany :: RetainedLookupCapture -> [LookupCaptureTextSelection] -> [Either LookupCaptureIssue LookupCaptureText]
+selectLookupCaptureTextMany captured = map (selectLookupCaptureText captured)
 
 retainLookupCapture :: LookupBatch -> Maybe LookupBatch -> RetainedLookupCapture
 retainLookupCapture = RetainedLookupCapture
@@ -234,3 +311,22 @@ instance Display LookupCaptureExcerpt where
      ("excerpt", displayTree (captureExcerpt excerpt)),
      ("continuations", TextLeaf (T.pack (show (captureContinuations excerpt))))]
 instance Display LookupCaptureIssue where displayTree = TextLeaf . T.pack . show
+
+instance Display LookupCaptureTextSelection where displayTree = TextLeaf . T.pack . show
+instance Display LookupCaptureText where
+  displayTree value = Constructor "LookupCaptureText"
+    [("selection", displayTree (captureTextSelection value)),
+     ("batch", displayTree (captureTextBatchIdentity value)), ("view", displayTree (captureTextView value)),
+     ("locator", displayTree (captureTextLocator value)), ("sourceIdentity", displayTree (captureTextSourceIdentity value)),
+     ("unavailable", displayTree (captureTextUnavailable value)), ("slice", displayTree (captureTextSlice value))]
+instance Display LookupLiteralMatch where
+  displayTree value = Constructor "LookupLiteralMatch"
+    [("match", displayTree (literalMatchSelection value)), ("context", displayTree (literalContextSelection value)),
+     ("text", displayTree (literalMatchContext value))]
+instance Display LookupLiteralSearch where
+  displayTree value = Constructor "LookupLiteralSearch"
+    [("source", displayTree (literalSource value)),
+     ("batch", displayTree (literalBatchIdentity value)), ("view", displayTree (literalView value)),
+     ("locator", displayTree (literalLocator value)), ("sourceIdentity", displayTree (literalSourceIdentity value)),
+     ("unavailable", displayTree (literalUnavailable value)), ("count", displayTree (literalCount value)),
+     ("matches", displayTree (literalMatches value)), ("omitted", displayTree (literalOmitted value))]

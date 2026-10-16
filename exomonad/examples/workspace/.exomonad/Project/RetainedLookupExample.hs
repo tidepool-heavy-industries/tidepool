@@ -2,9 +2,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | Capture once, then inspect ordinary immutable values. No navigation action
 -- rereads source, invokes lookup, or grants the discovered declaration's effects.
-module Project.RetainedLookupExample (capture, sections, firstSignatureLine) where
+module Project.RetainedLookupExample
+  ( capture, sections, firstSignatureLine, searchExample, completeExample, exactMatches ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
 import Tidepool.Lookup
 import Tidepool.Lookup.Navigation
 
@@ -29,3 +31,21 @@ sections captured = selectLookupMany captured
 firstSignatureLine :: LookupBatch -> Either LookupSelectionIssue LookupExcerpt
 firstSignatureLine captured = selectLookup captured
   (LookupSelection (LookupAddress 1 1 Signature) (Just (LookupLines 1 1)))
+
+-- Search the retained example without refetching it. Count every occurrence,
+-- show at most four contexts of 40 characters around the exact literal needle.
+searchExample :: RetainedLookupCapture -> Text -> Either LookupCaptureIssue LookupLiteralSearch
+searchExample captured needle = searchLookupCapture captured
+  (LookupLiteralQuery PrimaryLookup (LookupAddress 1 1 Example) needle 40 4)
+
+-- A missing source stays a typed refusal. No line range means the whole
+-- captured source, even when its initial presentation required expansion.
+completeExample :: RetainedLookupCapture -> Either LookupCaptureIssue LookupCaptureExcerpt
+completeExample captured = selectLookupCapture captured
+  (LookupCaptureSelection PrimaryLookup (LookupSelection (LookupAddress 1 1 Example) Nothing))
+
+-- Both exact matches and their contexts carry reusable addresses. These
+-- selections stay small even when the example consists of one very long line.
+exactMatches :: RetainedLookupCapture -> LookupLiteralSearch -> [Either LookupCaptureIssue LookupCaptureText]
+exactMatches captured found = selectLookupCaptureTextMany captured
+  (map literalMatchSelection (literalMatches found))

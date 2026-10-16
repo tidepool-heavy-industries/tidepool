@@ -35,7 +35,9 @@ newtype LookupArguments = LookupArguments { queries :: [Text] }
   deriving stock (Generic)
   deriving anyclass (FromJSON, JsonSchema)
 
-data LookupNavigation = LookupIndex | LookupSections [LookupCaptureSelection] | LookupReceipt | LookupSelectionTrace
+data LookupNavigation = LookupIndex | LookupSections [LookupCaptureSelection]
+  | LookupSearch LookupLiteralQuery | LookupText [LookupCaptureTextSelection]
+  | LookupReceipt | LookupSelectionTrace
   deriving (Generic, FromJSON, ToJSON, JsonSchema)
 data LookupReadArguments = LookupReadArguments
   { retainedActor :: Int, retainedIncarnation :: Int, retainedSlot :: Int
@@ -50,7 +52,7 @@ instance Display LookupCaptureReceipt where
   displayTree receipt = Constructor "LookupCaptureReceipt"
     [("actor", displayTree (lookupCaptureActor receipt)), ("incarnation", displayTree (lookupCaptureIncarnation receipt)),
      ("slot", displayTree (lookupCaptureSlot receipt)), ("view", displayTree (lookupCaptureView receipt)),
-     ("read_lookup", TextLeaf "Use this exact identity with LookupIndex, LookupReceipt, LookupSelectionTrace, or LookupSections. Sections carry PrimaryLookup or RelatedLookup, a result/entry address, and optional line ranges.")]
+     ("read_lookup", TextLeaf "Use this exact identity with LookupIndex, LookupReceipt, LookupSelectionTrace, LookupSections, LookupSearch, or LookupText. Sections carry PrimaryLookup or RelatedLookup, a result/entry address, and optional line ranges. LookupSearch takes a literal needle, context radius and match limit for one section; reuse its match/context selections with LookupText. Example and Bundle sections return complete captured source when no line range is supplied.")]
 
 data LookupTools mode = LookupTools
   { lookup :: mode :- Call LookupArguments LookupCaptureReceipt
@@ -123,7 +125,7 @@ toolFor action = LookupTools
       "Resolve missing API details before composing a cell: names, module exports, Haskell types or Exomonad documentation in this actor's scope. Pass {\"queries\":[\"Cmd.run\",\":: Int -> Int\",\"doc workbench\"]}; batch related questions. Search by input/output type when the name is unknown. Prefix type searches with :: and use _ for unknown parts. Qualified names are tried before module exports. During a pending request, queries \"respond\" and \"sessionInput\" reveal its exact reply and assignment types. Each query reports independently; narrow ambiguous or truncated matches. Availability labels describe the current effect row: a found signature alone does not establish that it is callable with your effects or runtime authority. When configured, related declarations and alternatives may be attached; explicitly look up a candidate for fuller detail. doc queries are text for this tool, not notebook Haskell."
       action
   , readLookup = presentWith id $ tool
-      "Read the retained lookup by the exact actor/incarnation/slot in LookupCaptureReceipt. Use LookupIndex, LookupReceipt, or LookupSections with PrimaryLookup/RelatedLookup and stable result/entry ordinals, named sections and optional 1-based inclusive line ranges. LookupSelectionTrace shows packing, judgment and exact expansion evidence. Selection preserves order and never refetches."
+      "Read the retained lookup by the exact actor/incarnation/slot in LookupCaptureReceipt. Use LookupIndex, LookupReceipt, or LookupSections with PrimaryLookup/RelatedLookup and stable result/entry ordinals, named sections and optional 1-based inclusive line ranges. Use LookupSearch with a LookupLiteralQuery (capture part, section address, literalNeedle, nonnegative literalRadius and literalLimit) to count all overlapping matches and return a bounded prefix of contexts. Reuse literalMatchSelection or literalContextSelection with LookupText for exact 0-based half-open Unicode scalar ranges, including within long lines. Example or Bundle without a line range returns the complete captured source. LookupSelectionTrace shows packing, judgment and exact expansion evidence. Selection preserves order and never refetches."
       (\request -> do
         _ <- selectDisplay (retainedActor request, retainedIncarnation request, retainedSlot request)
           (encodeValue (toJSON (requested request)))
@@ -220,6 +222,8 @@ executeRetained discover select arguments = do
         Right LookupReceipt -> Constructor "LookupSearchReceipts"
           [(T.pack (show part), TextLeaf (T.pack (show receipt))) | (part, receipt) <- lookupCaptureReceipts captured]
         Right (LookupSections selections) -> displayTree (selectLookupCaptureMany captured selections)
+        Right (LookupSearch query) -> displayTree (searchLookupCapture captured query)
+        Right (LookupText selections) -> displayTree (selectLookupCaptureTextMany captured selections)
   handle <- displaySelectable index navigate
   let (actor, incarnation, slot) = displayIdentity handle
   pure (LookupCaptureReceipt actor incarnation slot (lookupView original))
