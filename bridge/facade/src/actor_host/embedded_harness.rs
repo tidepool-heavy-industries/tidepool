@@ -909,28 +909,17 @@ impl HostActor for EmbeddedHostActor {
     }
 
     async fn output_retained(&self, operation: &OperationId) -> Result<(), String> {
-        let canonical = self
+        let recorded = self
             .store
             .inspect_embedded_result(&self.identity, operation)
             .map_err(|error| error.to_string())?
             .ok_or("canonical retained operation is missing")?;
         if !matches!(
-            canonical.0["type"].as_str(),
+            recorded.item.0["type"].as_str(),
             Some("function_call_output" | "custom_tool_call_output")
-        ) || canonical
-            .output_format()
-            .map_err(|error| error.to_string())?
-            == harness::provider::OutputFormat::LegacyOpaque
+        ) || recorded.output_format == harness::provider::OutputFormat::LegacyOpaque
         {
             return Ok(());
-        }
-        let recorded = self
-            .store
-            .replay_tool_output_operation(operation)
-            .map_err(|error| error.to_string())?
-            .ok_or("canonical native settlement is missing")?;
-        if recorded.item != canonical {
-            return Err("native settlement disagrees with retained canonical output".into());
         }
         if let Some(projected) =
             super::embedded_policy::project_retained_result(&recorded, operation)?

@@ -293,7 +293,7 @@ pub(super) fn result_reader(
                     error => RfResultError::ResultUnreadable(error.to_string()),
                 })?
                 .ok_or(RfResultError::ResultMissing)?;
-            let text = output.0["output"].as_str().ok_or_else(|| {
+            let text = output.item.0["output"].as_str().ok_or_else(|| {
                 RfResultError::ResultUnreadable("canonical output has no text body".into())
             })?;
             serde_json::from_str(text)
