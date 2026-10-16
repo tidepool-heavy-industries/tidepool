@@ -66,6 +66,15 @@ Most changes touch one of three layers, and it helps to know which:
   used only by its new test is usually a sketch, not an abstraction.
 - Put invariants in the owning entry point. Do not require every caller to
   remember a pre-check or reproduce policy.
+- At orchestration boundaries, declare the services a consumer needs through
+  named `HasX` traits with associated behavior contracts. A service implementation
+  can require its own `HasY + HasZ` context without exposing those dependencies
+  to its callers. Wire concrete services at the owning composition root; prefer
+  owned, cheaply cloneable service contexts for spawned work. Keep operation
+  authority and exclusive permits in separately issued domain handles.
+  Follow [capability boundaries](docs/capability-boundaries.md) for contextual
+  composition, ownership and incremental migration. A contract can justify a
+  trait with one implementation; do not turn every local helper into a service.
 - Treat surprising or needlessly complicated code as a finding. Fix it when
   it is in scope; otherwise report it plainly. Prefer deleting obsolete paths
   to preserving them through adapters.
