@@ -12234,6 +12234,175 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn current_complete_product_borrows_issued_full_dependency_without_execution_demand() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+            NativeArtifactDemand,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+        };
+        let producer_bytes = b"current-product-full-dependency";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let dependency = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "AvailableDependency",
+                vec![(7, vec![]), (9001, vec![])],
+                74,
+                &BTreeMap::new(),
+                b"available dependency".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let mut binder = testing::identity("AvailableDependency", "entry_9001");
+        binder.unit = dependency.owner().unit.clone();
+        let current = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "CurrentDependent",
+                vec![(
+                    5,
+                    vec![PendingImportOwner::Source {
+                        owner: dependency.owner().clone(),
+                        original_ordinal: 9001,
+                        binder,
+                    }],
+                )],
+                75,
+                &BTreeMap::new(),
+                b"current dependent".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let recovered = recovered_witness_fixtures(&[dependency, current]);
+        let dependency = &recovered[0].product;
+        let current = &recovered[1].product;
+        let root = tempfile::tempdir().unwrap();
+        for full in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let entry =
+                Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+            let view = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    &BTreeSet::new(),
+                )
+                .unwrap();
+            let context = Arc::new(
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &view,
+                    projection,
+                    vec![crate::declaration_join::ExactLexicalNode {
+                        owner: entry.descriptor.owner.clone(),
+                        imports: vec![],
+                    }],
+                    entry.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap(),
+            );
+            // Full availability comes from the existing explicit offer issuer,
+            // never from the later output's broader artifact custody.
+            let private = full.then(|| {
+                OriginalCompilerInputs::from_native_availability(
+                    &context,
+                    producer,
+                    std::slice::from_ref(dependency),
+                )
+                .unwrap()
+            });
+            let request = ExactCompileContext::new(context)
+                .prepare_compilation_with_private_input(
+                    &root.path().join(format!("request-{full}")),
+                    producer_bytes,
+                    None,
+                    private,
+                )
+                .unwrap();
+            let wire: Value =
+                ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                    .unwrap();
+            assert_eq!(
+                wire.as_array().unwrap()[6].as_array().unwrap()[0]
+                    .as_array()
+                    .unwrap()[8],
+                if full {
+                    value_array([value_text("full-carrier")])
+                } else {
+                    value_array([value_text("issued-groups"), value_array([])])
+                }
+            );
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+                request.compiler_inputs(),
+                &request.compiler_inputs().metadata,
+                &validation.inventory,
+            )
+            .unwrap();
+            // Model the production cached-product admission, as in View.Wire.
+            // This is an issuer component test, not a GHC compilation history.
+            selection
+                .admit_current(
+                    current.owner(),
+                    ProductOrigin::Cached,
+                    current.module_interface().unwrap(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            let output =
+                crate::declaration_context::certified_product_artifact_view_with_validation(
+                    producer.sha256(),
+                    &[dependency.clone(), current.clone()],
+                    &[],
+                    &[],
+                    Some(&request.compiler_inputs().artifacts),
+                    NativeArtifactDemand::ScopeInterfaces,
+                    &mut validation,
+                )
+                .unwrap();
+            assert!(output.selected_native_groups().is_empty());
+            let result = OriginalCompilerInputs::from_selection(&selection, &output);
+            if !full {
+                assert!(result.is_err(), "bounded empty availability admitted B9001");
+                continue;
+            }
+            let private = result.expect("current product must borrow its issued full dependency");
+            let public = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_checked_original_products(producer.sha256(), &[])
+                    .unwrap(),
+            );
+            let next = ExactCompileContext::new(public)
+                .prepare_compilation_with_private_input(
+                    &root.path().join("next"),
+                    producer_bytes,
+                    None,
+                    Some(private),
+                )
+                .unwrap();
+            assert!(next
+                .compiler_inputs()
+                .metadata
+                .selected_native_groups
+                .is_empty());
+            let wire: Value =
+                ciborium::de::from_reader(std::fs::read(&next.manifest).unwrap().as_slice())
+                    .unwrap();
+            let rows = wire.as_array().unwrap()[6].as_array().unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                let row = row.as_array().unwrap();
+                assert_eq!(row[6], value_array([]));
+                assert_eq!(row[8], value_array([value_text("full-carrier")]));
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_target_selects_old_full_carrier_transitively_without_new_native() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
