@@ -138,6 +138,22 @@ def validate(
         "Cargo.lock production exomonad-host package must depend on the selected harness package",
     )
 
+    # Cargo abbreviates an edge only when its package identity is unambiguous.
+    # Resolve that edge against the lock inventory before comparing its source.
+    edge = re.fullmatch(r"harness(?: ([^ ()]+)(?: \((.+)\))?)?", selected_harness_dependencies[0])
+    _require(edge is not None, "Cargo.lock host harness dependency is malformed")
+    version, source = edge.groups()
+    resolved = [
+        package for package in cargo_lock.get("package", [])
+        if package.get("name") == "harness"
+        and (version is None or package.get("version") == version)
+        and (source is None or package.get("source") == source)
+    ]
+    _require(
+        resolved == [selected],
+        "Cargo.lock host harness dependency does not uniquely select the pinned Git harness package",
+    )
+
     nodes = flake_lock.get("nodes", {})
     root_inputs = nodes.get("root", {}).get("inputs", {})
     _require(
@@ -215,6 +231,22 @@ class ProvenanceTests(unittest.TestCase):
         args[1]["package"][1]["dependencies"] = []
         with self.assertRaisesRegex(ProvenanceError, "exomonad-host package must depend"):
             validate(*args)
+
+    def test_host_edge_resolves_the_exact_harness_source_and_version(self) -> None:
+        registry = {"name": "harness", "version": "0.1.0", "source": "registry+https://github.com/rust-lang/crates.io-index"}
+        for edge in ("harness", "harness 0.1.0", "harness 0.1.0 (" + registry["source"] + ")",
+                     "harness 9.0.0", "harness 0.1.0 (git+https://example.invalid/harness#other)"):
+            with self.subTest(edge=edge):
+                args = list(fixture())
+                args[1]["package"].append(registry)
+                args[1]["package"][1]["dependencies"] = [edge]
+                with self.assertRaisesRegex(ProvenanceError, "does not uniquely select"):
+                    validate(*args)
+        args = list(fixture())
+        args[1]["package"].append(registry)
+        selected = args[1]["package"][0]
+        args[1]["package"][1]["dependencies"] = ["harness 0.1.0 (" + selected["source"] + ")"]
+        self.assertEqual(validate(*args), "a" * 40)
 
     def test_unrelated_matching_revision_cannot_hide_cargo_lock_drift(self) -> None:
         args = list(fixture())
