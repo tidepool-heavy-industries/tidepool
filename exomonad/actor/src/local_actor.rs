@@ -916,6 +916,10 @@ pub(crate) fn startup_cleanup(error: &ractor::SpawnErr) -> Option<crate::Residen
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    /// Register independent retained-exit observations before this incarnation
+    /// is exposed or any startup refusal can begin cancellable cleanup.
+    fn observe_exit(&mut self, _context: &KernelContext) {}
+
     fn replacement_staged(&self) -> bool {
         false
     }
@@ -1769,6 +1773,7 @@ where
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
         });
+        state.behavior.observe_exit(&state.context);
         if let Some(cause) = startup_refusal {
             finish_actor(
                 &state.context.myself.clone(),

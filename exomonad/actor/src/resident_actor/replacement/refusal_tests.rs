@@ -720,7 +720,9 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         Ok(_) => panic!("source handler must fail after its next checkpoint is staged"),
     };
     assert!(
-        error.detail.contains("controlled failure after staged source checkpoint"),
+        error
+            .detail
+            .contains("controlled failure after staged source checkpoint"),
         "{error}"
     );
     assert!(
@@ -761,7 +763,9 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
     assert_eq!(result.to_json(), serde_json::json!(42));
     let work = behavior.workbench_executions.lock().actor_scope_root(actor);
     assert_eq!(
-        work.cleanup(&behavior.environment, &owner.kernel).await.uncertainty(),
+        work.cleanup(&behavior.environment, &owner.kernel)
+            .await
+            .uncertainty(),
         None
     );
     drop(behavior);

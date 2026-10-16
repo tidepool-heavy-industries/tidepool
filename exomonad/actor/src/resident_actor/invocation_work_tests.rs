@@ -1891,10 +1891,10 @@ async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiri
         fixture.deployments.try_recv(),
         Ok(LocalResidentDeployment::RequestCancellation { .. })
     ));
-    requests
+    let claim = requests
         .begin_cancellation_acknowledgement(target, request)
         .unwrap();
-    requests.finish_cancellation_acknowledgement(request);
+    requests.finish_cancellation_acknowledgement(claim);
 
     fixture.cleanup(&work).await;
 

@@ -471,7 +471,7 @@ async fn interrupt_during_preview(
         .collect();
     machines.settle_suspended(receipt, resident, holes);
     if matches!(interruption, Interruption::Cancellation) {
-        fixture
+        let claim = fixture
             .environment
             .requests
             .begin_cancellation_acknowledgement(context.actor, request_id)
@@ -479,7 +479,7 @@ async fn interrupt_during_preview(
         fixture
             .environment
             .requests
-            .finish_cancellation_acknowledgement(request_id);
+            .finish_cancellation_acknowledgement(claim);
         assert_eq!(
             fixture
                 .environment
@@ -790,6 +790,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         panic!("expected native settlement");
     };
     let visible = matches!(failure, NativeFailure::None);
+    let mut cancellation_claim = None;
     match failure {
         NativeFailure::None => assert!(matches!(
             (&commit, durable),
@@ -807,21 +808,26 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 .public_owner
                 .ready()
                 .is_none());
+            let claim = fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id)
+                .unwrap();
             assert_eq!(
-                fixture
-                    .environment
-                    .requests
-                    .begin_cancellation_acknowledgement(context.actor, request_id),
-                Ok(crate::CancellationReason::RequesterCancelled)
+                claim.reason(),
+                crate::CancellationReason::RequesterCancelled
             );
+            cancellation_claim = Some(claim);
         }
     }
     if !matches!(failure, NativeFailure::CommitError) {
-        fixture
-            .environment
-            .requests
-            .begin_cancellation_acknowledgement(context.actor, request_id)
-            .unwrap();
+        cancellation_claim = Some(
+            fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id)
+                .unwrap(),
+        );
     }
     release_tx.send(()).unwrap();
     if let Some(park) = park.take() {
@@ -833,7 +839,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     fixture
         .environment
         .requests
-        .finish_cancellation_acknowledgement(request_id);
+        .finish_cancellation_acknowledgement(cancellation_claim.unwrap());
     if matches!(failure, NativeFailure::CommitError) {
         let error = fixture
             .environment

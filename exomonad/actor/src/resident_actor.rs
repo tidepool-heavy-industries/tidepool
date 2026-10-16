@@ -11039,16 +11039,19 @@ where
         true
     }
 
-    fn start<'a>(
-        &'a mut self,
-        kernel: &'a KernelContext,
-    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+    fn observe_exit(&mut self, kernel: &KernelContext) {
         observe_request_retirement(
             kernel.identity(),
             kernel.retained_exit(),
             Arc::clone(&self.environment.requests),
             self.environment.deployments.clone(),
         );
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         let placement_transfer = self
             .child_placement_custody
             .as_ref()
@@ -14394,7 +14397,7 @@ fn observe_request_retirement(
 /// before hooks; the retained-exit observer covers shutdowns that never return
 /// to the behavior. All notices use the same backpressured publication path.
 async fn publish_request_retirement(
-    requests: &RequestRegistry,
+    requests: &Arc<RequestRegistry>,
     deployments: &mpsc::Sender<LocalResidentDeployment>,
     actor: ActorRef,
     terminal: &ActorTerminal,
@@ -14407,10 +14410,30 @@ async fn publish_request_retirement(
 /// then every queued settlement. The resident actor calls it after each
 /// registry transition it makes; a command completion task calls it after
 /// settling a job outside any actor turn.
-pub(crate) async fn publish_request_notifications(
-    requests: &RequestRegistry,
+pub(crate) fn publish_request_notifications(
+    requests: &Arc<RequestRegistry>,
     deployments: &mpsc::Sender<LocalResidentDeployment>,
     notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let requests = Arc::clone(requests);
+    let deployments = deployments.clone();
+    let notifications = notifications.into_iter().collect::<Vec<_>>();
+    // Cancellation of a publisher detaches this task. The task keeps custody
+    // of watch transitions until bounded publication completes.
+    let publication = tokio::spawn(async move {
+        deliver_request_notifications(&requests, &deployments, notifications).await;
+    });
+    async move {
+        if let Err(error) = publication.await {
+            tracing::error!(%error, "request notification publisher task failed");
+        }
+    }
+}
+
+async fn deliver_request_notifications(
+    requests: &RequestRegistry,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    notifications: Vec<crate::request::WatchNotification>,
 ) {
     for notification in notifications {
         // A watch forgotten by campaign cleanup keeps no state to poll.
@@ -14880,7 +14903,9 @@ mod tests {
     async fn retained_exit_observer_retires_requests_once_with_backpressure() {
         use crate::request::{ResponseFailure, ResponseObservation};
 
-        for exit_before_observer in [false, true] {
+        for (exit_before_observer, cancel_shutdown_publisher) in
+            [(false, false), (true, false), (false, true)]
+        {
             let owner = ActorRef::first(ActorId(901));
             let target = ActorRef::first(ActorId(902));
             let requests = std::sync::Arc::new(crate::request::RequestRegistry::default());
@@ -14898,6 +14923,32 @@ mod tests {
                     terminal: failed.clone(),
                 })
                 .unwrap();
+            if cancel_shutdown_publisher {
+                let task_requests = std::sync::Arc::clone(&requests);
+                let task_deployments = deployments.clone();
+                let task_failed = failed.clone();
+                let publisher = tokio::spawn(async move {
+                    super::publish_request_retirement(
+                        &task_requests,
+                        &task_deployments,
+                        target,
+                        &task_failed,
+                    )
+                    .await;
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while matches!(
+                        requests.observe_response(owner, request),
+                        Ok(ResponseObservation::Pending(_))
+                    ) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("normal shutdown issued its watch transition");
+                publisher.abort();
+                let _ = publisher.await;
+            }
             if exit_before_observer {
                 terminal.publish(failed.clone()).unwrap();
             }

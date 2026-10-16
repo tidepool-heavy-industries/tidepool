@@ -753,8 +753,7 @@ fn channel_filler(owner: ActorRef) -> LocalResidentDeployment {
 }
 
 #[tokio::test]
-async fn cancelled_full_channel_publication_retains_restored_command_notice_for_exactly_one_retry()
-{
+async fn cancelled_full_channel_publication_preserves_restored_command_notice_once() {
     let registry = Arc::new(RequestRegistry::default());
     let owner = ActorRef::first(ActorId(92));
     let request = restore_command_notice(&registry, owner, "restored-job", true);
@@ -782,7 +781,7 @@ async fn cancelled_full_channel_publication_retains_restored_command_notice_for_
         publish_request_notifications(&registry, &deployments, Vec::new()),
     )
     .await
-    .expect("cancelled publication must release its publisher lock");
+    .expect("independent publisher and retry must complete without duplicate delivery");
     let Some(LocalResidentDeployment::SettlementChanged { notification }) = receive.recv().await
     else {
         panic!("retry must deliver the retained settlement notice");
@@ -836,29 +835,32 @@ async fn competing_settlement_publishers_preserve_fifo_without_duplicates_or_emp
     ));
     assert!(matches!(futures_util::poll!(&mut first), Poll::Pending));
     assert!(matches!(futures_util::poll!(&mut second), Poll::Pending));
-    assert!(matches!(
-        receive.recv().await,
-        Some(LocalResidentDeployment::Retired { .. })
-    ));
-    assert!(matches!(futures_util::poll!(&mut first), Poll::Pending));
-    assert!(matches!(futures_util::poll!(&mut second), Poll::Pending));
-    let Some(LocalResidentDeployment::SettlementChanged {
-        notification: first_notice,
-    }) = receive.recv().await
-    else {
-        panic!("first queued settlement must publish first");
+    let drain = async {
+        assert!(matches!(
+            receive.recv().await,
+            Some(LocalResidentDeployment::Retired { .. })
+        ));
+        let Some(LocalResidentDeployment::SettlementChanged {
+            notification: first_notice,
+        }) = receive.recv().await
+        else {
+            panic!("first queued settlement must publish first");
+        };
+        let Some(LocalResidentDeployment::SettlementChanged {
+            notification: second_notice,
+        }) = receive.recv().await
+        else {
+            panic!("second queued settlement must publish second");
+        };
+        (first_notice, second_notice)
     };
+    let (_, _, (first_notice, second_notice)) =
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second, drain)
+        })
+        .await
+        .expect("competing publishers drain without waiting on an empty queue");
     assert_eq!(first_notice.request, first_request);
-    assert!(matches!(futures_util::poll!(&mut first), Poll::Ready(())));
-    // The first publisher has filled the channel with the last notice. The
-    // second must finish immediately because there is nothing left to claim.
-    assert!(matches!(futures_util::poll!(&mut second), Poll::Ready(())));
-    let Some(LocalResidentDeployment::SettlementChanged {
-        notification: second_notice,
-    }) = receive.recv().await
-    else {
-        panic!("second queued settlement must publish second");
-    };
     assert_eq!(second_notice.request, second_request);
     assert!(first_notice.sequence < second_notice.sequence);
     assert!(!registry.has_settlement_notifications());

@@ -123,6 +123,10 @@ struct ObservedBehavior {
 }
 
 impl KernelBehavior for ObservedBehavior {
+    fn observe_exit(&mut self, context: &KernelContext) {
+        self.inner.observe_exit(context);
+    }
+
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
@@ -934,6 +938,10 @@ struct ForcedRetirementBehavior {
 }
 
 impl KernelBehavior for ForcedRetirementBehavior {
+    fn observe_exit(&mut self, context: &KernelContext) {
+        self.inner.observe_exit(context);
+    }
+
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
@@ -988,12 +996,34 @@ impl KernelBehavior for ForcedRetirementBehavior {
         }
     }
 
+    fn external_application_failed<'a>(
+        &'a mut self, context: &'a KernelContext, failure: ExternalApplicationFailure,
+    ) -> BoxFuture<'a, ExternalFailureDisposition> {
+        self.inner.external_application_failed(context, failure)
+    }
+
+    fn shutdown<'a>(
+        &'a mut self, context: &'a KernelContext, terminal: &'a ActorTerminal,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        self.inner.shutdown(context, terminal)
+    }
+
+    fn child_exited(&mut self, notice: ChildExitNotice) {
+        self.inner.child_exited(notice);
+    }
+
     fn shutdown_components<'a>(
         &'a mut self,
         _context: &'a KernelContext,
         _terminal: &'a ActorTerminal,
         _deadline: tokio::time::Instant,
-    ) -> BoxFuture<'a, (crate::CleanupComponentOutcome, crate::CleanupComponentOutcome)> {
+    ) -> BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
         self.shutdowns.fetch_add(1, Ordering::Relaxed);
         Box::pin(std::future::pending())
     }
@@ -1046,7 +1076,11 @@ async fn assert_forced_request_retirement(
         ActorExitKind::Completed => panic!("expected forced retirement"),
     };
     assert_eq!(
-        fixture.forest.environment.requests.observe_response(owner, request),
+        fixture
+            .forest
+            .environment
+            .requests
+            .observe_response(owner, request),
         Ok(ResponseObservation::Unavailable(failure))
     );
     publish_request_retirement(
@@ -1059,9 +1093,15 @@ async fn assert_forced_request_retirement(
     while let Ok(event) = fixture._deployments.try_recv() {
         match event {
             LocalResidentDeployment::WatchChanged { notification }
-                if notification.watch == watch => watches += 1,
+                if notification.watch == watch =>
+            {
+                watches += 1
+            }
             LocalResidentDeployment::SettlementChanged { notification }
-                if notification.request == request => settlements += 1,
+                if notification.request == request =>
+            {
+                settlements += 1
+            }
             _ => {}
         }
     }
@@ -1075,7 +1115,9 @@ fn watch_forced_target(
     let owner = ActorRef::first(crate::ActorId(9901));
     let requests = &fixture.forest.environment.requests;
     let request = requests.reserve(owner, target.identity());
-    requests.mark_queued(owner, target.identity(), request).unwrap();
+    requests
+        .mark_queued(owner, target.identity(), request)
+        .unwrap();
     let (watch, initial) = requests.register_watch(owner, vec![request]).unwrap();
     assert!(initial.is_empty());
     (owner, request, watch)
@@ -1085,7 +1127,12 @@ fn watch_forced_target(
 async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
     let mut fixture = Fixture::new();
     let forest = &fixture.forest;
-    let placement = forest.environment.runner.provision_root_scope(forest.session).await.unwrap();
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
     let shutdowns = Arc::new(AtomicUsize::new(0));
     let stopped = Arc::new(AtomicUsize::new(0));
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -1099,21 +1146,31 @@ async fn resident_root_serial_owner_panic_retires_requests_without_shutdown() {
         },
         forest.incarnation,
         forest.directory.clone(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let _context = receive.await.unwrap();
     let (owner, request, watch) = watch_forced_target(&fixture, &actor);
     let (reply, _receive) = tokio::sync::oneshot::channel();
-    actor.address().send_message(crate::KernelMessage::Tool {
-        invocation: exomonad_tool::ToolInvocation {
-            context: None,
-            name: "panic".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({})),
-        },
-        reply: reply.into(),
-    }).unwrap();
+    actor
+        .address()
+        .send_message(crate::KernelMessage::Tool {
+            invocation: exomonad_tool::ToolInvocation {
+                context: None,
+                name: "panic".into(),
+                arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({})),
+            },
+            reply: reply.into(),
+        })
+        .unwrap();
     assert_forced_request_retirement(&mut fixture, &actor, request, watch, owner).await;
     task.await.unwrap();
-    assert!(actor.terminal().get().unwrap().summary.contains("serial actor continuation panicked"));
+    assert!(actor
+        .terminal()
+        .get()
+        .unwrap()
+        .summary
+        .contains("serial actor continuation panicked"));
     assert_eq!(shutdowns.load(Ordering::Relaxed), 0);
     assert_eq!(stopped.load(Ordering::Relaxed), 0);
 }
@@ -1124,7 +1181,13 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
     let shutdowns = Arc::new(AtomicUsize::new(0));
     let stopped = Arc::new(AtomicUsize::new(0));
     // Capture a real kernel context through the root's resident startup wrapper.
-    let root_placement = fixture.forest.environment.runner.provision_root_scope(fixture.forest.session).await.unwrap();
+    let root_placement = fixture
+        .forest
+        .environment
+        .runner
+        .provision_root_scope(fixture.forest.session)
+        .await
+        .unwrap();
     let (send, receive) = tokio::sync::oneshot::channel();
     let (supervisor, task) = crate::local_actor::spawn_local_actor_in_directory(
         None,
@@ -1139,19 +1202,36 @@ async fn resident_supervisor_forced_child_retires_requests_without_shutdown() {
         },
         fixture.forest.incarnation,
         fixture.forest.directory.clone(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let context = receive.await.unwrap();
     let placement = fixture.child_placement(&supervisor);
     let (send, receive) = tokio::sync::oneshot::channel();
-    let child = context.spawn_child(None, ForcedRetirementBehavior {
-        inner: fixture.behavior(ActorDescriptor::new("hung-child", placement).with_supervisor_parent(Some(supervisor.identity()))),
-        context: Some(send),
-        shutdowns: shutdowns.clone(),
-        stopped: stopped.clone(),
-    }).await.unwrap();
+    let child = context
+        .spawn_child(
+            None,
+            ForcedRetirementBehavior {
+                inner: fixture.behavior(
+                    ActorDescriptor::new("hung-child", placement)
+                        .with_supervisor_parent(Some(supervisor.identity())),
+                ),
+                context: Some(send),
+                shutdowns: shutdowns.clone(),
+                stopped: stopped.clone(),
+            },
+        )
+        .await
+        .unwrap();
     let _child_context = receive.await.unwrap();
     let (owner, request, watch) = watch_forced_target(&fixture, &child);
-    supervisor.shutdown(ActorTerminal::new(ActorExitKind::Completed, "owner finished")).await.unwrap();
+    supervisor
+        .shutdown(ActorTerminal::new(
+            ActorExitKind::Completed,
+            "owner finished",
+        ))
+        .await
+        .unwrap();
     task.await.unwrap();
     assert_forced_request_retirement(&mut fixture, &child, request, watch, owner).await;
     let terminal = child.terminal().get().unwrap();
