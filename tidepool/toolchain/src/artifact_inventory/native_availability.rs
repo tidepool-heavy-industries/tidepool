@@ -371,22 +371,26 @@ impl IssuedNativeOffer {
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
-        let originals = projection
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
-            .collect::<BTreeSet<_>>();
-        let contributes = self
-            .issued_group_carriers()?
-            .keys()
-            .any(|group| originals.contains(&group.binding.artifact()));
+        // Matching roles propagate the existing opaque issuance directly.
+        // Only a different or absent role needs dependency relevance.
+        let contributes = || -> Result<bool, CompileError> {
+            let originals = projection
+                .roles()
+                .into_iter()
+                .filter_map(|role| role.original())
+                .collect::<BTreeSet<_>>();
+            Ok(self
+                .issued_group_carriers()?
+                .keys()
+                .any(|group| originals.contains(&group.binding.artifact())))
+        };
         let role = projection.snapshot_roles().get(&self.0.owner);
         let Some(original) = role.and_then(CompilerInputRole::original) else {
-            return Ok(contributes.then(|| self.clone()));
+            return Ok(contributes()?.then(|| self.clone()));
         };
         let role = role.expect("native role");
         if original != self.0.original || role.interface() != self.0.interface {
-            if contributes {
+            if contributes()? {
                 return Ok(Some(self.clone()));
             }
             return Err(failure(
