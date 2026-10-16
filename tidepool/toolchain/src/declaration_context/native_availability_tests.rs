@@ -1298,7 +1298,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         .expect_err("dependency availability cannot replace a selected product or interface");
         assert_eq!(
             error.to_string(),
-            failure("issued native dependency conflicts with request interface").to_string()
+            "extractor contract failure: artifact inventory: issued native dependency conflicts with request interface"
         );
     }
 }
