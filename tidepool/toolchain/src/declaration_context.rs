@@ -362,9 +362,7 @@ fn retain_native_offers(
     context: &ArtifactView,
     offers: &[crate::artifact_inventory::IssuedNativeOffer],
 ) -> Result<ArtifactView, CompileError> {
-    offers
-        .iter()
-        .try_fold(context.clone(), |view, offer| view.merge(offer.custody()))
+    context.retain_issued_offer_custody(offers.iter().cloned())
 }
 
 /// Carry choices already issued by each input before their custody is merged.

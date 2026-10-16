@@ -6432,6 +6432,133 @@ impl ArtifactView {
         }))
     }
 
+    /// Retain issued private offers in order. A validated prefix can defer a
+    /// custody-only addition which changes no owned node or payload authority;
+    /// its exact seeds and ordered materialization parent still enter the result.
+    /// Every changing prefix uses ordinary merge and its refusal boundary.
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.native_offer_custody",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
+    pub(crate) fn retain_issued_offer_custody(
+        &self,
+        offers: impl IntoIterator<Item = IssuedNativeOffer>,
+    ) -> Result<Self, CompileError> {
+        let mut current = self.clone();
+        let mut deferred = Vec::new();
+        let mut validated = false;
+        let mut ordinary_merges = 0usize;
+        let mut covered_offers = 0usize;
+        for offer in offers {
+            let incoming = offer.custody();
+            if Arc::ptr_eq(&current.lease, &incoming.lease) || !incoming.has_retained_nodes() {
+                continue;
+            }
+            if !current.has_retained_nodes() {
+                current = incoming.clone();
+                validated = false;
+                continue;
+            }
+            if validated && current.covers_issued_custody(incoming) {
+                // Foreign issuers still cross the same authentication boundary.
+                current.validate_issued_merge(incoming)?;
+                deferred.push(Arc::clone(&incoming.lease));
+                covered_offers += 1;
+                continue;
+            }
+            current = current.finish_deferred_custody(std::mem::take(&mut deferred))?;
+            current = current.merge(incoming)?;
+            validated = true;
+            ordinary_merges += 1;
+        }
+        let retained = current.finish_deferred_custody(deferred)?;
+        tracing::debug!(target: "exomonad_harness::timing", ordinary_merges, covered_offers, "issued offer custody retention");
+        Ok(retained)
+    }
+
+    fn covers_issued_custody(&self, incoming: &Self) -> bool {
+        if !incoming.lease.selection.namespace.is_empty()
+            || !incoming.lease.selection.roots.is_empty()
+            || incoming
+                .lease
+                .selection
+                .scopes
+                .iter()
+                .any(|(scope, proof)| self.lease.selection.scopes.get(scope) != Some(proof))
+            || incoming.lease.payloads.iter().any(|(id, entry)| {
+                self.lease
+                    .payloads
+                    .get(id)
+                    .is_none_or(|retained| !Arc::ptr_eq(retained, entry))
+            })
+        {
+            return false;
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        incoming
+            .lease
+            .selection
+            .custody_roots
+            .keys()
+            .all(|root| owned.contains(root))
+    }
+
+    fn finish_deferred_custody(&self, deferred: Vec<Arc<ViewLease>>) -> Result<Self, CompileError> {
+        if deferred.is_empty() {
+            return Ok(self.clone());
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let projection = self.read_projection(&state);
+        let ids = artifact_ids(&projection.nodes);
+        let entries = projection
+            .entries
+            .iter()
+            .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
+            .collect::<BTreeMap<_, _>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        SelectedOwners::new(&state, &entries, &ids)?.planned_edges(
+            &state,
+            &entries,
+            &native_groups(&projection.nodes),
+            NativeClosureStage::AcceptedMerge,
+        )?;
+        let reads = ViewReadProjection {
+            nodes: projection.nodes.clone(),
+            entries: projection.entries.clone(),
+            dependencies: OnceLock::new(),
+            native_selection: OnceLock::new(),
+            metadata: OnceLock::new(),
+        };
+        let mut parents = Vec::with_capacity(deferred.len() + 1);
+        parents.push(Arc::clone(&self.lease));
+        parents.extend(deferred);
+        let namespace = self.namespace();
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        drop(state);
+        let retained = Self::new(ViewDraft {
+            roots: vec![],
+            selection,
+            inventory: self.lease.inventory.clone(),
+            parents,
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        retained
+            .reads
+            .read_projection
+            .set(reads)
+            .ok()
+            .expect("fresh custody projection");
+        Ok(retained)
+    }
+
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         if Arc::ptr_eq(&self.lease, &other.lease) || !other.has_retained_nodes() {
             return Ok(self.clone());
@@ -7391,7 +7518,8 @@ mod tests {
             assert_eq!(retained.lexical, lexical);
             assert_eq!(
                 retained
-                    .compiler_support.artifacts
+                    .compiler_support
+                    .artifacts
                     .capture_graph_selection()
                     .native_groups,
                 prefix.capture_graph_selection().native_groups

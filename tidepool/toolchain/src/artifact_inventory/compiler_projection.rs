@@ -169,13 +169,16 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
         let mut offers = Vec::new();
-        let mut retained = artifacts;
-        for offer in native_offers {
-            if !offers.contains(&offer) {
-                retained = retained.merge(offer.custody())?;
-                offers.push(offer);
-            }
-        }
+        let retained = artifacts.retain_issued_offer_custody(
+            native_offers.into_iter().filter_map(|offer| {
+                if !offers.contains(&offer) {
+                    offers.push(offer.clone());
+                    Some(offer)
+                } else {
+                    None
+                }
+            }),
+        )?;
         Ok(Self {
             projection,
             artifacts: retained,
