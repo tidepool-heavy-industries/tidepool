@@ -2514,6 +2514,51 @@ impl CertifiedSourceSelection {
         Ok(selected)
     }
 
+    pub(crate) fn request_native_availability(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
+        self.native_selections()
+            .filter_map(|native| match &native.availability {
+                ReceiptNativeAvailability::Request(issued) => Some(issued),
+                ReceiptNativeAvailability::CompleteProduct => None,
+            })
+    }
+
+    pub(crate) fn complete_native_products(
+        &self,
+        artifacts: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>> {
+        let metadata = artifacts.metadata_snapshot();
+        self.native_selections()
+            .filter(|native| {
+                matches!(
+                    native.availability,
+                    ReceiptNativeAvailability::CompleteProduct
+                )
+            })
+            .map(|native| {
+                let products = metadata
+                    .artifacts
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        crate::artifact_inventory::ArtifactPayload::Original(product)
+                            if product.owner() == &native.owner =>
+                        {
+                            Some(product.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                match products.as_slice() {
+                    [product] => Ok(product.clone()),
+                    _ => Err(CertificationError::Mismatch(
+                        "complete native selection payload",
+                    )),
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn native_original_requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
@@ -16846,6 +16891,41 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            if nonempty {
+                // Production certification issues a complete current product even
+                // when the target has not demanded every body. The private-input
+                // handoff must preserve that issuance for a later notebook cell.
+                let private = OriginalCompilerInputs::from_selection(
+                    &certified.source_selection,
+                    &certified.artifact_view,
+                )
+                .unwrap();
+                let next =
+                    crate::declaration_context::ExactCompileContext::new(public_context.clone())
+                        .prepare_compilation_with_private_input(
+                            &directory.join("certified-current-handoff"),
+                            &producer,
+                            None,
+                            Some(private),
+                        )
+                        .unwrap();
+                let scope: Value =
+                    ciborium::de::from_reader(std::fs::read(&next.manifest).unwrap().as_slice())
+                        .unwrap();
+                let products = scope.as_array().unwrap()[6].as_array().unwrap();
+                let current = products
+                    .iter()
+                    .find(|row| {
+                        let row = row.as_array().unwrap();
+                        row[0].as_text() == Some(&owner.unit)
+                            && row[1].as_text() == Some(&owner.module)
+                            && row[2].as_text() == Some(&owner.module_version)
+                    })
+                    .unwrap()
+                    .as_array()
+                    .unwrap();
+                assert_eq!(current[8], value_array([value_text("full-carrier")]));
+            }
             let expected_custody = prior
                 .iter()
                 .map(|product| product.owner().clone())

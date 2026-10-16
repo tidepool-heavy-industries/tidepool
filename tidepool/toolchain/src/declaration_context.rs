@@ -516,17 +516,64 @@ impl OriginalCompilerInputs {
             .native_original_requirements()
             .cloned()
             .collect::<Vec<_>>();
-        let native_original_requirements =
-            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-                &projection,
+        let mut native_original_requirements =
+            carry_native_original_requirements(&projection, &preferred);
+        let mut native_availability = Vec::new();
+        for issued in selection.request_native_availability() {
+            for offer in issued.issuance.iter().filter(|offer| {
+                projection
+                    .roles()
+                    .iter()
+                    .any(|role| role.original() == Some(offer.original()))
+            }) {
+                if !native_availability.contains(offer) {
+                    native_availability.push(offer.clone());
+                }
+            }
+        }
+        let complete = selection
+            .complete_native_products(artifacts)
+            .map_err(compiler_evidence_failure)?;
+        let artifacts = if let Some(product) = complete.first() {
+            let producer = product
+                .module_interface()
+                .ok_or_else(|| failure("complete native product has no canonical owner"))?
+                .producer_sha256();
+            let issued = Self::issue_complete_native_availability(
                 artifacts,
-                &preferred,
+                &projection,
+                producer,
+                &complete,
+                &native_original_requirements,
             )?;
-        let native_availability =
-            capture_native_availability(&projection, artifacts, &native_original_requirements)?;
+            native_original_requirements.extend(issued.native_original_requirements);
+            native_availability.extend(issued.native_availability);
+            issued.artifacts
+        } else {
+            artifacts.clone()
+        };
+        for offer in &native_availability {
+            if let Some(proof) = offer.proof() {
+                if !native_original_requirements.contains(proof) {
+                    native_original_requirements.push(proof.clone());
+                }
+            }
+        }
+        for role in projection.roles() {
+            if let Some(original) = role.original() {
+                if !native_availability
+                    .iter()
+                    .any(|offer| offer.original() == original)
+                {
+                    return Err(failure(
+                        "source selection lost its issued native availability",
+                    ));
+                }
+            }
+        }
         Ok(Self {
             projection,
-            artifacts: artifacts.clone(),
+            artifacts,
             native_original_requirements,
             native_availability,
         })
@@ -548,8 +595,24 @@ impl OriginalCompilerInputs {
         products: &[CertifiedRecoveryProduct],
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
     ) -> Result<Self, CompileError> {
-        let selected = context.compiler_metadata_snapshot()?;
-        let retained = context.inventory.metadata_snapshot();
+        Self::issue_complete_native_availability(
+            &context.inventory,
+            &context.compiler_projection,
+            producer.sha256(),
+            products,
+            availability,
+        )
+    }
+
+    fn issue_complete_native_availability(
+        inventory: &ArtifactView,
+        baseline: &CompilerInputProjection,
+        producer_sha256: [u8; 32],
+        products: &[CertifiedRecoveryProduct],
+        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
+    ) -> Result<Self, CompileError> {
+        let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
+        let retained = inventory.metadata_snapshot();
         let mut validation = PackageInterfaceValidation::default();
         let mut entries = Vec::new();
         for product in products {
@@ -579,15 +642,15 @@ impl OriginalCompilerInputs {
                 ));
             }
             entries.push(Arc::new(ArtifactEntry::original_with_validation(
-                producer.sha256(),
+                producer_sha256,
                 product.clone(),
                 &mut validation,
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
         let mut preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            &context.compiler_projection,
-            &context.inventory,
+            baseline,
+            inventory,
             &[],
         )?;
         for proof in availability {
@@ -596,14 +659,13 @@ impl OriginalCompilerInputs {
             }
         }
         let native_original_requirements =
-            capture_native_original_requirements(&projection, &context.inventory, &preferred)?;
-        let effective = context.compiler_projection.merge(&projection)?;
+            capture_native_original_requirements(&projection, inventory, &preferred)?;
+        let effective = baseline.merge(&projection)?;
         // Available code retains custody without selecting executable groups.
-        let mut artifacts = context
-            .inventory
+        let mut artifacts = inventory
             .inventory()
             .admit_projected_with_native_requirements(
-                &context.inventory,
+                inventory,
                 entries.clone(),
                 &effective,
                 &native_original_requirements,
@@ -850,7 +912,13 @@ pub(crate) struct RequestCompilerInputs {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum NativeTransportAvailability {
+pub(crate) struct NativeTransportAvailability {
+    mode: NativeTransportMode,
+    issuance: Arc<[NativeCompilerAvailability]>,
+}
+
+#[derive(Clone, Debug)]
+enum NativeTransportMode {
     FullCarrier(ArtifactBinding),
     IssuedGroups {
         groups: BTreeSet<u32>,
@@ -860,9 +928,9 @@ pub(crate) enum NativeTransportAvailability {
 
 impl NativeTransportAvailability {
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
-        match self {
-            Self::FullCarrier(_) => true,
-            Self::IssuedGroups { groups, .. } => groups.contains(&ordinal),
+        match &self.mode {
+            NativeTransportMode::FullCarrier(_) => true,
+            NativeTransportMode::IssuedGroups { groups, .. } => groups.contains(&ordinal),
         }
     }
 }
@@ -901,6 +969,12 @@ impl NativeCompilerTransport {
         let mut bindings = BTreeMap::new();
         let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
+        let issuance: Arc<[NativeCompilerAvailability]> = offers
+            .iter()
+            .filter(|offer| offered_roots.contains(&offer.original()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         for offer in offers
             .iter()
             .filter(|offer| offered_roots.contains(&offer.original()))
@@ -987,18 +1061,24 @@ impl NativeCompilerTransport {
             .into_iter()
             .map(|(id, offer)| {
                 let mode = if full.contains(&id) {
-                    NativeTransportAvailability::FullCarrier(
+                    NativeTransportMode::FullCarrier(
                         offer
                             .carrier
                             .ok_or_else(|| failure("full native offer has no issued carrier"))?,
                     )
                 } else {
-                    NativeTransportAvailability::IssuedGroups {
+                    NativeTransportMode::IssuedGroups {
                         groups: offer.groups,
                         carrier: offer.carrier,
                     }
                 };
-                Ok((id, Arc::new(mode)))
+                Ok((
+                    id,
+                    Arc::new(NativeTransportAvailability {
+                        mode,
+                        issuance: Arc::clone(&issuance),
+                    }),
+                ))
             })
             .collect::<Result<_, CompileError>>()?;
         Ok(Self {
@@ -7203,8 +7283,8 @@ impl ExactDeclarationContext {
                             .map(PendingCertifiedGroup::group)
                             .collect::<Vec<_>>();
                         let availability = inputs.native_transport.availability[&selected].as_ref();
-                        let mode = match availability {
-                            NativeTransportAvailability::FullCarrier(carrier) => {
+                        let mode = match &availability.mode {
+                            NativeTransportMode::FullCarrier(carrier) => {
                                 if carrier.artifact != selected {
                                     return Err(failure(
                                         "full native offer carrier differs from payload",
@@ -7212,7 +7292,7 @@ impl ExactDeclarationContext {
                                 }
                                 Value::Array(vec![text("full-carrier")])
                             }
-                            NativeTransportAvailability::IssuedGroups { groups, carrier } => {
+                            NativeTransportMode::IssuedGroups { groups, carrier } => {
                                 if carrier.is_some_and(|carrier| carrier.artifact != selected) {
                                     return Err(failure(
                                         "issued native offer carrier differs from payload",
