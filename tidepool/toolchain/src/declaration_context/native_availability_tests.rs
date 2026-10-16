@@ -616,7 +616,20 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         let current = inventory
             .admit_shared(&inventory.empty_view(), vec![entries[2].clone()])
             .unwrap();
-        let view = issued.merge(&current).unwrap();
+        let merged = issued.merge(&current);
+        if interface_drift {
+            let error = merged.expect_err("different interfaces cannot share an owner namespace");
+            assert!(matches!(
+                error,
+                CompileError::ArtifactInventory(error)
+                    if error.failure
+                        == crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict {
+                            owner: entries[0].descriptor.owner.clone(),
+                        }
+            ));
+            continue;
+        }
+        let view = merged.unwrap();
         let metadata =
             CompilerInputProjection::from_issued_entries(&[entries[1].clone(), entries[2].clone()])
                 .unwrap()
