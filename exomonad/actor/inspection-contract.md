@@ -40,7 +40,8 @@ matching actor path or stale incarnation cannot substitute for that identity.
 
 Execution, native finalization, durable settlement and delivery remain separate.
 Delivery means membership in the observing conversation's retained input
-history, never model attention or acceptance. Store facts share one transaction;
+history, never model attention or acceptance. Absence from the current history
+is not proof that delivery never occurred or remains queued. Store facts share one transaction;
 live scheduler and native observations are independently identified samples.
 Unknown or unavailable owners do not imply completion. Inspection never waits
 for work, acknowledges completion, cancels, consumes a watch or grants retry.

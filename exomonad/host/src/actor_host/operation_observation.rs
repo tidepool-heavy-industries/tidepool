@@ -164,7 +164,7 @@ mod tests {
                     .expect("native owner is independently observable");
                 assert_eq!(pending.execution, OperationExecution::Running);
                 assert_eq!(pending.settlement, OperationSettlement::Pending);
-                assert_eq!(pending.delivery, OperationDelivery::Pending);
+                assert_eq!(pending.delivery, OperationDelivery::NotInCurrentHistory);
                 let original =
                     crate::actor_host::embedded_harness::original_operation(&observer, &operation)
                         .unwrap();
@@ -194,7 +194,7 @@ mod tests {
                 assert_eq!(model.observer, observer);
                 assert_eq!(model.native_execution, NativeOperationExecution::Pending);
                 assert_eq!(model.settlement, OperationSettlement::Pending);
-                assert_eq!(model.delivery, OperationDelivery::Pending);
+                assert_eq!(model.delivery, OperationDelivery::NotInCurrentHistory);
 
                 let client = reqwest::Client::new();
                 let api = format!("http://{}/api", host.address);
@@ -228,7 +228,7 @@ mod tests {
                 assert_eq!(gui.native_execution, NativeOperationExecution::Pending);
                 assert_eq!(gui.finalization, OperationFinalization::Pending);
                 assert_eq!(gui.settlement, OperationSettlement::Pending);
-                assert_eq!(gui.delivery, OperationDelivery::Pending);
+                assert_eq!(gui.delivery, OperationDelivery::NotInCurrentHistory);
                 assert!(host
                     .runtime
                     .scheduler()

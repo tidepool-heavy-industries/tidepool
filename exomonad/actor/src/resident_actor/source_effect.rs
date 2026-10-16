@@ -27,10 +27,16 @@ pub(super) async fn refresh_source_observation(
         .as_ref()
         .and_then(ActorRequestSnapshot::generation)
         .map(|generation| generation.id.get());
+    // Filesystem observation needs only immutable issued source evidence. Do
+    // not retain the generation's native scope through an uncancellable read.
+    let issued_source = issued
+        .as_ref()
+        .map(|issued| issued.installation().source().clone());
+    drop(issued);
     let inspected = tokio::task::spawn_blocking(move || {
-        let issued_revision = issued
+        let issued_revision = issued_source
             .as_ref()
-            .map(|issued| layers.revision(issued.installation().source()))
+            .map(|source| layers.revision(source))
             .transpose()?;
         layers
             .observe(&source)

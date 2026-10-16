@@ -303,7 +303,6 @@ impl<T> SourceObservation<T> {
 /// Which rows this actor can actually observe on the next poll.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDriftTargets {
-    pub layer: bool,
     pub checkout: bool,
     pub frozen: bool,
 }
@@ -928,16 +927,11 @@ impl ActorRuntimeObservationHandle {
         observation.prompt_fingerprint = Some(fingerprint.into());
     }
 
-    /// Mark every applicable row pending before the host begins filesystem or
-    /// Git work. An absent source remains unobserved even after earlier polls.
+    /// Mark checkout and frozen-workspace rows before their observation work.
+    /// The installed source layer has its separate generation-fenced refresh.
     pub fn begin_source_drift_poll(&self, targets: SourceDriftTargets) {
         let now = unix_time_ms();
         let mut observation = self.inner.write();
-        if targets.layer {
-            observation.source_drift.layer.begin(now);
-        } else {
-            observation.source_drift.layer = SourceObservation::NotObserved;
-        }
         if targets.checkout {
             observation.source_drift.checkout.begin(now);
         } else {
@@ -948,24 +942,6 @@ impl ActorRuntimeObservationHandle {
         } else {
             observation.source_drift.frozen = SourceObservation::NotObserved;
         }
-    }
-
-    /// Publish row 1 of the source-drift view: this actor's source layer,
-    /// active vs. latest observed disk.
-    pub fn publish_source_layer_drift(&self, drift: SourceLayerDrift) {
-        self.inner
-            .write()
-            .source_drift
-            .layer
-            .publish(unix_time_ms(), drift);
-    }
-
-    pub fn fail_source_layer_drift(&self, reason: impl Into<String>) {
-        self.inner
-            .write()
-            .source_drift
-            .layer
-            .unavailable(unix_time_ms(), reason.into());
     }
 
     /// Publish row 2: the checkout's Git head and dirty files.
@@ -1602,7 +1578,6 @@ mod tests {
     fn source_observation_keeps_prior_sample_explicit_across_failed_poll() {
         let handle = ActorRuntimeObservationHandle::default();
         let targets = SourceDriftTargets {
-            layer: false,
             checkout: true,
             frozen: false,
         };
