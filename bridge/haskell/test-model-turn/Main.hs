@@ -18,6 +18,7 @@ import FormLifecycleTest (formLifecycleTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import JevPreparedTest (jevPreparedTests)
 import JevRecordingTest (jevRecordingTests)
+import qualified Examples.ModelCallWorkflow as ModelExample
 import LookupEvidenceTest (lookupEvidenceTests)
 
 import Prelude
@@ -67,7 +68,7 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  [testCase "NoTools model examples preserve selectors limits and receipts" noToolsExample, testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 scenario :: IO ()
 scenario = do
@@ -116,3 +117,34 @@ sourceInspection = do
   let page = pageWithContinuation 80 (TextLeaf (Text.replicate 200 "λ")) Nothing :: DisplayPage '[]
   unless (pageHasMore page && "[truncated;" `Text.isInfixOf` text page && Text.length (text page) <= 80)
     (error "retained page omitted bounded truncation notice")
+
+
+noToolsExample :: IO ()
+noToolsExample = do
+  let runExample label example =
+        let result = run (interpret (handleText label) example)
+        in case ModelExample.report result of
+          (Right "bounded answer", Just (_, ["request"], usage))
+            | lookup "provider_requests" usage == Just 1
+            , lookup "tool_attempts" usage == Just 0 -> pure ()
+          other -> error ("NoTools example lost outcome or receipt: " ++ show other)
+  runExample "Luna" (ModelExample.luna "bounded input")
+  runExample "Sol" (ModelExample.sol "bounded input")
+  case ModelExample.report (ModelResult (Left ModelCancelled) Nothing) of
+    (Left _, Nothing) -> pure ()
+    other -> error ("missing receipt or failure changed: " ++ show other)
+  where
+    handleText :: Text -> ModelCall a -> Eff '[] a
+    handleText label (ModelStartWith value) =
+      case fromJSON value of
+        Success (Control.ModelRequestEnvelope _ input model _ limits tools _ hook)
+          | input == "bounded input"
+          , fmap toJSON model == Just (object ["tag" .= label])
+          , limits == Control.ModelRequestLimits (Just 1) (Just 0) Nothing Nothing
+          , tools == toJSON ([] :: [Value])
+          , not hook -> pure (Right (toJSON (Control.ModelFinished
+              (Control.ModelReceiptEnvelope "invocation" "cell" ["request"]
+                (Control.ModelUsageEnvelope 1 0 7 0) (Control.ModelUsageEnvelope 1 0 7 0)
+                (Control.ModelTextOutcome "bounded answer")))))
+        _ -> error "NoTools recipe changed selector, input, limits, tools or hook"
+    handleText _ _ = error "NoTools recipe attempted callback, hook or close"

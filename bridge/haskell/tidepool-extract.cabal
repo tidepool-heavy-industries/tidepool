@@ -835,6 +835,7 @@ test-suite model-turn-test
     JevRecordingTest
     LookupEvidenceTest
     Examples.JevPreparedWorkflow
+    Examples.ModelCallWorkflow
     Examples.JevComposedWorkflow
     Project.EvidencePattern
     Project.Lookup
