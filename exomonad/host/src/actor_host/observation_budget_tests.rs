@@ -402,7 +402,7 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-        for name in ["throwing", "oversized", "wide"] {
+        for name in ["throwing", "oversized", "wide", "pruned", "budgeted", "late"] {
             let policy = campaign.root_installation.policy.clone();
             let call_id = uuid::Uuid::new_v4().to_string();
             let (context, completion) = super::test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
@@ -410,7 +410,7 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
                 request_id:call_id.clone(), call_id,
             });
             let invocation = exomonad_tool::ToolInvocation {
-                context:Some(context), name:name.into(), arguments:exomonad_tool::ToolArguments::Structured(serde_json::json!("input")),
+                context:Some(context), name:name.into(), arguments:exomonad_tool::ToolArguments::Structured(serde_json::json!({"input":"input"})),
             };
             let retry = invocation.clone();
             let mut running = tokio::spawn(async move {
@@ -428,11 +428,34 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
             let response = running.await.unwrap();
             assert_eq!(response["status"], "committed", "{response}");
             assert_eq!(response["items"][0]["value"], expected_semantic);
-            assert_eq!(response["items"][0]["presentation"]["status"], if name == "wide" { "published" } else { "failed" });
+            assert_eq!(response["items"][0]["presentation"]["status"], if matches!(name, "wide" | "pruned" | "budgeted" | "late") { "published" } else { "failed" });
             let presentation = response["items"][0]["output"].as_str().unwrap();
-            assert!(presentation.len() < 4096);
-            if name == "wide" { assert_eq!(presentation, "wide result retained"); }
-            assert!(!presentation.contains("stdout"), "effect display must not prefix the authored presentation");
+            let bindings = response["items"][0]["installedBindings"].as_array().unwrap();
+            assert_eq!(bindings.len(), 1, "command observation retains its issued recovery binding: {response}");
+            let recovery_footer = format!("\nprivate bindings (discarded unless this cell publishes): {}", bindings[0].as_str().unwrap());
+            let authored = presentation.strip_suffix(&recovery_footer).expect("the recovery footer must name the issued binding");
+            if name == "budgeted" {
+                assert!(presentation.len() <= 64 * 1024, "combined output exceeds the aggregate budget");
+                assert!(authored.starts_with('λ') && authored.contains('ω'),
+                    "explicit output and independently bounded return presentation must both survive: {presentation}");
+            } else if name == "pruned" {
+                assert!(presentation.contains("pruned selection"), "{presentation}");
+                assert!(!presentation.contains("explicit handler output") && !presentation.contains("returned value selected"),
+                    "afterTool pruning must replace the combined explicit and returned output: {presentation}");
+            } else if name == "late" {
+                let projected = super::embedded_policy::project_workbench_model_output(
+                    response.clone(), retry.context.as_ref().unwrap()).unwrap();
+                let output = projected["items"][0]["output"].as_str().unwrap();
+                assert_eq!(output.strip_suffix(&recovery_footer).expect("model output retains the same recovery footer"), format!("explicit handler output\n{}\nlate result retained", "λ".repeat(13000)),
+                    "automatic command presentation must not consume later explicit Console allowance");
+                assert!(projected["items"][0].get("value").is_none());
+            } else {
+                assert!(presentation.len() < 4096);
+                assert!(presentation.starts_with("explicit handler output\n"),
+                    "explicit Console output must survive returned-value presentation or its failure: {presentation}");
+                if name == "wide" { assert_eq!(authored, "explicit handler output\nwide result retained"); }
+            }
+            assert!(!presentation.contains("stdout"), "automatic command observations must not prefix the authored presentation");
             let repeated = campaign.root_installation.policy.dispatch_json_boxed(retry).await.unwrap();
             assert_eq!(repeated, response, "an exact transport retry observes the same retained outcome");
             assert_eq!(backend.executions(), 1);
@@ -452,8 +475,40 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
                 result = &mut rejected => result.unwrap(),
                 _ = backend_request(campaign) => panic!("invalid typed input admitted its handler effect"),
             };
-            assert!(matches!(refusal,Err(exomonad_actor::ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Rejected { .. }))), "typed refusal must remain distinct from missing semantic publication: {refusal:?}");
+            assert!(matches!(&refusal, Err(exomonad_actor::ResidentToolError::Declaration(
+                exomonad_tool::ToolDeclarationError::InvalidArguments { name: refused_name }
+            )) if refused_name == name), "the endpoint schema owner must refuse invalid root input: {refusal:?}");
             assert_eq!(backend.executions(),1);
         }
+        let policy = campaign.root_installation.policy.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let (context, completion) = super::test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::External { thread_id:"retention-before-publication".into() },
+            request_id:id.clone(), call_id:id,
+        });
+        let mut running = tokio::spawn(async move {
+            let response = policy.dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                context:Some(context), name:"failed".into(),
+                arguments:exomonad_tool::ToolArguments::Structured(serde_json::json!({"input":"input"})),
+            }).await;
+            policy.complete_boxed(completion).await.unwrap();
+            response
+        });
+        let backend = TestCommands::completed("fallback stdout witness");
+        tokio::select! {
+            request = backend_request(campaign) => request.supply(Ok(backend.clone())),
+            result = &mut running => panic!("handler ended before its command: {result:?}"),
+        }
+        let failure = running.await.unwrap().expect_err("handler failure precedes semantic publication");
+        let exomonad_actor::ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(failure)) = failure else {
+            panic!("expected retained workbench failure: {failure:?}");
+        };
+        assert!(failure.diagnostic.as_ref().is_some_and(|diagnostic|
+            diagnostic.message.contains("handler stopped before semantic result")),
+            "the intended handler failure must own the fallback: {failure:?}");
+        assert!(failure.receipts.iter().any(|receipt| receipt.output.contains("explicit handler output")
+            && receipt.output.contains("fallback stdout witness")),
+            "before semantic publication, failure must retain both explicit output and automatic command evidence: {failure:?}");
+        assert_eq!(backend.executions(), 1);
     })).await;
 }

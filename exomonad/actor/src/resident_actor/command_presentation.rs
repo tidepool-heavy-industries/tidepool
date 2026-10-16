@@ -24,7 +24,7 @@ impl PreparedCommandPresentation {
         actor: ActorRef,
         fragment: &mut ResidentWorkbenchFragment,
         remaining: &mut usize,
-        output: &mut Vec<String>,
+        output: &mut Vec<WorkbenchEffectOutput>,
         recovered_bindings: &mut Vec<String>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(binding) = self.binding {
@@ -34,7 +34,7 @@ impl PreparedCommandPresentation {
         }
         let rendered = fragment.present_command(self.job.clone(), self.presentation, remaining);
         if !rendered.is_empty() {
-            output.push(rendered);
+            output.push(WorkbenchEffectOutput::AutomaticCommand(rendered));
         }
         if let Some(pages) = self.displayed_pages {
             jobs.mark_displayed(actor, &self.job, &pages)
@@ -241,7 +241,12 @@ mod tests {
             panic!("display receipt failure must remain a post-execution observation")
         };
         assert!(detail.contains("command observation receipt"));
-        assert_eq!(output, ["already executed"]);
+        assert_eq!(
+            output,
+            [WorkbenchEffectOutput::AutomaticCommand(
+                "already executed".into()
+            )]
+        );
         assert_eq!(retained, ["retained-by-prior-effect"]);
         assert_eq!(recovered_bindings, ["retained-by-prior-effect"]);
     }
