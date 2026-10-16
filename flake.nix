@@ -28,7 +28,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/e35de1b980fbd1308292d81f0d80c3f6551adbb4";
+      url = "github:tidepool-heavy-industries/exomonad-harness/b2d37779760a69ad16e2c07fc70f9fefcb0f63fe";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
