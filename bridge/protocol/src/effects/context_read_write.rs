@@ -147,7 +147,7 @@ fn type_defs() -> Vec<TypeDef> {
             field("contextUnitVersionReference", "reference", HsType::Named("ContextReference")),
             field("contextUnitVersionDigest", "digest", HsType::Text),
         ]),
-        sum("ContextTextAuthor", &["ContextAuthorUser", "ContextAuthorAssistant", "ContextAuthorTool", "ContextAuthorSystem", "ContextAuthorDeveloper", "ContextAuthorUnknown"], &["Owner-observed authorship of an exact retained text field; not reconstructed from its body."]),
+        sum("ContextTextAuthor", &["ContextAuthorUser", "ContextAuthorAssistant", "ContextAuthorTool", "ContextAuthorSystem", "ContextAuthorDeveloper", "ContextAuthorUnknown"], &["Immutable canonical original occurrence role/type; Unknown remains explicit. Replacement overlays do not change this attribution; later edits retain separate transaction receipts."]),
         record("ContextTextAuthorship", vec![
             field("contextAuthorshipReference", "reference", HsType::Named("ContextReference")),
             field("contextAuthorshipSelector", "selector", HsType::Named("ContextTextSelector")),

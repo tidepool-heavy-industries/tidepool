@@ -41,8 +41,10 @@ as an authority-free `Context`. `contextBlocks`, `visibleTexts`, and
 `editableTexts` is a read-only fold. Native Haskell source/input and function
 arguments stay pinned. `display` gives bounded text previews, character counts,
 exact references, selectors and content versions. `contextAuthorship` reads
-owner-observed authorship and authored-note status keyed by reference and
-selector, without copying bodies or guessing roles from text.
+the immutable canonical original occurrence's role/type and authored-note flag,
+keyed by reference and selector. Unknown remains explicit. This metadata does
+not attribute replacement text to the original author; the later editing
+transaction receipt records that edit separately.
 
 Build one `ContextPatch` with `contextPatch`. Each `replaceText target body`
 uses an opaque target from `textTargets current`, binding the exact reference,

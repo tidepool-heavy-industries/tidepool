@@ -158,13 +158,13 @@ instance Display Context where
         , ("version", displayTree (Text.take 16 (contextUnitVersionDigest version)))
         ]
 
--- Authorship is an observation from the transcript owner, keyed by exact field.
--- It contains no copied text and adds no edit authority.
+-- Authorship identifies the immutable canonical original occurrence, keyed by
+-- exact field. It does not attribute replacement text to that original author.
 displayAuthorship :: ContextTextAuthorship -> DisplayTree
 displayAuthorship authorship = displayRecord 0 "ContextTextAuthorship"
   [ ("reference", displayTree (show (contextAuthorshipReference authorship)))
   , ("selector", displayTree (contextAuthorshipSelector authorship))
-  , ("author", displayTree (show (contextAuthorshipAuthor authorship)))
+  , ("originalAuthor", displayTree (show (contextAuthorshipAuthor authorship)))
   , ("authoredNote", displayTree (contextAuthorshipNote authorship))
   ]
 
@@ -184,8 +184,9 @@ data ContextProvenance
 contextBlocks :: Getter Context [ContextBlock]
 contextBlocks = to (blocks . documentOf)
 
--- | Owner-observed role and authored-note status for each exact text field.
--- Replacing text does not rewrite its original authorship.
+-- | Owner-observed canonical original role/type and authored-note flag for each
+-- exact field. Unknown remains explicit. A replacement keeps this original
+-- attribution; the editing transaction receipt records the later edit separately.
 contextAuthorship :: Getter Context [ContextTextAuthorship]
 contextAuthorship = to (\(Context inspection) -> contextInspectionAuthorship inspection)
 

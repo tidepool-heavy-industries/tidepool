@@ -74,8 +74,10 @@ evidence.
 text and owner-issued content versions. Repeated reads in one cell keep that
 committed base. `contextBlocks` is read-only; `visibleTexts` and `referencedTexts`
 inspect bodies, exact references and selectors. `contextAuthorship` is a read-only
-getter of owner-observed role and authored-note status for each exact field;
-it contains no copied text and does not infer roles from content. `editableTexts` is a read-only
+getter of the immutable canonical original occurrence's role/type and
+authored-note flag for each exact field; Unknown remains explicit. It does not
+attribute replacement text to the original author. The later editing transaction
+receipt records that edit separately. `editableTexts` is a read-only
 fold over eligible bodies. Tool source/input and function arguments stay pinned.
 
 Build one batch with `C.contextPatch`: use `C.replaceText target body` on targets
