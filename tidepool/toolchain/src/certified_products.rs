@@ -12387,6 +12387,7 @@ pub(crate) mod tests {
             assert!(next
                 .compiler_inputs()
                 .metadata
+                .retained
                 .selected_native_groups
                 .is_empty());
             let wire: Value =

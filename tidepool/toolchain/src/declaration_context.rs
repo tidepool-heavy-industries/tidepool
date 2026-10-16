@@ -10855,11 +10855,11 @@ mod tests {
             let product = if native_authored {
                 crate::certified_products::fixture_native_declaration_product(
                     product,
-                    issuer.producer,
+                    issuer.facts.producer,
                     11,
                 )
             } else {
-                crate::certified_products::fixture_finalized_product(product, issuer.producer)
+                crate::certified_products::fixture_finalized_product(product, issuer.facts.producer)
             };
             let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
                 .remove(0)
@@ -10876,7 +10876,7 @@ mod tests {
                         }
                         context = context
                             .extend_checked_original_products(
-                                issuer.producer,
+                                issuer.facts.producer,
                                 std::slice::from_ref(&product),
                             )
                             .unwrap();
@@ -10966,7 +10966,7 @@ mod tests {
         );
         let consumer = crate::certified_products::fixture_source_finalized_product(
             consumer,
-            issuer.producer,
+            issuer.facts.producer,
             vec![crate::certified_products::CanonicalSourceImport {
                 qualifier: crate::cache::ImportQualifier::Unqualified,
                 module: root.module.clone(),
@@ -10988,7 +10988,7 @@ mod tests {
             .context()
             .as_ref()
             .clone()
-            .extend_checked_original_products(issuer.producer, &[consumer])
+            .extend_checked_original_products(issuer.facts.producer, &[consumer])
             .unwrap();
         edit_lexical(&mut context, |nodes| {
             nodes.push(ExactLexicalNode {
@@ -13859,7 +13859,6 @@ mod tests {
         ] {
             assert!(context.recovery_products().is_empty());
             assert!(!context
-                .facts
                 .lexical_graph()
                 .iter()
                 .any(|node| node.owner == owner));

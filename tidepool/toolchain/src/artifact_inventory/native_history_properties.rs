@@ -1856,8 +1856,8 @@ fn cold_native_history(
         expected_metadata
     );
     prop_assert_eq!(
-        metadata.selected_native_groups,
-        catalog.selection(&selected)
+        &metadata.selected_native_groups,
+        &catalog.selection(&selected)
     );
     prop_assert_eq!(
         graph

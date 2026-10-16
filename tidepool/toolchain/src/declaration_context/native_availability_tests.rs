@@ -418,14 +418,16 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         .collect::<Vec<_>>();
     let narrowed = full.interface_projection(&owners).unwrap();
     let projection = CompilerInputProjection::from_interface_view(&narrowed).unwrap();
-    let context = Arc::new(ExactDeclarationContext {
-        producer: producer.sha256(),
-        inventory: narrowed,
-        compiler_projection: projection,
-        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-        template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
-    });
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            inventory: narrowed,
+            compiler_projection: projection,
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
     let before = context.as_ref().clone();
     assert!(context.facts.inventory.selected_native_groups().is_empty());
     let authored_id = entries
@@ -520,11 +522,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     assert!(request
         .compiler_inputs()
         .metadata
+        .retained
         .artifacts
         .contains_key(&helper_id));
     assert!(request
         .compiler_inputs()
         .metadata
+        .retained
         .selected_native_groups
         .is_empty());
     let helper_owner = entries
@@ -1236,6 +1240,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
     assert!(captured_request
         .compiler_inputs()
         .metadata
+        .retained
         .selected_native_groups
         .is_empty());
     assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
@@ -1356,14 +1361,16 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
         )
         .unwrap();
     assert!(artifacts.selected_native_groups().is_empty());
-    let context = Arc::new(ExactDeclarationContext {
-        producer: producer.sha256(),
-        inventory: artifacts,
-        compiler_projection: CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
-        lexical: Default::default(),
-        template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
-    });
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            inventory: artifacts,
+            compiler_projection: CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(context)
         .prepare_compilation(root.path(), PRODUCER)
@@ -1401,8 +1408,12 @@ fn dependency_execution_graph_roots_stay_private_and_malformed_roots_refuse() {
     let full = inventory
         .admit_shared(&inventory.empty_view(), vec![entry])
         .unwrap();
+    let compiler_metadata = CompilerInputProjection::from_issued_entries(&full.entries())
+        .unwrap()
+        .project_metadata(full.metadata_snapshot())
+        .unwrap();
     assert_eq!(
-        compiler_execution_scope(&scope, &full.metadata_snapshot()).unwrap(),
+        compiler_execution_scope(&scope, &compiler_metadata).unwrap(),
         scope
     );
     for malformed in [
