@@ -76,14 +76,8 @@ def validate_generated_source(cargo_lock: dict, flake_lock: dict, revision: str,
     return revision
 
 
-def validate(
-    cargo_manifest: dict,
-    cargo_lock: dict,
-    host_manifest: dict,
-    flake_lock: dict,
-    flake_source: str,
-) -> str:
-    """Return the selected harness commit, or reject any disconnected pin."""
+def selected_host_harness(cargo_manifest: dict, cargo_lock: dict, host_manifest: dict) -> dict:
+    """Resolve the host's exact Harness lock edge and its declared repository."""
     workspace_dependency = cargo_manifest.get("workspace", {}).get("dependencies", {}).get("harness")
     _require(isinstance(workspace_dependency, dict), "workspace harness dependency is missing")
     _require(
@@ -117,9 +111,12 @@ def validate(
     ]
     _require(len(harness_lock_records) == 1, "Cargo.lock must select exactly one Git harness package")
     selected = harness_lock_records[0]
-    lock_requested, lock_resolved = _git_revision(selected["source"], origin="Cargo.lock harness source")
-    _require(lock_requested == requested, "Cargo.lock harness rev differs from Cargo.toml")
-    _require(lock_resolved == requested, "Cargo.lock did not resolve the exact requested harness commit")
+    repository = urlsplit(selected["source"].removeprefix("git+"))
+    expected = urlsplit(HARNESS_REPOSITORY)
+    _require(
+        (repository.scheme, repository.netloc, repository.path) == (expected.scheme, expected.netloc, expected.path),
+        "Cargo.lock harness source does not use the expected repository",
+    )
 
     host_records = [
         package
@@ -153,6 +150,23 @@ def validate(
         resolved == [selected],
         "Cargo.lock host harness dependency does not uniquely select the pinned Git harness package",
     )
+
+    return selected
+
+
+def validate(
+    cargo_manifest: dict,
+    cargo_lock: dict,
+    host_manifest: dict,
+    flake_lock: dict,
+    flake_source: str,
+) -> str:
+    """Return the selected harness commit, or reject any disconnected pin."""
+    selected = selected_host_harness(cargo_manifest, cargo_lock, host_manifest)
+    requested = cargo_manifest["workspace"]["dependencies"]["harness"]["rev"]
+    lock_requested, lock_resolved = _git_revision(selected["source"], origin="Cargo.lock harness source")
+    _require(lock_requested == requested, "Cargo.lock harness rev differs from Cargo.toml")
+    _require(lock_resolved == requested, "Cargo.lock did not resolve the exact requested harness commit")
 
     nodes = flake_lock.get("nodes", {})
     root_inputs = nodes.get("root", {}).get("inputs", {})
@@ -230,6 +244,12 @@ class ProvenanceTests(unittest.TestCase):
         args[1]["package"].append({"name": "tidepool", "version": "0.1.0", "dependencies": ["harness"]})
         args[1]["package"][1]["dependencies"] = []
         with self.assertRaisesRegex(ProvenanceError, "exomonad-host package must depend"):
+            validate(*args)
+
+    def test_same_revision_from_a_different_repository_is_rejected(self) -> None:
+        args = list(fixture())
+        args[1]["package"][0]["source"] = args[1]["package"][0]["source"].replace(HARNESS_REPOSITORY, "https://example.invalid/fork.git")
+        with self.assertRaisesRegex(ProvenanceError, "expected repository"):
             validate(*args)
 
     def test_host_edge_resolves_the_exact_harness_source_and_version(self) -> None:

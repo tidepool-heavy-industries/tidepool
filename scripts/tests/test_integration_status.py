@@ -5,10 +5,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
 
 SPEC = importlib.util.spec_from_file_location("integration_status", Path(__file__).parents[1] / "integration-status.py")
 STATUS = importlib.util.module_from_spec(SPEC)
@@ -40,11 +43,13 @@ class IntegrationStatusTests(unittest.TestCase):
         return self.git("rev-parse", "HEAD")
 
     def write_pins(self, revision, lock_revision=None, flake_revision=None, web_lock_revision=None):
-        git_url = "https://github.com/example/harness.git"
+        (self.repo / "exomonad/host").mkdir(parents=True, exist_ok=True)
+        (self.repo / "exomonad/host/Cargo.toml").write_text('[package]\nname = "exomonad-host"\nversion = "0.1.0"\n[dependencies.harness]\nworkspace = true\n')
+        git_url = "https://github.com/tidepool-heavy-industries/exomonad-harness.git"
         (self.repo / "Cargo.toml").write_text(f'[workspace.dependencies]\nharness = {{ git = "{git_url}", rev = "{revision}", package = "harness" }}\n')
-        (self.repo / "Cargo.lock").write_text(f'[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "git+{git_url}?rev={revision}#{lock_revision or revision}"\n')
-        (self.repo / "flake.nix").write_text(f'{{ inputs.harnessWeb = {{ url = "github:example/harness/{flake_revision or revision}"; flake = false; }}; }}\n')
-        (self.repo / "flake.lock").write_text(json.dumps({"root": "root", "nodes": {"root": {"inputs": {"harnessWeb": "harnessWeb"}}, "harnessWeb": {"locked": {"type": "github", "owner": "example", "repo": "harness", "rev": web_lock_revision or revision}}}}))
+        (self.repo / "Cargo.lock").write_text(f'[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "git+{git_url}?rev={revision}#{lock_revision or revision}"\n[[package]]\nname = "exomonad-host"\nversion = "0.1.0"\ndependencies = ["harness"]\n')
+        (self.repo / "flake.nix").write_text(f'{{ inputs.harnessWeb = {{ url = "github:tidepool-heavy-industries/exomonad-harness/{flake_revision or revision}"; flake = false; }}; }}\n')
+        (self.repo / "flake.lock").write_text(json.dumps({"root": "root", "nodes": {"root": {"inputs": {"harnessWeb": "harnessWeb"}}, "harnessWeb": {"locked": {"type": "github", "owner": "tidepool-heavy-industries", "repo": "exomonad-harness", "rev": web_lock_revision or revision}}}}))
 
     def invoke(self, *args):
         output = io.StringIO()
@@ -122,6 +127,55 @@ class IntegrationStatusTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("harness_pin_disagreement", report["errors"])
 
+    def test_unselected_harness_inventory_cannot_satisfy_required_ancestry(self):
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        for edge in (None, "foreign-harness", "harness", "harness 0.1.0", "harness 0.1.0 (" + registry + ")"):
+            with self.subTest(edge=edge):
+                self.write_pins(self.base)
+                path = self.repo / "Cargo.lock"
+                contents = path.read_text().replace('dependencies = ["harness"]',
+                    'dependencies = []' if edge is None else 'dependencies = [' + json.dumps(edge) + ']')
+                # The correct Git record remains available but the host either
+                # has no such edge, selects a foreign source, or is ambiguous.
+                path.write_text(contents + '\n[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "' + registry + '"\n')
+                code, report = self.invoke("--strict", "--harness-repo", str(self.repo),
+                                           "--required-harness-ancestor", self.base)
+                self.assertEqual(code, 1)
+                self.assertFalse(report["strict_ok"])
+                self.assertIn("harness_pins_unavailable", report["errors"])
+                self.assertIsNone(report["harness_repository"]["selected_revision"])
+                self.assertIsNone(report["harness_repository"]["selected_contains_required"])
+
+    def test_exact_host_git_edge_survives_unrelated_registry_inventory(self):
+        path = self.repo / "Cargo.lock"
+        source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=" + self.base + "#" + self.base
+        contents = path.read_text().replace('dependencies = ["harness"]',
+            'dependencies = [' + json.dumps("harness 0.1.0 (" + source + ")") + ']')
+        path.write_text(contents + '\n[[package]]\nname = "harness"\nversion = "0.1.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n')
+        code, report = self.invoke("--strict", "--harness-repo", str(self.repo),
+                                  "--required-harness-ancestor", self.base)
+        self.assertEqual(code, 0)
+        self.assertTrue(report["harness_repository"]["selected_contains_required"])
+
+    def test_same_revision_from_foreign_repository_is_not_selected(self):
+        path = self.repo / "Cargo.lock"
+        path.write_text(path.read_text().replace("https://github.com/tidepool-heavy-industries/exomonad-harness.git", "https://example.invalid/fork.git"))
+        code, report = self.invoke("--strict", "--harness-repo", str(self.repo),
+                                  "--required-harness-ancestor", self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("harness_pins_unavailable", report["errors"])
+        self.assertIsNone(report["harness_repository"]["selected_contains_required"])
+
+    def test_native_revision_is_the_resolved_host_edge_even_during_pin_disagreement(self):
+        actual = self.commit("selected-change", "selected")
+        self.write_pins(self.base, lock_revision=actual)
+        code, report = self.invoke("--strict", "--harness-repo", str(self.repo),
+                                  "--required-harness-ancestor", actual)
+        self.assertEqual(code, 1)
+        self.assertIn("harness_pin_disagreement", report["errors"])
+        self.assertEqual(report["harness_pins"]["selected_native_revision"], actual)
+        self.assertTrue(report["harness_repository"]["selected_contains_required"])
+
     def test_required_harness_ancestor_uses_selected_commit_not_main(self):
         descendant = self.commit("harness-change", "one")
         self.write_pins(descendant)
@@ -162,7 +216,7 @@ class IntegrationStatusTests(unittest.TestCase):
 
     def test_source_repository_mismatch_and_credentials_are_not_printed(self):
         text = (self.repo / "Cargo.toml").read_text()
-        (self.repo / "Cargo.toml").write_text(text.replace("https://github.com/example/harness.git", "https://private-token@github.com/other/harness.git"))
+        (self.repo / "Cargo.toml").write_text(text.replace("https://github.com/tidepool-heavy-industries/exomonad-harness.git", "https://private-token@github.com/other/harness.git"))
         code, report = self.invoke("--strict")
         self.assertEqual(code, 1)
         self.assertNotIn("private-token", json.dumps(report))
@@ -236,7 +290,7 @@ class IntegrationStatusTests(unittest.TestCase):
     def test_nix_expression_is_evaluated_without_outputs(self):
         (self.repo / "flake.nix").write_text(
             'let revision = "' + self.base + '"; in { inputs.harnessWeb.url = '
-            '"github:example/harness/" + revision; outputs = throw "outputs must not be evaluated"; }'
+            '"github:tidepool-heavy-industries/exomonad-harness/" + revision; outputs = throw "outputs must not be evaluated"; }'
         )
         code, report = self.invoke("--strict")
         self.assertEqual(code, 0)

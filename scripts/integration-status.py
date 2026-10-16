@@ -9,6 +9,8 @@ import subprocess
 import tomllib
 from urllib.parse import parse_qs, urlsplit
 
+from embedded_web_provenance import selected_host_harness
+
 
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
@@ -60,12 +62,14 @@ def repository_identity(url):
 
 def pins(repo):
     with (repo / "Cargo.toml").open("rb") as handle:
-        cargo = tomllib.load(handle)["workspace"]["dependencies"]["harness"]
+        manifest = tomllib.load(handle)
+    cargo = manifest["workspace"]["dependencies"]["harness"]
     with (repo / "Cargo.lock").open("rb") as handle:
-        packages = [p for p in tomllib.load(handle)["package"] if p["name"] == cargo.get("package", "harness")]
-    if len(packages) != 1:
-        raise ObservationError("Cargo.lock must contain one selected Harness package")
-    locked = urlsplit(packages[0]["source"].removeprefix("git+"))
+        cargo_lock = tomllib.load(handle)
+    with (repo / "exomonad/host/Cargo.toml").open("rb") as handle:
+        host_manifest = tomllib.load(handle)
+    selected = selected_host_harness(manifest, cargo_lock, host_manifest)
+    locked = urlsplit(selected["source"].removeprefix("git+"))
     revisions = parse_qs(locked.query).get("rev", [])
     if len(revisions) != 1:
         raise ObservationError("Cargo.lock Harness source requires one exact rev")
@@ -88,7 +92,7 @@ def pins(repo):
         raise ObservationError("flake.lock harnessWeb must identify GitHub")
     identities = {
         "cargo_manifest": {"revision": cargo["rev"], "repository": repository_identity(cargo["git"])},
-        "cargo_lock": {"revision": locked.fragment, "requested_revision": revisions[0], "repository": repository_identity(packages[0]["source"])},
+        "cargo_lock": {"revision": locked.fragment, "requested_revision": revisions[0], "repository": repository_identity(selected["source"])},
         "flake_manifest": {"revision": revision, "repository": f"github.com/{owner}/{name}".lower()},
         "flake_lock": {"revision": node["rev"], "repository": f'github.com/{node["owner"]}/{node["repo"]}'.lower()},
     }
@@ -98,7 +102,7 @@ def pins(repo):
                 raise ObservationError("Harness pins must use exact full object IDs")
     agreed = len({i["revision"] for i in identities.values()}) == 1 and len({i["repository"] for i in identities.values()}) == 1
     agreed = agreed and revisions[0] == locked.fragment
-    return {"agreement": agreed, "observation": "working_tree_files", "sources": identities, "selected_native_revision": cargo["rev"]}
+    return {"agreement": agreed, "observation": "working_tree_files", "sources": identities, "selected_native_revision": locked.fragment}
 
 
 def observe(repo, candidates=(), harness_repo=None, required_ancestor=None):
