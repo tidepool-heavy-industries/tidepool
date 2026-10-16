@@ -849,12 +849,22 @@ pub(crate) struct RequestCompilerInputs {
     original_sources: crate::certified_products::RetainedOriginalSources,
 }
 
-enum NativeTransportAvailability {
+#[derive(Clone, Debug)]
+pub(crate) enum NativeTransportAvailability {
     FullCarrier(ArtifactBinding),
     IssuedGroups {
         groups: BTreeSet<u32>,
         carrier: Option<ArtifactBinding>,
     },
+}
+
+impl NativeTransportAvailability {
+    pub(crate) fn permits(&self, ordinal: u32) -> bool {
+        match self {
+            Self::FullCarrier(_) => true,
+            Self::IssuedGroups { groups, .. } => groups.contains(&ordinal),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -867,7 +877,7 @@ struct NativeTransportBuilder {
 /// All rows, aliases and arena images use this single request-local selection.
 struct NativeCompilerTransport {
     metadata: ArtifactMetadataSnapshot,
-    availability: BTreeMap<ArtifactId, NativeTransportAvailability>,
+    availability: BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
 }
 
 impl NativeCompilerTransport {
@@ -988,7 +998,7 @@ impl NativeCompilerTransport {
                         carrier: offer.carrier,
                     }
                 };
-                Ok((id, mode))
+                Ok((id, Arc::new(mode)))
             })
             .collect::<Result<_, CompileError>>()?;
         Ok(Self {
@@ -1041,6 +1051,13 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    pub(crate) fn native_availability(
+        &self,
+        original: ArtifactId,
+    ) -> Option<Arc<NativeTransportAvailability>> {
+        self.native_transport.availability.get(&original).cloned()
+    }
+
     pub(crate) fn available_original_sources(
         &self,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
@@ -7185,7 +7202,7 @@ impl ExactDeclarationContext {
                             .filter(|group| independent && group.owner() == owner)
                             .map(PendingCertifiedGroup::group)
                             .collect::<Vec<_>>();
-                        let availability = &inputs.native_transport.availability[&selected];
+                        let availability = inputs.native_transport.availability[&selected].as_ref();
                         let mode = match availability {
                             NativeTransportAvailability::FullCarrier(carrier) => {
                                 if carrier.artifact != selected {

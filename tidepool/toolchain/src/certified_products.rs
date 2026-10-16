@@ -1106,6 +1106,12 @@ pub enum OriginalMembershipFailure {
     OriginalBytes(CachedHomeOwner),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct OriginalAvailabilityRefusal {
+    pub owner: CachedHomeOwner,
+    pub original_ordinal: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
     #[error("compiler host work interrupted: {0}")]
@@ -1134,6 +1140,8 @@ pub enum CertificationError {
     OriginalSelectionConflict(Box<OriginalSelectionConflict>),
     #[error("compiler original membership observation rejected: {0:?}")]
     OriginalMembership(Box<OriginalMembershipFailure>),
+    #[error("source group is outside this request's original availability: {0:?}")]
+    OriginalAvailability(Box<OriginalAvailabilityRefusal>),
     #[error("selected compiler original closure rejected: {0}")]
     OriginalClosure(#[source] Box<crate::CompileError>),
     #[error("finalized module payload capture failed: {0}")]
@@ -2424,6 +2432,24 @@ struct ReceiptNativeSelection {
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
     requirements: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
+    availability: ReceiptNativeAvailability,
+}
+
+#[derive(Clone, Debug)]
+enum ReceiptNativeAvailability {
+    /// Explicit complete products and newly certified source own their bodies.
+    CompleteProduct,
+    /// Exact requests retain the same immutable fact used by their input wire.
+    Request(Arc<crate::declaration_context::NativeTransportAvailability>),
+}
+
+impl ReceiptNativeAvailability {
+    fn permits(&self, ordinal: u32) -> bool {
+        match self {
+            Self::CompleteProduct => true,
+            Self::Request(availability) => availability.permits(ordinal),
+        }
+    }
 }
 
 impl ReceiptSourceSelection {
@@ -2456,6 +2482,35 @@ impl CertifiedSourceSelection {
         let mut selected = Self::from_compiler_projection(&inputs.projection, metadata, operation)?;
         selected
             .with_native_original_requirements(metadata, &inputs.native_original_requirements)?;
+        for role in inputs.projection.roles() {
+            let Some(original) = role.original() else {
+                continue;
+            };
+            let Some(crate::artifact_inventory::ArtifactEntry {
+                payload: crate::artifact_inventory::ArtifactPayload::Original(product),
+                ..
+            }) = metadata.artifacts.get(&original).map(Arc::as_ref)
+            else {
+                return Err(CertificationError::Mismatch("request original payload"));
+            };
+            let key = (product.owner().unit.clone(), product.owner().module.clone());
+            let Some(ReceiptSourceSelection::Native { native, .. }) =
+                Arc::make_mut(&mut selected.modules).get_mut(&key)
+            else {
+                return Err(CertificationError::Mismatch(
+                    "request original compiler role",
+                ));
+            };
+            if native.owner != *product.owner() {
+                return Err(CertificationError::Mismatch(
+                    "request original compiler owner",
+                ));
+            }
+            native.availability =
+                ReceiptNativeAvailability::Request(inputs.native_availability(original).ok_or(
+                    CertificationError::Mismatch("request original availability"),
+                )?);
+        }
         Ok(selected)
     }
 
@@ -2908,6 +2963,7 @@ impl CertifiedSourceSelection {
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
                             requirements: Vec::new(),
+                            availability: ReceiptNativeAvailability::CompleteProduct,
                         },
                     },
                 )
@@ -3014,6 +3070,7 @@ impl CertifiedSourceSelection {
                     owner: owner.clone(),
                     version,
                     requirements: Vec::new(),
+                    availability: ReceiptNativeAvailability::CompleteProduct,
                 },
             },
         );
@@ -3422,6 +3479,14 @@ fn resolve_receipt_owner_with_validation(
                     .is_some_and(|version| version != &selected.owner.module_version)
                 {
                     return Err(CertificationError::Mismatch("source module version"));
+                }
+                if !selected.availability.permits(original_ordinal) {
+                    return Err(CertificationError::OriginalAvailability(Box::new(
+                        OriginalAvailabilityRefusal {
+                            owner: selected.owner.clone(),
+                            original_ordinal,
+                        },
+                    )));
                 }
                 sources
                     .get(&(selected.owner.clone(), original_ordinal, binder.clone()))
@@ -11765,6 +11830,38 @@ pub(crate) mod tests {
                 .compiler_inputs()
                 .available_original_sources(std::slice::from_ref(&product), &validation.inventory)
                 .unwrap();
+            if mode == "issued" {
+                // An already certified native body owns its historical child
+                // independently of this request's direct compiler selection.
+                let edge = PendingImportOwner::Source {
+                    owner: product.owner().clone(),
+                    original_ordinal: 9001,
+                    binder: testing::identity("BoundedHelper", "entry_9001"),
+                };
+                let historical =
+                    full_native_fixture("ProtectedHistory", vec![(11, vec![edge.clone()])], 72);
+                let original = &historical.original_native().unwrap().groups[0];
+                let receipt = ReceiptImportOwner::Source {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                    module_version: Some(product.owner().module_version.clone()),
+                    original_ordinal: 9001,
+                    binder: testing::identity("BoundedHelper", "entry_9001"),
+                };
+                let sources = membership
+                    .overlay(&request.groups, &validation.inventory)
+                    .unwrap();
+                let checked = validate_original_group_receipts(
+                    original.group(),
+                    &[receipt],
+                    original,
+                    &sources,
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap();
+                assert_eq!(checked.imports(), &[edge]);
+            }
             for ordinal in [7, 9001] {
                 observed += 1;
                 let binder = testing::identity("BoundedHelper", &format!("entry_{ordinal}"));
@@ -11799,6 +11896,19 @@ pub(crate) mod tests {
                     &BTreeMap::new(),
                     &mut validation,
                 );
+                if mode == "canonical" {
+                    assert!(matches!(
+                        &imported,
+                        Err(CertificationError::Mismatch(
+                            "source outside compiler selection"
+                        ))
+                    ));
+                } else if mode == "issued" && ordinal == 9001 {
+                    assert!(
+                        matches!(&imported, Err(CertificationError::OriginalAvailability(refusal))
+                        if refusal.owner == *product.owner() && refusal.original_ordinal == 9001)
+                    );
+                }
                 let outcome = imported
                     .map_err(|error| format!("certification: {error:?}"))
                     .and_then(|imports| {
