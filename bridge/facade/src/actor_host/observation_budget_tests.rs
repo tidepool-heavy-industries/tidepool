@@ -436,6 +436,24 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
             let repeated = campaign.root_installation.policy.dispatch_json_boxed(retry).await.unwrap();
             assert_eq!(repeated, response, "an exact transport retry observes the same retained outcome");
             assert_eq!(backend.executions(), 1);
+            let invalid_id = uuid::Uuid::new_v4().to_string();
+            let (invalid_context, invalid_completion) = super::test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::External { thread_id:"retention-invalid".into() },
+                request_id:invalid_id.clone(), call_id:invalid_id,
+            });
+            let policy = campaign.root_installation.policy.clone();
+            let invalid = exomonad_tool::ToolInvocation { context:Some(invalid_context), name:name.into(), arguments:exomonad_tool::ToolArguments::Structured(serde_json::json!(42)) };
+            let mut rejected = tokio::spawn(async move {
+                let result = policy.dispatch_json_boxed(invalid).await;
+                policy.complete_boxed(invalid_completion).await.unwrap();
+                result
+            });
+            let refusal = tokio::select! {
+                result = &mut rejected => result.unwrap(),
+                _ = backend_request(campaign) => panic!("invalid typed input admitted its handler effect"),
+            };
+            assert!(matches!(refusal,Err(exomonad_actor::ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Rejected { .. }))), "typed refusal must remain distinct from missing semantic publication: {refusal:?}");
+            assert_eq!(backend.executions(),1);
         }
     })).await;
 }

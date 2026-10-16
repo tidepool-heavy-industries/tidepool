@@ -331,8 +331,15 @@ fn oversized_original_identity_is_explicitly_omitted_with_the_native_inspection_
 #[test]
 fn unconfirmed_cancellation_keeps_its_kind_and_bounds_retained_error_output() {
     let operation = origin();
+    let canonical = super::super::embedded_policy::encode_native_result(
+        exomonad_actor::ResidentToolResponse::Value(
+            json!({"application":"already returned","semantic":"λ".repeat(50000)}),
+        ),
+        super::super::embedded_policy::native_original(&operation).unwrap(),
+    )
+    .unwrap();
     let output = native_terminal_output(
-        Ok(json!({"application": "already returned"})),
+        Ok(canonical.clone()),
         Err(error(
             vec![receipt(
                 0,
@@ -349,6 +356,11 @@ fn unconfirmed_cancellation_keeps_its_kind_and_bounds_retained_error_output() {
     let JobOutput::CancellationUnconfirmed(message) = output else {
         panic!("projection must preserve unconfirmed cancellation");
     };
+    assert_eq!(
+        message.result_receipt(),
+        Some(&canonical),
+        "cleanup uncertainty must retain the completed value"
+    );
     let message = message.message();
     assert!(message.len() <= TOOL_ERROR_MESSAGE_BYTE_BUDGET);
     assert!(message.contains("native cleanup remains unconfirmed"));

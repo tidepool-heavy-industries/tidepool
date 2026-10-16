@@ -132,7 +132,12 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
                 if exit.cleanup_confirmed {
                     JobOutput::CancelledWithReceipt(receipt)
                 } else {
-                    JobOutput::CancellationUnconfirmed("native cell cleanup unconfirmed".into())
+                    JobOutput::CancellationUnconfirmed(
+                        super::embedded_harness::retain_unconfirmed_receipt(
+                            "native cell cleanup unconfirmed".into(),
+                            receipt,
+                        ),
+                    )
                 }
             }
             output => output,
@@ -146,6 +151,7 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
                 ContextDisposition::Unedited
             };
         Some(ProviderCompletion {
+            output_format: super::embedded_harness::native_output_format(&output),
             activation_terminal: self
                 .request_reply
                 .as_ref()

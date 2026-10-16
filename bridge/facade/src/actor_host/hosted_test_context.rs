@@ -2471,6 +2471,7 @@ mod tests {
                 _: harness::provider::CallContext,
             ) -> harness::provider::ProviderCompletion {
                 harness::provider::ProviderCompletion {
+                    output_format: harness::provider::OutputFormat::LegacyOpaque,
                     activation_terminal: None,
                     output: self.0.clone(),
                     full_success: false,
