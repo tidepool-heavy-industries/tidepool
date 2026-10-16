@@ -594,6 +594,7 @@ impl HostedTestDiagnostics {
 #[derive(Clone)]
 pub(super) struct ObservedInstallation {
     pub(super) actor: LocalActorRef,
+    pub(super) runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
     pub(super) policy: Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     pub(super) checkpoint: bool,
     pub(super) context_parent: Option<ActorRef>,
@@ -687,6 +688,7 @@ impl HostTestObserver {
             installation.actor.identity(),
             ObservedInstallation {
                 actor: installation.actor.clone(),
+                runtime_observation: installation.runtime_observation.clone(),
                 policy: installation.policy.clone(),
                 checkpoint: installation.checkpoint.is_some(),
                 context_parent: installation.context_parent,
