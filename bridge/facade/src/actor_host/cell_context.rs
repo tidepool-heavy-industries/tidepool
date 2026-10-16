@@ -6,8 +6,8 @@ use exomonad_tool::ToolInvocationContext;
 use harness::{
     context::{
         ContextDraft, ContextPatch, ContextProblem, ContextProblemCode, ContextReference,
-        ContextSnapshot, ContextTextSelector, ContextTransaction, ContextTransactionDraft,
-        ContextTransactionStatus,
+        ContextSnapshot, ContextTextAuthorship, ContextTextSelector, ContextTransaction,
+        ContextTransactionDraft, ContextTransactionStatus,
     },
     model::Effort,
     provider::{ContextDisposition, InvocationCompletionSource, ProviderCompletion},
@@ -60,6 +60,7 @@ struct DraftState {
     draft: ContextDraft,
     changed: bool,
     staged: Option<(ContextPatch, ContextTransaction)>,
+    authorship: Vec<ContextTextAuthorship>,
 }
 
 enum DraftLifecycle {
@@ -90,7 +91,10 @@ impl EmbeddedContextBinding {
         model: ModelResolver,
         initial_context: InitialContextObserver,
         store: Arc<harness::store::Store>,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        let inspection = store
+            .inspect_context(snapshot)
+            .map_err(|error| error.to_string())?;
         let issuing_snapshot = Arc::new(snapshot.clone());
         let original_snapshot = issuing_snapshot.clone();
         let issuing_store = store.clone();
@@ -113,7 +117,7 @@ impl EmbeddedContextBinding {
                     .map_err(|error| error.to_string())
             },
         );
-        Self {
+        Ok(Self {
             invocation,
             model,
             initial_context,
@@ -124,14 +128,15 @@ impl EmbeddedContextBinding {
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
-                    document: snapshot.document.clone(),
+                    document: inspection.document,
                     next_model: None,
                     next_effort: None,
                 },
                 changed: false,
                 staged: None,
+                authorship: inspection.authorship,
             })),
-        }
+        })
     }
 
     pub(super) fn with_request_reply(
@@ -318,8 +323,10 @@ impl HostedContextBinding for EmbeddedContextBinding {
                     .map(Response::new)
                     .map_err(EffectError::Handler),
                 ContextReq::GetContextWith => {
+                    let mut inspection = harness::context::inspect_context(&state.draft.document);
+                    inspection.authorship.clone_from(&state.authorship);
                     Ok(Response::new(super::context_wire::inspection_to_wire(
-                        &harness::context::inspect_context(&state.draft.document),
+                        &inspection,
                     )))
                 }
                 ContextReq::StageContextWith(patch) => {
@@ -503,6 +510,7 @@ mod tests {
                 },
                 changed: true,
                 staged: None,
+                authorship: vec![],
             })),
         }
     }
@@ -610,6 +618,58 @@ mod tests {
             };
             assert_eq!(discarded.patch, patch);
         }
+    }
+
+    #[test]
+    fn immediate_stage_refusal_does_not_poison_explicit_choice_publication() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([24; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("choice-after-refusal".into()),
+            principal,
+        )
+        .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
+                changes: vec![tidepool_bridge_effects::ContextChange::ReplaceContextText {
+                    reference: tidepool_bridge_effects::ContextReference {
+                        raw: "missing".into(),
+                    },
+                    selector: tidepool_bridge_effects::ContextTextSelector::MessageText { part: 0 },
+                    expected: "a".repeat(64),
+                    text: "never staged".into(),
+                }],
+            }),
+            principal,
+        )
+        .unwrap();
+        assert!(binding.state.lock().staged.is_none());
+        prepare_result(
+            &binding,
+            ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+            principal,
+        )
+        .unwrap();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let ContextDisposition::Draft(draft) = completion.context else {
+            panic!("unaccepted batch must leave explicit standalone choice publication eligible");
+        };
+        assert_eq!(draft.next_model.as_deref(), Some("choice-after-refusal"));
+        assert_eq!(draft.next_effort, Some(Effort::High));
+        assert!(draft.document.blocks.is_empty());
     }
 
     #[test]

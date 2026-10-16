@@ -1,9 +1,15 @@
 import qualified Tidepool.Agent.Context as C
+import Control.Lens (view)
 
 transactionBefore <- C.getContext
 transactionTarget <- case filter ((== "parent-original") . C.targetText) (C.textTargets transactionBefore) of
   [target] -> pure target
   _ -> error "expected one exact original field"
+display (case filter (\metadata -> C.contextAuthorshipReference metadata == C.targetReference transactionTarget
+        && C.contextAuthorshipSelector metadata == C.targetSelector transactionTarget)
+        (view C.contextAuthorship transactionBefore) of
+  [metadata] -> C.contextAuthorshipAuthor metadata == C.ContextAuthorUser && not (C.contextAuthorshipNote metadata)
+  _ -> False)
 let transactionPatch = C.contextPatch
       [ C.replaceText transactionTarget "conditional-context-replacement"
       , C.appendNote "assistant-source-note" [C.targetReference transactionTarget]

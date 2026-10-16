@@ -892,7 +892,7 @@ async fn resident_targeted_transaction_reconciles_after_cell_and_retains_origina
             .filter(|item| item["output"] == "True")
             .count()
     };
-    assert_eq!(true_displays(&staged_output), 4, "{staged_output}");
+    assert_eq!(true_displays(&staged_output), 5, "{staged_output}");
     assert_context_operations_uncommitted(&staged_output);
     assert_eq!(committed.request.model, model);
     assert_eq!(committed.request.pinned_effort, effort);
@@ -923,7 +923,7 @@ async fn resident_targeted_transaction_reconciles_after_cell_and_retains_origina
     );
     let observed = next_round(&mut rounds, &fixture.context).await;
     let output = successful_output(&observed.request, "targeted-context-readback");
-    assert_eq!(true_displays(&output), 3, "{output}");
+    assert_eq!(true_displays(&output), 5, "{output}");
     assert_eq!(observed.request.model, model);
     assert_eq!(observed.request.pinned_effort, effort);
     assert!(has_user_text(

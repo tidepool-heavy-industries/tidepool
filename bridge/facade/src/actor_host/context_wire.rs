@@ -33,6 +33,27 @@ pub(super) fn inspection_to_wire(
                 digest: version.digest.clone(),
             })
             .collect(),
+        authorship: inspection
+            .authorship
+            .iter()
+            .map(|metadata| {
+                use harness::context::ContextTextAuthor as Author;
+                use tidepool_bridge_effects::ContextTextAuthor as Wire;
+                tidepool_bridge_effects::ContextTextAuthorship {
+                    reference: reference_to_wire(&metadata.reference),
+                    selector: selector_to_wire(&metadata.selector),
+                    author: match metadata.author {
+                        Author::User => Wire::ContextAuthorUser,
+                        Author::Assistant => Wire::ContextAuthorAssistant,
+                        Author::Tool => Wire::ContextAuthorTool,
+                        Author::System => Wire::ContextAuthorSystem,
+                        Author::Developer => Wire::ContextAuthorDeveloper,
+                        Author::Unknown => Wire::ContextAuthorUnknown,
+                    },
+                    authored_note: metadata.authored_note,
+                }
+            })
+            .collect(),
     }
 }
 
