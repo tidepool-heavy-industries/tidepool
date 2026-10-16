@@ -492,7 +492,7 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
 }
 
 #[test]
-fn issued_offer_retention_keeps_first_conflict_and_its_parent_evidence() {
+fn issued_offer_retention_preserves_historical_canonical_custody() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let current = product("RetentionConflict", 92);
@@ -532,7 +532,7 @@ fn issued_offer_retention_keeps_first_conflict_and_its_parent_evidence() {
         current_offer,
     ];
     let projection = CompilerInputProjection::from_issued_entries(&[current_entry]).unwrap();
-    let error = ordered_offer_retention(&context, &offers).unwrap_err();
+    let error = context.merge(&changed_source).unwrap_err();
     let CompileError::ArtifactInventory(error) = error else {
         panic!("expected typed conflict, got {error:?}");
     };
@@ -540,7 +540,35 @@ fn issued_offer_retention_keeps_first_conflict_and_its_parent_evidence() {
         error.failure,
         crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { .. }
     ));
-    assert_offer_retention_matches_ordered_fold(&context, &projection, &offers);
+    for end in 0..=offers.len() {
+        let retained = crate::artifact_inventory::CompilerSourceSupport::new(
+            projection.clone(),
+            context.clone(),
+            offers[..end].iter().cloned(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained.artifacts.capture_graph_selection().namespace,
+            context.capture_graph_selection().namespace
+        );
+        assert_eq!(
+            retained.artifacts.capture_graph_selection().roots,
+            context.capture_graph_selection().roots
+        );
+        for offer in &offers[..end] {
+            let actual = retained.artifacts.capture_graph_selection();
+            let expected = offer.custody().capture_graph_selection();
+            assert!(expected
+                .bindings
+                .iter()
+                .all(|node| actual.bindings.contains(node)));
+            assert!(offer
+                .custody()
+                .binding_dependencies()
+                .iter()
+                .all(|edge| retained.artifacts.binding_dependencies().contains(edge)));
+        }
+    }
 }
 
 #[test]
@@ -4802,4 +4830,185 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
             .selected_native_groups()
             .is_empty());
     }
+}
+
+#[test]
+fn historical_canonical_offer_histories_preserve_selected_request_and_recovery() {
+    use crate::artifact_inventory::{
+        CompilerSourceSupport, IssuedNativeOffer, NativeOriginalRequirement,
+    };
+    use crate::exact_context::{hydrate_context, Materializer};
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let root = tempfile::tempdir().unwrap();
+    let mut histories = 0;
+    for changed_body in [false, true] {
+        for mode in 0..3 {
+            for reverse in [false, true] {
+                for duplicate in [false, true] {
+                    let old = product("HistoricalCanonical", 91);
+                    let new = fixture_finalized_product(
+                        original_groups_fixture_with_interface(
+                            "HistoricalCanonical",
+                            vec![(7, vec![]), (9001, vec![])],
+                            if changed_body { 92 } else { 91 },
+                            &BTreeMap::new(),
+                            b"independent current canonical interface".to_vec(),
+                        ),
+                        producer.sha256(),
+                    );
+                    let new = recovered_witness_fixtures(&[new]).remove(0).product;
+                    let entries = [old, new]
+                        .into_iter()
+                        .map(|product| {
+                            Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
+                        })
+                        .collect::<Vec<_>>();
+                    let sources = entries
+                        .iter()
+                        .map(|entry| {
+                            let inventory = ArtifactInventory::default();
+                            inventory
+                                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let old_projection =
+                        CompilerInputProjection::from_issued_entries(&[entries[0].clone()])
+                            .unwrap();
+                    let proof = NativeOriginalRequirement::from_selected_view(
+                        entries[0].descriptor.id,
+                        &sources[0],
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let full = IssuedNativeOffer::issue(
+                        entries[0].descriptor.id,
+                        &sources[0],
+                        Some(proof),
+                    )
+                    .unwrap();
+                    let partial = full
+                        .within_projection(&old_projection, &sources[0].inventory().empty_view())
+                        .unwrap()
+                        .unwrap();
+                    let offer = match mode {
+                        0 => IssuedNativeOffer::issue(entries[0].descriptor.id, &sources[0], None)
+                            .unwrap(),
+                        1 => partial,
+                        _ => full,
+                    };
+                    let selected = sources[1]
+                        .interface_projection(&[entries[1].descriptor.owner.clone()])
+                        .unwrap();
+                    let projection =
+                        CompilerInputProjection::from_interface_view(&selected).unwrap();
+                    let mut offers = vec![offer.clone()];
+                    if duplicate {
+                        offers.push(offer.clone());
+                    }
+                    // A covered prefix followed by another authenticated scope.
+                    let auxiliary =
+                        IssuedNativeOffer::issue(entries[1].descriptor.id, &sources[1], None)
+                            .unwrap();
+                    if reverse {
+                        offers.insert(0, auxiliary);
+                    } else {
+                        offers.push(auxiliary);
+                    }
+                    let support =
+                        CompilerSourceSupport::new(projection.clone(), selected.clone(), offers)
+                            .unwrap();
+                    assert_eq!(
+                        support.artifacts.capture_graph_selection().namespace,
+                        selected.capture_graph_selection().namespace
+                    );
+                    assert_eq!(
+                        support.artifacts.capture_graph_selection().roots,
+                        selected.capture_graph_selection().roots
+                    );
+                    assert!(support.artifacts.selected_native_groups().is_empty());
+                    let graph = support.artifacts.capture_graph_selection();
+                    assert!(offer
+                        .custody()
+                        .capture_graph_selection()
+                        .bindings
+                        .iter()
+                        .all(|node| graph.bindings.contains(node)));
+                    assert!(offer
+                        .custody()
+                        .binding_dependencies()
+                        .iter()
+                        .all(|edge| support.artifacts.binding_dependencies().contains(edge)));
+                    let expected = support.native_offer_observations().unwrap();
+                    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+                        producer: producer.sha256(),
+                        compiler_support: support,
+                        lexical: Default::default(),
+                        template_imports: None,
+                        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+                    });
+                    let store = MemoryBlockstore::new();
+                    let mut materializer = Materializer::new(&store);
+                    let receipt = materializer
+                        .materialize_context(None, &context.snapshot())
+                        .unwrap();
+                    for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+                        store.put_keyed(&cid, &bytes).unwrap();
+                    }
+                    let receipt = hydrate_context(&store, receipt.root()).unwrap();
+                    let path = root.path().join(format!("recovery-{histories}"));
+                    std::fs::create_dir_all(&path).unwrap();
+                    let (products, interfaces) = context
+                        .materialize_recovery_products_and_interfaces(&path)
+                        .unwrap();
+                    let graph = context.snapshot().graph_selection().unwrap();
+                    let recovered = RecoveredArtifactInventory::capture_bound(
+                        &path,
+                        &products,
+                        &interfaces,
+                        &[],
+                        &[],
+                        &context.artifact_view().descriptors(),
+                        &graph.bindings,
+                        &context.artifact_view().binding_dependencies(),
+                    )
+                    .unwrap();
+                    let restored = recovered.context_with_snapshot(receipt.snapshot()).unwrap();
+                    assert_eq!(
+                        restored
+                            .facts
+                            .compiler_support
+                            .native_offer_observations()
+                            .unwrap(),
+                        expected
+                    );
+                    assert_eq!(
+                        restored.artifact_view().capture_graph_selection(),
+                        context.artifact_view().capture_graph_selection()
+                    );
+                    assert!(restored.lexical_graph().is_empty());
+                    let request = ExactCompileContext::new(Arc::new(restored))
+                        .prepare_compilation(
+                            &root.path().join(format!("request-{histories}")),
+                            PRODUCER,
+                        )
+                        .unwrap();
+                    assert!(request
+                        .compiler_inputs()
+                        .artifacts
+                        .selected_native_groups()
+                        .is_empty());
+                    assert_eq!(request.compiler_inputs().projection, projection);
+                    assert!(request
+                        .compiler_inputs()
+                        .native_transport
+                        .availability
+                        .is_empty());
+                    histories += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(histories, 24);
 }
