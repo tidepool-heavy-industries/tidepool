@@ -4706,11 +4706,23 @@ impl ExactCompilationRequest {
             .iter()
             .map(|module| (module.unit.as_str(), module.module.as_str(), module.boot))
             .collect();
-        if source_owners
+        if let Some((unit, module, _)) = source_owners
             .iter()
-            .any(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
+            .find(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
         {
-            return Err(failure("fresh module replaced an admitted exact owner"));
+            let context_owner = interfaces.iter().any(|interface| {
+                interface.owner.unit == *unit && interface.owner.module == *module
+            });
+            let planned_owner =
+                planned.is_some_and(|owner| owner.unit == *unit && owner.module == *module);
+            let checked_value_owner = self
+                .checked_value_imports
+                .owners()
+                .any(|owner| owner == (*unit, *module));
+            return Err(failure(format!(
+                "fresh module replaced an admitted exact owner: owner={unit}:{module}, context={context_owner}, planned={planned_owner}, checked_value={checked_value_owner}, source={}",
+                source_path.display(),
+            )));
         }
         let mut selected: BTreeSet<_> = context
             .facts
