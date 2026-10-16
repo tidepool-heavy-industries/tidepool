@@ -501,13 +501,40 @@ impl NativeOriginalRequirement {
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let graph = self.selection.graph_selection();
         validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
-        let Some(carrier) = graph
+        let carrier = if let Some(carrier) = graph
             .namespace
             .iter()
             .find(|binding| binding.artifact == self.original)
             .copied()
-        else {
-            return Ok(None);
+        {
+            carrier
+        } else {
+            // Selected-group proofs intentionally carry no compiler namespace.
+            // Their own root edges may still identify one complete carrier.
+            let carriers = graph
+                .roots
+                .iter()
+                .filter_map(|root| match root {
+                    InventoryNodeKey::Group(group) if group.binding.artifact == self.original => {
+                        Some(*root)
+                    }
+                    _ => None,
+                })
+                .flat_map(|root| state.outgoing(root))
+                .filter_map(|(target, dependency)| match target {
+                    InventoryNodeKey::Artifact(carrier)
+                        if carrier.artifact == self.original
+                            && *dependency == ArtifactDependency::Interface =>
+                    {
+                        Some(carrier)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            if carriers.len() != 1 {
+                return Ok(None);
+            }
+            *carriers.first().expect("one issued native carrier")
         };
         if view
             .lease
@@ -534,20 +561,16 @@ impl NativeOriginalRequirement {
         )
         .descriptor
         .id;
-        let Some(canonical_binding) = graph
-            .namespace
-            .iter()
-            .find(|binding| binding.artifact == canonical)
-            .copied()
+        let Some(canonical_binding) = view.lease.selection.namespace.get(&canonical).copied()
         else {
             return Ok(None);
         };
-        if view
-            .lease
-            .selection
-            .namespace
-            .get(&canonical)
-            .is_none_or(|selected| *selected != canonical_binding)
+        if !graph.bindings.contains(&canonical_binding)
+            || graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical)
+                .is_some_and(|selected| *selected != canonical_binding)
             || !state
                 .outgoing(InventoryNodeKey::Artifact(carrier))
                 .any(|(target, dependency)| {
@@ -572,10 +595,12 @@ impl NativeOriginalRequirement {
             .collect::<imbl::OrdSet<_>>();
         let index = NativeSelectionIndex::build(&state, &nodes);
         if entry.native_group_ordinals.is_empty()
-            || !entry
-                .native_group_ordinals
-                .iter()
-                .all(|ordinal| index.groups.contains_key(&(carrier, *ordinal)))
+            || !entry.native_group_ordinals.iter().all(|ordinal| {
+                matches!(
+                    index.groups.get(&(carrier, *ordinal)),
+                    Some(NativeGroupResolution::Unique(_))
+                )
+            })
         {
             return Ok(None);
         }

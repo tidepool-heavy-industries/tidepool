@@ -377,44 +377,25 @@ fn capture_native_availability(
                 choices.push(proof);
             }
         }
-        let complete = NativeOriginalRequirement::from_issued_group_custody(
-            original,
-            role.interface(),
-            artifacts,
-        )?;
         if choices.is_empty() {
-            offers.push(match complete {
-                Some(proof) => NativeCompilerAvailability::Full(proof),
-                None => NativeCompilerAvailability::Issued {
+            offers.push(
+                match NativeOriginalRequirement::from_issued_group_custody(
                     original,
-                    proof: None,
+                    role.interface(),
+                    artifacts,
+                )? {
+                    Some(proof) => NativeCompilerAvailability::Full(proof),
+                    None => NativeCompilerAvailability::Issued {
+                        original,
+                        proof: None,
+                    },
                 },
-            });
+            );
             continue;
         }
         for proof in choices {
-            let groups = proof.issued_groups(artifacts)?;
-            let root_groups = groups
-                .iter()
-                .filter(|group| group.binding.artifact == original)
-                .copied()
-                .collect::<BTreeSet<_>>();
-            let full = if let Some(complete) = &complete {
-                let qualified = complete
-                    .qualify_availability(artifacts)?
-                    .ok_or_else(|| failure("complete native availability lost its carrier"))?;
-                let full_roots = qualified
-                    .groups()
-                    .iter()
-                    .filter(|group| group.binding.artifact == original)
-                    .copied()
-                    .collect::<BTreeSet<_>>();
-                root_groups == full_roots
-            } else {
-                false
-            };
-            offers.push(if full {
-                NativeCompilerAvailability::Full(complete.clone().unwrap())
+            offers.push(if proof.qualify_availability(artifacts)?.is_some() {
+                NativeCompilerAvailability::Full(proof)
             } else {
                 NativeCompilerAvailability::Issued {
                     original,
