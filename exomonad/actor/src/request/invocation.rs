@@ -142,7 +142,7 @@ impl RequestRegistry {
             TargetState::CancellationRequested { reason, presented } => {
                 RequestCleanupState::CancellationRequested { reason, presented }
             }
-            TargetState::AcknowledgingCancellation(reason) => {
+            TargetState::AcknowledgingCancellation { reason, .. } => {
                 RequestCleanupState::AcknowledgingCancellation(reason)
             }
             TargetState::Closed => RequestCleanupState::TargetClosed,
@@ -508,7 +508,7 @@ mod tests {
                 presented: true,
             })
         );
-        registry
+        let cancellation_claim = registry
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
         assert_eq!(
@@ -517,15 +517,17 @@ mod tests {
                 CancellationReason::RequesterCancelled
             ))
         );
-        registry.rollback_cancellation_acknowledgement(request);
+        registry
+            .rollback_cancellation_acknowledgement(cancellation_claim)
+            .unwrap();
         assert_eq!(
             registry.cancel_request(owner, request, CancellationReason::RequesterCancelled),
             Ok((CancelRequestOutcome::AlreadyRequested, None))
         );
-        registry
+        let cancellation_claim = registry
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
-        registry.finish_cancellation_acknowledgement(request);
+        registry.finish_cancellation_acknowledgement(cancellation_claim);
         assert_eq!(
             registry.request_cleanup_state(owner, request),
             Ok(RequestCleanupState::TargetClosed)

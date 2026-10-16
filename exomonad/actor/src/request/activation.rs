@@ -75,7 +75,7 @@ impl RequestRegistry {
         match record.target_state {
             TargetState::Presented => {}
             TargetState::CancellationRequested { .. }
-            | TargetState::AcknowledgingCancellation(_) => {
+            | TargetState::AcknowledgingCancellation { .. } => {
                 return Err(ActivationPublicationRefusal::Request(
                     ReplyError::CancellationRequested,
                 ))
@@ -160,7 +160,9 @@ impl RequestActivationCompletion {
         match record.target_state {
             TargetState::Presented => Ok(publish()),
             TargetState::CancellationRequested { .. }
-            | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
+            | TargetState::AcknowledgingCancellation { .. } => {
+                Err(ReplyError::CancellationRequested)
+            }
             TargetState::Closed => Err(ReplyError::AlreadySettled),
             _ => Err(ReplyError::Stale),
         }

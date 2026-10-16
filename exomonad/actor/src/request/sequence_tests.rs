@@ -424,6 +424,8 @@ fn run_history_with_mutation(
     let mut requests = vec![RequestModel::default(); targets.len()];
     let mut reply_claims: Vec<Option<RequestReplyClaim>> =
         (0..targets.len()).map(|_| None).collect();
+    let mut cancellation_claims: Vec<Option<CancellationAcknowledgementClaim>> =
+        (0..targets.len()).map(|_| None).collect();
     let mut watches: Vec<WatchModel> = Vec::new();
     let mut event_sequences = BTreeMap::<ActorRef, Vec<u64>>::new();
     let mut last_sequence = BTreeMap::<ActorRef, u64>::new();
@@ -518,8 +520,9 @@ fn run_history_with_mutation(
                     });
                 }
                 notices = if failed {
-                    reply_claims[key] = None;
-                    registry.fail_reply_settlement(id, "failed transfer")
+                    reply_claims[key].take().map_or_else(Vec::new, |claim| {
+                        registry.fail_reply_settlement(claim, "failed transfer")
+                    })
                 } else {
                     test_support::complete_optional_reply(
                         &registry,
@@ -604,7 +607,13 @@ fn run_history_with_mutation(
                     }
                 });
                 compare(
-                    registry.begin_cancellation_acknowledgement(caller_target, id),
+                    registry
+                        .begin_cancellation_acknowledgement(caller_target, id)
+                        .map(|claim| {
+                            let reason = claim.reason();
+                            cancellation_claims[key] = Some(claim);
+                            reason
+                        }),
                     expected,
                     coverage,
                 )?;
@@ -619,16 +628,20 @@ fn run_history_with_mutation(
                     };
                     model.first_outcome(Err(failure));
                 }
-                notices = registry.finish_cancellation_acknowledgement(id);
+                notices = cancellation_claims[key]
+                    .take()
+                    .map_or_else(Vec::new, |claim| {
+                        registry.finish_cancellation_acknowledgement(claim)
+                    });
             }
             Action::RollbackAck => {
                 if !model.released && model.ack_accepted && !model.target_finished {
                     model.ack_accepted = false;
                     coverage.acknowledgement_retries += 1;
-                    // A retried acknowledgement belongs to target-side execution.
-                    model.delivered = true;
                 }
-                registry.rollback_cancellation_acknowledgement(id);
+                if let Some(claim) = cancellation_claims[key].take() {
+                    let _ = registry.rollback_cancellation_acknowledgement(claim);
+                }
             }
             Action::Abandon => {
                 let expected = model.authorize(identity).map(|()| match &model.outcome {

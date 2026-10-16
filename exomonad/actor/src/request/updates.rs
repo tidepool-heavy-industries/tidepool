@@ -695,10 +695,10 @@ mod tests {
                     Ok(RequestUpdateState::UpdateTooLate)
                 );
             }
-            registry
+            let cancellation_claim = registry
                 .begin_cancellation_acknowledgement(target, request)
                 .unwrap();
-            registry.finish_cancellation_acknowledgement(request);
+            registry.finish_cancellation_acknowledgement(cancellation_claim);
             assert_eq!(
                 registry.observe_reply(target, request),
                 Ok(ReplyObservation::Closed)
