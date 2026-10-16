@@ -715,7 +715,7 @@ impl OriginalCompilerInputs {
         let mut preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
             baseline,
             inventory,
-            &[],
+            availability,
         )?;
         for proof in availability {
             if !preferred.contains(proof) {
