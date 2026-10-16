@@ -251,7 +251,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             original_ordinal: *original_ordinal,
         })
         .collect();
-    let make = |module: &str, version| {
+    let make = |module: &str, version, selected: &BTreeSet<NativeGroupKey>| {
         let marker = product(module, version);
         inventory
             .admit_recovery_selection(
@@ -259,12 +259,12 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
                 vec![Arc::new(ArtifactEntry::canonical(
                     marker.module_interface().unwrap().clone(),
                 ))],
-                &groups,
+                selected,
             )
             .unwrap()
     };
-    let left = make("LeftIssuance", 77);
-    let right = make("RightIssuance", 78);
+    let left = make("LeftIssuance", 77, &groups);
+    let right = make("RightIssuance", 78, &groups);
     let proof = |view: &ArtifactView| {
         NativeOriginalRequirement::from_issued_group_custody(
             native_entry.descriptor.id,
@@ -308,12 +308,14 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert!(selected_proof
         .qualify_availability(&view)
         .unwrap()
-        .is_none());
-    let unambiguous = capture_native_availability(&baseline, &left, &[selected_proof]).unwrap();
+        .is_some());
+    let unambiguous =
+        capture_native_availability(&baseline, &left, std::slice::from_ref(&selected_proof))
+            .unwrap();
     let [NativeCompilerAvailability::Full(qualified)] = unambiguous.as_slice() else {
-        panic!("matching selected roots may use an independently qualified complete proof");
+        panic!("a complete selected-root proof qualifies through its own carrier edges");
     };
-    assert_eq!(qualified, &left_proof);
+    assert_eq!(qualified, &selected_proof);
     let offers = capture_native_availability(&baseline, &view, std::slice::from_ref(&left_proof))
         .expect("a supplied qualified proof must not be recaptured from broader custody");
     let [NativeCompilerAvailability::Full(retained)] = offers.as_slice() else {
@@ -322,6 +324,119 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert_eq!(retained.original, native_entry.descriptor.id);
     assert_eq!(retained, &left_proof);
     assert_eq!(dependency(retained, &view), left_group);
+    let partial_views = [7, 9001].map(|ordinal| {
+        make(
+            &format!("PartialIssuance{ordinal}"),
+            79,
+            &BTreeSet::from([NativeGroupKey {
+                artifact: native_entry.descriptor.id,
+                original_ordinal: ordinal,
+            }]),
+        )
+    });
+    let partial_proofs = partial_views.each_ref().map(|view| {
+        NativeOriginalRequirement::from_selected_view(native_entry.descriptor.id, view)
+            .unwrap()
+            .unwrap()
+    });
+    let broad = partial_views
+        .iter()
+        .try_fold(view.clone(), |view, partial| view.merge(partial))
+        .unwrap()
+        .retain_original_custody(&view)
+        .unwrap();
+    for (proof, ordinal) in partial_proofs.iter().zip([7, 9001]) {
+        assert!(proof.qualify_availability(&broad).unwrap().is_none());
+        let issued = proof.issued_groups(&broad).unwrap();
+        assert_eq!(issued.len(), 1);
+        assert_eq!(issued.first().unwrap().original_ordinal, ordinal);
+    }
+    for supplied in [
+        vec![partial_proofs[0].clone()],
+        vec![left_proof.clone(), partial_proofs[0].clone()],
+        vec![partial_proofs[0].clone(), left_proof.clone()],
+        vec![
+            left_proof.clone(),
+            partial_proofs[0].clone(),
+            left_proof.clone(),
+        ],
+        vec![left_proof.clone(), right_proof.clone()],
+        vec![right_proof.clone(), left_proof.clone()],
+        partial_proofs.to_vec(),
+        vec![partial_proofs[1].clone(), partial_proofs[0].clone()],
+    ] {
+        let offers = capture_native_availability(&baseline, &broad, &supplied).unwrap();
+        assert_eq!(offers.len(), supplied.len());
+        for (offer, proof) in offers.iter().zip(&supplied) {
+            assert_eq!(offer.original(), native_entry.descriptor.id);
+            assert_eq!(offer.proof(), Some(proof));
+            assert_eq!(
+                matches!(offer, NativeCompilerAvailability::Full(_)),
+                proof == &left_proof || proof == &right_proof
+            );
+        }
+    }
+    let marker = product("DifferentCarrier", 80);
+    let other = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            vec![
+                native_entry.clone(),
+                Arc::new(ArtifactEntry::canonical(
+                    marker.module_interface().unwrap().clone(),
+                )),
+            ],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let binding = |view: &ArtifactView, id| {
+        crate::artifact_inventory::ExactArtifactSelection::capture(view)
+            .graph_selection()
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == id)
+            .copied()
+            .unwrap()
+    };
+    for id in [native_entry.descriptor.id, canonical.descriptor.id] {
+        assert_ne!(binding(&left, id), binding(&other, id));
+    }
+    let other_interface = other
+        .interface_projection(std::slice::from_ref(&canonical.descriptor.owner))
+        .unwrap();
+    for selected in [&other, &other_interface] {
+        let mismatch = left
+            .merge(selected)
+            .unwrap()
+            .retain_original_custody(selected)
+            .unwrap();
+        assert!(left_proof.issued_groups(&mismatch).is_ok());
+        assert!(left_proof
+            .qualify_availability(&mismatch)
+            .unwrap()
+            .is_none());
+        let offers =
+            capture_native_availability(&baseline, &mismatch, std::slice::from_ref(&left_proof))
+                .unwrap();
+        assert!(matches!(
+            offers.as_slice(),
+            [NativeCompilerAvailability::Issued { proof: Some(proof), .. }] if proof == &left_proof
+        ));
+    }
+    let mut malformed = left_proof.clone();
+    let mut graph = malformed.selection.graph_selection().clone();
+    graph.bindings.push(graph.bindings[0]);
+    malformed.selection =
+        crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(graph);
+    for supplied in [
+        vec![left_proof.clone(), malformed.clone()],
+        vec![malformed, left_proof.clone()],
+    ] {
+        assert!(matches!(
+            capture_native_availability(&baseline, &broad, &supplied),
+            Err(CompileError::ExtractFailed(_))
+        ));
+    }
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),
