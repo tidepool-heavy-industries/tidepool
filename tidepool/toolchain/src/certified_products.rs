@@ -12185,6 +12185,14 @@ pub(crate) mod tests {
                         &BTreeMap::new(),
                         &mut validation,
                     );
+                    let category = match &imported {
+                        Ok(_) => "accepted".to_owned(),
+                        Err(CertificationError::OriginalAvailability(refusal)) => {
+                            format!("availability_refused:{}", refusal.original_ordinal)
+                        }
+                        Err(error) => format!("other_refusal:{error:?}"),
+                    };
+                    eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={category}");
                     let allowed =
                         matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
                     if !allowed
