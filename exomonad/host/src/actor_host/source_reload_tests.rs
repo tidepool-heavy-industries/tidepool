@@ -692,6 +692,8 @@ async fn reloaded_choice_retains_a_file_read_continuation_across_cells() {
         }
     }
 
+    let phase_started = std::time::Instant::now();
+    eprintln!("choice-probe phase=start");
     let backend = Arc::new(ChoiceJev {
         requests: Mutex::new(Vec::new()),
     });
@@ -708,6 +710,10 @@ async fn reloaded_choice_retains_a_file_read_continuation_across_cells() {
         })),
     )
     .await;
+    eprintln!(
+        "choice-probe phase=admitted elapsed={:?}",
+        phase_started.elapsed()
+    );
     campaign.run_scenario(|campaign| Box::pin(async move {
         let authored = campaign._repository.path().join(".exomonad/Persona");
         std::fs::create_dir_all(&authored).unwrap();
@@ -718,6 +724,7 @@ async fn reloaded_choice_retains_a_file_read_continuation_across_cells() {
         ).await;
         assert_eq!(reloaded["status"], "committed", "{reloaded}");
         assert_eq!(reloaded["items"][0]["value"]["Right"]["tag"], "ReloadPublished", "{reloaded}");
+        eprintln!("choice-probe phase=reloaded elapsed={:?}", phase_started.elapsed());
         let policy = policy.snapshot_for_request().expect("reloaded source generation");
         let observed = committed(policy.as_ref(), r#"import qualified Persona.ChoiceProbe as Probe
 probeResult <- Probe.observe "Inspect the original selected action without running it"
@@ -726,6 +733,7 @@ _ <- case fmap Probe.inspect probeResult of
   _ -> error "choice inspection lost its keyed masses or original payload""#).await;
         assert_eq!(observed["status"], "committed", "{observed}");
         assert_eq!(backend.requests.lock().len(), 1);
+        eprintln!("choice-probe phase=observed elapsed={:?}", phase_started.elapsed());
         let reads = campaign._repository.path().join("choice");
         std::fs::create_dir_all(&reads).unwrap();
         std::fs::write(reads.join("search.txt"), "selected continuation read after observation\n").unwrap();
@@ -733,9 +741,10 @@ _ <- case fmap Probe.inspect probeResult of
 _ <- case probeRead of
   Right (Right body) | body == "selected continuation read after observation\n" -> pure ()
   _ -> error "retained choice did not execute its original file read"
-display (fmap (\response -> let (masses, key, path) = Probe.inspect response in (key, path, lookup "search" masses, length masses)) probeResult)"#).await;
+display (case fmap Probe.inspect probeResult of { Right (masses, key, path) -> key == "search" && path == "choice/search.txt" && lookup "search" masses == Just 0.88 && lookup "page" masses == Just 0.07 && lookup "patch" masses == Just 0.05 && length masses == 3; _ -> False })"#).await;
         assert_eq!(super::test_campaign::committed_display_text(&result),
-            "Right (\"search\",\"choice/search.txt\",Just 0.88,3)", "{result}");
+            "True", "{result}");
+        eprintln!("choice-probe phase=continued-and-reinspected elapsed={:?}", phase_started.elapsed());
         assert_eq!(backend.requests.lock().len(), 1, "running and reinspecting a retained choice must not repeat inference");
     })).await;
 }
