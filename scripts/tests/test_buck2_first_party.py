@@ -21,6 +21,9 @@ FEATURES = GENERATOR.with_name("buck2_cargo_features.py")
 PROFILE = GENERATOR.with_name("native-profile.toml")
 TEST_OWNERSHIP = GENERATOR.with_name("test_source_ownership.py")
 TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "source_bundle::tests::materialization_repairs_a_stale_or_partial_completion_marker",
+    "source_bundle::tests::completion_marker_does_not_hide_changed_or_missing_library_sources",
+    "source_bundle::tests::selected_source_verification_rejects_changed_missing_and_extra_modules",
     "certified_products::tests::original_native_index_preserves_sparse_order_and_selected_identity",
     "certified_products::tests::original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners",
     "certified_products::tests::original_native_index_matches_linear_scan_for_generated_sparse_groups",
