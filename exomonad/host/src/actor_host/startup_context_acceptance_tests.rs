@@ -773,18 +773,34 @@ async fn startup_refusal(cancel: bool) {
         Err(mpsc::error::TryRecvError::Empty)
     ));
     if cancel {
-        let cleanup = tokio::time::timeout(
-            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-            context
-                .actor
-                .shutdown_with_cleanup(exomonad_actor::ActorTerminal::new(
-                    exomonad_actor::ActorExitKind::Cancelled,
-                    "cancel held startup",
-                )),
-        )
+        let mut shutdown = Box::pin(context.actor.shutdown_with_cleanup(
+            exomonad_actor::ActorTerminal::new(
+                exomonad_actor::ActorExitKind::Cancelled,
+                "cancel held startup",
+            ),
+        ));
+        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            tokio::select! {
+                biased;
+                outcome = &mut shutdown => panic!(
+                    "startup cleanup settled while its admitted Jev answer was held: {outcome:?}"
+                ),
+                () = async {
+                    while context.actor.lifecycle().observation().phase
+                        != exomonad_actor::LifecyclePhase::Closing
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                } => {},
+            }
+        })
         .await
-        .unwrap()
         .unwrap();
+        held.answer.send(true).unwrap();
+        let cleanup = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, shutdown)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             cleanup.terminal.kind,
             exomonad_actor::ActorExitKind::Cancelled

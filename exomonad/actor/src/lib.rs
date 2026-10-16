@@ -118,6 +118,7 @@ pub use interactive_session::{
 pub use kernel::lifecycle::resident::{
     RootBindingAdapter, RootBindingClaimError, RootBindingOperationClaim,
 };
+pub use kernel::lifecycle::LifecyclePhase;
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, DisplayExpansionRequest,
     KernelCallFailure, KernelCallReply, KernelInvocationFailure, KernelInvocationReply,

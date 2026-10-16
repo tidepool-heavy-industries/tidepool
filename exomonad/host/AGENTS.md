@@ -44,8 +44,10 @@ do not weaken the receipt or discard the evidence to make teardown pass.
 Actor retirement, registry removal and final machine release are distinct
 observations. On a cleanup timeout, trace the actual remaining request, capture
 or value owner and its release contract before moving assertions or extending
-deadlines. Enable the owning lifecycle traces first; missing filtered events
-cannot establish that cleanup was never attempted.
+deadlines. A controlled backend must settle admitted effects after the typed
+cancellation cutoff; holding its answer while awaiting cleanup can block the
+cleanup being tested. Enable the owning lifecycle traces first; missing filtered
+events cannot establish that cleanup was never attempted.
 
 Notification tests assert exact message multiplicity, FIFO order and durable
 delivery phases. Provider batching may include several admitted notifications
