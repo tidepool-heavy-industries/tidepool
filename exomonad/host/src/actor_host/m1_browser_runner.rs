@@ -443,7 +443,7 @@ fn committed_browser_display(
     let expected_conversation = harness::model::ConversationIdentity::Embedded {
         run: target.run.clone(),
         actor: target.actor,
-        incarnation: target.incarnation,
+        incarnation: target.incarnation.clone(),
     };
     let store = fixture.runtime.store();
     let claims = store.claims(&call).map_err(|error| error.to_string())?;
