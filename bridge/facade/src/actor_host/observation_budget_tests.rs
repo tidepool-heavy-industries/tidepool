@@ -402,7 +402,7 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-        for name in ["throwing", "oversized"] {
+        for name in ["throwing", "oversized", "wide"] {
             let policy = campaign.root_installation.policy.clone();
             let call_id = uuid::Uuid::new_v4().to_string();
             let (context, completion) = super::test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
@@ -418,7 +418,8 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
                 policy.complete_boxed(completion).await.unwrap();
                 response
             });
-            let expected = "canonical semantic result λ".repeat(8000);
+            let expected = if name == "wide" { "λ".to_owned() } else { "canonical semantic result λ".repeat(8000) };
+            let expected_semantic = if name == "wide" { serde_json::json!(vec![expected.clone(); 10001]) } else { serde_json::json!(expected) };
             let backend = TestCommands::completed(&expected);
             tokio::select! {
                 request = backend_request(campaign) => request.supply(Ok(backend.clone())),
@@ -426,8 +427,8 @@ async fn named_tool_semantics_survive_throwing_and_oversized_presenters_without_
             }
             let response = running.await.unwrap();
             assert_eq!(response["status"], "committed", "{response}");
-            assert_eq!(response["items"][0]["value"], expected);
-            assert_eq!(response["items"][0]["presentation"]["status"], "failed");
+            assert_eq!(response["items"][0]["value"], expected_semantic);
+            assert_eq!(response["items"][0]["presentation"]["status"], if name == "wide" { "published" } else { "failed" });
             assert!(response["items"][0]["output"].as_str().unwrap().len() < 4096);
             let repeated = campaign.root_installation.policy.dispatch_json_boxed(retry).await.unwrap();
             assert_eq!(repeated, response, "an exact transport retry observes the same retained outcome");

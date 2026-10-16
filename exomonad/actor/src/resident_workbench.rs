@@ -9901,7 +9901,8 @@ where
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsPublishResultWith(value),
                     ) => Ok(ResidentActorBoundary::ToolResultPublication {
                         continuation: hole,
-                        value: tidepool_runtime::value_to_json(&value, session.data_con_table(), 0),
+                        value: serde_json::from_str(&value).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(
+                            format!("canonical named-tool result JSON could not be decoded: {error}")))?,
                     }),
                     ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(

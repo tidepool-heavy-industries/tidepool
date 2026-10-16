@@ -1207,7 +1207,7 @@ prepareAgentSpec spec = case compileInstalledTools (specTools spec) of
       publishResult :: Either ToolDispatchError ToolDispatchSuccess -> Eff (AgentTools ': SyncEffects effects) Text
       publishResult (Left problem) = pure (encodeValue (refusalReply problem))
       publishResult (Right (ToolDispatchSuccess output presentation)) = do
-        send (AgentToolsPublishResultWith output)
+        send (AgentToolsPublishResultWith (encodeValue output))
         pure (encodeValue (object ["status" .= ("success" :: Text), "presentation" .= presentation]))
 
       runToolCall :: CompiledTools (Eff (SyncEffects effects)) -> Eff (AgentTools ': SyncEffects effects) Text

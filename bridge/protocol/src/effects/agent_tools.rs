@@ -101,8 +101,8 @@ pub fn agent_tools() -> Effect {
                 method: "agent_tools_publish_result_with",
                 args: vec![Arg {
                     name: "result",
-                    ty: HsType::Value,
-                    rust: RustBinding::HaskellValue,
+                    ty: HsType::Text,
+                    rust: RustBinding::Path("String"),
                 }],
                 ret: HsType::Unit,
                 errors: None,
