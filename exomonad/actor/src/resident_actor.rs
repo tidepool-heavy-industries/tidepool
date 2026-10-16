@@ -8530,7 +8530,6 @@ where
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
         loop {
-            {}
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
                     input_unit_index: unit.input_unit_index,
@@ -8553,9 +8552,7 @@ where
                             ),
                         ),
                     )?;
-                    {
-                        return Ok(FragmentAdvance::ParkNative);
-                    }
+                    return Ok(FragmentAdvance::ParkNative);
                 }
                 None => {
                     let request = match current.resume_failure.take() {
@@ -8573,9 +8570,7 @@ where
                                     ),
                                 ),
                             )?;
-                            {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
+                            return Ok(FragmentAdvance::ParkNative);
                         }
                         None if !current.scopes.is_empty()
                             || current
@@ -8620,9 +8615,7 @@ where
                             "one captured native request"
                         );
                         current.native_start = Some(request);
-                        {
-                            return Ok(FragmentAdvance::ParkNative);
-                        }
+                        return Ok(FragmentAdvance::ParkNative);
                     }
                 }
             };
@@ -8642,9 +8635,7 @@ where
                             ),
                         ),
                     )?;
-                    {
-                        return Ok(FragmentAdvance::ParkNative);
-                    }
+                    return Ok(FragmentAdvance::ParkNative);
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
                     current.outcome = Some(outcome);
@@ -8674,7 +8665,6 @@ where
                     };
                     let boundary = match boundary {
                         ResidentActorBoundary::Green(boundary) => {
-                            {}
                             return self.prepare_green_boundary(
                                 kernel,
                                 context,
@@ -8722,9 +8712,7 @@ where
                                             }),
                                         },
                                     );
-                                    {
-                                        return Ok(FragmentAdvance::ParkNative);
-                                    }
+                                    return Ok(FragmentAdvance::ParkNative);
                                 }
                             };
                             let frame = scopes::ScopeFrame {
@@ -8748,9 +8736,7 @@ where
                                     token,
                                     work,
                                 });
-                            {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
+                            return Ok(FragmentAdvance::ParkNative);
                         }
                         ResidentActorBoundary::ScopeDone { token, .. }
                             if !current.scopes.is_empty() =>
@@ -8770,9 +8756,7 @@ where
                                 )
                             };
                             self.prepare_scope_finish(kernel, context, current, body)?;
-                            {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
+                            return Ok(FragmentAdvance::ParkNative);
                         }
                         ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
                             self.prepare_scope_finish(
@@ -8785,9 +8769,7 @@ where
                                     ),
                                 ),
                             )?;
-                            {
-                                return Ok(FragmentAdvance::ParkNative);
-                            }
+                            return Ok(FragmentAdvance::ParkNative);
                         }
                         boundary => boundary,
                     };
@@ -9283,9 +9265,7 @@ where
                                         return Err(error);
                                     }
                                     self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
-                                    {
-                                        return Ok(FragmentAdvance::ParkNative);
-                                    }
+                                    return Ok(FragmentAdvance::ParkNative);
                                 }
                             });
                         }
