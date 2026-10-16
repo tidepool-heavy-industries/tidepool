@@ -2,12 +2,12 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands, Console, Lookup)
 import Tidepool.Actors.Exomonad
 
 do
   Just seed <- R.call (readSeed (R.client seedStore)) ()
-  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, Lookup, BoundWorktree]
   Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
     ((defaultSpawnOptions workerSpec) { spawnLabel = Just "checkpoint-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
