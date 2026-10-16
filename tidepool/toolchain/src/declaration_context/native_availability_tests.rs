@@ -978,6 +978,35 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
     );
     let mixed = recovered_witness_fixtures(&[mixed]).remove(0).product;
     let context = type_context(std::slice::from_ref(&mixed));
+    // Retained imports require exact type custody, independently of whether a
+    // corresponding live value or native implementation remains available.
+    let value_interfaces = [&identity, &partial_identity]
+        .into_iter()
+        .map(|binder| {
+            Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    context.facts.producer,
+                    &binder.unit,
+                    &binder.module,
+                    BTreeMap::new(),
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let projection = context
+        .facts
+        .compiler_projection
+        .merge(&CompilerInputProjection::from_issued_entries(&value_interfaces).unwrap())
+        .unwrap();
+    let view = context
+        .artifact_view()
+        .inventory()
+        .admit_shared(context.artifact_view(), value_interfaces)
+        .unwrap();
+    let context = Arc::new(context.rebuild(|facts| {
+        facts.inventory = view;
+        facts.compiler_projection = projection;
+    }));
     let private = OriginalCompilerInputs::from_native_availability(
         &context,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -990,7 +1019,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
     let partial_view = inventory
         .admit_recovery_selection(
             &inventory.empty_view(),
-            vec![private.artifacts.metadata_snapshot().artifacts[&original].clone()],
+            private.artifacts.entries(),
             &BTreeSet::from([NativeGroupKey {
                 artifact: original,
                 original_ordinal: 7,
