@@ -385,6 +385,7 @@ impl IssuedNativeOffer {
 
     /// Current roles may stop offering an original, or stop qualifying its full
     /// census. Neither change authorizes an alternative ambient proof.
+    #[track_caller]
     pub(crate) fn within_projection(
         &self,
         projection: &CompilerInputProjection,
@@ -412,8 +413,14 @@ impl IssuedNativeOffer {
             if contributes()? {
                 return Ok(Some(self.clone()));
             }
-            return Err(failure(
-                "native offer conflicts with selected compiler product or interface",
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeOfferSelectionConflict {
+                    owner: self.0.owner.clone(),
+                    offered_original: self.0.original,
+                    offered_interface: self.0.interface,
+                    selected_original: original,
+                    selected_interface: role.interface(),
+                },
             ));
         }
         let NativeOfferBody::Full {
