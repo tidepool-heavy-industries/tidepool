@@ -1199,8 +1199,7 @@ macro_rules! fs_write_effect_def {
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written
-    /// builder it replaced — the effects-module source (and so the
-    /// compiled-artifact cache key) must not move.
+    /// builder it replaced, preserving the exact generated effects-module source.
     #[test]
     fn generated_time_decl_matches_handwritten_baseline() {
         let d = crate::time_decl();

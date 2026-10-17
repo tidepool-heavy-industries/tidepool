@@ -7131,7 +7131,7 @@ mod module_product_tests {
     }
 
     /// This test intentionally crosses the matched Rust frontend, Haskell
-    /// worker, entry-free wire reader and invocation bundle. Run it with
+    /// worker, entry-free wire reader and physical output owner. Run it with
     /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
@@ -9062,7 +9062,7 @@ mod dependency_cache_tests {
     use super::*;
 
     /// A package-importing graph, including implicit Prelude, must enter GHC
-    /// for package selection even if its paired bundle remains available.
+    /// for package selection across repeated requests and home shadow changes.
     #[test]
     fn package_imports_force_worker_selection_for_home_shadow_changes() {
         let root = tempfile::tempdir().unwrap();
@@ -9091,7 +9091,7 @@ mod dependency_cache_tests {
             .expect("fixture compiler request");
             prepared
         };
-        assert!(compile(), "fresh recipe compiles");
+        assert!(compile(), "fresh request compiles");
         assert!(
             compile(),
             "package lookup requires the worker on a repeated request"
