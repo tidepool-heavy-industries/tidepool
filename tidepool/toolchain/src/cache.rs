@@ -295,6 +295,28 @@ impl CompletedSourceEvidence {
         Ok(Self(evidence))
     }
 
+    /// Check only the invocation text against this already authenticated target.
+    /// Dependency bytes, path normalization and negative witnesses keep the
+    /// completed observation that issued this owner.
+    pub(crate) fn validate_expected_source(
+        &self,
+        source: &str,
+    ) -> Result<(), DependencyEvidenceFailure> {
+        crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
+        let (index, target) = self
+            .0
+            .sources
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.path == Path::new(GENERATED_SOURCE))
+            .ok_or(DependencyEvidenceFailure::GeneratedSourceMissing)?;
+        validate_source_digest(
+            index,
+            target,
+            hex_digest(&Sha256::digest(source.as_bytes())),
+        )
+    }
+
     pub(crate) fn revalidate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
         self.0.validate_consumed_sources(source)
     }
@@ -500,9 +522,27 @@ pub(crate) struct DependencyEvidenceWork {
     pub negative_metadata_calls: u64,
 }
 
+fn validate_source_digest(
+    index: usize,
+    item: &SourceEvidence,
+    actual: String,
+) -> Result<(), DependencyEvidenceFailure> {
+    if actual != item.sha256 {
+        return Err(DependencyEvidenceFailure::Source {
+            index,
+            reason: SourceWitnessFailure::Changed {
+                expected: item.sha256.clone(),
+                actual,
+            },
+        });
+    }
+    Ok(())
+}
+
 impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
+    #[cfg(test)]
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
         let completed = CompletedSourceEvidence::from_worker(bytes, input, source).ok()?;
         completed.cache_safe.then(|| completed.into_evidence())
@@ -608,15 +648,7 @@ impl DependencyEvidence {
                 work.source_read_bytes += bytes.len() as u64;
                 hex_digest(&Sha256::digest(bytes))
             };
-            if digest != item.sha256 {
-                return Err(DependencyEvidenceFailure::Source {
-                    index,
-                    reason: SourceWitnessFailure::Changed {
-                        expected: item.sha256.clone(),
-                        actual: digest,
-                    },
-                });
-            }
+            validate_source_digest(index, item, digest)?;
         }
         if !target {
             return Err(DependencyEvidenceFailure::GeneratedSourceMissing);

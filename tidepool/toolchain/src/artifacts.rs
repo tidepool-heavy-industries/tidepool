@@ -3327,6 +3327,12 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    if source_segment.is_none() && offer.exact.is_some() {
+        charge_source_evidence(
+            &validation.inventory,
+            ordinary_inputs.as_ref().expect("ordinary products").1.len(),
+        )?;
+    }
     let exact_source_owned = if source_segment.is_none() {
         offer
             .exact
@@ -3371,15 +3377,13 @@ fn seal_turn_outputs_with_validation(
     };
     let ordinary_evidence = if exact_source.is_none() {
         Some(
-            cache::CompletedSourceEvidence::from_worker(evidence_bytes, source_path, source)
-                .map_err(|failure| {
-                    CompileError::CompilerEvidence(Box::new(
-                        crate::certified_products::CertificationError::CompletedSourceEvidence {
-                            input: source_path.to_path_buf(),
-                            failure: Box::new(failure),
-                        },
-                    ))
-                })?,
+            ParsedSourceEvidence::parse(
+                &validation.inventory,
+                evidence_bytes,
+                SourceEvidenceUse::Compiler,
+                source_path,
+            )?
+            .authenticate(source_path, source)?,
         )
     } else {
         None
@@ -3456,7 +3460,6 @@ fn seal_turn_outputs_with_validation(
             (products, Some(globals), Some(packages))
         }
         None => {
-            charge_source_evidence(&validation.inventory, evidence_bytes.len())?;
             timing::record_inventory_work(
                 "products.certify.before",
                 output_dir,
@@ -4392,26 +4395,132 @@ fn charge_source_evidence(
         .map_err(|error| compiler_evidence_failure(error.into()))
 }
 
+/// Parsed worker observations, without consumed-byte or import-witness authority.
+/// The owning admission charges its existing inventory before the sole JSON decode.
+struct ParsedSourceEvidence(cache::DependencyEvidence);
+
+#[derive(Clone, Copy)]
+enum SourceEvidenceUse {
+    BuildAction,
+    CompletedCorpus,
+    Compiler,
+}
+
+impl ParsedSourceEvidence {
+    fn parse(
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+        bytes: &[u8],
+        usage: SourceEvidenceUse,
+        input: &Path,
+    ) -> Result<Self, CompileError> {
+        charge_source_evidence(operation, bytes.len())?;
+        #[cfg(test)]
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(count.get() + 1));
+        serde_json::from_slice(bytes)
+            .map(Self)
+            .map_err(|error| match usage {
+                SourceEvidenceUse::BuildAction => CompileError::ExtractFailed(format!(
+                    "build-action dependency evidence: {error}"
+                )),
+                SourceEvidenceUse::CompletedCorpus => {
+                    CompileError::ExtractFailed(format!("corpus dependency evidence: {error}"))
+                }
+                SourceEvidenceUse::Compiler => source_evidence_failure(
+                    input,
+                    cache::DependencyEvidenceFailure::WorkerDecode {
+                        message: error.to_string(),
+                    },
+                ),
+            })
+    }
+
+    fn validate_build_action_closure(
+        &self,
+        source: &Path,
+        include: &[PathBuf],
+    ) -> Result<(), CompileError> {
+        if !self.0.cache_safe || !self.0.selection_complete {
+            return Err(CompileError::ExtractFailed(
+                "build-action source evidence is incomplete".into(),
+            ));
+        }
+        validate_declared_source_closure(&self.0, source, include)
+    }
+
+    fn authenticate(
+        self,
+        input: &Path,
+        source: &str,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        cache::CompletedSourceEvidence::from_worker_evidence(self.0, input, source)
+            .map_err(|failure| source_evidence_failure(input, failure))
+    }
+
+    fn authenticate_build_input(
+        self,
+        input: &Path,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        cache::CompletedSourceEvidence::from_worker_evidence(
+            self.0,
+            input,
+            &std::fs::read_to_string(input)?,
+        )
+        .map_err(|_| {
+            CompileError::ExtractFailed(
+                "build-action consumed bytes or import witnesses changed".into(),
+            )
+        })
+    }
+
+    fn admit_build_action(
+        self,
+        input: &Path,
+        include: &[PathBuf],
+        expected_source: &str,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        self.validate_build_action_closure(input, include)?;
+        let completed = self.authenticate_build_input(input)?;
+        completed
+            .validate_expected_source(expected_source)
+            .map_err(|failure| source_evidence_failure(input, failure))?;
+        Ok(completed)
+    }
+}
+
+fn source_evidence_failure(
+    input: &Path,
+    failure: cache::DependencyEvidenceFailure,
+) -> CompileError {
+    compiler_evidence_failure(
+        crate::certified_products::CertificationError::CompletedSourceEvidence {
+            input: input.to_path_buf(),
+            failure: Box::new(failure),
+        },
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_EVIDENCE_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Validate consumed bytes and import witnesses against a build action's
-/// declared module and complete readable source trees. This shares the worker
-/// dependency reader with ordinary artifact admission and grants no execution.
+/// declared module and source trees. Parsing shares the caller's inventory;
+/// parsed observations grant no execution authority.
 pub fn validate_prepared_fixture_sources(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
     evidence_bytes: &[u8],
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    validate_build_action_source_closure(evidence_bytes, source, include)?;
-    cache::DependencyEvidence::from_worker(
+    let parsed = ParsedSourceEvidence::parse(
+        operation,
         evidence_bytes,
+        SourceEvidenceUse::BuildAction,
         source,
-        &std::fs::read_to_string(source)?,
-    )
-    .ok_or_else(|| {
-        CompileError::ExtractFailed(
-            "build-action consumed bytes or import witnesses changed".into(),
-        )
-    })?;
-    Ok(())
+    )?;
+    parsed.validate_build_action_closure(source, include)?;
+    parsed.authenticate_build_input(source).map(|_| ())
 }
 
 /// Validate observations from a fresh corpus compilation owned by a native
@@ -4419,46 +4528,20 @@ pub fn validate_prepared_fixture_sources(
 /// remains ineligible for source replay and does not prove a hermetic action.
 /// Observed Haskell sources must still belong to the declared source trees.
 pub fn validate_completed_corpus_sources(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
     evidence_bytes: &[u8],
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    let evidence: cache::DependencyEvidence =
-        serde_json::from_slice(evidence_bytes).map_err(|error| {
-            CompileError::ExtractFailed(format!("corpus dependency evidence: {error}"))
-        })?;
-    validate_declared_source_closure(&evidence, source, include)?;
-    cache::CompletedSourceEvidence::from_worker_evidence(
-        evidence,
+    let parsed = ParsedSourceEvidence::parse(
+        operation,
+        evidence_bytes,
+        SourceEvidenceUse::CompletedCorpus,
         source,
-        &std::fs::read_to_string(source)?,
-    )
-    .map_err(|failure| {
-        CompileError::CompilerEvidence(Box::new(
-            crate::certified_products::CertificationError::CompletedSourceEvidence {
-                input: source.to_path_buf(),
-                failure: Box::new(failure),
-            },
-        ))
-    })?;
+    )?;
+    validate_declared_source_closure(&parsed.0, source, include)?;
+    parsed.authenticate(source, &std::fs::read_to_string(source)?)?;
     Ok(())
-}
-
-fn validate_build_action_source_closure(
-    evidence_bytes: &[u8],
-    source: &Path,
-    include: &[PathBuf],
-) -> Result<(), CompileError> {
-    let evidence: cache::DependencyEvidence =
-        serde_json::from_slice(evidence_bytes).map_err(|error| {
-            CompileError::ExtractFailed(format!("build-action dependency evidence: {error}"))
-        })?;
-    if !evidence.cache_safe || !evidence.selection_complete {
-        return Err(CompileError::ExtractFailed(
-            "build-action source evidence is incomplete".into(),
-        ));
-    }
-    validate_declared_source_closure(&evidence, source, include)
 }
 
 fn validate_declared_source_closure(
@@ -4902,8 +4985,13 @@ fn compile_invocation_inner(
                     }
                 },
             )?;
-            charge_source_evidence(bundle.operation(), bundle.dependencies().len())?;
-            validate_prepared_fixture_sources(bundle.dependencies(), &input_path, inv.include)?;
+            ParsedSourceEvidence::parse(
+                bundle.operation(),
+                bundle.dependencies(),
+                SourceEvidenceUse::BuildAction,
+                &input_path,
+            )?
+            .admit_build_action(&input_path, inv.include, inv.source)?;
             let raw = bundle.targets();
             let artifacts = assemble_portable(bundle.metadata(), &raw, &mut on_stage)?;
             std::fs::create_dir(output)?;
@@ -4963,10 +5051,30 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
-        charge_source_evidence(&inventory_operation, evidence_bytes.len())?;
-        if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
-            validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
-        }
+        let parsed_evidence = if exact_request.is_some() {
+            // Exact receipt admission owns its own parser and source proof.
+            charge_source_evidence(&inventory_operation, evidence_bytes.len())?;
+            None
+        } else {
+            let build_action = matches!(&policy, CompilationPolicy::BuildAction { .. });
+            let parsed = ParsedSourceEvidence::parse(
+                &inventory_operation,
+                &evidence_bytes,
+                if build_action {
+                    SourceEvidenceUse::BuildAction
+                } else {
+                    SourceEvidenceUse::Compiler
+                },
+                &input_path,
+            )?;
+            if build_action {
+                parsed.validate_build_action_closure(&input_path, inv.include)?;
+                // A build action also authenticates the physical input. These
+                // raw facts are not a proof for the separate invocation text.
+                ParsedSourceEvidence(parsed.0.clone()).authenticate_build_input(&input_path)?;
+            }
+            Some(parsed)
+        };
         let exact_source = exact_request
             .as_ref()
             .map(|request| {
@@ -4990,19 +5098,9 @@ fn compile_invocation_inner(
         let evidence = match exact_source.as_ref() {
             Some(source) => Some((*source.evidence).clone()),
             None => Some(
-                cache::CompletedSourceEvidence::from_worker(
-                    &evidence_bytes,
-                    &input_path,
-                    inv.source,
-                )
-                .map_err(|failure| {
-                    CompileError::CompilerEvidence(Box::new(
-                        crate::certified_products::CertificationError::CompletedSourceEvidence {
-                            input: input_path.clone(),
-                            failure: Box::new(failure),
-                        },
-                    ))
-                })?,
+                parsed_evidence
+                    .expect("non-exact parsed evidence")
+                    .authenticate(&input_path, inv.source)?,
             ),
         };
         if let Some((output, _)) = inventory_export {
@@ -6985,12 +7083,150 @@ mod module_product_tests {
                 sha256: "unused-by-closure-validator".into(),
             })
             .collect();
-        let encode = |evidence: &cache::DependencyEvidence| serde_json::to_vec(evidence).unwrap();
-        validate_build_action_source_closure(&encode(&evidence), &source, &[inputs]).unwrap();
-        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &serde_json::to_vec(&evidence).unwrap(),
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        parsed
+            .validate_build_action_closure(&source, &[inputs])
+            .unwrap();
+        assert!(parsed.validate_build_action_closure(&source, &[]).is_err());
         evidence.sources.pop();
         evidence.selection_complete = false;
-        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &serde_json::to_vec(&evidence).unwrap(),
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        assert!(parsed.validate_build_action_closure(&source, &[]).is_err());
+    }
+
+    #[test]
+    fn prepared_source_admission_parses_once_and_charges_before_decode() {
+        use sha2::{Digest, Sha256};
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let text = "module Main where\nresult = 42\n";
+        std::fs::write(&source, text).unwrap();
+        let mut evidence = assembly_evidence(&["Main"]);
+        evidence.modules[0].source = source.clone();
+        evidence.sources.push(cache::SourceEvidence {
+            path: source.clone(),
+            sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        });
+        // Completed observations do not acquire replay eligibility by parsing.
+        for cache_safe in [false, true] {
+            for selection_complete in [false, true] {
+                evidence.cache_safe = cache_safe;
+                evidence.selection_complete = selection_complete;
+                let bytes = serde_json::to_vec(&evidence).unwrap();
+                let operation = InventoryOperation::new(Default::default());
+                SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+                assert_eq!(
+                    validate_prepared_fixture_sources(&operation, &bytes, &source, &[]).is_ok(),
+                    cache_safe && selection_complete,
+                );
+                assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+                assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 64);
+                validate_completed_corpus_sources(&operation, &bytes, &source, &[]).unwrap();
+                assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+                assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 128);
+            }
+        }
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 63,
+            ..Default::default()
+        });
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+        // Malformed JSON would reach a different failure if decode preceded charge.
+        assert!(matches!(
+            validate_prepared_fixture_sources(&restricted, b"{", &source, &[]),
+            Err(CompileError::CompilerEvidence(_)),
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 0);
+        let operation = InventoryOperation::new(Default::default());
+        assert!(matches!(
+            validate_prepared_fixture_sources(&operation, b"{", &source, &[]),
+            Err(CompileError::ExtractFailed(message)) if message.starts_with("build-action dependency evidence:"),
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        assert!(charge_source_evidence(&operation, usize::MAX).is_err());
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 0);
+    }
+
+    #[test]
+    fn parsed_build_observations_preserve_physical_and_invocation_authentication() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let text = "module Main where\nresult = 42\n";
+        std::fs::write(&source, text).unwrap();
+        let mut evidence = assembly_evidence(&["Main"]);
+        evidence.modules[0].source = source.clone();
+        evidence.sources.push(cache::SourceEvidence {
+            path: source.clone(),
+            sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        });
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        SOURCE_EVIDENCE_DECODES.with(|count| count.set(0));
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        parsed.validate_build_action_closure(&source, &[]).unwrap();
+        ParsedSourceEvidence(parsed.0.clone())
+            .authenticate_build_input(&source)
+            .unwrap();
+        assert!(parsed
+            .authenticate(&source, "different invocation text")
+            .is_err());
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        let mismatch = parsed.admit_build_action(&source, &[], "different invocation text");
+        assert!(matches!(mismatch,
+            Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                    index: 0,
+                    reason: cache::SourceWitnessFailure::Changed { expected, actual }
+                } if expected == format!("{:x}", Sha256::digest(text.as_bytes()))
+                    && actual == format!("{:x}", Sha256::digest(b"different invocation text"))))
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
+        std::fs::write(&source, "changed physical input").unwrap();
+        assert!(matches!(
+            parsed.admit_build_action(&source, &[], "different invocation text"),
+            Err(CompileError::ExtractFailed(message))
+                if message == "build-action consumed bytes or import witnesses changed",
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
     }
 
     fn product_metadata() -> Vec<u8> {
@@ -7238,6 +7474,60 @@ mod module_product_tests {
         assert!(consumer.imports.iter().any(|imported| {
             imported.module == "ModuleProductA" && imported.selected.is_some()
         }));
+    }
+
+    /// Construct the reachable interval where the frontend captured A but the
+    /// physical file supplied to the real worker is already B.
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn real_worker_portable_build_refuses_changed_captured_source_before_export() {
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
+        let physical = std::fs::read_to_string(fixture_root.join("ModuleProductB.hs")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("ModuleProductB.hs");
+        std::fs::write(&input, &physical).unwrap();
+        let roots = [fixture_root];
+        let histories = [
+            physical.clone(),
+            format!("{physical}\n-- captured before physical replacement\n"),
+            physical.replace("module ModuleProductB", "module PriorProductB"),
+        ];
+        for (index, captured) in histories.iter().enumerate() {
+            let output = root.path().join(format!("export-{index}"));
+            let invocation = CompileInvocation {
+                source: captured,
+                targets: &["consume"],
+                include: &roots,
+                fallback_module_name: "ModuleProductB",
+            };
+            let result = compile_invocation_inner(
+                &invocation,
+                &mut |_, _, _| {},
+                CompilationPolicy::BuildAction {
+                    source_path: &input,
+                    scratch: root.path(),
+                    export: BuildActionExport::PreparedFixture { output: &output },
+                },
+            );
+            if index == 0 {
+                assert!(result.is_ok(), "unchanged worker input: {:?}", result.err());
+                assert!(output.join("consume.prepared.cbor").is_file());
+                assert!(output.join("meta.cbor").is_file());
+            } else {
+                assert!(
+                    !output.exists(),
+                    "a refused source cannot publish portable output"
+                );
+                assert!(matches!(result,
+                    Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                        certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                        if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                            reason: cache::SourceWitnessFailure::Changed { .. }, ..
+                        }))
+                ));
+            }
+        }
     }
 
     #[test]
@@ -7943,6 +8233,8 @@ mod module_product_tests {
     #[test]
     #[serial_test::serial]
     fn completed_quotations_admit_originals_without_source_replay() {
+        let source_validation_operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
         use crate::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
         use tidepool_repr::execution_schema::{Atom, Group, HeapRhs, ScalarLiteral};
 
@@ -8186,13 +8478,26 @@ mod module_product_tests {
                     }
                 }
                 let observations = serde_json::to_vec(&observations).unwrap();
-                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
+                validate_completed_corpus_sources(
+                    &source_validation_operation,
+                    &observations,
+                    &consumer,
+                    &include,
+                )
+                .unwrap();
                 assert!(
-                    validate_prepared_fixture_sources(&observations, &consumer, &include).is_err(),
+                    validate_prepared_fixture_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed TH output cannot become an immutable build recipe"
                 );
                 assert!(
                     validate_completed_corpus_sources(
+                        &source_validation_operation,
                         &observations,
                         &consumer,
                         std::slice::from_ref(&earlier),
@@ -8205,18 +8510,36 @@ mod module_product_tests {
                 changed.extend_from_slice(b"\n-- changed after compilation\n");
                 std::fs::write(&provider, changed).unwrap();
                 assert!(
-                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    validate_completed_corpus_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed output still validates consumed source bytes"
                 );
                 std::fs::write(&provider, provider_bytes).unwrap();
                 let shadow = earlier.join("QuotedOriginal.hs");
                 std::fs::write(&shadow, "module QuotedOriginal where\nvalue = 0\n").unwrap();
                 assert!(
-                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    validate_completed_corpus_sources(
+                        &source_validation_operation,
+                        &observations,
+                        &consumer,
+                        &include
+                    )
+                    .is_err(),
                     "completed output still validates negative import witnesses"
                 );
                 std::fs::remove_file(shadow).unwrap();
-                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
+                validate_completed_corpus_sources(
+                    &source_validation_operation,
+                    &observations,
+                    &consumer,
+                    &include,
+                )
+                .unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
                     &admission.home_imports().unwrap(),
