@@ -11,7 +11,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import GHC
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName)
 import System.Directory (copyFile, createDirectoryIfMissing)
@@ -109,7 +109,11 @@ verifySiteComponentHistories directory = do
           && all (null . pmSiteRejections) modules)
         "separate component arenas lost or duplicated a genuine typed site"
       assert (not (Map.null (Map.withoutKeys internalTops originalNames)))
-        "site fixture did not exercise genuinely new emitted tops"
+        ("site fixture did not exercise genuinely new emitted tops: " ++ show
+          [(occNameString (nameOccName name), isExternalName name, Set.member name originalNames)
+          | unit <- filter preparedUsesSiteAuthority modules
+          , (binding,_) <- pmBindings unit, binder <- Projection.topBinders binding
+          , let name = varName binder])
       let groups = IntMap.elems (IntMap.unions
             (map fatComponentBindings (fatSelectionComponents selectionAB)))
           owner = fatOriginalOwner (fatSelectionVersion selectionAB)
