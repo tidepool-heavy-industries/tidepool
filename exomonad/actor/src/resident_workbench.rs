@@ -1567,17 +1567,22 @@ impl InstalledToolLease {
             }
     }
 
-    fn generation_references(
-        &self,
-        source: tidepool_runtime::session::GenerationArtifactReference,
-        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
-        let installation = PersistedActorInstallation::capture(self, &source)?;
-        let bytes = serde_json::to_vec(&installation).map_err(|error| error.to_string())?;
-        Ok(tidepool_runtime::session::DurableGenerationReferences {
+    fn observe_generation(self) -> Result<ObservedInstallation, String> {
+        let evidence = self
+            .source()
+            .generation_evidence()
+            .ok_or("generation preparation has no issued source evidence")?;
+        let source = evidence.reference.clone();
+        let configuration_digest = evidence.configuration_digest;
+        source.validate().map_err(|error| {
+            ActorInstallationRecoveryError::Corrupt(error.to_string()).to_string()
+        })?;
+        let facts = PersistedActorInstallation::capture(&self, &source)?;
+        Ok(ObservedInstallation {
+            lease: self,
             source,
-            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
-            prompts,
+            facts,
+            configuration_digest,
         })
     }
 
@@ -1588,6 +1593,46 @@ impl InstalledToolLease {
         let installation =
             PersistedActorInstallation::decode(&references.installation, &references.source)?;
         installation.verify(self, &references.source)
+    }
+}
+
+/// Installation facts derived from this exact retained lease. Durable encoding
+/// is a projection for a new stored generation, not preparation authority.
+struct ObservedInstallation {
+    lease: InstalledToolLease,
+    source: tidepool_runtime::session::GenerationArtifactReference,
+    facts: PersistedActorInstallation,
+    configuration_digest: [u8; 32],
+}
+
+impl ObservedInstallation {
+    fn durable_references(
+        &self,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
+        let bytes = serde_json::to_vec(&self.facts).map_err(|error| error.to_string())?;
+        Ok(tidepool_runtime::session::DurableGenerationReferences {
+            source: self.source.clone(),
+            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
+            prompts,
+        })
+    }
+
+    fn verify_restored(
+        &self,
+        references: &tidepool_runtime::session::DurableGenerationReferences,
+        prompts: &tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<(), String> {
+        references.validate().map_err(|error| error.to_string())?;
+        if self.source != references.source || prompts != &references.prompts {
+            return Err("restored generation must retain its source and prompt references".into());
+        }
+        let persisted =
+            PersistedActorInstallation::decode(&references.installation, &references.source)
+                .map_err(|error| error.to_string())?;
+        persisted
+            .verify_facts(&self.facts)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -2147,15 +2192,10 @@ where
                 "generation preparation actor does not own installation".into(),
             ));
         }
-        let evidence = installation.source().generation_evidence().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "generation preparation has no issued source evidence".into(),
-            )
-        })?;
-        let configuration_digest = evidence.configuration_digest;
-        let references = installation
-            .generation_references(evidence.reference.clone(), prompts.clone())
+        let observed = installation
+            .observe_generation()
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let configuration_digest = observed.configuration_digest;
         let expected = expected_snapshot.generation().cloned();
         let checkout_context = context.clone();
         // Erasing the generic registry retains its actual allocation identity.
@@ -2163,12 +2203,9 @@ where
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
             Arc::downgrade(&owner)
         };
-        installation
-            .verify_recovered_generation(&references)
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let source = expected
             .as_ref()
-            .and_then(|_| installation.tools.as_ref())
+            .and_then(|_| observed.lease.tools.as_ref())
             .and_then(|tools| tools._source_original.clone());
         self.access
             .with_machine(context, move |session, context, _| {
@@ -2189,8 +2226,8 @@ where
                 session.validate_lexical_scope_lease(scope.scope(), &scope)?;
                 let commit = match descriptor.persistence_policy() {
                     crate::ActorPersistencePolicy::Ephemeral => {
-                        PreparedGenerationCommit::Ephemeral { id:
-                            expected
+                        PreparedGenerationCommit::Ephemeral {
+                            id: expected
                                 .as_ref()
                                 .map_or(
                                     Ok(tidepool_runtime::session::NotebookGenerationId::INITIAL),
@@ -2199,7 +2236,14 @@ where
                                 .map_err(|error| {
                                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                                 })?,
-                            source: source.map(|selection| session.stage_published_source_originals_in(scope.scope(), selection)).transpose()?,
+                            source: source
+                                .map(|selection| {
+                                    session.stage_published_source_originals_in(
+                                        scope.scope(),
+                                        selection,
+                                    )
+                                })
+                                .transpose()?,
                         }
                     }
                     crate::ActorPersistencePolicy::Durable => {
@@ -2217,32 +2261,40 @@ where
                                 )
                             })?;
                         let restored = if expected.is_none() {
-                            session.active_notebook_generation(&owner).map_err(ResidentError::Session)?
-                        } else { None };
-                        if let Some(selected) = restored {
-                            selected.references.validate().map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            if references.source != selected.references.source || references.prompts != selected.references.prompts {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol("restored generation must retain its source and prompt references".into()));
-                            }
-                            let persisted = PersistedActorInstallation::decode(&selected.references.installation, &selected.references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            let actual = PersistedActorInstallation::decode(&references.installation, &references.source).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            persisted.verify_facts(&actual).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                            let readiness = session.durable_public_readiness(&selected.owner, scope.scope()).map_err(ResidentError::Session)?;
-                            PreparedGenerationCommit::Restored { selected, readiness }
+                            session
+                                .active_notebook_generation(&owner)
+                                .map_err(ResidentError::Session)?
                         } else {
-                        let prepared = session
-                            .prepare_notebook_generation(
-                                scope.scope(),
-                                &owner,
-                                expected
-                                    .as_ref()
-                                    .and_then(|generation| generation.durable.clone()),
-                                references,
-                                source,
-                            )
-                            .map_err(ResidentError::Session)?;
-                        let selected = prepared.selection();
-                        PreparedGenerationCommit::Durable { prepared, selected }
+                            None
+                        };
+                        if let Some(selected) = restored {
+                            observed
+                                .verify_restored(&selected.references, &prompts)
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                            let readiness = session
+                                .durable_public_readiness(&selected.owner, scope.scope())
+                                .map_err(ResidentError::Session)?;
+                            PreparedGenerationCommit::Restored {
+                                selected,
+                                readiness,
+                            }
+                        } else {
+                            let references = observed
+                                .durable_references(prompts.clone())
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                            let prepared = session
+                                .prepare_notebook_generation(
+                                    scope.scope(),
+                                    &owner,
+                                    expected
+                                        .as_ref()
+                                        .and_then(|generation| generation.durable.clone()),
+                                    references,
+                                    source,
+                                )
+                                .map_err(ResidentError::Session)?;
+                            let selected = prepared.selection();
+                            PreparedGenerationCommit::Durable { prepared, selected }
                         }
                     }
                 };
@@ -2264,7 +2316,7 @@ where
                     prompts,
                     configuration_digest,
                     reload_report: None,
-                    installation,
+                    installation: observed.lease,
                     context: next_context,
                     scope,
                     commit,
