@@ -2,7 +2,9 @@ module SiteComponentHistoryChecks (verifySiteComponentHistories) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (bracket)
+import Control.Concurrent (forkFinally, killThread)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar)
+import Control.Exception (AsyncException(ThreadKilled), bracket, fromException)
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
@@ -16,11 +18,14 @@ import System.Directory (copyFile, createDirectoryIfMissing)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.Process (readProcess)
+import System.Timeout (timeout)
+import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasks)
 import Tidepool.EffectSchema (ysSite)
 import Tidepool.ExecutionProjection qualified as Projection
 import Tidepool.ExecutionSchema qualified as Wire
 import Tidepool.FatIface
 import Tidepool.PreparedStg
+import Tidepool.RequestCompletion (finishCompletion)
 
 assert :: Bool -> String -> IO ()
 assert condition message = unless condition (fail message)
@@ -83,7 +88,15 @@ verifySiteComponentHistories directory = do
       grownTask <- acquire (Just first) selectionAB >>= requireRight
       assert (length (preparedComponentTaskPending grownTask) == 1)
         "A to A+B scheduled a completed component or its shared workers"
-      grown <- runPreparedComponentTask grownTask >>= requireRight
+      pending <- case preparedComponentTaskPending grownTask of
+        [unit] -> pure unit
+        _ -> fail "site growth did not expose exactly its actual B task"
+      completedB <- cancelAfterPreparation pending
+      retryTask <- acquire (Just first) selectionAB >>= requireRight
+      grown <- runPreparedComponentTask retryTask >>= requireRight
+      assert (maybe False (samePreparedUnit completedB)
+          (Map.lookup (preparedUnitTaskKey pending) (preparedComponentUnitRows grown)))
+        "cancelled incorporation lost the genuinely completed site body on retry"
       validatePreparedComponents grown
       assertPreserved "growth replaced A or its shared workers" first grown
       let modules = preparedComponentModules grown
@@ -161,6 +174,31 @@ verifySiteComponentHistories directory = do
   where
     requireRight :: Show failure => Either failure value -> IO value
     requireRight = either (fail . show) pure
+    -- Cancellation occurs after the actual authority-validated body-cache
+    -- commit and before its result can enter recovery. The real executor joins
+    -- the blocked child; no prepared unit or consumed witness is manufactured.
+    cancelAfterPreparation task = do
+      completed <- newEmptyMVar
+      never <- newEmptyMVar :: IO (MVar ())
+      done <- newEmptyMVar
+      let grant = either error id (compilerExecutionGrant 1)
+          action = withCompilerExecutor (const (pure ())) grant (\executor ->
+            runCompilerTasks executor (\pending -> do
+              unit <- runPreparedUnitTask pending >>= requireRight
+              putMVar completed unit
+              readMVar never
+              pure unit) (\_ _ -> fail "cancelled site result reached incorporation") [task])
+              >>= finishCompletion
+          observe cell = timeout 30000000 (readMVar cell) >>= maybe
+            (fail "site component cancellation did not settle") pure
+      bracket (forkFinally action (putMVar done)) killThread $ \thread -> do
+        unit <- observe completed
+        killThread thread
+        outcome <- observe done
+        assert (case outcome of
+          Left failure -> fromException failure == Just ThreadKilled
+          Right _ -> False) "site cancellation lost its asynchronous outcome"
+        pure unit
     describe FatIfaceComponents{} = "ready"
     describe (FatIfaceComponentsMissing reason) = show reason
     describe (FatIfaceComponentsLoadFailure _ reason) = reason
