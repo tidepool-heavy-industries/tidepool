@@ -1234,10 +1234,14 @@ mod tests {
         let all = testing::projected_group(wire, 11).unwrap();
         let bytes = tidepool_test_data::prepared_encode::encode_projected_group(&all);
         let mut value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let fields = value.as_array_mut().unwrap();
+        let ciborium::value::Value::Array(fields) = &mut value else {
+            panic!("normal group encoder must emit an array")
+        };
         // Describe a raw exported suffix, then earn admission through both
         // normal readers. No projected-group field or proof is constructed here.
-        let binders = fields[3].as_array_mut().unwrap();
+        let ciborium::value::Value::Array(binders) = &mut fields[3] else {
+            panic!("normal group encoder must emit a binder array")
+        };
         binders.drain(..helpers);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
