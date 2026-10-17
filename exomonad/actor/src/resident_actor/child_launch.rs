@@ -1288,9 +1288,9 @@ mod tests {
     ) {
         crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
             let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+            crate::capabilities::WorkbenchServices::new().with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
                 crate::RetainedActorExit::new(),
-            )
+            ))
             .scope(async {
                 let parent = SessionId(971);
                 let id = SessionId(972);

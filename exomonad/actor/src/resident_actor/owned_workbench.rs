@@ -1020,10 +1020,12 @@ where
                 "hosted execution abandoned before exact continuation settlement".into(),
                 resources.clone(),
             )
-            .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
-                work: invocation_work.clone(),
-                control: control.clone(),
-            });
+            .with_compiler_owner(workbench.compiler_scope(
+                crate::resident_workbench::CompilerCloseOwner::Invocation {
+                    work: invocation_work.clone(),
+                    control: control.clone(),
+                },
+            ));
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),

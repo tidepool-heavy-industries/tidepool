@@ -180,6 +180,18 @@ impl KernelBehavior for ObservedBehavior {
         self.inner.tool(context, invocation, capture)
     }
 
+    fn dispatch_tool(
+        &mut self,
+        context: &KernelContext,
+        invocation: exomonad_tool::ToolInvocation,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) -> crate::OwnedActorTask<Self, serde_json::Value> {
+        self.inner
+            .dispatch_tool(context, invocation, capture, control)
+            .project_behavior(|outer: &mut Self| &mut outer.inner)
+    }
+
     fn dispatch_workbench(
         &mut self,
         context: &KernelContext,
@@ -877,7 +889,6 @@ async fn native_mailbox_compiler_lifecycle_on_tokio_workers() {
 }
 
 async fn native_mailbox_compiler_lifecycle_history() {
-    use crate::resident_workbench::CompilerCloseOwner;
     use std::path::PathBuf;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{
@@ -1077,7 +1088,7 @@ async fn native_mailbox_compiler_lifecycle_history() {
             .unwrap();
         caller_task.await.unwrap();
         let caller_closes = caller.terminal().compiler_close_observations();
-        assert!(CompilerCloseOwner::current().is_err());
+        assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
         let machines = forest.environment.runner.machines_for_test();
         let mut observed = recipient.terminal().compiler_close_observations().len();
         for custody in casts {
@@ -1106,7 +1117,7 @@ async fn native_mailbox_compiler_lifecycle_history() {
                 "{closes:?}"
             );
             observed = closes.len();
-            assert!(CompilerCloseOwner::current().is_err());
+            assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
         }
         let reply = tokio::time::timeout(
             Duration::from_secs(30),
@@ -1159,7 +1170,7 @@ async fn native_mailbox_compiler_lifecycle_history() {
                 .all(crate::termination::CompilerWorkClose::is_confirmed),
             "{closes:?}"
         );
-        assert!(CompilerCloseOwner::current().is_err());
+        assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
     }
 }
 

@@ -216,28 +216,31 @@ proptest::proptest! {
 async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     let (control, task) = RunControlClient::start().await.unwrap();
     let (other_control, other_task) = RunControlClient::start().await.unwrap();
-    let other_ticket = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+    let services = crate::capabilities::WorkbenchServices::new();
+    let other_ticket = services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
         other_control.preparation_client().producer(),
-    )
-    .register_work()
+    ))
+    .admit_work()
     .unwrap();
-    let other_cancellation = other_ticket.cancellation().host_admission_cancellation();
+    let other_outcome = other_ticket.run_with_close(|_| ());
+    let other_cancellation = other_outcome.host_admission_cancellation().unwrap();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
         .shared_preparation(client.producer());
-    let ticket = owner.register_work().unwrap();
-    let cancellation = ticket.cancellation().host_admission_cancellation();
-    let observed_cancellation = cancellation.clone();
+    let ticket = services.with_compiler_owner(owner).admit_work().unwrap();
+    let observed_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let physical_cancellation = observed_cancellation.clone();
     let (started, entered) = tokio::sync::oneshot::channel();
     let (cancelled, stopped) = tokio::sync::oneshot::channel();
     let (release, finish) = std::sync::mpsc::channel();
     let physical = tokio::task::spawn_blocking(move || {
         ticket.run(|_| {
             started.send(()).unwrap();
-            while cancellation.checkpoint().is_ok() {
+            while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
                 std::thread::yield_now();
             }
+            physical_cancellation.store(true, std::sync::atomic::Ordering::SeqCst);
             cancelled.send(()).unwrap();
             finish.recv_timeout(Duration::from_secs(10)).unwrap();
         })
@@ -249,7 +252,7 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         "waiter stopped",
     ));
     assert!(client.claim(|| ()).is_ok());
-    observed_cancellation.checkpoint().unwrap();
+    assert!(!observed_cancellation.load(std::sync::atomic::Ordering::SeqCst));
     control.seal().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), stopped)
         .await
@@ -258,8 +261,8 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     other_cancellation.checkpoint().unwrap();
     assert!(client.claim(|| ()).is_err());
     assert!(
-        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
-            .register_work()
+        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer()))
+            .admit_work()
             .is_err()
     );
     assert!(!control.shared_cleanup.observation().is_confirmed());

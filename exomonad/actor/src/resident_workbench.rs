@@ -42,6 +42,7 @@ use to_haskell::{
     ActorContextProjection, CallStatus, LifecycleAnswer, ProgressAnswer, RouteStateAnswer,
 };
 
+use crate::capabilities::CompilerOwnerScope;
 use crate::WorkbenchRequest;
 use serde::Serialize;
 use tidepool_bridge::HaskellValue;
@@ -80,7 +81,7 @@ use crate::{ActorCompileViewError, ResponseExpectation};
 tokio::task_local! {
     static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
     static INVOCATION_CANCEL: Arc<std::sync::atomic::AtomicBool>;
-    static COMPILER_CLOSE_OWNER: CompilerCloseOwner;
+    static COMPILER_CLOSE_OWNER: crate::capabilities::CompilerOwnerScope;
     static EXECUTION_CONTROL: Arc<crate::WorkbenchExecutionControl>;
 }
 
@@ -117,102 +118,36 @@ impl CompilerCloseOwner {
             }
         }
     }
+}
+
+impl crate::capabilities::CompilerOwnerScope {
+    /// Capture before spawning: Tokio task-local contexts are not inherited.
+    pub(crate) fn current() -> Result<Self, ResidentActorWorkbenchError> {
+        COMPILER_CLOSE_OWNER
+            .try_with(Clone::clone)
+            .map_err(|_| ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
+    }
 
     pub(crate) fn scope<T>(
         &self,
         operation: impl std::future::Future<Output = T>,
     ) -> impl std::future::Future<Output = T> {
-        COMPILER_CLOSE_OWNER.scope(self.clone(), operation)
+        // Keep large resident operations behind the same pinned-pointer boundary
+        // formerly owned by the concrete lifecycle scope helper.
+        COMPILER_CLOSE_OWNER.scope(self.clone(), Box::pin(operation))
     }
-}
 
-fn register_compiler_work(
-) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-    CompilerCloseOwner::current()?.register_work()
-}
-
-#[derive(Clone, Copy)]
-enum CompilerWorkAdmission {
-    Active,
-    Publication,
+    fn sync_scope<T>(&self, operation: impl FnOnce() -> T) -> T {
+        COMPILER_CLOSE_OWNER.sync_scope(self.clone(), operation)
+    }
 }
 
 impl CompilerCloseOwner {
-    /// Capture before spawning a task; Tokio task-local owners are not inherited.
-    pub(crate) fn current() -> Result<Self, ResidentActorWorkbenchError> {
-        COMPILER_CLOSE_OWNER
-            .try_with(Clone::clone)
-            .ok()
-            .or_else(|| execution_control().map(Self::Hosted))
-            .ok_or(ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
-    }
-
-    /// Admit before spawning native work. The affine ticket retains this exact
-    /// lifetime and settles it even if every async waiter disappears.
-    pub(crate) fn register_work(
-        &self,
-    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-        self.register_work_in(CompilerWorkAdmission::Active)
-    }
-
-    /// Only the publication entrypoint admits finalizer work after user effects stop.
-    pub(crate) fn register_publication_work(
-        &self,
-    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-        self.register_work_in(CompilerWorkAdmission::Publication)
-    }
-
     pub(crate) fn shared_preparation(&self, producer: crate::RetainedActorExit) -> Self {
         Self::SharedPreparation {
             producer,
             observer: Box::new(self.clone()),
         }
-    }
-
-    fn register_receipt(
-        &self,
-        receipt: crate::termination::CompilerWorkReceipt,
-        admission: CompilerWorkAdmission,
-    ) -> bool {
-        match self {
-            Self::ActorLifecycle(owner) => owner.register_compiler_work(receipt),
-            Self::ActorFinalization(owner) => owner.register_compiler_finalization_work(receipt),
-            Self::SharedPreparation { producer, observer } => {
-                producer.register_compiler_work(receipt.clone())
-                    && observer.register_receipt(receipt.observation_only(), admission)
-            }
-            Self::Hosted(owner) => owner.register_compiler_work(receipt),
-            Self::Invocation { work, control } => {
-                let admitted = match admission {
-                    CompilerWorkAdmission::Active => work.register_compiler_work(receipt.clone()),
-                    CompilerWorkAdmission::Publication => {
-                        work.register_publication_compiler_work(receipt.clone())
-                    }
-                };
-                admitted
-                    && control
-                        .as_ref()
-                        .is_none_or(|owner| owner.register_compiler_work(receipt))
-            }
-        }
-    }
-
-    fn register_work_in(
-        &self,
-        admission: CompilerWorkAdmission,
-    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-        let receipt = crate::termination::CompilerWorkReceipt::pending();
-        let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
-        let admitted = self.register_receipt(receipt, admission);
-        if admitted {
-            return Ok(ticket);
-        }
-        // No native work has started. Revoke any partial metadata admission cleanly.
-        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-            action: (),
-            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
-        });
-        Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
     }
 }
 
@@ -2518,6 +2453,7 @@ pub type HandlerEffectSupport<H> =
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: BoundActorWorkbenchSource,
+    capabilities: crate::capabilities::WorkbenchServices,
     handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
@@ -2613,7 +2549,7 @@ where
     Ok(())
 }
 
-struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
+struct CancelCompilerTransactionOnDrop(Option<crate::termination::CompilerWorkControl>);
 
 impl Drop for CancelCompilerTransactionOnDrop {
     fn drop(&mut self) {
@@ -2628,6 +2564,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines,
             source,
+            capabilities: crate::capabilities::WorkbenchServices::new(),
             handler_effect_support: Arc::new(|_| Vec::new()),
             child_session_factory: None,
             child_bootstrap_program: None,
@@ -2650,6 +2587,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
+            capabilities: self.capabilities.clone(),
             handler_effect_support: self.handler_effect_support.clone(),
             child_session_factory: self.child_session_factory.clone(),
             child_bootstrap_program: self.child_bootstrap_program.clone(),
@@ -2836,7 +2774,7 @@ struct ParkedHoleAbortState {
     state: Mutex<ParkedHoleState>,
     reason: String,
     retained_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    compiler_owner: std::sync::OnceLock<CompilerCloseOwner>,
+    compiler_owner: std::sync::OnceLock<CompilerOwnerScope>,
 }
 
 enum ParkedHoleState {
@@ -2924,7 +2862,7 @@ impl ParkedHoleAbortGuard {
         Self { shared }
     }
 
-    pub(crate) fn with_compiler_owner(self, owner: CompilerCloseOwner) -> Self {
+    pub(crate) fn with_compiler_owner(self, owner: CompilerOwnerScope) -> Self {
         assert!(
             self.shared.compiler_owner.set(owner).is_ok(),
             "cleanup owner is assigned once before native admission"
@@ -3049,9 +2987,9 @@ impl ParkedHoleAbortRegistration {
     pub(crate) fn sync_scope<T>(&self, operation: impl FnOnce() -> T) -> T {
         let compiler_owner = self.0.compiler_owner.get().cloned();
         match compiler_owner {
-            Some(owner) => COMPILER_CLOSE_OWNER.sync_scope(owner, || {
-                SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation)
-            }),
+            Some(owner) => {
+                owner.sync_scope(|| SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation))
+            }
             None => SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation),
         }
     }
@@ -4619,6 +4557,18 @@ impl ResidentRequest {
 }
 
 impl<H, O> ResidentActorRunner<H, O> {
+    pub(crate) fn compiler_scope(&self, owner: CompilerCloseOwner) -> CompilerOwnerScope {
+        self.access.capabilities.with_compiler_owner(owner)
+    }
+
+    pub(crate) fn compiler_finalization_scope<F: std::future::Future>(
+        &self,
+        guard: &crate::termination::CompilerFinalizationGuard,
+        operation: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        guard.scope(&self.access.capabilities, operation)
+    }
+
     #[cfg(test)]
     pub(crate) fn preparation_source(&self) -> BoundActorWorkbenchSource {
         self.access.source.clone()
@@ -4798,9 +4748,10 @@ impl<H, O> ResidentActorRunner<H, O> {
         // The blocking task owns only an unregistered session. Cancellation
         // drops its eventual result, so it cannot register an orphan after the
         // awaiting launch's cleanup has already run.
-        let compiler_work = register_compiler_work().map_err(|error| error.to_string())?;
-        let mut cancel_on_drop =
-            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+            .and_then(|scope| scope.admit_work())
+            .map_err(|error| error.to_string())?;
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let (machine, lexical_scope) = spawn_blocking_in_span(move || {
             compiler_work.run(|settlement| {
                 let mut machine = factory(session_id, &source_layer, settlement)?;
@@ -5140,6 +5091,10 @@ impl<H, O> ResidentActorRunner<H, O> {
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
+    pub(crate) fn compiler_scope(&self, owner: CompilerCloseOwner) -> CompilerOwnerScope {
+        self.access.capabilities.with_compiler_owner(owner)
+    }
+
     pub(crate) fn boundary_runner(&self) -> ResidentActorRunner<H, O> {
         ResidentActorRunner {
             access: self.access.sharing(),
@@ -5591,11 +5546,9 @@ where
     where
         ResultValue: Send + 'static,
     {
-        let owner = CompilerCloseOwner::current()?;
+        let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine(context, move |session, context, source| {
-            Ok(owner
-                .register_work()?
-                .run(|settlement| operation(session, context, source, settlement))?)
+            owner.run(|settlement| operation(session, context, source, settlement))?
         })
         .await
     }
@@ -5616,11 +5569,9 @@ where
     where
         ResultValue: Send + 'static,
     {
-        let owner = CompilerCloseOwner::current()?;
+        let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine_wait(context, admission, move |session, context, source| {
-            owner
-                .register_work()?
-                .run(|settlement| operation(session, context, source, settlement))
+            owner.run(|settlement| operation(session, context, source, settlement))?
         })
         .await
     }
@@ -7096,9 +7047,11 @@ where
                     renderer_access = waiter.wait().await;
                 }
                 tidepool_runtime::session::RendererAccess::Produce(mut producer) => {
-                    let compiler_work = register_compiler_work().map_err(committed)?;
+                    let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+                        .and_then(|scope| scope.admit_work())
+                        .map_err(committed)?;
                     let mut cancel_on_drop =
-                        CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+                        CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
                     let compiler_admission = admission.clone();
                     let compiler_template = template.clone();
                     let compiler_includes = includes.clone();
@@ -7412,8 +7365,9 @@ where
         if let Some((admission, dependencies)) = reused {
             let original_admission = admission.clone();
             let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
-            let compiler_work = register_compiler_work()?;
-            cancel_on_drop.0 = Some(compiler_work.cancellation());
+            let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+                .and_then(|scope| scope.admit_work())?;
+            cancel_on_drop.0 = Some(compiler_work.control());
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(|settlement| {
                     let prototype = original_admission.prototype();
@@ -7635,8 +7589,9 @@ where
             .await?;
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         let parser_specification = specification.clone();
-        let compiler_work = register_compiler_work()?;
-        cancel_on_drop.0 = Some(compiler_work.cancellation());
+        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+            .and_then(|scope| scope.admit_work())?;
+        cancel_on_drop.0 = Some(compiler_work.control());
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
             compiler_work.run(|settlement| {
                 tidepool_toolchain::artifacts::parse_cell_plan(
@@ -7686,8 +7641,9 @@ where
             .await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
-        let compiler_work = register_compiler_work()?;
-        cancel_on_drop.0 = Some(compiler_work.cancellation());
+        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+            .and_then(|scope| scope.admit_work())?;
+        cancel_on_drop.0 = Some(compiler_work.control());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 let prepared = compiler_work.run_with_close(|settlement| {
@@ -7895,8 +7851,9 @@ where
             let workspace_modules = source.workspace_modules.clone();
             let inspection_view = view.clone();
             let effects = effects_alias.clone();
-            let compiler_work = register_compiler_work()?;
-            let cancellation = compiler_work.cancellation();
+            let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+                .and_then(|scope| scope.admit_work())?;
+            let cancellation = compiler_work.control();
             cancel_on_drop.0 = Some(cancellation.clone());
             let spawn = {
                 let _entered = compile_span.enter();
@@ -8152,9 +8109,9 @@ where
         // Enter the span only for the synchronous call that captures it —
         // an `Entered` guard is not `Send` and must not live across the
         // `.await` below.
-        let compiler_work = register_compiler_work()?;
-        let mut cancel_on_drop =
-            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+            .and_then(|scope| scope.admit_work())?;
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
@@ -9421,12 +9378,12 @@ where
                         })?
                     }
                     tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
-                        let compiler_work = CompilerCloseOwner::current()
-                            .and_then(|owner| owner.register_publication_work())
+                        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+                            .and_then(|owner| owner.admit_publication())
                             .map_err(|error| {
                                 publication_error(PrivatePublicationPhase::CertifyAndStage, error)
                             })?;
-                        cancel_on_drop.0 = Some(compiler_work.cancellation());
+                        cancel_on_drop.0 = Some(compiler_work.control());
                         let certification =
                             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                                 compiler_work.run(|settlement| base.certify(settlement))
@@ -11230,7 +11187,7 @@ where
             hole.cont_id().to_string(),
             "external operation lost its continuation owner".into(),
         )
-        .with_compiler_owner(CompilerCloseOwner::current()?);
+        .with_compiler_owner(crate::capabilities::CompilerOwnerScope::current()?);
         let registration = guard.registration();
         let result = match work {
             tidepool_effect::DeferredEffect::Blocking(work) => {
@@ -12262,10 +12219,10 @@ where
         ),
         ResidentActorWorkbenchError,
     > {
-        let owner = CompilerCloseOwner::current()?;
+        let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
-                owner.register_work()?.run(|settlement| {
+                owner.run(|settlement| {
                     let placement = crate::ActorPlacement {
                         session: session_id,
                         resource_scope: RealmId::fresh(),
@@ -12308,7 +12265,7 @@ where
                         }
                     };
                     Ok((publication, outcome))
-                })
+                })?
             })
             .await
     }
@@ -14450,6 +14407,7 @@ pub(crate) mod request_tests {
     async fn cleanup_scope_captures_compiler_owner_when_polled_with_client(
         preparation_client: crate::CompilerPreparationClient,
     ) {
+        let services = crate::capabilities::WorkbenchServices::new();
         let workbench = ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
             Arc::new(crate::ActorMachineRegistry::new()),
             ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation_client),
@@ -14468,34 +14426,42 @@ pub(crate) mod request_tests {
         );
         let registration = guard.registration();
         let retained = crate::RetainedActorExit::new();
-        let operation = registration.scope(async { register_compiler_work().unwrap() });
+        let operation = registration.scope(async {
+            crate::capabilities::CompilerOwnerScope::current()
+                .and_then(|scope| scope.admit_work())
+                .unwrap()
+        });
         assert!(retained.compiler_close_observations().is_empty());
-        let guard = guard.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
+        let guard = guard.with_compiler_owner(
+            services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone())),
+        );
         let ticket = operation.await;
-        assert!(CompilerCloseOwner::current().is_err());
+        assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
         assert!(matches!(
             retained.compiler_close_observations().as_slice(),
             [crate::termination::CompilerWorkClose::Pending]
         ));
-        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-            action: (),
-            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+        ticket.run(|close| {
+            close(tidepool_runtime::CompilerTransactionClose::NotStarted);
         });
         guard.disarm();
     }
 
     #[tokio::test]
     async fn actor_stop_interrupts_owned_host_work_before_source_read_and_recovers() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let control = crate::WorkbenchExecutionControl::untracked();
-        let original = control.clone();
+        let original = services.with_compiler_owner(CompilerCloseOwner::Hosted(control.clone()));
         let (entered, observed) = tokio::sync::oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("must-not-be-read");
         let task = tokio::spawn(async move {
-            CompilerCloseOwner::Hosted(original)
+            original
                 .scope(async move {
-                    let ticket = register_compiler_work().unwrap();
+                    let ticket = crate::capabilities::CompilerOwnerScope::current()
+                        .and_then(|scope| scope.admit_work())
+                        .unwrap();
                     spawn_blocking_in_span(move || {
                         ticket.run(|_settlement| {
                             entered.send(()).unwrap();
@@ -14543,9 +14509,12 @@ pub(crate) mod request_tests {
             b"module Recovery where\nvalue = 1\n",
         )
         .unwrap();
-        let result = CompilerCloseOwner::Hosted(fresh.clone())
+        let result = services
+            .with_compiler_owner(CompilerCloseOwner::Hosted(fresh.clone()))
             .scope(async move {
-                let ticket = register_compiler_work().unwrap();
+                let ticket = crate::capabilities::CompilerOwnerScope::current()
+                    .and_then(|scope| scope.admit_work())
+                    .unwrap();
                 spawn_blocking_in_span(move || {
                     ticket.run(|_settlement| tidepool_toolchain::cache::source_root_manifest(&root))
                 })
@@ -14565,9 +14534,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn commit_claimed_compiler_work_settles_after_losing_stop() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let control = crate::WorkbenchExecutionControl::untracked();
-        let ticket = CompilerCloseOwner::Hosted(control.clone())
-            .register_work()
+        let ticket = services
+            .with_compiler_owner(CompilerCloseOwner::Hosted(control.clone()))
+            .admit_work()
             .unwrap();
         let claim = control.publication_decision().claim_commit().unwrap();
         let (entered, observed) = tokio::sync::oneshot::channel();
@@ -14605,11 +14576,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_waiter_observes_shared_producer_completion_without_interrupting_it() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let control = crate::WorkbenchExecutionControl::untracked();
         let producer = crate::RetainedActorExit::new();
-        let owner =
-            CompilerCloseOwner::Hosted(control.clone()).shared_preparation(producer.clone());
-        let ticket = owner.register_work().unwrap();
+        let owner = services
+            .with_compiler_owner(CompilerCloseOwner::Hosted(control.clone()))
+            .shared_preparation(producer.clone());
+        let ticket = owner.admit_work().unwrap();
         let (entered, observed) = tokio::sync::oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let directory = tempfile::tempdir().unwrap();
@@ -14662,15 +14635,19 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn compiler_obligation_survives_waiter_loss_and_actor_stop_until_late_close() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let retained = crate::RetainedActorExit::new();
-        let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
+        let owner =
+            services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
         let (entered, observed) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let (settled, settled_observation) = std::sync::mpsc::channel();
         let waiter = owner
             .scope(async {
                 // Exercise the same admission boundary as every real compiler spawn.
-                let ticket = register_compiler_work().unwrap();
+                let ticket = crate::capabilities::CompilerOwnerScope::current()
+                    .and_then(|scope| scope.admit_work())
+                    .unwrap();
                 let native = spawn_blocking_in_span(move || {
                     let action = ticket.run(|_settlement| {
                         entered.send(()).unwrap();
@@ -14720,12 +14697,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn captured_preparation_owner_survives_waiter_loss_and_retirement() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let retained = crate::RetainedActorExit::new();
-        let captured = CompilerCloseOwner::ActorLifecycle(retained.clone())
-            .scope(async { CompilerCloseOwner::current().unwrap() })
+        let captured = services
+            .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()))
+            .scope(async { crate::capabilities::CompilerOwnerScope::current().unwrap() })
             .await;
         // Register before the task exists, using its captured actual owner.
-        let ticket = captured.register_work().unwrap();
+        let ticket = captured.admit_work().unwrap();
         assert!(matches!(
             retained.compiler_close_observations().as_slice(),
             [crate::termination::CompilerWorkClose::Pending]
@@ -14734,7 +14713,7 @@ pub(crate) mod request_tests {
         let (release, proceed) = std::sync::mpsc::channel();
         let (settled, completed) = std::sync::mpsc::channel();
         let waiter = tokio::spawn(async move {
-            assert!(CompilerCloseOwner::current().is_err());
+            assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
             spawn_blocking_in_span(move || {
                 let action = ticket.run_for_workload(
                     tidepool_extract_cmd::CompileWorkload::Preparation,
@@ -14793,9 +14772,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn captured_preparation_owner_refuses_admission_after_retirement() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let retained = crate::RetainedActorExit::new();
-        let captured = CompilerCloseOwner::ActorLifecycle(retained.clone())
-            .scope(async { CompilerCloseOwner::current().unwrap() })
+        let captured = services
+            .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()))
+            .scope(async { crate::capabilities::CompilerOwnerScope::current().unwrap() })
             .await;
         retained.retain_cleanup(crate::ResidentCleanupOutcome {
             actor: crate::ActorRef::first(crate::ActorId(1)),
@@ -14803,7 +14784,7 @@ pub(crate) mod request_tests {
             realm: crate::CleanupComponentOutcome::Confirmed,
             children: crate::CleanupComponentOutcome::Confirmed,
         });
-        assert!(captured.register_work().is_err());
+        assert!(captured.admit_work().is_err());
         assert!(retained.compiler_close_observations().is_empty());
         assert!(retained.cleanup().unwrap().is_confirmed());
     }
@@ -14811,8 +14792,8 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn compiler_spawn_refuses_missing_cleanup_owner() {
         assert!(matches!(
-            register_compiler_work(),
-            Err(ResidentActorWorkbenchError::ActorProtocol(_))
+            crate::capabilities::CompilerOwnerScope::current().and_then(|scope| scope.admit_work()),
+            Err(ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
         ));
     }
 
@@ -17267,18 +17248,22 @@ pub(crate) mod request_tests {
             let requests_before = compiler_trace_started_ids(&trace_path);
             let task_workbench = Arc::clone(&workbench);
             let task_context = context.clone();
-            let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                task_workbench
-                    .resume_lookup(
-                        task_context,
-                        hole,
-                        real_lookup_request(varied_lookup_queries()),
-                        crate::UsagePointerTable::default(),
-                        None,
-                        None,
-                    )
-                    .await
-            }));
+            let task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        task_workbench
+                            .resume_lookup(
+                                task_context,
+                                hole,
+                                real_lookup_request(varied_lookup_queries()),
+                                crate::UsagePointerTable::default(),
+                                None,
+                                None,
+                            )
+                            .await
+                    }),
+            );
 
             let trace_for_wait = trace_path.clone();
             let active_request = tokio::task::spawn_blocking(move || {
@@ -17737,27 +17722,31 @@ pub(crate) mod request_tests {
         let task_continuation_id = continuation_id.clone();
         let task_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-            let guard = ParkedHoleAbortGuard::new(
-                &task_workbench.access,
-                task_context.clone(),
-                task_continuation_id,
-                "cancelled lookup request".into(),
-            );
-            SLOT_CONTINUATION_OWNER
-                .scope(
-                    guard.registration(),
-                    task_workbench.resume_lookup(
-                        task_context,
-                        hole,
-                        real_lookup_request(varied_lookup_queries()),
-                        crate::UsagePointerTable::default(),
-                        Some(task_cancellation),
-                        None,
-                    ),
-                )
-                .await
-        }));
+        let task = tokio::spawn(
+            crate::capabilities::CompilerOwnerScope::current()
+                .unwrap()
+                .scope(async move {
+                    let guard = ParkedHoleAbortGuard::new(
+                        &task_workbench.access,
+                        task_context.clone(),
+                        task_continuation_id,
+                        "cancelled lookup request".into(),
+                    );
+                    SLOT_CONTINUATION_OWNER
+                        .scope(
+                            guard.registration(),
+                            task_workbench.resume_lookup(
+                                task_context,
+                                hole,
+                                real_lookup_request(varied_lookup_queries()),
+                                crate::UsagePointerTable::default(),
+                                Some(task_cancellation),
+                                None,
+                            ),
+                        )
+                        .await
+                }),
+        );
         let trace_for_wait = trace_path.clone();
         let request = tokio::task::spawn_blocking(move || {
             wait_for_new_compiler_request(&trace_for_wait, &requests_before)
@@ -17825,6 +17814,7 @@ pub(crate) mod request_tests {
     async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation_with_preparation_client(
         preparation_client: crate::CompilerPreparationClient,
     ) {
+        let services = crate::capabilities::WorkbenchServices::new();
         use tracing::instrument::WithSubscriber;
 
         let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
@@ -17837,7 +17827,8 @@ pub(crate) mod request_tests {
         let (_, _, source, _session_root) = host_mount_fixture();
         let source = source.bind_preparation(preparation_client.clone());
         let retained = crate::RetainedActorExit::new();
-        let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
+        let owner =
+            services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
         let source_layer = crate::CheckpointSourceLayer::default();
         let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -17909,7 +17900,7 @@ pub(crate) mod request_tests {
             async move {
                 // This waiter has no task-local owner; it borrows the admitted
                 // source task instead of registering a replacement compiler.
-                assert!(CompilerCloseOwner::current().is_err());
+                assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
                 let mut waiting = Box::pin(source.prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Preparation,
                     source_layer,
@@ -18481,6 +18472,7 @@ pub(crate) mod request_tests {
     async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay_with_preparation_client(
         preparation_client: crate::CompilerPreparationClient,
     ) {
+        let services = crate::capabilities::WorkbenchServices::new();
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,
             identities: Vec<String>,
@@ -18724,7 +18716,7 @@ pub(crate) mod request_tests {
                 let loading = tokio::spawn({
                     let source = source.clone();
                     let selected = selected.clone();
-                    let owner = CompilerCloseOwner::Hosted(load_control.clone());
+                    let owner = services.with_compiler_owner(CompilerCloseOwner::Hosted(load_control.clone()));
                     async move {
                         owner
                             .scope(source.prepare_source_toolset(
@@ -21678,7 +21670,7 @@ pub(crate) mod request_tests {
             Ok(machine)
         }));
         let task_runner = runner.clone();
-        let task_owner = CompilerCloseOwner::current().unwrap();
+        let task_owner = crate::capabilities::CompilerOwnerScope::current().unwrap();
         let task = tokio::spawn(async move {
             task_owner
                 .scope(task_runner.provision_child_session(id, RealmId::ROOT, None, &[]))
@@ -21809,7 +21801,7 @@ pub(crate) mod request_tests {
             assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
 
             let task_runner = runner.clone();
-            let task_owner = CompilerCloseOwner::current().unwrap();
+            let task_owner = crate::capabilities::CompilerOwnerScope::current().unwrap();
             let (published, observe) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
                 let _owned = task_owner
@@ -26347,36 +26339,42 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             let abandoned_input = inputs.remove(0);
             drop(inputs);
-            let first_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    first
-                        .mount_activation_input(
-                            first_context,
-                            first_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let first_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        first
+                            .mount_activation_input(
+                                first_context,
+                                first_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(30), producer_seen)
                 .await
                 .unwrap()
                 .unwrap();
-            let second_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    second
-                        .mount_activation_input(
-                            second_context,
-                            second_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let second_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        second
+                            .mount_activation_input(
+                                second_context,
+                                second_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(30), waiter_seen)
                 .await
                 .unwrap()
@@ -26393,19 +26391,22 @@ pub(crate) mod request_tests {
                 .map(str::to_owned)
                 .collect();
             machines.settle_suspended(receipt, session, holes);
-            let abandoned_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    abandoned
-                        .mount_activation_input(
-                            abandoned_context,
-                            abandoned_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let abandoned_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        abandoned
+                            .mount_activation_input(
+                                abandoned_context,
+                                abandoned_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(30), abandoned_seen)
                 .await
                 .unwrap()
@@ -26466,19 +26467,22 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
-            let first_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    first
-                        .mount_activation_input(
-                            first_context,
-                            first_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let first_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        first
+                            .mount_activation_input(
+                                first_context,
+                                first_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(60), sealed_seen)
                 .await
                 .unwrap()
@@ -26566,38 +26570,44 @@ pub(crate) mod request_tests {
             let first_input = inputs.remove(0);
             let second_input = inputs.remove(0);
             drop(inputs);
-            let first_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    first
-                        .mount_activation_input(
-                            first_context,
-                            first_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let first_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        first
+                            .mount_activation_input(
+                                first_context,
+                                first_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(60), started_seen)
                 .await
                 .unwrap()
                 .unwrap();
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
-            let second_task =
-                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-                    second
-                        .mount_activation_input(
-                            second_context,
-                            second_input,
-                            None,
-                            "()".into(),
-                            None,
-                            Vec::new(),
-                        )
-                        .await
-                }));
+            let second_task = tokio::spawn(
+                crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .scope(async move {
+                        second
+                            .mount_activation_input(
+                                second_context,
+                                second_input,
+                                None,
+                                "()".into(),
+                                None,
+                                Vec::new(),
+                            )
+                            .await
+                    }),
+            );
             tokio::time::timeout(Duration::from_secs(60), waiting_seen)
                 .await
                 .unwrap()
@@ -27972,6 +27982,7 @@ pub(crate) mod request_tests {
     async fn external_work_releases_machine_until_its_failure_settles_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
     ) {
+        let services = crate::capabilities::WorkbenchServices::new();
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(
@@ -28005,7 +28016,8 @@ pub(crate) mod request_tests {
         let task = {
             let runner = Arc::clone(&runner);
             let context = context.clone();
-            let compiler_owner = CompilerCloseOwner::Hosted(control.clone());
+            let compiler_owner =
+                services.with_compiler_owner(CompilerCloseOwner::Hosted(control.clone()));
             let expected_control = control.clone();
             tokio::spawn(async move {
                 compiler_owner
@@ -28014,15 +28026,15 @@ pub(crate) mod request_tests {
                             hole,
                             request,
                             work: tidepool_effect::DeferredEffect::blocking(move || {
-                                let CompilerCloseOwner::Hosted(current) =
-                                    CompilerCloseOwner::current().unwrap()
-                                else {
-                                    panic!("deferred source check keeps its exact caller owner")
-                                };
-                                assert!(Arc::ptr_eq(&current, &expected_control));
                                 crate::ActorCompilerCloseOwner::current()
                                     .unwrap()
                                     .run(|_| {
+                                        assert!(matches!(
+                                            expected_control
+                                                .compiler_close_observations()
+                                                .as_slice(),
+                                            [crate::termination::CompilerWorkClose::Pending]
+                                        ));
                                         started_tx.send(()).expect("observer waiting");
                                         release_rx
                                             .recv_timeout(Duration::from_secs(5))
@@ -28659,28 +28671,32 @@ pub(crate) mod request_tests {
         let task_workbench = Arc::clone(&workbench);
         let slot_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
-            task_workbench
-                .with_exact_continuation_cleanup(
-                    task_context.clone(),
-                    "cancelled slot".into(),
-                    async {
-                        let (block, _) = suspending_fragment();
-                        let step = slot_workbench
-                            .begin_cell_for_test(task_context, block)
-                            .await
-                            .expect("slot fragment parks");
-                        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-                            panic!("expected slot suspension")
-                        };
-                        parked_tx
-                            .send(outcome.continuation_id().to_owned())
-                            .expect("test waiting for slot hole");
-                        std::future::pending::<()>().await;
-                    },
-                )
-                .await
-        }));
+        let task = tokio::spawn(
+            crate::capabilities::CompilerOwnerScope::current()
+                .unwrap()
+                .scope(async move {
+                    task_workbench
+                        .with_exact_continuation_cleanup(
+                            task_context.clone(),
+                            "cancelled slot".into(),
+                            async {
+                                let (block, _) = suspending_fragment();
+                                let step = slot_workbench
+                                    .begin_cell_for_test(task_context, block)
+                                    .await
+                                    .expect("slot fragment parks");
+                                let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                                    panic!("expected slot suspension")
+                                };
+                                parked_tx
+                                    .send(outcome.continuation_id().to_owned())
+                                    .expect("test waiting for slot hole");
+                                std::future::pending::<()>().await;
+                            },
+                        )
+                        .await
+                }),
+        );
         let slot_id = parked_rx.await.expect("slot parked");
         task.abort();
         assert!(task.await.expect_err("cancelled task").is_cancelled());

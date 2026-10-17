@@ -103,10 +103,12 @@ fn execution_with_id(
             "model test execution abandoned".into(),
             resources.clone(),
         )
-        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
-            work: invocation_work.clone(),
-            control: Some(control.clone()),
-        });
+        .with_compiler_owner(workbench.compiler_scope(
+            crate::resident_workbench::CompilerCloseOwner::Invocation {
+                work: invocation_work.clone(),
+                control: Some(control.clone()),
+            },
+        ));
     OwnedExecution {
         state: Box::new(WorkbenchExecutionState {
             cell_span: cell_execution_span(&context, &request),
@@ -159,25 +161,31 @@ async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_w
     use crate::resident_workbench::CompilerCloseOwner;
     use crate::termination::CompilerWorkClose;
 
+    let services = crate::capabilities::WorkbenchServices::new();
     for unwind in [false, true] {
         let owned = execution(source.clone(), Arc::new(ModelOwner::default()));
         let original_work = owned.state.effects.invocation_work.clone();
         let original_control = owned.state.effects.control.clone().unwrap();
         let unrelated = crate::WorkbenchExecutionControl::untracked();
         let expected_control = original_control.clone();
-        let running = CompilerCloseOwner::Hosted(unrelated.clone())
+        let running = services
+            .with_compiler_owner(CompilerCloseOwner::Hosted(unrelated.clone()))
             .scope(async {
                 owned.spawn_blocking(move || {
-                    let CompilerCloseOwner::Invocation { work, control } =
-                        CompilerCloseOwner::current().unwrap()
-                    else {
-                        panic!("source checking must use the admitted invocation owner")
-                    };
-                    assert!(Arc::ptr_eq(&work, &original_work));
-                    assert!(Arc::ptr_eq(&control.unwrap(), &expected_control));
                     crate::ActorCompilerCloseOwner::current()
                         .unwrap()
                         .run(|_| {
+                            assert!(matches!(
+                                expected_control.compiler_close_observations().as_slice(),
+                                [CompilerWorkClose::Pending]
+                            ));
+                            assert!(original_work.begin_publication());
+                            assert!(matches!(
+                                crate::ActorCompilerCloseOwner::current()
+                                    .unwrap()
+                                    .run(|_| ()),
+                                Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+                            ));
                             if unwind {
                                 panic!("source checker unwind")
                             }

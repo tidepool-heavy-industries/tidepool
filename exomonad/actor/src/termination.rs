@@ -174,10 +174,54 @@ impl CompilerWorkClose {
     }
 }
 
+/// Read-only live evidence for one issued compiler obligation.
+/// Cloning this handle retains evidence without granting stop or settlement authority.
 #[derive(Clone, Debug)]
-pub(crate) struct CompilerWorkReceipt {
+pub(crate) struct CompilerWorkObservation {
     close: Arc<Mutex<CompilerWorkClose>>,
-    cancellation: Option<tidepool_runtime::CompilerTransactionCancellation>,
+}
+
+impl CompilerWorkObservation {
+    pub(crate) fn observation(&self) -> CompilerWorkClose {
+        self.close.lock().clone()
+    }
+}
+
+/// Stop control for the exact work whose observation it retains.
+/// Stopping after compiler close still revokes that work's host admission.
+#[derive(Clone, Debug)]
+pub(crate) struct CompilerWorkControl {
+    observation: CompilerWorkObservation,
+    cancellation: tidepool_runtime::CompilerTransactionCancellation,
+}
+
+impl CompilerWorkControl {
+    pub(crate) fn observation(&self) -> CompilerWorkObservation {
+        self.observation.clone()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn cancel_pending(&self) {
+        self.cancellation.cancel_host_admission();
+        if matches!(*self.observation.close.lock(), CompilerWorkClose::Pending) {
+            self.cancellation.cancel();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum CompilerWorkAccess {
+    Controlled(CompilerWorkControl),
+    Observed(CompilerWorkObservation),
+}
+
+/// One recipient's registration; purpose never changes a peer's registration.
+#[derive(Clone, Debug)]
+pub(crate) struct CompilerWorkRegistration {
+    access: CompilerWorkAccess,
     purpose: CompilerWorkPurpose,
 }
 
@@ -187,68 +231,127 @@ enum CompilerWorkPurpose {
     Finalization,
 }
 
-impl CompilerWorkReceipt {
-    pub(crate) fn pending() -> Self {
-        Self {
-            close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
-            cancellation: Some(tidepool_runtime::CompilerTransactionCancellation::new()),
-            purpose: CompilerWorkPurpose::Active,
+impl CompilerWorkRegistration {
+    pub(crate) fn observation(&self) -> CompilerWorkClose {
+        match &self.access {
+            CompilerWorkAccess::Controlled(control) => control.observation.observation(),
+            CompilerWorkAccess::Observed(observation) => observation.observation(),
         }
     }
-    pub(crate) fn observation(&self) -> CompilerWorkClose {
-        self.close.lock().clone()
+
+    pub(crate) fn observer(&self) -> CompilerWorkObservation {
+        match &self.access {
+            CompilerWorkAccess::Controlled(control) => control.observation(),
+            CompilerWorkAccess::Observed(observation) => observation.clone(),
+        }
     }
 
-    /// A dependent waiter observes settlement without owning the shared producer's stop edge.
-    pub(crate) fn observation_only(&self) -> Self {
+    fn observation_only(&self) -> Self {
         Self {
-            close: Arc::clone(&self.close),
-            cancellation: None,
+            access: CompilerWorkAccess::Observed(self.observer()),
             purpose: self.purpose,
         }
     }
 
     pub(crate) fn request_cancellation(&self) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel_host_admission();
-        }
-        let cancellation = {
-            let close = self.close.lock();
-            matches!(*close, CompilerWorkClose::Pending)
-                .then(|| self.cancellation.clone())
-                .flatten()
-        };
-        if let Some(cancellation) = cancellation {
-            cancellation.cancel();
+        match &self.access {
+            CompilerWorkAccess::Controlled(control) => control.cancel_pending(),
+            CompilerWorkAccess::Observed(_) => {}
         }
     }
 }
 
-/// Affine native-work obligation. Its blocking owner settles even without a waiter.
+/// Affine native-work obligation, issued only after real owner admission.
+/// Its blocking owner settles even without a waiter; unconsumed drop is abandonment.
 #[must_use]
 pub(crate) struct CompilerWorkTicket {
-    receipt: CompilerWorkReceipt,
+    control: CompilerWorkControl,
     settled: bool,
     owner: crate::resident_workbench::CompilerCloseOwner,
 }
 
-impl CompilerWorkTicket {
-    pub(crate) fn new(
-        receipt: CompilerWorkReceipt,
-        owner: crate::resident_workbench::CompilerCloseOwner,
-    ) -> Self {
-        Self {
-            receipt,
-            settled: false,
-            owner,
+#[derive(Clone, Copy)]
+enum CompilerWorkAdmission {
+    Active,
+    Publication,
+}
+
+impl crate::capabilities::CompilerAdmission for crate::capabilities::CompilerAdmissionService {
+    fn admit_work(
+        &self,
+        owner: &crate::resident_workbench::CompilerCloseOwner,
+    ) -> Result<CompilerWorkTicket, crate::ResidentActorWorkbenchError> {
+        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Active)
+    }
+
+    fn admit_publication(
+        &self,
+        owner: &crate::resident_workbench::CompilerCloseOwner,
+    ) -> Result<CompilerWorkTicket, crate::ResidentActorWorkbenchError> {
+        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Publication)
+    }
+}
+
+impl crate::resident_workbench::CompilerCloseOwner {
+    fn register_receipt(
+        &self,
+        receipt: CompilerWorkRegistration,
+        admission: CompilerWorkAdmission,
+    ) -> bool {
+        match self {
+            Self::ActorLifecycle(owner) => owner.register_compiler_work(receipt),
+            Self::ActorFinalization(owner) => owner.register_compiler_finalization_work(receipt),
+            Self::SharedPreparation { producer, observer } => {
+                producer.register_compiler_work(receipt.clone())
+                    && observer.register_receipt(receipt.observation_only(), admission)
+            }
+            Self::Hosted(owner) => owner.register_compiler_work(receipt),
+            Self::Invocation { work, control } => {
+                let admitted = match admission {
+                    CompilerWorkAdmission::Active => work.register_compiler_work(receipt.clone()),
+                    CompilerWorkAdmission::Publication => {
+                        work.register_publication_compiler_work(receipt.clone())
+                    }
+                };
+                admitted
+                    && control
+                        .as_ref()
+                        .is_none_or(|owner| owner.register_compiler_work(receipt))
+            }
         }
     }
-    pub(crate) fn cancellation(&self) -> tidepool_runtime::CompilerTransactionCancellation {
-        self.receipt
-            .cancellation
-            .as_ref()
-            .expect("compiler ticket owns cancellation")
-            .clone()
+}
+
+impl CompilerWorkTicket {
+    fn admit(
+        owner: crate::resident_workbench::CompilerCloseOwner,
+        admission: CompilerWorkAdmission,
+    ) -> Result<Self, crate::ResidentActorWorkbenchError> {
+        let control = CompilerWorkControl {
+            observation: CompilerWorkObservation {
+                close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
+            },
+            cancellation: tidepool_runtime::CompilerTransactionCancellation::new(),
+        };
+        let registration = CompilerWorkRegistration {
+            access: CompilerWorkAccess::Controlled(control.clone()),
+            purpose: CompilerWorkPurpose::Active,
+        };
+        let ticket = Self {
+            control,
+            settled: false,
+            owner,
+        };
+        if ticket.owner.register_receipt(registration, admission) {
+            return Ok(ticket);
+        }
+        // No native work started; settle references retained by partial admission.
+        ticket.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+        Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+    }
+
+    pub(crate) fn control(&self) -> CompilerWorkControl {
+        self.control.clone()
     }
 
     pub(crate) fn run<T>(
@@ -285,7 +388,7 @@ impl CompilerWorkTicket {
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> tidepool_runtime::CompilerTransactionSettled<T> {
-        let cancellation = self.cancellation();
+        let cancellation = self.control.cancellation.clone();
         tidepool_runtime::settle_compiler_transaction_cancellable_for_workload(
             workload,
             cancellation,
@@ -294,13 +397,8 @@ impl CompilerWorkTicket {
         )
     }
 
-    pub(crate) fn consume<T>(self, outcome: tidepool_runtime::CompilerTransactionOutcome<T>) -> T {
-        self.consume_close(outcome.close);
-        outcome.action
-    }
-
-    pub(crate) fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
-        *self.receipt.close.lock() = CompilerWorkClose::Settled(close);
+    fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
+        *self.control.observation.close.lock() = CompilerWorkClose::Settled(close);
         self.settled = true;
         self.owner.close_settled();
     }
@@ -309,7 +407,7 @@ impl CompilerWorkTicket {
 impl Drop for CompilerWorkTicket {
     fn drop(&mut self) {
         if !self.settled {
-            *self.receipt.close.lock() = CompilerWorkClose::Abandoned;
+            *self.control.observation.close.lock() = CompilerWorkClose::Abandoned;
             self.owner.close_settled();
         }
     }
@@ -319,12 +417,12 @@ impl Drop for CompilerWorkTicket {
 /// the existing lifecycle owner when native work outlives its async waiter.
 #[derive(Clone)]
 pub struct ActorCompilerCloseOwner {
-    owner: crate::resident_workbench::CompilerCloseOwner,
+    scope: crate::capabilities::CompilerOwnerScope,
 }
 
 impl ActorCompilerCloseOwner {
     pub fn current() -> Result<Self, crate::ResidentActorWorkbenchError> {
-        crate::resident_workbench::CompilerCloseOwner::current().map(|owner| Self { owner })
+        crate::capabilities::CompilerOwnerScope::current().map(|scope| Self { scope })
     }
 
     pub fn run<T>(
@@ -333,8 +431,8 @@ impl ActorCompilerCloseOwner {
     ) -> Result<tidepool_runtime::CompilerTransactionOutcome<T>, crate::ResidentActorWorkbenchError>
     {
         Ok(self
-            .owner
-            .register_work()?
+            .scope
+            .admit_work()?
             .run_with_close(action)
             .into_outcome())
     }
@@ -371,15 +469,25 @@ impl CompilerPreparationClient {
 
 /// A compiler preparation lifetime before any actor is admitted. Retain this
 /// owner independently of its cancelable operation future.
-#[derive(Default)]
 pub struct CompilerPreparationOwner {
     retained: RetainedActorExit,
     preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+    services: crate::capabilities::WorkbenchServices,
+}
+
+impl Default for CompilerPreparationOwner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CompilerPreparationOwner {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            retained: RetainedActorExit::new(),
+            preparation: Arc::new(crate::agent_spec::preparation::ToolsetPreparation::default()),
+            services: crate::capabilities::WorkbenchServices::new(),
+        }
     }
 
     pub(crate) fn client(&self) -> CompilerPreparationClient {
@@ -411,6 +519,7 @@ impl CompilerPreparationOwner {
         let client = self.client();
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
+        let owner = self.services.with_compiler_owner(owner);
         async move {
             let action = owner.scope(operation(client)).await;
             drop(guard);
@@ -431,7 +540,7 @@ impl CompilerPreparationOwner {
         let cleanup = self.cleanup();
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
-        let action = owner.register_work().map(|ticket| ticket.run(action));
+        let action = self.services.with_compiler_owner(owner).run(action);
         admission.completed = true;
         drop(admission);
         CompilerPreparationOutcome { action, cleanup }
@@ -457,7 +566,11 @@ impl CompilerPreparationOwner {
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
         async move {
-            let action = owner.scope(operation).await;
+            let action = self
+                .services
+                .with_compiler_owner(owner)
+                .scope(operation)
+                .await;
             admission.completed = true;
             drop(admission);
             CompilerPreparationOutcome { action, cleanup }
@@ -499,11 +612,13 @@ pub(crate) struct CompilerFinalizationGuard {
 impl CompilerFinalizationGuard {
     pub(crate) fn scope<F: std::future::Future>(
         &self,
+        services: &crate::capabilities::WorkbenchServices,
         operation: F,
     ) -> impl std::future::Future<Output = F::Output> {
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorFinalization(self.retained.clone());
-        async move { owner.scope(operation).await }
+        let scope = services.with_compiler_owner(owner);
+        async move { scope.scope(operation).await }
     }
 }
 
@@ -557,7 +672,7 @@ impl CompilerPreparationCleanup {
             work: state
                 .compilers
                 .iter()
-                .map(CompilerWorkReceipt::observation)
+                .map(CompilerWorkRegistration::observation)
                 .collect(),
         }
     }
@@ -599,7 +714,7 @@ enum CompilerAdmission {
 struct RetainedCleanupState {
     compiler_admission: CompilerAdmission,
     outcome: Option<crate::ResidentCleanupOutcome>,
-    compilers: Vec<CompilerWorkReceipt>,
+    compilers: Vec<CompilerWorkRegistration>,
 }
 
 struct ExitState {
@@ -679,7 +794,7 @@ impl RetainedActorExit {
         let unconfirmed: Vec<_> = state
             .compilers
             .iter()
-            .map(CompilerWorkReceipt::observation)
+            .map(CompilerWorkRegistration::observation)
             .filter(|close| !close.is_confirmed())
             .collect();
         if !unconfirmed.is_empty() {
@@ -704,7 +819,7 @@ impl RetainedActorExit {
         self.notify_compiler_close();
     }
 
-    pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
+    pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkRegistration) -> bool {
         let shutdown = self.state.requested_shutdown.lock();
         let mut state = self.state.cleanup.lock();
         if state.compiler_admission != CompilerAdmission::Active
@@ -754,7 +869,7 @@ impl RetainedActorExit {
 
     pub(crate) fn register_compiler_finalization_work(
         &self,
-        mut receipt: CompilerWorkReceipt,
+        mut receipt: CompilerWorkRegistration,
     ) -> bool {
         let mut state = self.state.cleanup.lock();
         if state.compiler_admission != CompilerAdmission::Finalizing || state.outcome.is_some() {
@@ -787,7 +902,7 @@ impl RetainedActorExit {
             .lock()
             .compilers
             .iter()
-            .map(CompilerWorkReceipt::observation)
+            .map(CompilerWorkRegistration::observation)
             .collect()
     }
 
@@ -1130,9 +1245,9 @@ mod tests {
         let mut owner = super::CompilerPreparationOwner::new();
         owner
             .scope(async move {
-                let ticket = crate::resident_workbench::CompilerCloseOwner::current()
+                let ticket = crate::capabilities::CompilerOwnerScope::current()
                     .unwrap()
-                    .register_work()
+                    .admit_work()
                     .unwrap();
                 drop(ticket);
                 action
@@ -1164,30 +1279,34 @@ mod tests {
 
     #[test]
     fn dropping_unpolled_source_scope_closes_admission_without_fabricated_actor() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let mut owner = super::CompilerPreparationOwner::new();
-        let captured =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone());
+        let captured = services.with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone()),
+        );
         let observation = owner.cleanup();
         let operation = owner.scope(async {
             panic!("unpolled action cannot execute");
         });
         drop(operation);
         assert!(observation.observation().is_confirmed());
-        assert!(captured.register_work().is_err());
+        assert!(captured.admit_work().is_err());
         assert!(owner.retained.get().is_none());
         assert!(owner.retained.cleanup().is_none());
     }
 
     #[tokio::test]
     async fn cancelled_source_scope_retains_abandonment_and_closes_late_admission() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let mut owner = super::CompilerPreparationOwner::new();
-        let captured =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone());
+        let captured = services.with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone()),
+        );
         let observation = owner.cleanup();
         let mut operation = Box::pin(owner.scope(async {
-            let _ticket = crate::resident_workbench::CompilerCloseOwner::current()
+            let _ticket = crate::capabilities::CompilerOwnerScope::current()
                 .unwrap()
-                .register_work()
+                .admit_work()
                 .unwrap();
             std::future::pending::<()>().await;
         }));
@@ -1207,7 +1326,7 @@ mod tests {
             vec![super::CompilerWorkClose::Abandoned]
         );
         assert!(!observation.observation().is_confirmed());
-        assert!(captured.register_work().is_err());
+        assert!(captured.admit_work().is_err());
     }
 
     #[tokio::test]
@@ -1216,9 +1335,9 @@ mod tests {
         let (release, proceed) = std::sync::mpsc::channel();
         let outcome = owner
             .scope(async {
-                let ticket = crate::resident_workbench::CompilerCloseOwner::current()
+                let ticket = crate::capabilities::CompilerOwnerScope::current()
                     .unwrap()
-                    .register_work()
+                    .admit_work()
                     .unwrap();
                 let _native = tidepool_runtime::spawn_blocking_in_span(move || {
                     ticket.run_for_workload(
@@ -1268,21 +1387,111 @@ mod tests {
         }
     }
 
-    fn admitted_compiler(owner: &RetainedActorExit) -> CompilerWorkTicket {
-        let receipt = CompilerWorkReceipt::pending();
-        assert!(owner.register_compiler_work(receipt.clone()));
-        CompilerWorkTicket::new(
-            receipt,
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone()),
-        )
+    fn admitted_compiler(
+        services: &crate::capabilities::WorkbenchServices,
+        owner: &RetainedActorExit,
+    ) -> CompilerWorkTicket {
+        services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone()),
+            )
+            .admit_work()
+            .unwrap()
+    }
+
+    #[test]
+    fn nested_shared_registrations_stop_only_the_actual_producer() {
+        let services = crate::capabilities::WorkbenchServices::new();
+        for stop in 0..3 {
+            let producer = RetainedActorExit::new();
+            let intermediate = RetainedActorExit::new();
+            let observer = RetainedActorExit::new();
+            let owner = services
+                .with_compiler_owner(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone()),
+                )
+                .shared_preparation(intermediate.clone())
+                .shared_preparation(producer.clone());
+            let ticket = owner.admit_work().unwrap();
+            let observation = ticket.control().observation();
+            for recipient in [&producer, &intermediate, &observer] {
+                assert_eq!(
+                    recipient.compiler_close_observations(),
+                    vec![CompilerWorkClose::Pending]
+                );
+            }
+            [&observer, &intermediate, &producer][stop].request_shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "one recipient stopped",
+            ));
+            let action = ticket.run(|_| tidepool_extract_cmd::compiler_host_checkpoint());
+            if stop == 2 {
+                assert_eq!(action.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+            } else {
+                action.unwrap();
+            }
+            assert_eq!(
+                observation.observation(),
+                CompilerWorkClose::Settled(tidepool_runtime::CompilerTransactionClose::NotStarted)
+            );
+            for recipient in [&producer, &intermediate, &observer] {
+                assert_eq!(
+                    recipient.compiler_close_observations(),
+                    vec![observation.observation()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_finalization_purpose_is_recipient_local_and_observation_only() {
+        let services = crate::capabilities::WorkbenchServices::new();
+        let producer = RetainedActorExit::new();
+        let observer = RetainedActorExit::new();
+        let guard = observer.begin_compiler_finalization().unwrap();
+        let owner = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorFinalization(observer.clone()),
+            )
+            .shared_preparation(producer.clone());
+        let ticket = owner.admit_work().unwrap();
+        {
+            let producer_state = producer.state.cleanup.lock();
+            let observer_state = observer.state.cleanup.lock();
+            assert_eq!(
+                producer_state.compilers[0].purpose,
+                CompilerWorkPurpose::Active
+            );
+            assert_eq!(
+                observer_state.compilers[0].purpose,
+                CompilerWorkPurpose::Finalization
+            );
+            assert!(matches!(
+                producer_state.compilers[0].access,
+                CompilerWorkAccess::Controlled(_)
+            ));
+            assert!(matches!(
+                observer_state.compilers[0].access,
+                CompilerWorkAccess::Observed(_)
+            ));
+        }
+        drop(guard);
+        ticket
+            .run(|_| tidepool_extract_cmd::compiler_host_checkpoint())
+            .unwrap();
+        assert_eq!(
+            producer.compiler_close_observations(),
+            observer.compiler_close_observations()
+        );
     }
 
     #[tokio::test]
     async fn actor_exit_cancels_host_admission_after_compiler_close() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let owner = RetainedActorExit::new();
-        let ticket = admitted_compiler(&owner);
-        let host = ticket.cancellation().host_admission_cancellation();
+        let ticket = admitted_compiler(&services, &owner);
         let outcome = ticket.run_with_close(|_| 17);
+        let host = outcome.host_admission_cancellation().unwrap();
         assert_eq!(*outcome.action(), 17);
         assert_eq!(
             *outcome.close(),
@@ -1304,6 +1513,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalization_histories_keep_active_and_captured_admission_closed() {
+        let services = crate::capabilities::WorkbenchServices::new();
         for kind in [
             ActorExitKind::Completed,
             ActorExitKind::Failed,
@@ -1312,33 +1522,34 @@ mod tests {
         ] {
             for retain_first in [false, true] {
                 let retained = RetainedActorExit::new();
-                let active =
-                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone());
-                active.register_work().unwrap().consume(
-                    tidepool_runtime::CompilerTransactionOutcome {
-                        action: (),
-                        close: tidepool_runtime::CompilerTransactionClose::NotStarted,
-                    },
+                let active = services.with_compiler_owner(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
                 );
+                active
+                    .admit_work()
+                    .unwrap()
+                    .run(|_| ());
                 retained.request_shutdown(ActorTerminal::new(kind, "stop active work"));
-                assert!(active.register_work().is_err());
+                assert!(active.admit_work().is_err());
                 let guard = retained.begin_compiler_finalization().unwrap();
                 assert!(retained.begin_compiler_finalization().is_err());
                 let finalizer = guard
-                    .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+                    .scope(&services, async {
+                        crate::ActorCompilerCloseOwner::current().unwrap()
+                    })
                     .await;
                 finalizer
                     .run(|close| close(tidepool_runtime::CompilerTransactionClose::Clean))
                     .unwrap();
                 assert!(
-                    active.register_work().is_err(),
+                    active.admit_work().is_err(),
                     "finalization must not reopen active work"
                 );
                 let pending = guard
-                    .scope(async {
-                        crate::resident_workbench::CompilerCloseOwner::current()
+                    .scope(&services, async {
+                        crate::capabilities::CompilerOwnerScope::current()
                             .unwrap()
-                            .register_work()
+                            .admit_work()
                             .unwrap()
                     })
                     .await;
@@ -1360,11 +1571,8 @@ mod tests {
                     Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
                 ));
                 assert!(!entered);
-                assert!(active.register_work().is_err());
-                pending.consume(tidepool_runtime::CompilerTransactionOutcome {
-                    action: (),
-                    close: tidepool_runtime::CompilerTransactionClose::NotStarted,
-                });
+                assert!(active.admit_work().is_err());
+                pending.run(|_| ());
                 assert!(retained.cleanup().unwrap().is_confirmed());
                 let state = retained.state.cleanup.lock();
                 assert!(state.compiler_admission == CompilerAdmission::Closed);
@@ -1375,12 +1583,13 @@ mod tests {
 
     #[test]
     fn retaining_cleanup_without_stop_interrupts_admitted_active_compiler() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let retained = RetainedActorExit::new();
-        let ticket = admitted_compiler(&retained);
+        let ticket = admitted_compiler(&services, &retained);
         let actor = crate::ActorRef::first(crate::ActorId(332));
         retained.retain_cleanup(clean_actor_cleanup(actor));
         assert!(retained.requested_shutdown().is_none());
-        assert!(admitted_compiler_refusal(&retained));
+        assert!(admitted_compiler_refusal(&services, &retained));
         assert!(retained.begin_compiler_finalization().is_err());
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("must-not-be-read");
@@ -1392,18 +1601,29 @@ mod tests {
         assert!(retained.cleanup().unwrap().is_confirmed());
     }
 
-    fn admitted_compiler_refusal(retained: &RetainedActorExit) -> bool {
-        !retained.register_compiler_work(CompilerWorkReceipt::pending())
+    fn admitted_compiler_refusal(
+        services: &crate::capabilities::WorkbenchServices,
+        retained: &RetainedActorExit,
+    ) -> bool {
+        services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
+            )
+            .admit_work()
+            .is_err()
     }
 
     #[tokio::test]
     async fn finalization_timeout_retains_pending_until_native_late_close() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let retained = RetainedActorExit::new();
         let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "stop before hook");
         retained.request_shutdown(terminal.clone());
         let guard = retained.begin_compiler_finalization().unwrap();
         let finalizer = guard
-            .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+            .scope(&services, async {
+                crate::ActorCompilerCloseOwner::current().unwrap()
+            })
             .await;
         let (entered, observed) = tokio::sync::oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
@@ -1465,6 +1685,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalization_preserves_primary_failure_and_uncertainty_on_unwind() {
+        let services = crate::capabilities::WorkbenchServices::new();
         for unwind in [false, true] {
             let retained = RetainedActorExit::new();
             retained.request_shutdown(ActorTerminal::new(
@@ -1475,7 +1696,7 @@ mod tests {
             let operation = std::panic::AssertUnwindSafe(async {
                 let guard = retained.begin_compiler_finalization().unwrap();
                 guard
-                    .scope(async {
+                    .scope(&services, async {
                         let result = crate::ActorCompilerCloseOwner::current()
                             .unwrap()
                             .run(|close| {
@@ -1514,8 +1735,9 @@ mod tests {
 
     #[test]
     fn pending_compiler_prevents_confirmed_actor_stop_until_actual_late_close() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let owner = RetainedActorExit::new();
-        let ticket = admitted_compiler(&owner);
+        let ticket = admitted_compiler(&services, &owner);
         let actor = crate::ActorRef::first(crate::ActorId(1));
         owner.retain_cleanup(clean_actor_cleanup(actor));
         owner
@@ -1529,9 +1751,9 @@ mod tests {
         // The blocking owner survives the vanished async waiter and settles its
         // affine obligation independently of the actor's immutable terminal.
         assert_eq!(
-            ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-                action: Ok::<_, &'static str>(42),
-                close: tidepool_runtime::CompilerTransactionClose::Clean,
+            ticket.run(|close| {
+                close(tidepool_runtime::CompilerTransactionClose::Clean);
+                Ok::<_, &'static str>(42)
             }),
             Ok(42)
         );
@@ -1540,17 +1762,23 @@ mod tests {
             owner.get(),
             Some(completed("actor stopped while compiler was pending"))
         );
-        assert!(!owner.register_compiler_work(CompilerWorkReceipt::pending()));
+        assert!(services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone())
+            )
+            .admit_work()
+            .is_err());
     }
 
     #[test]
     fn completed_compiler_close_is_retained_before_actor_stop() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let owner = RetainedActorExit::new();
-        let ticket = admitted_compiler(&owner);
+        let ticket = admitted_compiler(&services, &owner);
         assert_eq!(
-            ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-                action: Err::<(), _>("primary failure"),
-                close: tidepool_runtime::CompilerTransactionClose::Clean,
+            ticket.run(|close| {
+                close(tidepool_runtime::CompilerTransactionClose::Clean);
+                Err::<(), _>("primary failure")
             }),
             Err("primary failure")
         );
@@ -1569,8 +1797,9 @@ mod tests {
 
     #[test]
     fn abandoned_compiler_obligation_cannot_certify_actor_cleanup() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let owner = RetainedActorExit::new();
-        let ticket = admitted_compiler(&owner);
+        let ticket = admitted_compiler(&services, &owner);
         owner.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
             1,
         ))));
@@ -1936,6 +2165,7 @@ mod tests {
 
     #[test]
     fn shutdown_batch_preserves_completed_exit_prior_intent_and_unsettled_work() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let exited = RetainedActorExit::new();
         let prior = RetainedActorExit::new();
         let pending = RetainedActorExit::new();
@@ -1944,7 +2174,7 @@ mod tests {
             .unwrap();
         let original = ActorTerminal::new(ActorExitKind::Failed, "original retirement");
         prior.request_shutdown(original.clone());
-        let ticket = admitted_compiler(&pending);
+        let ticket = admitted_compiler(&services, &pending);
         let cancellation = ActorTerminal::new(ActorExitKind::Cancelled, "later batch");
         let mut admissions_closed = false;
         RetainedActorExit::request_shutdown_batch(
