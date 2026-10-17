@@ -1524,7 +1524,8 @@ mod tests {
     };
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
-    use tidepool_repr::execution_schema::InventoryDecodeLimits;
+    use sha2::{Digest, Sha256};
+    use tidepool_repr::execution_schema::{CachedHomeOwner, InventoryDecodeLimits};
 
     struct Fixture {
         _root: tempfile::TempDir,
