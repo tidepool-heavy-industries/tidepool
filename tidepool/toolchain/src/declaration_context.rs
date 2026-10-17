@@ -2877,9 +2877,10 @@ impl RetainedTemplateImports {
         original: &ExactDeclarationContext,
         templates: &[String],
     ) -> Result<Option<Arc<Self>>, CompileError> {
-        let entries = original.artifact_view().entries();
-        let canonical = entries
-            .iter()
+        let interfaces = original.compiler_source_support().selected_interfaces()?;
+        let canonical = interfaces
+            .entries()
+            .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Canonical(interface)
                     if matches!(
@@ -2913,25 +2914,36 @@ impl RetainedTemplateImports {
                 "retained template imports require complete original compiler execution evidence",
             ));
         }
-        let graph = original
-            .interface_graph_for_roots(roots.iter().cloned().collect())?
-            .into_iter()
-            .map(|(owner, interface)| {
-                let entry = canonical.get(&owner).ok_or_else(|| {
-                    failure("original template graph lacks canonical source custody")
-                })?;
-                Ok((
-                    owner,
-                    RetainedTemplateNode {
-                        canonical: entry.descriptor.id,
-                        interface,
+        let lexical = original
+            .lexical_graph()
+            .iter()
+            .map(|node| (&node.owner, node))
+            .collect::<BTreeMap<_, _>>();
+        let mut graph = BTreeMap::new();
+        let mut pending = roots.iter().cloned().collect::<Vec<_>>();
+        while let Some(owner) = pending.pop() {
+            if graph.contains_key(&owner) {
+                continue;
+            }
+            let lexical = lexical
+                .get(&owner)
+                .ok_or_else(|| failure("checked template lexical closure is incomplete"))?;
+            let entry = canonical
+                .get(&owner)
+                .ok_or_else(|| failure("original template graph lacks canonical source custody"))?;
+            pending.extend(lexical.imports.iter().cloned());
+            graph.insert(
+                owner,
+                RetainedTemplateNode {
+                    canonical: entry.descriptor.id,
+                    interface: TemplateInterfaceNode {
+                        interface_sha256: entry.descriptor.interface_sha256,
+                        imports: lexical.imports.clone(),
                     },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
-        let artifacts = original
-            .artifact_view()
-            .select_roots(graph.values().map(|node| node.canonical).collect())?;
+                },
+            );
+        }
+        let artifacts = interfaces.select_owners(graph.keys().cloned().collect())?;
         let retained = Arc::new(Self {
             producer: original.facts.producer,
             roots,

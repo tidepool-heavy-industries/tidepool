@@ -1642,6 +1642,18 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_accepted_join_custody_test", unit=True)
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_accepted_join_custody_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "declaration_join::authored_tests::accepted_join_preserves_selected_dependencies_with_historical_interface_custody",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_linked_entry_reopen_test", unit=True)
             env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
             resources.append("//build/package:native_catalog")

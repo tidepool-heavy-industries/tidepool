@@ -161,6 +161,35 @@ pub(crate) struct CompilerSourceSupport {
     pub(crate) native_offers: Arc<[IssuedNativeOffer]>,
 }
 
+/// Borrowed selected interface observations and the same issuing view that
+/// resolves their scoped bindings. Historical custody cannot choose a row.
+pub(crate) struct SelectedCompilerInterfaces<'a> {
+    artifacts: &'a ArtifactView,
+    entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+}
+
+impl SelectedCompilerInterfaces<'_> {
+    pub(crate) fn entries(&self) -> &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>> {
+        &self.entries
+    }
+
+    pub(crate) fn select_owners(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+    ) -> Result<ArtifactView, CompileError> {
+        let ids = owners
+            .iter()
+            .map(|owner| {
+                self.entries
+                    .get(owner)
+                    .map(|entry| entry.descriptor.id)
+                    .ok_or_else(|| failure("selected interface owner lacks its issued role"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.artifacts.select_roots(ids)
+    }
+}
+
 impl CompilerSourceSupport {
     pub(crate) fn new(
         projection: CompilerInputProjection,
@@ -204,6 +233,29 @@ impl CompilerSourceSupport {
             }
         }
         Self::new(projection, artifacts, offers)
+    }
+
+    /// Observe issued canonical interfaces while preserving compiler roles and
+    /// native authority in the original support.
+    pub(crate) fn selected_interfaces(
+        &self,
+    ) -> Result<SelectedCompilerInterfaces<'_>, CompileError> {
+        let metadata = self.artifacts.metadata_snapshot();
+        let mut entries = BTreeMap::new();
+        for (owner, role) in &self.projection.roles {
+            let entry = metadata
+                .artifacts
+                .get(&role.interface())
+                .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
+            if entry.descriptor.owner != *owner || entry.is_native() {
+                return Err(failure("compiler interface role has another owner or kind"));
+            }
+            entries.insert(owner.clone(), entry.clone());
+        }
+        Ok(SelectedCompilerInterfaces {
+            artifacts: &self.artifacts,
+            entries,
+        })
     }
 
     pub(crate) fn native_offer_observations(&self) -> Result<BTreeSet<[u8; 32]>, CompileError> {
