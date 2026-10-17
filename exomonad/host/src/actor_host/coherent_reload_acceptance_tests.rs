@@ -194,6 +194,28 @@ fn assert_true_page(host: &HostedTestRuntime, result: &Value) {
     );
 }
 
+fn assert_use_b_with_constituents(host: &HostedTestRuntime, result: &Value) {
+    let actor = host.context.actor.identity();
+    let pages = super::test_campaign::retained_committed_display_texts(
+        &host.runtime.store(),
+        &harness::store::actor_output::ActorOutputOrigin {
+            run: host.runtime.run_identity().to_owned(),
+            native_actor: actor.id.0,
+            incarnation: actor.incarnation.0,
+        },
+        result,
+    );
+    let [constituents, verdict] = pages.as_slice() else {
+        panic!("expected constituent page followed by the original verdict: {pages:?}");
+    };
+    eprintln!("COHERENT_USE_B_CONSTITUENTS {constituents}");
+    eprintln!(
+        "COHERENT_USE_B_EXPECTED_BODY_BLAKE3 {}",
+        blake3::hash(include_bytes!("fixtures/coherent_reload_work_b.hs"))
+    );
+    assert_eq!(verdict, "True");
+}
+
 fn assert_reload_disposition(
     result: &Value,
     expected: tidepool_runtime::session::WorkbenchOperationDisposition,
@@ -526,7 +548,11 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                     )
                     .await
                     .unwrap();
-                assert_true_page(host, &round.settled_output(id));
+                if id == "use-b" {
+                    assert_use_b_with_constituents(host, &round.settled_output(id));
+                } else {
+                    assert_true_page(host, &round.settled_output(id));
+                }
                 match id {
                     "noop" => assert_reload_disposition(
                         &round.settled_output(id),
@@ -604,7 +630,11 @@ async fn authored_cell(
         )
         .await
         .unwrap();
-    assert_true_page(host, &next.settled_output(id));
+    if id == "use-b" {
+        assert_use_b_with_constituents(host, &next.settled_output(id));
+    } else {
+        assert_true_page(host, &next.settled_output(id));
+    }
     next
 }
 
