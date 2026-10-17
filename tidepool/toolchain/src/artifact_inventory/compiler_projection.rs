@@ -411,9 +411,9 @@ impl CompilerSourceSupport {
                     .unwrap_or_else(|| {
                         NativeOriginalRequirement::from_selected_view(original, &artifacts)
                     })?;
-                let groups = proof
-                    .iter()
-                    .flat_map(|proof| {
+                let groups = checked_input_group_choices(
+                    original,
+                    proof.iter().flat_map(|proof| {
                         proof
                             .selection
                             .snapshot()
@@ -423,13 +423,13 @@ impl CompilerSourceSupport {
                                 ArtifactBindingNode::Group(group)
                                     if group.binding.artifact() == original =>
                                 {
-                                    Some((group.original_ordinal, *group))
+                                    Some(*group)
                                 }
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
-                    })
-                    .collect();
+                    }),
+                )?;
                 let owner = artifacts
                     .lease
                     .payloads
@@ -1809,6 +1809,88 @@ mod tests {
             assert_eq!(
                 support.selected_interfaces().unwrap().entries().len(),
                 expected.len()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_input_issuance_refuses_distinct_group_choices_before_recording_domain() {
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture(
+                "InputChoice",
+                vec![(7, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
+            [2; 32],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let original = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let inventory = ArtifactInventory::default();
+        let sources = ["LeftMarker", "RightMarker"].map(|marker| {
+            inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        Arc::clone(&original),
+                        Arc::new(crate::artifact_inventory::tests::entry(marker, &[])),
+                    ],
+                )
+                .unwrap()
+        });
+        let projection =
+            CompilerInputProjection::from_issued_entries(&sources[0].entries()).unwrap();
+        let expected = sources[0]
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == original.descriptor.id =>
+                {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 1);
+        let repeated = sources[0].merge_fixture_selections(&sources[0]).unwrap();
+        let admitted =
+            CompilerSourceSupport::from_selected_issuance(projection.clone(), repeated).unwrap();
+        let actual = admitted.input_decisions.facts[&original.descriptor.owner]
+            .groups
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "repeated exact issuance preserves its chosen Group"
+        );
+        for (left, right) in [(&sources[0], &sources[1]), (&sources[1], &sources[0])] {
+            let ambiguous = left.merge_fixture_selections(right).unwrap();
+            let choices = ambiguous
+                .capture_graph_selection()
+                .roots
+                .into_iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group)
+                        if group.binding.artifact() == original.descriptor.id =>
+                    {
+                        Some(group)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                choices.len(),
+                2,
+                "both genuine distinct issuers reach the production ingress"
+            );
+            assert!(
+                matches!(CompilerSourceSupport::from_selected_issuance(projection.clone(), ambiguous),
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original.descriptor.id))
             );
         }
     }

@@ -942,6 +942,27 @@ enum CompilerInputValidation {
     FragmentPair,
 }
 
+fn checked_input_group_choices(
+    original: ArtifactId,
+    groups: impl IntoIterator<Item = NativeGroupBinding>,
+) -> Result<imbl::OrdMap<u32, NativeGroupBinding>, CompileError> {
+    let mut selected = imbl::OrdMap::new();
+    for group in groups {
+        if group.binding.artifact() != original {
+            return Err(failure("input decision group differs from its original"));
+        }
+        if selected
+            .insert(group.original_ordinal, group)
+            .is_some_and(|previous| previous != group)
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+            ));
+        }
+    }
+    Ok(selected)
+}
+
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
     SourceSelections {
@@ -6767,8 +6788,8 @@ impl ArtifactView {
                     })
                     .collect()
             };
-            let mut chosen = imbl::OrdMap::new();
-            for group in choices {
+            let chosen = checked_input_group_choices(original, choices)?;
+            for group in chosen.values().copied() {
                 let key = NativeGroupKey {
                     artifact: original,
                     original_ordinal: group.original_ordinal,
@@ -6781,7 +6802,6 @@ impl ArtifactView {
                         ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
                     ));
                 }
-                chosen.insert(group.original_ordinal, group);
             }
             input_decisions.facts.insert(
                 owner.clone(),
