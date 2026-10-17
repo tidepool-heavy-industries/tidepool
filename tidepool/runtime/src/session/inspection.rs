@@ -3058,6 +3058,126 @@ mod tests {
     }
 
     #[test]
+    fn hosted_lookup_keeps_failed_metadata_separate_from_successful_type_cohort() {
+        eval_harness::require_extract();
+        std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        std::env::set_var(
+            "TIDEPOOL_TEST_TRACE_PROFILE",
+            tidepool_extract_cmd::CompilerTraceProfile::Full.name(),
+        );
+        let artifact_root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT");
+        let mut root = match &artifact_root {
+            Some(parent) => tempfile::Builder::new()
+                .prefix("hosted-cohort-failure-")
+                .tempdir_in(parent)
+                .unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        root.disable_cleanup(artifact_root.is_some());
+        for directory in ["metadata", "type"] {
+            std::fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        let metadata = root.path().join("metadata/Expr.hs");
+        let type_source = root.path().join("type/Expr.hs");
+        std::fs::write(
+            &metadata,
+            "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nbroken = missingValue\n",
+        )
+        .unwrap();
+        std::fs::write(&type_source, "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport Prelude (Int)\n__tidepool_lookup_query :: Int\n__tidepool_lookup_query = __tidepool_lookup_query\n").unwrap();
+        let batch = HostedLookupBatch {
+            operations: vec![
+                HostedLookupOperation::Primary {
+                    ordinal: 2,
+                    origin: "missing".into(),
+                    query: HostedLookupQuery::Name(tidepool_extract_cmd::LookupNameInspection {
+                        query: "missing".into(),
+                        qualifier_module: None,
+                        mode: LookupNameMode::Name,
+                    }),
+                },
+                HostedLookupOperation::Primary {
+                    ordinal: 9,
+                    origin: ":: Int".into(),
+                    query: HostedLookupQuery::TypeSearch("Int".into()),
+                },
+            ],
+            discovery: Some(HostedLookupDiscovery {
+                candidate_limit: 1,
+                scopes: vec![
+                    tidepool_extract_cmd::InspectionScope::Current,
+                    tidepool_extract_cmd::InspectionScope::PublicModule("Data.Maybe".into()),
+                ],
+                eligible_modules: 1,
+            }),
+        };
+        let output = root.path().join("hosted.cbor");
+        let mut command = ExtractCmd::new().unwrap();
+        command
+            .output_dir(root.path())
+            .inspect_out(&output)
+            .input(&metadata)
+            .input(&type_source)
+            .hosted_lookup(batch.clone());
+        let run = command.bind().unwrap().execute(&command).unwrap();
+        std::fs::write(
+            root.path().join("hosted.stderr"),
+            run.stderr_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            run.success(),
+            "typed per-query rejection must preserve successful peer: {}",
+            run.stderr_lossy()
+        );
+        let InspectionOutput::Hosted(issued) =
+            decode_inspection_output(&std::fs::read(&output).unwrap()).unwrap()
+        else {
+            panic!("hosted output")
+        };
+        issued.validate_for(&batch).unwrap();
+        assert!(
+            matches!(&issued.answers[..], [
+            HostedLookupAnswer::Rejected { operation: HostedOperationIdentity::Primary(2), diagnostic },
+            HostedLookupAnswer::Type { ordinal: 9, .. },
+        ] if diagnostic.contains("missingValue")),
+            "failed metadata must not erase successful type cohort: {issued:#?}"
+        );
+        let selection = issued.discovery.unwrap();
+        assert!(
+            matches!(selection.fallback, HostedFallback::Unavailable(ref reason) if reason.contains("missingValue"))
+        );
+        assert_eq!(selection.submitted_modules, 0);
+        assert_eq!(selection.enumerated_occurrences, 0);
+        assert!(selection.candidates.is_empty());
+        let stderr = run.stderr_lossy();
+        for (name, expected) in [
+            ("compile_attempts", 2),
+            ("rich_entries", 0),
+            ("constraint_solves", 0),
+        ] {
+            let prefix = format!("tidepool-count name=inspection.{name} count=");
+            let observed = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .map(|value| {
+                    value
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                observed,
+                vec![expected],
+                "missing/duplicated census or illegal fallback/replay: {stderr}"
+            );
+        }
+    }
+
+    #[test]
     fn qualified_info_and_browse_share_one_checked_target() {
         eval_harness::require_extract();
         // The assertion reads the worker's `tidepool-checked` accounting
