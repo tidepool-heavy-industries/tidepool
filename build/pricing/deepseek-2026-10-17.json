@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "version": "deepseek-official-2026-10-17",
+  "currency": "USD",
+  "verified_at": "2026-10-17T10:33:51Z",
+  "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "unit": "per_million_tokens",
+  "schedule": "UTC Monday-Friday 01:00-04:00 and 06:00-10:00, excluding Chinese public holidays; other hours off-peak",
+  "holiday_calendar": "unknown",
+  "models": {
+    "deepseek-flash": {
+      "off_peak": {"cache_hit": "0.003", "cache_miss": "0.15", "output": "0.6"},
+      "peak": {"cache_hit": "0.006", "cache_miss": "0.3", "output": "1.2"}
+    },
+    "deepseek-v4-pro": {
+      "off_peak": {"cache_hit": "0.022", "cache_miss": "0.66", "output": "1.98"},
+      "peak": {"cache_hit": "0.044", "cache_miss": "1.32", "output": "3.96"}
+    }
+  }
+}
