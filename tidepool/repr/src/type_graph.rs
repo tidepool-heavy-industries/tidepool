@@ -96,6 +96,8 @@ pub enum TypeLiteral {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TypeNode {
+    /// Scoped runtime body. Binder kinds belong to declarations and explicit
+    /// forall expressions; opening a root introduces positional unknowns only.
     Root {
         domain: RootDomain,
         binders: Vec<SourceBinderFlag>,
@@ -1264,7 +1266,7 @@ fn validate_roles(
             .ok_or(TypeGraphError::InvalidReference(index))?;
         let expression = target.is_expression();
         let allowed = match (&graph[node], edge.weight()) {
-            (TypeNode::Root { .. }, TypeEdge::Body | TypeEdge::BinderKind(_)) => expression,
+            (TypeNode::Root { .. }, TypeEdge::Body) => expression,
             (TypeNode::Declaration { .. }, TypeEdge::BinderKind(_)) => expression,
             (
                 TypeNode::Declaration {
@@ -1311,11 +1313,7 @@ fn validate_roles(
     };
     let exact = |expected: &[(u8, u32)]| slots.iter().copied().eq(expected.iter().copied());
     let valid = match &graph[node] {
-        TypeNode::Root { binders, .. } => {
-            slots.len() == binders.len() + 1
-                && slots.contains(&(1, 0))
-                && contiguous(0, binders.len())
-        }
+        TypeNode::Root { .. } => exact(&[(1, 0)]),
         TypeNode::Declaration {
             parameters, form, ..
         } => {
@@ -1584,9 +1582,7 @@ mod tests {
             vec![SourceBinderFlag::Specified],
             "a",
         );
-        let kind = kind(&mut graph);
         let bound = graph.add_node(TypeNode::Bound(0));
-        graph.add_edge(open, kind, TypeEdge::BinderKind(0));
         graph.add_edge(open, bound, TypeEdge::Body);
         publish(graph.clone(), &[]);
         let closed = root(&mut graph, RootDomain::Closed, vec![], "a");
@@ -1598,30 +1594,62 @@ mod tests {
     }
 
     #[test]
-    fn binder_kinds_reject_forward_references_and_forall_extends_only_body() {
+    fn constructor_root_retains_telescope_but_rejects_kind_annotations() {
         let mut graph = GraphStorage::new();
         let root = root(
             &mut graph,
             RootDomain::ConstructorScheme,
             vec![SourceBinderFlag::Specified, SourceBinderFlag::Inferred],
-            "a",
+            "outer",
         );
-        let kind = kind(&mut graph);
-        let bound = graph.add_node(TypeNode::Bound(0));
-        graph.add_edge(root, kind, TypeEdge::BinderKind(0));
-        graph.add_edge(root, bound, TypeEdge::BinderKind(1));
+        let bound = graph.add_node(TypeNode::Bound(1));
         graph.add_edge(root, bound, TypeEdge::Body);
         publish(graph.clone(), &[]);
+
+        let mut shortened = graph.clone();
+        if let TypeNode::Root { binders, .. } = &mut shortened[root] {
+            binders.pop();
+        }
+        assert_eq!(
+            TypeGraph::validate(shortened, &[], GraphLimits::default()),
+            Err(TypeGraphError::InvalidScope(root.index()))
+        );
+
+        let kind = kind(&mut graph);
+        graph.add_edge(root, kind, TypeEdge::BinderKind(0));
+        assert_eq!(
+            TypeGraph::validate(graph, &[], GraphLimits::default()),
+            Err(TypeGraphError::InvalidRole(root.index()))
+        );
+    }
+
+    #[test]
+    fn binder_kinds_reject_forward_references_and_forall_extends_only_body() {
+        let mut graph = GraphStorage::new();
+        let declaration = graph.add_node(TypeNode::Declaration {
+            identity: crate::execution_schema::testing::type_identity(identity("Scoped", "type")),
+            parameters: vec![ParameterFlag::NamedSpecified, ParameterFlag::NamedInferred],
+            form: DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "scope control".into(),
+            },
+            restriction: SyntaxRestriction::None,
+        });
+        let kind = kind(&mut graph);
+        let bound = graph.add_node(TypeNode::Bound(0));
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(declaration, bound, TypeEdge::BinderKind(1));
+        publish(graph.clone(), &[]);
         let edge = graph
-            .edges(root)
+            .edges(declaration)
             .find(|edge| *edge.weight() == TypeEdge::BinderKind(0))
             .unwrap()
             .id();
         graph.remove_edge(edge);
-        graph.add_edge(root, bound, TypeEdge::BinderKind(0));
+        graph.add_edge(declaration, bound, TypeEdge::BinderKind(0));
         assert_eq!(
             TypeGraph::validate(graph, &[], GraphLimits::default()),
-            Err(TypeGraphError::InvalidScope(root.index()))
+            Err(TypeGraphError::InvalidScope(declaration.index()))
         );
 
         let mut graph = GraphStorage::new();

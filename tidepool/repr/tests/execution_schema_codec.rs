@@ -795,8 +795,6 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
     ];
     let mut edges = vec![
         (0, 9, TypeEdge::Body),
-        (1, 2, TypeEdge::BinderKind(0)),
-        (1, 3, TypeEdge::BinderKind(1)),
         (1, 4, TypeEdge::Body),
         (4, 2, TypeEdge::Kind),
         (4, 5, TypeEdge::Body),
@@ -867,7 +865,7 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
 fn codec_rejects_retired_prepared_schema_and_graph_versions() {
     let program = tidepool_repr::execution_schema::testing::wire_program();
     let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&program);
-    for version in [14, 15] {
+    for version in [14, 15, 18] {
         let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
         let Cbor::Array(fields) = &mut value else {
             unreachable!()

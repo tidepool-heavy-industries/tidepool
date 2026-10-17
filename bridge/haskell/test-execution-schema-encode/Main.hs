@@ -362,7 +362,7 @@ evidenceRepresentative = representative
       , (3, [(TypeHead, TypeNodeId 1)])
       , (5, [(TypeHead, TypeNodeId 4)])
       , (9, [(TypeMultiplicity, TypeNodeId 5), (TypeDomain, TypeNodeId 5), (TypeCodomain, TypeNodeId 5)])
-      , (10, [(TypeBinderKind 0, TypeNodeId 5), (TypeBody, TypeNodeId 9)]) ])
+      , (10, [(TypeBody, TypeNodeId 9)]) ])
   , programSites =
       [ SiteRow (41 + ordinal) "Fixture.entry" ordinal delivery
           (TypeNodeId 0) [TypeNodeId 0, TypeNodeId 0]

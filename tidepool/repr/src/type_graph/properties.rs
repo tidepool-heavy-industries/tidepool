@@ -626,13 +626,11 @@ proptest! {
             }
             _ => {
                 let bound = model.node(TypeNode::Bound(0));
-                let kind = model.node(TypeNode::Literal(TypeLiteral::Symbol("kind".into())));
                 let open = model.node(TypeNode::Root {
                     domain: RootDomain::ConstructorScheme,
                     binders: vec![SourceBinderFlag::Specified],
                     rendered: "open bound".into(),
                 });
-                model.edge(open, kind, TypeEdge::BinderKind(0));
                 model.edge(open, bound, TypeEdge::Body);
                 model.publish();
                 // The same bound expression was valid under the open root;

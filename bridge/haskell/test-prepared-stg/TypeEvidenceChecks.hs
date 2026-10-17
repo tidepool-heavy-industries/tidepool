@@ -14,7 +14,7 @@ import GHC.Core.Coercion (mkNomReflCo)
 import GHC.Core.Type (typeKind, mkNumLitTy, splitTyConApp_maybe, splitFunTys)
 import GHC.Core.TyCo.Rep (Type(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
-import GHC.Core.DataCon (dataConName)
+import GHC.Core.DataCon (dataConName, dataConUserTyVarBinders)
 import GHC.Core.TyCon (tyConDataCons, tyConName)
 import GHC.Types.Id (idType, idName, setIdType)
 import GHC.Stg.Syntax qualified as Stg
@@ -488,11 +488,28 @@ verifyOriginalScopes original alpha = do
     (mapM (\constructor -> maybe (lift (Left Policy.TypeGraphOriginalDeclarationMismatch))
       (Policy.internConstructorType constructor) (requestReplyIndex constructor)) scoped) shared)
   assert (length roots == 9 && roots !! 0 /= roots !! 1 && roots !! 2 /= roots !! 3
-      && roots !! 4 == roots !! 5 && roots !! 6 /= roots !! 7 && roots !! 6 /= roots !! 8)
-    "shared graph conflated alpha, binder position, repetition, unused binders or kinds"
+      && roots !! 4 == roots !! 5 && roots !! 6 /= roots !! 7 && roots !! 6 == roots !! 8)
+    "reply graph changed alpha, binder position, repetition, telescope count or unused-kind equivalence"
+  scopedGraph <- requireRight (Policy.finishTypeGraph scopedBuilder)
+  assert (all (\root -> map fst (outgoing scopedGraph root) == [TypeBody]) roots)
+    "constructor reply roots retained binder-kind annotations"
+  poly <- select "PolyKindScope" originalConstructors
+  renamedPoly <- select "PolyKindRenamed" originalConstructors
+  (polyRoot, polyBuilder) <- capture poly scopedBuilder
+  (renamedRoot, completePoly) <- capture renamedPoly polyBuilder
+  assert (polyRoot == renamedRoot) "dependent kind binders lost alpha-stable scope"
+  polyGraph <- requireRight (Policy.finishTypeGraph completePoly)
+  let (_, _, arguments) = nominal polyGraph (rootBody polyGraph polyRoot)
+  assert (length (dataConUserTyVarBinders poly) == 2
+      && case nodeAt polyGraph polyRoot of
+        TypeRoot ConstructorSchemeRoot flags _ -> length flags == 2
+        _ -> False)
+    "reply root dropped an original kind binder from its telescope"
+  assert (map (nodeAt polyGraph) arguments == [TypeBound 1, TypeBound 0])
+    "reply body lost its invisible kind argument or reversed dependent binder scope"
   intConstructor <- select "OnlyInt" originalConstructors
   intReply <- maybe (fail "OnlyInt lacks its reply") pure (requestReplyIndex intConstructor)
-  (closed, closedBuilder) <- requireRight (runStateT (Policy.internType intReply) scopedBuilder)
+  (closed, closedBuilder) <- requireRight (runStateT (Policy.internType intReply) completePoly)
   (schematic, schemeBuilder) <- capture intConstructor closedBuilder
   assert (closed /= schematic) "closed activation and constructor-scheme domains were conflated"
   isolated <- freshExactState (prHscEnv (pprPipelineResult original))

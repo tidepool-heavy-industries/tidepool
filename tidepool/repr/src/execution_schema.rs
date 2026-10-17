@@ -15,7 +15,7 @@ use crate::session_ids::SessionVarId;
 use crate::type_graph::TypeGraph;
 pub use crate::type_graph::TypeNode;
 
-pub const SCHEMA_VERSION: u64 = 18;
+pub const SCHEMA_VERSION: u64 = 19;
 pub const EXECUTION_ABI_VERSION: u64 = 10;
 
 macro_rules! dense_id {

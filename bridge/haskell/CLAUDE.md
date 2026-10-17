@@ -457,7 +457,7 @@ through their owning producers.
 
 ## Native constructor replies
 
-Prepared schema 17 / execution ABI 9 carries the constructor reply table and
+Prepared schema 19 / execution ABI 10 carries the constructor reply table and
 one finite reply-type graph. Earlier prepared schemas are rejected; registered
 prepared artifacts must be regenerated through their original compiler producers.
 The graph stores scoped expressions, nominal declarations, original constructor
@@ -466,7 +466,11 @@ eta-prefix scope. Recursive and nonregular recursive fields link declarations
 without instantiating an expanding field tree.
 
 An intrinsic static reply uses the complete source `DataCon` binder telescope;
-only the exact compiler-issued request-site carrier selects `AtSite`. A non-leading
+its root carries the binder flags/order and body without binder-kind annotations.
+Body type arguments, declaration parameter kinds and explicit forall kinds remain
+part of the graph. Opening a reply root introduces positional unknowns, and body
+scope, nominal identity and exact physical construction evidence remain checked.
+Only the exact compiler-issued request-site carrier selects `AtSite`. A non-leading
 carrier separately seals its original site and retained payload field while
 preserving the closed reply type. Capture authority requires the payload type
 to equal the carrier's final closed input. Open
