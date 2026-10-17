@@ -283,6 +283,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         }))
         .collect::<BTreeSet<_>>();
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
+        let mut ever_demanded = demanded.clone();
         let mut context = original.as_ref().clone();
         // Every history reaches the causal interaction, even after shrinking:
         // later same-owner body -> compose publication -> durable reconstruction.
@@ -334,6 +335,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     prop_assert_eq!(selected.len(), usize::from(issued_groups),
                         "later ordinal {} preserves policy only for exact issuer-owned groups: {:?}", ordinal, groups);
                     demanded.insert(ordinal);
+                    ever_demanded.insert(ordinal);
                 }
                 Operation::Compose => {
                     observed[1].set(observed[1].get() + 1);
@@ -487,7 +489,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 helper.descriptor.id
             );
         }
-        prop_assert!(demanded.len() >= 2);
+        prop_assert!(ever_demanded.len() >= 2,
+            "history coverage counts actual demand events independently of final policy selection");
         Ok(())
     });
     eprintln!(
