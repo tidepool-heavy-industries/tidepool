@@ -38,8 +38,20 @@ fn candidate_fixture(case: CandidateCase) -> Value {
             (
                 vec![StructuralGroup {
                     ordinal: 0,
-                    binders: vec![identity; 1536],
-                    globals: vec![],
+                    binders: vec![identity.clone(); 1536],
+                    globals: vec![
+                        GlobalKey {
+                            identity,
+                            rep: RuntimeRep::LiftedRef,
+                            signature: Some(Signature {
+                                arguments: vec![RuntimeRep::LiftedRef; 256],
+                                results: ResultContract::Returns(vec![RuntimeRep::Int(64); 256]),
+                            }),
+                            evaluated: false,
+                            generation: None,
+                        };
+                        1536
+                    ],
                 }],
                 false,
             )
