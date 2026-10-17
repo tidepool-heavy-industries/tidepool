@@ -2682,6 +2682,14 @@ impl PreparedCheckedTurn {
     }
 }
 
+/// One exact code/certification pair admitted in an explicit live scope.
+/// Dynamic provenance borrows this selection; native preparation consumes it.
+struct AdmittedTurnCode<'a> {
+    code: TurnCode<'a>,
+    scope: ScopeId,
+    resolved: Option<super::persistent::ResolvedCertifiedTurn>,
+}
+
 enum PendingPreparedSource {
     Legacy(super::prepared::InstallSnapshot),
     Certified {
@@ -6640,7 +6648,26 @@ where
         retirement
     }
 
-    fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
+    fn admit_turn_code_in<'a>(
+        &self,
+        scope: ScopeId,
+        code: TurnCode<'a>,
+    ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
+        let resolved = code
+            .certification()
+            .map(|certification| {
+                self.state
+                    .resolve_certification_in(scope, code.prepared(), certification)
+            })
+            .transpose()?;
+        Ok(AdmittedTurnCode { code, scope, resolved })
+    }
+
+    fn provenance_for(
+        &self,
+        admission: &AdmittedTurnCode<'_>,
+    ) -> Result<Arc<ProgramProvenance>, ResidentError> {
+        let code = &admission.code;
         if code.provenance.get().is_none() {
             let plan = CompiledProvenancePlan::build(code)?;
             // Concurrent readers can compute the same immutable plan; only
@@ -6652,16 +6679,9 @@ where
             .get()
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
-        if let Some(certification) = code.certification.as_ref().as_ref() {
-            // Implicit retained-value calls execute the original typed helper.
-            // Resolve the same exact target and selected source-group imports
-            // used by native installation on every execution, including cache
-            // hits. Runtime binding lineage never enters the immutable plan.
-            let resolved = self.state.resolve_certification_in(
-                self.run_context.lexical_scope,
-                code.prepared(),
-                certification,
-            )?;
+        if let Some(resolved) = &admission.resolved {
+            // Runtime binding lineage is projected from this admission's exact
+            // selected imports and never enters the immutable provenance plan.
             let imports = resolved.target_owners.iter().chain(
                 resolved
                     .groups
@@ -6872,9 +6892,22 @@ where
             .map_err(|_| ResidentError::ActivationPreviewRefused {
                 binding: mounted.binding,
             })?;
-        let provenance = self.provenance_for(&compiled.renderer.compiled.code())?;
-        self.run_prepared_for_purpose(
+        // Preview provenance retains its current-scope contract. Its executable
+        // admission belongs to the separately issued detached scope below.
+        let provenance_admission = self.admit_turn_code_in(
+            self.run_context.lexical_scope,
             compiled.renderer.compiled.code(),
+        )?;
+        let provenance = self.provenance_for(&provenance_admission)?;
+        drop(provenance_admission);
+        self.state
+            .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
+        let execution_admission = self.admit_turn_code_in(
+            admission.scope_lease.scope(),
+            compiled.renderer.compiled.code(),
+        )?;
+        self.run_prepared_for_purpose(
+            execution_admission,
             PreparedTurnMode::Value(ResultObservation::Presentation),
             Some(mounted.handle),
             PreparedExecutionPurpose::HostActivationPreview {
@@ -6915,11 +6948,12 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.state.validate_new_binding_ids(binding_ids_of(&mode))?;
-        let provenance = self.provenance_for(&code)?;
+        let admission = self.admit_turn_code_in(self.run_context.lexical_scope, code)?;
+        let provenance = self.provenance_for(&admission)?;
         let checked = checked_turn_plan(
-            code.certification.as_ref(),
-            code.prepared(),
-            code.table(),
+            admission.code.certification.as_ref(),
+            admission.code.prepared(),
+            admission.code.table(),
             &mode,
         )?;
         let lexical_scope = self.run_context.lexical_scope;
@@ -6927,7 +6961,7 @@ where
             .map(|checked| checked.start(&self.state, lexical_scope))
             .transpose()?;
         self.run_prepared_for_purpose(
-            code,
+            admission,
             mode,
             argument,
             PreparedExecutionPurpose::Authored(checked),
@@ -6938,7 +6972,7 @@ where
 
     fn run_prepared_for_purpose(
         &mut self,
-        code: TurnCode<'_>,
+        admission: AdmittedTurnCode<'_>,
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
         purpose: PreparedExecutionPurpose<'_>,
@@ -6947,16 +6981,18 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let (checked, lexical_scope, _execution_scope_lease, retained_images) = match purpose {
             PreparedExecutionPurpose::Authored(checked) => {
-                (checked, self.run_context.lexical_scope, None, None)
+                if admission.scope != self.run_context.lexical_scope {
+                    return Err(PreparedRuntimeError::SourceScopeAdmission.into());
+                }
+                (checked, admission.scope, None, None)
             }
             PreparedExecutionPurpose::HostActivationPreview { lease, images } => {
-                self.state
-                    .validate_lexical_scope_lease(lease.scope(), &lease)?;
-                let scope = lease.scope();
-                (None, scope, Some(lease), Some(images))
+                if admission.scope != lease.scope() {
+                    return Err(PreparedRuntimeError::SourceScopeAdmission.into());
+                }
+                (None, admission.scope, Some(lease), Some(images))
             }
         };
-        let (constructor_table, _sites, prepared, certification) = code.into_parts();
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
         {
@@ -6966,11 +7002,8 @@ where
         // Preview source instances belong to its detached authority, so dropping
         // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
-        let (program, source_keys) = self.install_turn_program_in_with_images(
-            lexical_scope,
-            &constructor_table,
-            prepared,
-            certification.as_ref().as_ref(),
+        let (program, source_keys) = self.install_admitted_turn(
+            admission,
             match retained_images {
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
                 None => TurnImageAcquisition::Compile,
@@ -7034,34 +7067,9 @@ where
         )
     }
 
-    fn install_turn_program_in(
+    fn install_admitted_turn(
         &mut self,
-        lexical_scope: ScopeId,
-        metadata: &DataConTable,
-        prepared: PreparedProgram,
-        certification: Option<&super::turn::TurnCertification>,
-    ) -> Result<
-        (
-            ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        ResidentError,
-    > {
-        self.install_turn_program_in_with_images(
-            lexical_scope,
-            metadata,
-            prepared,
-            certification,
-            TurnImageAcquisition::Compile,
-        )
-    }
-
-    fn install_turn_program_in_with_images(
-        &mut self,
-        lexical_scope: ScopeId,
-        metadata: &DataConTable,
-        prepared: PreparedProgram,
-        certification: Option<&super::turn::TurnCertification>,
+        admission: AdmittedTurnCode<'_>,
         images: TurnImageAcquisition<'_>,
     ) -> Result<
         (
@@ -7070,12 +7078,11 @@ where
         ),
         ResidentError,
     > {
-        if let Some(certification) = certification {
-            let resolved =
-                self.state
-                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            let (target, demanded) = match &images {
-                TurnImageAcquisition::Ready { bundle, .. } => {
+        let AdmittedTurnCode { code, scope, resolved } = admission;
+        let (metadata, _sites, prepared, _certification) = code.into_parts();
+        if let Some(resolved) = resolved {
+            let (target, demanded) = match images {
+                TurnImageAcquisition::Ready { bundle } => {
                     super::prepared::CertifiedTargetImage::lookup_scoped(
                         prepared, &resolved, bundle,
                     )?
@@ -7088,8 +7095,8 @@ where
                 }
             };
             self.install_certified_turn_in(
-                lexical_scope,
-                metadata,
+                scope,
+                &metadata,
                 target,
                 &resolved.target_owners,
                 &resolved.source_evidence,
@@ -7102,7 +7109,7 @@ where
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
             }
             Ok((
-                self.state.install_prepared(prepared, Some(metadata))?,
+                self.state.install_prepared(prepared, Some(&metadata))?,
                 Default::default(),
             ))
         }
@@ -7148,14 +7155,10 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let provenance = self.provenance_for(&code)?;
-        let (constructor_table, _sites, prepared, certification) = code.into_parts();
-        let (program, source_keys) = self.install_turn_program_in(
-            scope,
-            &constructor_table,
-            prepared,
-            certification.as_ref().as_ref(),
-        )?;
+        let admission = self.admit_turn_code_in(scope, code)?;
+        let provenance = self.provenance_for(&admission)?;
+        let (program, source_keys) =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -7291,9 +7294,13 @@ where
                         &mode.as_mode(),
                     )
                 })?;
+        let lexical_scope = self.run_context.lexical_scope;
+        let admission = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
+            .in_scope(|| self.admit_turn_code_in(lexical_scope, code))?;
         let provenance = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.provenance")
-            .in_scope(|| self.provenance_for(&code))?;
-        let (constructor_table, _sites, prepared, certification) = code.into_parts();
+            .in_scope(|| self.provenance_for(&admission))?;
+        let AdmittedTurnCode { code, scope: _, resolved } = admission;
+        let (constructor_table, _sites, prepared, _certification) = code.into_parts();
         if let Some(generation) = mode.generation() {
             // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(generation);
@@ -7302,13 +7309,10 @@ where
         // this typed refusal (rather than a panic) is the fallback if that
         // contract is not honored, since `PreparedRuntimeError` already has
         // a variant for exactly this precondition.
-        let lexical_scope = self.run_context.lexical_scope;
-        let snapshot = if let Some(certification) = certification.as_ref() {
+        let snapshot = if let Some(resolved) = resolved {
             let admitted_public = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.visibility")
                 .in_scope(|| self.state.public_visibility_snapshot_in(lexical_scope))
                 .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
-            let resolved = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
-                .in_scope(|| self.state.resolve_certification_in(lexical_scope, &prepared, certification))?;
             PendingPreparedSource::Certified {
                 prepared,
                 resolved,
