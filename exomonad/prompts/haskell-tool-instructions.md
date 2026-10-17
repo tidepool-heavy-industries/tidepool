@@ -4,8 +4,8 @@ Use hosted `lookup`, or `LookupApi.lookupRaw`/`LookupApi.lookupRequest`
 with notebook `Lookup`. Query `doc workbench` for details.
 
 `haskell` is asynchronous; `haskell_sync` waits with the same effects.
-Only synchronous profiles admit `ContextReadWrite` (`setNextModel`, `setNextEffort`).
-Accepted edits and model/effort choices commit or reject together.
+Only synchronous profiles admit `ContextReadWrite` (`setNextModel`, `setNextReasoning`).
+Accepted edits and model/reasoning choices commit or reject together.
 Stage refusal preserves prior intent; patches never change settings by themselves.
 External effects are not undone.
 Capture completed context for another agent.

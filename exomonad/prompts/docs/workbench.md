@@ -48,7 +48,7 @@ default notebooks share the same effects; the spec can declare separate effect
 profiles. The pause applies to that caller; independently owned work follows its own
 lifecycle. Only an explicit synchronous profile can include
 `ContextReadWrite`, which provides context
-editing, `setNextModel`, and `setNextEffort`.
+editing, `setNextModel`, and `setNextReasoning`.
 
 An accepted context batch and explicit next-model/effort choices in a synchronous
 cell commit together only when the whole cell succeeds. A terminal transaction
@@ -58,10 +58,11 @@ transaction: it leaves separately requested choices and any first accepted batch
 intact. A failed cell does not commit its staged edits, but it
 cannot undo external effects already issued, such as a command or provider
 request. Captured contexts are snapshots. To use a completed edit as another actor’s
-starting context, explicitly capture and pass that context. `setNextModel` takes `Text`: the
-host resolves a configured alias first, then treats an unmatched value as a
-literal model identifier. `C.setNextEffort C.High` changes the next request’s
-reasoning effort while preserving the model and existing context prefix.
+starting context, explicitly capture and pass that context. `setNextModel` takes a typed `Model`, such as `DeepSeekFlash` or
+`OpenAIModel Gpt61Sol`. Custom IDs use `CustomModel backend name`.
+`setNextReasoning` takes provider-qualified reasoning, such as
+`DeepSeekReasoning DeepSeekHigh`. Choices must match the run's fixed startup
+backend and preserve the existing context prefix.
 
 The editable context retains native evidence. For another model’s inference,
 completed reasoning exchanges can become attributed readable notes with their

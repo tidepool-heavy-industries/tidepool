@@ -226,6 +226,28 @@ Select the embedded backend in the project's `.exomonad/config.toml`:
 backend = "embedded"
 ```
 
+New workspaces select DeepSeekFlash with high reasoning. Choose the provider at
+startup in the same configuration:
+
+```toml
+[defaults]
+model = { backend = "deepseek", model = "deepseek-flash" }
+reasoning = { backend = "deepseek", effort = "high" }
+
+[launch.embedded]
+provider = "deepseek"
+listen = "127.0.0.1:8080"
+context_capacity_tokens = 131072
+```
+
+DeepSeek reads `DEEPSEEK_API_KEY` at dispatch, or an absolute protected
+`credential_file` reference. Key contents never belong in configuration.
+Optional `[launch.embedded.inference_limits]` overrides `max_output_tokens`
+(default 65536), `connect_timeout_secs` (15), `total_timeout_secs` (300), and
+`max_inflight` (4). These inference limits are separate from tool budgets.
+The provider remains fixed for the run; changing it requires a new run.
+
+For an OpenAI run, select an explicit OpenAI model and reasoning pair instead.
 For native ChatGPT plan authentication, sign in with a separate Exomonad record:
 
 ```bash
@@ -243,6 +265,10 @@ possible alternative for this CLI, but has not been qualified here.
 Select the native public Responses route explicitly:
 
 ```toml
+[defaults]
+model = { backend = "chatgpt_plan", model = "gpt-6.1-sol" }
+reasoning = { backend = "chatgpt_plan", effort = "high" }
+
 [launch.embedded]
 provider = "chatgpt_plan"
 credential_file = "/absolute/private/path/chatgpt.json"
@@ -260,7 +286,9 @@ use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the verified browser bundle, or be supplied by the
 frozen bundle entrypoint through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The host checks
 source, schema, and asset identities before listening. Provider authentication is
-independent of browser access. The default provider is `chatgpt_plan`; it may also be declared explicitly.
+independent of browser access. Declare the provider explicitly. Legacy configuration
+without a provider keeps its OpenAI interpretation; it does not adopt the new
+workspace default.
 The private Codex inference bridge, `provider = "codex"`, and `codex_auth_file`
 configuration have been retired. Migrate with `exomonad auth login` and
 `credential_file`; existing Codex credentials are not reinterpreted.
@@ -284,8 +312,9 @@ local Tailscale daemon, and rejects tagged, shared, and local-self peers. It doe
 not use `session_secret_file`. Access is rechecked during live browser streams.
 For secret-based access, omit `browser_auth` and supply an absolute
 `session_secret_file`; the browser signs in with that file's contents.
-Model and effort selection remain in `[defaults]` and the
-workspace's `[models]` aliases. Backend selection is a config setting; `init`
+Typed model and reasoning selections remain in `[defaults]`. The workspace's
+`[models]` role aliases resolve once at startup; authored children use typed
+choices within the run backend or inherit their parent's current selection. Backend selection is a config setting; `init`
 has no `--backend` flag.
 
 ```bash
