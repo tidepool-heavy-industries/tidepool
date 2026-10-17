@@ -64,7 +64,7 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
-  , newPreparedComponentTaskPreparer, runPreparedBodyTask, selectPreparedBodyCaches)
+  , newPreparedComponentUnitsPreparer, runPreparedComponentTask, preparedComponentModules, selectPreparedBodyCaches)
 import Tidepool.ExecutionProjection (topBinders)
 
 assert :: Bool -> String -> IO ()
@@ -278,14 +278,15 @@ scenario = do
         privateOwner privateGroups >>= either (fail . show) pure
       liftIO $ do
         componentCache <- newPreparedBodyCache
-        acquireComponents <- newPreparedComponentTaskPreparer hsc privateOwners componentCache
+        acquireComponents <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
         let prepare roots = do
               selected <- lookupFatIfaceComponents hsc cache privateOwner roots >>= \case
                 FatIfaceComponents selection -> pure selection
                 _ -> fail "canonical package growth lost its genuine interface selection"
-              task <- acquireComponents selected >>= either (fail . show) pure
-              runPreparedBodyTask task >>= either (fail . show) pure
-            physicalBindings prepared = fmap Map.fromList $ fmap concat $ forM (pmBindings prepared) $ \(binding,_) -> do
+              task <- acquireComponents Nothing selected >>= either (fail . show) pure
+              preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
+            spellings = Map.unions . map pmStableTopSpellings
+            physicalBindings prepared = fmap Map.fromList $ fmap concat $ forM (concatMap pmBindings prepared) $ \(binding,_) -> do
               identity <- evaluate binding >>= makeStableName
               pure [(varName binder,identity) | binder <- topBinders binding]
         first <- prepare [privateCallerName]
@@ -295,36 +296,36 @@ scenario = do
         assert (all (\(name,identity) -> Map.lookup name grownBindings == Just identity)
           (Map.toList firstBindings))
           "package demand growth re-lowered a completed private component"
-        assert (all (\(name,spelling) -> Map.lookup name (pmStableTopSpellings grown) == Just spelling)
-          (Map.toList (pmStableTopSpellings first)))
+        assert (all (\(name,spelling) -> Map.lookup name (spellings grown) == Just spelling)
+          (Map.toList (spellings first)))
           "package demand growth renamed an already prepared private top"
         shuffled <- prepare [privateDiamondName,fatIdentityName,privateCallerName,privateCallerName]
         shuffledBindings <- physicalBindings shuffled
-        assert (grownBindings == shuffledBindings && pmStableTopSpellings grown == pmStableTopSpellings shuffled)
+        assert (grownBindings == shuffledBindings && spellings grown == spellings shuffled)
           "root permutation or duplication changed canonical prepared component identities"
         bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
           (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
             setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
-            acquireDisabled <- newPreparedComponentTaskPreparer hsc privateOwners componentCache
+            acquireDisabled <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
             disabledSelection <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
               FatIfaceComponents selection -> pure selection
               _ -> fail "body-disable control lost its canonical component"
-            disabledTask <- acquireDisabled disabledSelection >>= either (fail . show) pure
-            disabledPrepared <- runPreparedBodyTask disabledTask >>= either (fail . show) pure
+            disabledTask <- acquireDisabled Nothing disabledSelection >>= either (fail . show) pure
+            disabledPrepared <- preparedComponentModules <$> (runPreparedComponentTask disabledTask >>= either (fail . show) pure)
             disabledBindings <- physicalBindings disabledPrepared
             assert (any (\(name,identity) -> Map.lookup name disabledBindings /= Just identity)
               (Map.toList firstBindings))
               "component body-disable calibration returned completed STG instead of lowering"
-            assert (Set.fromList (Map.elems (pmStableTopSpellings disabledPrepared))
-                == Set.fromList (Map.elems (pmStableTopSpellings first)))
+            assert (Set.fromList (Map.elems (spellings disabledPrepared))
+                == Set.fromList (Map.elems (spellings first)))
               "component body-disable calibration changed canonical private spellings"
         selectedCache <- selectPreparedBodyCaches [(componentCache,Set.singleton privateOwner)]
-        acquireSelected <- newPreparedComponentTaskPreparer hsc privateOwners selectedCache
+        acquireSelected <- newPreparedComponentUnitsPreparer hsc privateOwners selectedCache
         selected <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
           FatIfaceComponents selection -> pure selection
           _ -> fail "selected cache fixture lost its exact component"
-        selectedTask <- acquireSelected selected >>= either (fail . show) pure
-        selectedPrepared <- runPreparedBodyTask selectedTask >>= either (fail . show) pure
+        selectedTask <- acquireSelected Nothing selected >>= either (fail . show) pure
+        selectedPrepared <- preparedComponentModules <$> (runPreparedComponentTask selectedTask >>= either (fail . show) pure)
         selectedBindings <- physicalBindings selectedPrepared
         assert (selectedBindings == firstBindings)
           "owner-indexed completed cache selection discarded a prepared private unit"
@@ -332,9 +333,9 @@ scenario = do
           (fail "prepared original lacks its declaring context") pure
         independentOwners <- newOwnerInterfaceCache
         independentEnvironment <- forkExactContext hsc
-        acquireIndependent <- newPreparedComponentTaskPreparer independentEnvironment independentOwners componentCache
-        independentTask <- acquireIndependent selected >>= either (fail . show) pure
-        independent <- runPreparedBodyTask independentTask >>= either (fail . show) pure
+        acquireIndependent <- newPreparedComponentUnitsPreparer independentEnvironment independentOwners componentCache
+        independentTask <- acquireIndependent Nothing selected >>= either (fail . show) pure
+        independent <- preparedComponentModules <$> (runPreparedComponentTask independentTask >>= either (fail . show) pure)
         independentContext <- lookupOwnerInterface independentOwners privateOwner >>= maybe
           (fail "independently loaded original lacks its declaring context") pure
         assert (not (sameOwnerInterfaceContext originalContext independentContext))
@@ -345,13 +346,13 @@ scenario = do
           "prepared component cache crossed independently retained declaring contexts"
         independentBodies <- prepareRecoveredBodies independentEnvironment independentOwners privateBodies
           privateOwner privateGroups >>= either (fail . show) pure
-        oldBodies <- physicalBindings privatePrepared
-        newBodies <- physicalBindings independentBodies
+        oldBodies <- physicalBindings [privatePrepared]
+        newBodies <- physicalBindings [independentBodies]
         assert (any (\(name,identity) -> Map.lookup name newBodies /= Just identity)
           (Map.toList oldBodies))
           "prepared body cache crossed independently retained declaring contexts"
-        retainedAgain <- runPreparedBodyTask =<< (acquireSelected selected >>= either (fail . show) pure)
-        retained <- either (fail . show) physicalBindings retainedAgain
+        retainedAgain <- runPreparedComponentTask =<< (acquireSelected Nothing selected >>= either (fail . show) pure)
+        retained <- either (fail . show) (physicalBindings . preparedComponentModules) retainedAgain
         assert (retained == firstBindings)
           "another context's completion displaced the retained original context"
       privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)

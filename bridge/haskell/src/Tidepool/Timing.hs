@@ -238,7 +238,7 @@ timeModuleDetailPhase True parent name owner act = do
 -- owner; a module's component and version come from its acquired typed input.
 data TaskAttempt = TaskAttempt Word64 Int
 data TaskComponent = WholeModuleTask | OriginalComponentTask Int
-  | ConstructorWorkersTask | SiteComponentsTask [Int]
+  | ConstructorWorkersTask
 data TaskOwner = TaskOwner Module (Maybe String) (Maybe Word64) TaskComponent
 
 timeTaskDetailPhase :: MonadIO m => Bool -> String -> String -> Maybe ReuseContext
@@ -252,7 +252,6 @@ timeTaskDetailPhase True parent name context attempt (TaskOwner owner version is
         WholeModuleTask -> "module"
         OriginalComponentTask ordinal -> "original:" ++ show ordinal
         ConstructorWorkersTask -> "constructor_workers"
-        SiteComponentsTask ordinals -> "sites:" ++ intercalate "," (map show ordinals)
       metadata = maybe "" (\(ReuseContext cycleId _) -> " cycle=" ++ show cycleId) context
         ++ " execution_id=" ++ show execution
         ++ maybe "" (\(TaskAttempt executor ordinal) ->

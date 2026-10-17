@@ -1382,8 +1382,8 @@ advanceReachFacts delta seeds admitted carried = PreparedReachAdvance reach (del
       | otherwise = close (addOneToUniqSet visited unique) (unique:freshUniques)
           (fromMaybe [] (lookupUFM dependencies unique) <> pending)
 
--- Site arenas are replaceable; pure component facts are only admitted.
--- A replacement closes from actual roots against the current complete facts.
+-- Immutable unit additions retain prior facts. Replacing an actual unit
+-- variant closes from roots against the current complete facts.
 data PreparedReachUpdate
   = AdmitPreparedFacts [[(Id,[Unique])]]
   | ReplacePreparedFacts [[(Id,[Unique])]]

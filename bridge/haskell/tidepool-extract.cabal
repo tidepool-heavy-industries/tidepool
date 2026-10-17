@@ -498,6 +498,7 @@ test-suite prepared-stg-pipeline-test
   other-modules:
     RetainedPluginTest
     TypeEvidenceChecks
+    SiteComponentHistoryChecks
     ModuleProductRoundtripTest
     Tidepool.Test.GenuineCandidate
     Tidepool.Test.CandidateCodec
