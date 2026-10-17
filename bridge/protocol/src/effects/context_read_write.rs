@@ -60,34 +60,63 @@ pub fn context_read_write() -> Effect {
             verb(
                 "StageContextWith",
                 "stage_context_with",
-                vec![bridged_arg("patch", "ContextPatch", HsType::Named("ContextPatch"))],
+                vec![bridged_arg(
+                    "patch",
+                    "ContextPatch",
+                    HsType::Named("ContextPatch"),
+                )],
                 HsType::Named("ContextStageResult"),
             ),
             verb(
                 "InspectContextTransactionWith",
                 "inspect_context_transaction_with",
-                vec![bridged_arg("transaction", "ContextTransaction", HsType::Named("ContextTransaction"))],
+                vec![bridged_arg(
+                    "transaction",
+                    "ContextTransaction",
+                    HsType::Named("ContextTransaction"),
+                )],
                 HsType::Named("ContextTransactionStatus"),
             ),
             verb(
                 "InspectOriginalTextWith",
                 "inspect_original_text_with",
-                vec![bridged_arg("reference", "ContextReference", HsType::Named("ContextReference")), bridged_arg("selector", "ContextTextSelector", HsType::Named("ContextTextSelector"))],
+                vec![
+                    bridged_arg(
+                        "reference",
+                        "ContextReference",
+                        HsType::Named("ContextReference"),
+                    ),
+                    bridged_arg(
+                        "selector",
+                        "ContextTextSelector",
+                        HsType::Named("ContextTextSelector"),
+                    ),
+                ],
                 HsType::Named("OriginalTextObservation"),
+            ),
+            verb(
+                "ObserveRetainedExchangeWith",
+                "observe_retained_exchange_with",
+                vec![bridged_arg(
+                    "reference",
+                    "ContextReference",
+                    HsType::Named("ContextReference"),
+                )],
+                HsType::Named("RetainedExchangeObservation"),
             ),
             verb(
                 "SetNextModelWith",
                 "set_next_model_with",
-                vec![arg("model", HsType::Text)],
+                vec![bridged_arg("model", "Model", HsType::Named("Model"))],
                 HsType::Unit,
             ),
             verb(
-                "SetNextEffortWith",
-                "set_next_effort_with",
+                "SetNextReasoningWith",
+                "set_next_reasoning_with",
                 vec![Arg {
-                    name: "effort",
-                    ty: HsType::Named("ForkEffort"),
-                    rust: RustBinding::Path("crate::ForkEffort"),
+                    name: "reasoning",
+                    ty: HsType::Named("Reasoning"),
+                    rust: RustBinding::Path("crate::Reasoning"),
                 }],
                 HsType::Unit,
             ),
@@ -97,7 +126,9 @@ pub fn context_read_write() -> Effect {
                 name: "getInitialContext",
                 ctor: Some("GetInitialContextWith"),
                 substrate: false,
-                doc: &["Observe retained startup evidence without rerunning initialization or editing context."],
+                doc: &[
+                    "Observe retained startup evidence without rerunning initialization or editing context.",
+                ],
                 body: HelperBody::Nullary,
             },
             Helper {
@@ -122,8 +153,8 @@ pub fn context_read_write() -> Effect {
                 body: HelperBody::Pointfree,
             },
             Helper {
-                name: "setNextEffort",
-                ctor: Some("SetNextEffortWith"),
+                name: "setNextReasoning",
+                ctor: Some("SetNextReasoningWith"),
                 substrate: false,
                 doc: &[],
                 body: HelperBody::Pointfree,
@@ -138,81 +169,291 @@ pub fn context_read_write() -> Effect {
 
 fn type_defs() -> Vec<TypeDef> {
     vec![
-        record("ContextTextVersion", vec![
-            field("contextTextVersionReference", "reference", HsType::Named("ContextReference")),
-            field("contextTextVersionSelector", "selector", HsType::Named("ContextTextSelector")),
-            field("contextTextVersionDigest", "digest", HsType::Text),
-        ]),
-        record("ContextUnitVersion", vec![
-            field("contextUnitVersionReference", "reference", HsType::Named("ContextReference")),
-            field("contextUnitVersionDigest", "digest", HsType::Text),
-        ]),
-        sum("ContextTextAuthor", &["ContextAuthorUser", "ContextAuthorAssistant", "ContextAuthorTool", "ContextAuthorSystem", "ContextAuthorDeveloper", "ContextAuthorUnknown"], &["Immutable canonical original occurrence role/type; Unknown remains explicit. Replacement overlays do not change this attribution; later edits retain separate transaction receipts."]),
-        record("ContextTextAuthorship", vec![
-            field("contextAuthorshipReference", "reference", HsType::Named("ContextReference")),
-            field("contextAuthorshipSelector", "selector", HsType::Named("ContextTextSelector")),
-            field("contextAuthorshipAuthor", "author", HsType::Named("ContextTextAuthor")),
-            field("contextAuthorshipNote", "authored_note", HsType::Bool),
-        ]),
-        record("ContextInspection", vec![
-            field("contextInspectionDocument", "document", HsType::Named("ContextDocument")),
-            field("contextInspectionTextVersions", "text_versions", HsType::list(HsType::Named("ContextTextVersion"))),
-            field("contextInspectionUnitVersions", "unit_versions", HsType::list(HsType::Named("ContextUnitVersion"))),
-            field("contextInspectionAuthorship", "authorship", HsType::list(HsType::Named("ContextTextAuthorship"))),
-        ]),
-        record("ContextPatch", vec![field("contextPatchChanges", "changes", HsType::list(HsType::Named("ContextChange")))]),
-        variants("ContextChange", vec![
-            SumVariant { ctor: "ReplaceContextText", fields: VariantFields::Named(vec![
-                field("contextChangeReference", "reference", HsType::Named("ContextReference")),
-                field("contextChangeSelector", "selector", HsType::Named("ContextTextSelector")),
-                field("contextChangeExpected", "expected", HsType::Text),
-                field("contextChangeText", "text", HsType::Text),
-            ]), doc: &[] },
-            SumVariant { ctor: "RemoveContextUnit", fields: VariantFields::Named(vec![
-                field("contextChangeReference", "reference", HsType::Named("ContextReference")),
-                field("contextChangeExpected", "expected", HsType::Text),
-            ]), doc: &[] },
-            SumVariant { ctor: "AppendContextNote", fields: VariantFields::Named(vec![
-                field("contextChangeText", "text", HsType::Text),
-                field("contextChangeSources", "sources", HsType::list(HsType::Named("ContextReference"))),
-            ]), doc: &[] },
-        ]),
-        sum("ContextProblemCode", &["ContextProblemStale", "ContextProblemMissing", "ContextProblemAmbiguous", "ContextProblemDenied", "ContextProblemInvalidPatch", "ContextProblemAlreadyStaged", "ContextProblemIneligible", "ContextProblemUnsupportedSelector"], &["Typed context patch refusal; rendered detail never controls behavior."]),
-        record("ContextProblem", vec![
-            field("contextProblemCode", "code", HsType::Named("ContextProblemCode")),
-            field("contextProblemReference", "reference", HsType::maybe(HsType::Named("ContextReference"))),
-            field("contextProblemDetail", "detail", HsType::Text),
-        ]),
+        record(
+            "ContextTextVersion",
+            vec![
+                field(
+                    "contextTextVersionReference",
+                    "reference",
+                    HsType::Named("ContextReference"),
+                ),
+                field(
+                    "contextTextVersionSelector",
+                    "selector",
+                    HsType::Named("ContextTextSelector"),
+                ),
+                field("contextTextVersionDigest", "digest", HsType::Text),
+            ],
+        ),
+        record(
+            "ContextUnitVersion",
+            vec![
+                field(
+                    "contextUnitVersionReference",
+                    "reference",
+                    HsType::Named("ContextReference"),
+                ),
+                field("contextUnitVersionDigest", "digest", HsType::Text),
+            ],
+        ),
+        sum(
+            "ContextTextAuthor",
+            &[
+                "ContextAuthorUser",
+                "ContextAuthorAssistant",
+                "ContextAuthorTool",
+                "ContextAuthorSystem",
+                "ContextAuthorDeveloper",
+                "ContextAuthorUnknown",
+            ],
+            &[
+                "Immutable canonical original occurrence role/type; Unknown remains explicit. Replacement overlays do not change this attribution; later edits retain separate transaction receipts.",
+            ],
+        ),
+        record(
+            "ContextTextAuthorship",
+            vec![
+                field(
+                    "contextAuthorshipReference",
+                    "reference",
+                    HsType::Named("ContextReference"),
+                ),
+                field(
+                    "contextAuthorshipSelector",
+                    "selector",
+                    HsType::Named("ContextTextSelector"),
+                ),
+                field(
+                    "contextAuthorshipAuthor",
+                    "author",
+                    HsType::Named("ContextTextAuthor"),
+                ),
+                field("contextAuthorshipNote", "authored_note", HsType::Bool),
+            ],
+        ),
+        record(
+            "ContextInspection",
+            vec![
+                field(
+                    "contextInspectionDocument",
+                    "document",
+                    HsType::Named("ContextDocument"),
+                ),
+                field(
+                    "contextInspectionTextVersions",
+                    "text_versions",
+                    HsType::list(HsType::Named("ContextTextVersion")),
+                ),
+                field(
+                    "contextInspectionUnitVersions",
+                    "unit_versions",
+                    HsType::list(HsType::Named("ContextUnitVersion")),
+                ),
+                field(
+                    "contextInspectionAuthorship",
+                    "authorship",
+                    HsType::list(HsType::Named("ContextTextAuthorship")),
+                ),
+            ],
+        ),
         TypeDef {
-            name: "ContextTransaction", wire_rust: Some("ContextTransaction"), haskell_module: Some("Tidepool.Effects.Core"),
-            shape: TypeShape::Identity { payload: IdentityPayload::Text, hs_binder: "transaction", rust_field: "raw", validation: Validation::None },
-            json: JsonInstance::Transparent, derives: WIRE, domain: None,
-            doc: &["Owner-issued transaction identifier; possession does not grant observation authority."],
+            name: "RetainedExchangeReference",
+            wire_rust: Some("RetainedExchangeReference"),
+            haskell_module: Some("Tidepool.Effects.Core"),
+            shape: TypeShape::Identity {
+                payload: IdentityPayload::Text,
+                hs_binder: "exchange",
+                rust_field: "raw",
+                validation: Validation::None,
+            },
+            json: JsonInstance::Transparent,
+            derives: WIRE,
+            domain: None,
+            doc: &[
+                "Owner-observed retained exchange identity; Store revalidates authority at use.",
+            ],
         },
-        record("ContextTransactionReceipt", vec![
-            field("contextReceiptHead", "head", HsType::Text),
-            field("contextReceiptGeneration", "generation", HsType::Int),
-            field("contextReceiptChanged", "changed", HsType::Bool),
-            field("contextReceiptAppended", "appended", HsType::list(HsType::Named("ContextReference"))),
-        ]),
-        variants("ContextTransactionStatus", vec![
-            startup_variant("ContextTransactionStaged", vec![]),
-            startup_variant("ContextTransactionCommitted", vec![HsType::Named("ContextTransactionReceipt")]),
-            startup_variant("ContextTransactionRejected", vec![HsType::list(HsType::Named("ContextProblem"))]),
-            startup_variant("ContextTransactionCancelled", vec![]),
-            startup_variant("ContextTransactionUnknown", vec![HsType::Text]),
-        ]),
-        variants("ContextStageResult", vec![
-            startup_variant("ContextStaged", vec![HsType::Named("ContextTransaction")]),
-            startup_variant("ContextStageRefused", vec![HsType::list(HsType::Named("ContextProblem"))]),
-        ]),
-        variants("OriginalTextObservation", vec![
-            startup_variant("OriginalTextAvailable", vec![HsType::Text]),
-            startup_variant("OriginalTextMissing", vec![]),
-            startup_variant("OriginalTextDenied", vec![HsType::Text]),
-            startup_variant("OriginalTextUnavailable", vec![HsType::Text]),
-            startup_variant("OriginalTextUnsupported", vec![HsType::Text]),
-        ]),
+        variants(
+            "RetainedExchangeObservation",
+            vec![
+                startup_variant(
+                    "RetainedExchangeAvailable",
+                    vec![HsType::Named("RetainedExchangeReference")],
+                ),
+                startup_variant("RetainedExchangeMissing", vec![]),
+                startup_variant("RetainedExchangeDenied", vec![]),
+                startup_variant("RetainedExchangePending", vec![]),
+                startup_variant("RetainedExchangeUnpublished", vec![]),
+                startup_variant("RetainedExchangeNotStarted", vec![]),
+                startup_variant("RetainedExchangeFailure", vec![]),
+                startup_variant("RetainedExchangeCancelled", vec![]),
+                startup_variant("RetainedExchangeCancelledWithReceipt", vec![]),
+                startup_variant("RetainedExchangeInterrupted", vec![]),
+                startup_variant("RetainedExchangeCancellationUnconfirmed", vec![]),
+            ],
+        ),
+        record(
+            "ContextPatch",
+            vec![field(
+                "contextPatchChanges",
+                "changes",
+                HsType::list(HsType::Named("ContextChange")),
+            )],
+        ),
+        variants(
+            "ContextChange",
+            vec![
+                SumVariant {
+                    ctor: "ReplaceContextText",
+                    fields: VariantFields::Named(vec![
+                        field(
+                            "contextChangeReference",
+                            "reference",
+                            HsType::Named("ContextReference"),
+                        ),
+                        field(
+                            "contextChangeSelector",
+                            "selector",
+                            HsType::Named("ContextTextSelector"),
+                        ),
+                        field("contextChangeExpected", "expected", HsType::Text),
+                        field("contextChangeText", "text", HsType::Text),
+                    ]),
+                    doc: &[],
+                },
+                SumVariant {
+                    ctor: "RemoveContextUnit",
+                    fields: VariantFields::Named(vec![
+                        field(
+                            "contextChangeReference",
+                            "reference",
+                            HsType::Named("ContextReference"),
+                        ),
+                        field("contextChangeExpected", "expected", HsType::Text),
+                    ]),
+                    doc: &[],
+                },
+                SumVariant {
+                    ctor: "AppendContextNote",
+                    fields: VariantFields::Named(vec![
+                        field("contextChangeText", "text", HsType::Text),
+                        field(
+                            "contextChangeSources",
+                            "sources",
+                            HsType::list(HsType::Named("ContextReference")),
+                        ),
+                    ]),
+                    doc: &[],
+                },
+                SumVariant {
+                    ctor: "AppendRetainedExchange",
+                    fields: VariantFields::Named(vec![field(
+                        "contextChangeExchange",
+                        "source",
+                        HsType::Named("RetainedExchangeReference"),
+                    )]),
+                    doc: &[
+                        "Append exact successful call/result evidence; Store revalidates source authority and publication.",
+                    ],
+                },
+            ],
+        ),
+        sum(
+            "ContextProblemCode",
+            &[
+                "ContextProblemStale",
+                "ContextProblemMissing",
+                "ContextProblemAmbiguous",
+                "ContextProblemDenied",
+                "ContextProblemInvalidPatch",
+                "ContextProblemAlreadyStaged",
+                "ContextProblemIneligible",
+                "ContextProblemUnsupportedSelector",
+            ],
+            &["Typed context patch refusal; rendered detail never controls behavior."],
+        ),
+        record(
+            "ContextProblem",
+            vec![
+                field(
+                    "contextProblemCode",
+                    "code",
+                    HsType::Named("ContextProblemCode"),
+                ),
+                field(
+                    "contextProblemReference",
+                    "reference",
+                    HsType::maybe(HsType::Named("ContextReference")),
+                ),
+                field("contextProblemDetail", "detail", HsType::Text),
+            ],
+        ),
+        TypeDef {
+            name: "ContextTransaction",
+            wire_rust: Some("ContextTransaction"),
+            haskell_module: Some("Tidepool.Effects.Core"),
+            shape: TypeShape::Identity {
+                payload: IdentityPayload::Text,
+                hs_binder: "transaction",
+                rust_field: "raw",
+                validation: Validation::None,
+            },
+            json: JsonInstance::Transparent,
+            derives: WIRE,
+            domain: None,
+            doc: &[
+                "Owner-issued transaction identifier; possession does not grant observation authority.",
+            ],
+        },
+        record(
+            "ContextTransactionReceipt",
+            vec![
+                field("contextReceiptHead", "head", HsType::Text),
+                field("contextReceiptGeneration", "generation", HsType::Int),
+                field("contextReceiptChanged", "changed", HsType::Bool),
+                field(
+                    "contextReceiptAppended",
+                    "appended",
+                    HsType::list(HsType::Named("ContextReference")),
+                ),
+            ],
+        ),
+        variants(
+            "ContextTransactionStatus",
+            vec![
+                startup_variant("ContextTransactionStaged", vec![]),
+                startup_variant(
+                    "ContextTransactionCommitted",
+                    vec![HsType::Named("ContextTransactionReceipt")],
+                ),
+                startup_variant(
+                    "ContextTransactionRejected",
+                    vec![HsType::list(HsType::Named("ContextProblem"))],
+                ),
+                startup_variant("ContextTransactionCancelled", vec![]),
+                startup_variant("ContextTransactionUnknown", vec![HsType::Text]),
+            ],
+        ),
+        variants(
+            "ContextStageResult",
+            vec![
+                startup_variant("ContextStaged", vec![HsType::Named("ContextTransaction")]),
+                startup_variant(
+                    "ContextStageRefused",
+                    vec![HsType::list(HsType::Named("ContextProblem"))],
+                ),
+            ],
+        ),
+        variants(
+            "OriginalTextObservation",
+            vec![
+                startup_variant("OriginalTextAvailable", vec![HsType::Text]),
+                startup_variant("OriginalTextMissing", vec![]),
+                startup_variant("OriginalTextDenied", vec![HsType::Text]),
+                startup_variant("OriginalTextUnavailable", vec![HsType::Text]),
+                startup_variant("OriginalTextUnsupported", vec![HsType::Text]),
+            ],
+        ),
         TypeDef {
             name: "InitialContextIdentity",
             wire_rust: Some("InitialContextIdentity"),
@@ -220,17 +461,31 @@ fn type_defs() -> Vec<TypeDef> {
             shape: TypeShape::Record {
                 fields: vec![
                     field("initialContextOperation", "operation", HsType::Text),
-                    field("initialContextActor", "actor", HsType::Tuple(vec![HsType::Int, HsType::Int])),
+                    field(
+                        "initialContextActor",
+                        "actor",
+                        HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                    ),
                     field("initialContextSpecInstall", "spec_install", HsType::Int),
-                    field("initialContextSpecRevision", "spec_revision", HsType::maybe(HsType::Text)),
-                    field("initialContextSpecEntry", "spec_entry", HsType::maybe(HsType::Text)),
+                    field(
+                        "initialContextSpecRevision",
+                        "spec_revision",
+                        HsType::maybe(HsType::Text),
+                    ),
+                    field(
+                        "initialContextSpecEntry",
+                        "spec_entry",
+                        HsType::maybe(HsType::Text),
+                    ),
                     field("initialContextSpecSource", "spec_source", HsType::Text),
                 ],
             },
             json: JsonInstance::None,
             derives: WIRE,
             domain: None,
-            doc: &["Owner-issued startup operation, actor, installed spec and exact source identity."],
+            doc: &[
+                "Owner-issued startup operation, actor, installed spec and exact source identity.",
+            ],
         },
         TypeDef {
             name: "InitialContextPublicationReceipt",
@@ -240,15 +495,25 @@ fn type_defs() -> Vec<TypeDef> {
                 fields: vec![
                     field("initialContextRun", "run", HsType::Text),
                     field("initialContextActorPath", "actor_path", HsType::Text),
-                    field("initialContextConversationIncarnation", "conversation_incarnation", HsType::Text),
+                    field(
+                        "initialContextConversationIncarnation",
+                        "conversation_incarnation",
+                        HsType::Text,
+                    ),
                     field("initialContextRequest", "request", HsType::Text),
-                    field("initialContextCallerReference", "caller_reference", HsType::maybe(HsType::Named("ContextReference"))),
+                    field(
+                        "initialContextCallerReference",
+                        "caller_reference",
+                        HsType::maybe(HsType::Named("ContextReference")),
+                    ),
                 ],
             },
             json: JsonInstance::None,
             derives: WIRE,
             domain: None,
-            doc: &["Historical publication association and independently preserved caller seed reference."],
+            doc: &[
+                "Historical publication association and independently preserved caller seed reference.",
+            ],
         },
         TypeDef {
             name: "InitialContextObservation",
@@ -258,13 +523,42 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     startup_variant("InitialContextAbsent", vec![]),
                     startup_variant("InitialContextCaptured", vec![]),
-                    startup_variant("InitialContextPreparing", vec![HsType::Named("InitialContextIdentity")]),
-                    startup_variant("InitialContextRetained", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
-                    startup_variant("InitialContextPublishedEmpty", vec![HsType::Named("InitialContextIdentity"), HsType::Named("InitialContextPublicationReceipt")]),
-                    startup_variant("InitialContextPublished", vec![HsType::Named("InitialContextIdentity"), HsType::Named("InitialContextPublicationReceipt"), HsType::Text, HsType::Named("ContextReference")]),
-                    startup_variant("InitialContextFailed", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
-                    startup_variant("InitialContextCancelled", vec![HsType::Named("InitialContextIdentity")]),
-                    startup_variant("InitialContextUncertain", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
+                    startup_variant(
+                        "InitialContextPreparing",
+                        vec![HsType::Named("InitialContextIdentity")],
+                    ),
+                    startup_variant(
+                        "InitialContextRetained",
+                        vec![HsType::Named("InitialContextIdentity"), HsType::Text],
+                    ),
+                    startup_variant(
+                        "InitialContextPublishedEmpty",
+                        vec![
+                            HsType::Named("InitialContextIdentity"),
+                            HsType::Named("InitialContextPublicationReceipt"),
+                        ],
+                    ),
+                    startup_variant(
+                        "InitialContextPublished",
+                        vec![
+                            HsType::Named("InitialContextIdentity"),
+                            HsType::Named("InitialContextPublicationReceipt"),
+                            HsType::Text,
+                            HsType::Named("ContextReference"),
+                        ],
+                    ),
+                    startup_variant(
+                        "InitialContextFailed",
+                        vec![HsType::Named("InitialContextIdentity"), HsType::Text],
+                    ),
+                    startup_variant(
+                        "InitialContextCancelled",
+                        vec![HsType::Named("InitialContextIdentity")],
+                    ),
+                    startup_variant(
+                        "InitialContextUncertain",
+                        vec![HsType::Named("InitialContextIdentity"), HsType::Text],
+                    ),
                 ],
             },
             json: JsonInstance::None,
@@ -300,7 +594,9 @@ fn type_defs() -> Vec<TypeDef> {
         sum(
             "ContextNativeKind",
             &["CompletedExchange", "Opaque", "Pending"],
-            &["Host classification of native evidence; each visible text field carries its own editability."],
+            &[
+                "Host classification of native evidence; each visible text field carries its own editability.",
+            ],
         ),
         TypeDef {
             name: "ContextTextSelector",
@@ -315,12 +611,25 @@ fn type_defs() -> Vec<TypeDef> {
                             "part",
                             HsType::Int,
                         )]),
-                        doc: &["A visible message body identified by its position in the exchange."],
+                        doc: &[
+                            "A visible message body identified by its position in the exchange.",
+                        ],
                     },
                     SumVariant {
                         ctor: "ToolResultText",
                         fields: VariantFields::Positional(vec![]),
                         doc: &["The visible text of a completed tool result."],
+                    },
+                    SumVariant {
+                        ctor: "ReasoningText",
+                        fields: VariantFields::Named(vec![field(
+                            "contextReasoningPart",
+                            "part",
+                            HsType::Int,
+                        )]),
+                        doc: &[
+                            "One plaintext reasoning part; edit authority is qualified by the retained provider contract.",
+                        ],
                     },
                 ],
             },
@@ -400,7 +709,9 @@ fn type_defs() -> Vec<TypeDef> {
                                 HsType::list(HsType::Named("ContextVisibleText")),
                             ),
                         ]),
-                        doc: &["Host-owned native evidence with bounded preview and full visible text fields."],
+                        doc: &[
+                            "Host-owned native evidence with bounded preview and full visible text fields.",
+                        ],
                     },
                 ],
             },
@@ -555,7 +866,7 @@ mod tests {
                     &HsType::Named("OriginalTextObservation")
                 ),
                 ("SetNextModelWith", &HsType::Unit),
-                ("SetNextEffortWith", &HsType::Unit),
+                ("SetNextReasoningWith", &HsType::Unit),
             ]
         );
         let original = &effect.verbs[4];

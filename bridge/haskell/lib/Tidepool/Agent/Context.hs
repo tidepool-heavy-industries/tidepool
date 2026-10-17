@@ -21,8 +21,10 @@ module Tidepool.Agent.Context
   , ContextTextAuthorship (..)
   , ContextBlockKind (..)
   , ContextProvenance (..)
-  , Effort
-  , ForkEffort (..)
+  , Model (..)
+  , Reasoning (..)
+  , DeepSeekReasoning (..)
+  , OpenAIReasoning (..)
   , contextBlocks
   , contextAuthorship
   , editableTexts
@@ -42,6 +44,10 @@ module Tidepool.Agent.Context
   , replaceText
   , removeUnit
   , appendNote
+  , RetainedExchangeReference
+  , RetainedExchangeObservation (..)
+  , observeRetainedExchange
+  , appendRetainedExchange
   , contextPatch
   , ContextPatch
   , ContextChange
@@ -67,7 +73,7 @@ module Tidepool.Agent.Context
   , inspectContextTransaction
   , inspectOriginalText
   , setNextModel
-  , setNextEffort
+  , setNextReasoning
   )
 where
 
@@ -86,6 +92,8 @@ import Tidepool.Effects.Core
   , ContextTextVersion (..)
   , ContextUnitVersion (..)
   , ContextPatch (..)
+  , RetainedExchangeReference
+  , RetainedExchangeObservation (..)
   , ContextChange (..)
   , ContextProblem (..)
   , ContextProblemCode (..)
@@ -103,7 +111,10 @@ import Tidepool.Effects.Core
   , InitialContextIdentity (..)
   , InitialContextPublicationReceipt (..)
   , InitialContextObservation (..)
-  , ForkEffort (..)
+  , Model (..)
+  , Reasoning (..)
+  , DeepSeekReasoning (..)
+  , OpenAIReasoning (..)
   , ContextReference
   , ContextRole (..)
   )
@@ -276,6 +287,13 @@ removeUnit (ContextUnitTarget version) = RemoveContextUnit
 appendNote :: Text -> [ContextReference] -> ContextChange
 appendNote = AppendContextNote
 
+-- | Reuse a retained exchange without running its original invocation again.
+appendRetainedExchange :: RetainedExchangeReference -> ContextChange
+appendRetainedExchange = AppendRetainedExchange
+
+observeRetainedExchange :: Member ContextReadWrite effects => ContextReference -> Eff effects RetainedExchangeObservation
+observeRetainedExchange = send . ObserveRetainedExchangeWith
+
 contextPatch :: [ContextChange] -> ContextPatch
 contextPatch = ContextPatch
 
@@ -305,6 +323,8 @@ instance Display ContextPreview where
          ("characters", displayTree (Text.length body)), ("preview", displayTree (Text.take 160 body))]
       displayChange (RemoveContextUnit reference _) = displayRecord 0 "RemoveUnit"
         [("reference", displayTree (show reference))]
+      displayChange (AppendRetainedExchange source) = displayRecord 0 "AppendRetainedExchange"
+        [("source", displayTree (show source)), ("resolution", displayTree ("Owner resolves exact retained exchange at commit" :: Text))]
       displayChange (AppendContextNote body sources) = displayRecord 0 "AppendNote"
         [("sources", displayTree (show sources)), ("characters", displayTree (Text.length body)),
          ("preview", displayTree (Text.take 160 body))]
@@ -339,6 +359,7 @@ previewContext context@(Context inspection) (ContextPatch changes)
         [version] | contextUnitVersionDigest version == expected -> []
                   | otherwise -> [problem ContextProblemStale (Just reference) "Unit version differs from this inspection"]
         _ -> [problem ContextProblemAmbiguous (Just reference) "Unit version is ambiguous"]
+    validate (AppendRetainedExchange _) = [] -- Store resolves retained source authority at commit.
     validate (AppendContextNote _ sources) =
       [problem ContextProblemMissing (Just source) "Note source is outside this inspection"
       | source <- sources, source `notElem` knownReferences]
@@ -352,6 +373,7 @@ previewContext context@(Context inspection) (ContextPatch changes)
     changeReference (ReplaceContextText reference _ _ _) = Just reference
     changeReference (RemoveContextUnit reference _) = Just reference
     changeReference (AppendContextNote _ _) = Nothing
+    changeReference (AppendRetainedExchange _) = Nothing
     conflict (ReplaceContextText a sa _ _) (ReplaceContextText b sb _ _) = a == b && sa == sb
     conflict (RemoveContextUnit a _) (RemoveContextUnit b _) = overlapUnit a b || overlapUnit b a
     conflict (RemoveContextUnit a _) other = maybe False (overlapUnit a) (changeReference other)
@@ -361,6 +383,7 @@ previewContext context@(Context inspection) (ContextPatch changes)
     contains unit reference (Native candidate _ _ _ fields) = candidate == unit
       && reference `elem` map contextVisibleTextReference fields
     contains _ _ _ = False
+    apply document (AppendRetainedExchange _) = document
     apply document (AppendContextNote body sources) = document {blocks = blocks document ++ [Text Nothing Assistant body sources]}
     apply document (RemoveContextUnit reference _) = document {blocks = concatMap (remove reference) (blocks document)}
     apply document (ReplaceContextText reference selector _ body) = document {blocks = map (replace reference selector body) (blocks document)}
@@ -437,13 +460,10 @@ inspectOriginalText reference selector = send (InspectOriginalTextWith reference
 
 -- | Select the actor's next provider model. The host resolves a configured
 -- alias first, then treats an unmatched name as a literal model identifier.
-setNextModel :: Member ContextReadWrite effects => Text -> Eff effects ()
+setNextModel :: Member ContextReadWrite effects => Model -> Eff effects ()
 setNextModel = send . SetNextModelWith
 
--- | Existing reasoning-effort levels used for provider requests.
-type Effort = ForkEffort
-
--- | Stage the actor's reasoning effort for its next request. It is committed
--- only when the whole synchronous cell succeeds.
-setNextEffort :: Member ContextReadWrite effects => Effort -> Eff effects ()
-setNextEffort = send . SetNextEffortWith
+-- | Stage a provider-qualified reasoning choice for the next request.
+-- Publication requires the whole synchronous cell to succeed.
+setNextReasoning :: Member ContextReadWrite effects => Reasoning -> Eff effects ()
+setNextReasoning = send . SetNextReasoningWith

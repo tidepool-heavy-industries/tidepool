@@ -86,6 +86,13 @@ pub(super) fn patch_from_wire(
                         reference: reference_from_wire(reference),
                         expected,
                     },
+                    WireChange::AppendRetainedExchange { source } => {
+                        ContextChange::AppendRetainedExchange {
+                            source: harness::context::RetainedExchangeReference::from_raw(
+                                source.raw,
+                            ),
+                        }
+                    }
                     WireChange::AppendContextNote { text, sources } => {
                         ContextChange::AppendContextNote {
                             text,
@@ -196,6 +203,9 @@ pub(super) fn selector_from_wire(
             part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
         }),
         WireTextSelector::ToolResultText => Ok(ContextTextSelector::ToolResultText),
+        WireTextSelector::ReasoningText { part } => Ok(ContextTextSelector::ReasoningText {
+            part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
+        }),
     }
 }
 
@@ -205,6 +215,9 @@ fn selector_to_wire(selector: &ContextTextSelector) -> WireTextSelector {
             part: i64::from(*part),
         },
         ContextTextSelector::ToolResultText => WireTextSelector::ToolResultText,
+        ContextTextSelector::ReasoningText { part } => WireTextSelector::ReasoningText {
+            part: i64::from(*part),
+        },
     }
 }
 
@@ -295,6 +308,9 @@ fn text_to_wire(text: &ContextVisibleText) -> WireVisibleText {
                 part: i64::from(*part),
             },
             ContextTextSelector::ToolResultText => WireTextSelector::ToolResultText,
+            ContextTextSelector::ReasoningText { part } => WireTextSelector::ReasoningText {
+                part: i64::from(*part),
+            },
         },
         text: text.text.clone(),
         editable: text.editable,
@@ -478,5 +494,29 @@ mod tests {
                 expected
             );
         }
+    }
+}
+
+pub(super) fn exchange_to_wire(
+    observation: harness::context::RetainedExchangeObservation,
+) -> tidepool_bridge_effects::RetainedExchangeObservation {
+    use harness::context::RetainedExchangeObservation as Owner;
+    use tidepool_bridge_effects::RetainedExchangeObservation as Wire;
+    match observation {
+        Owner::Available(source) => {
+            Wire::RetainedExchangeAvailable(tidepool_bridge_effects::RetainedExchangeReference {
+                raw: source.as_str().into(),
+            })
+        }
+        Owner::Missing => Wire::RetainedExchangeMissing,
+        Owner::Denied => Wire::RetainedExchangeDenied,
+        Owner::Pending => Wire::RetainedExchangePending,
+        Owner::Unpublished => Wire::RetainedExchangeUnpublished,
+        Owner::NotStarted => Wire::RetainedExchangeNotStarted,
+        Owner::Failure => Wire::RetainedExchangeFailure,
+        Owner::Cancelled => Wire::RetainedExchangeCancelled,
+        Owner::CancelledWithReceipt => Wire::RetainedExchangeCancelledWithReceipt,
+        Owner::Interrupted => Wire::RetainedExchangeInterrupted,
+        Owner::CancellationUnconfirmed => Wire::RetainedExchangeCancellationUnconfirmed,
     }
 }

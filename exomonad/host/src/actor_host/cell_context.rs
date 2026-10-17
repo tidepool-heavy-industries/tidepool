@@ -14,7 +14,7 @@ use harness::{
     turn::JobOutput,
 };
 use parking_lot::Mutex;
-use tidepool_effect::{error::EffectError, DeferredEffect, Response};
+use tidepool_effect::{DeferredEffect, Response, error::EffectError};
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
@@ -22,12 +22,22 @@ pub(super) type InitialContextObserver = Arc<
     dyn Fn() -> Result<tidepool_bridge_effects::InitialContextObservation, String> + Send + Sync,
 >;
 
-pub(super) type ModelResolver = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+pub(super) type ModelResolver =
+    Arc<dyn Fn(&exomonad_actor::Model) -> Result<String, String> + Send + Sync>;
 
 type TransactionIssuer =
     Arc<dyn Fn(&ContextPatch) -> Result<ContextTransaction, String> + Send + Sync>;
 type TransactionObserver =
     Arc<dyn Fn(&ContextTransaction) -> Result<ContextTransactionStatus, String> + Send + Sync>;
+pub(super) type ReasoningResolver =
+    Arc<dyn Fn(&exomonad_actor::Reasoning) -> Result<Effort, String> + Send + Sync>;
+
+type ExchangeObserver = Arc<
+    dyn Fn(&ContextReference) -> Result<harness::context::RetainedExchangeObservation, String>
+        + Send
+        + Sync,
+>;
+
 type OriginalTextObserver = Arc<
     dyn Fn(
             &ContextReference,
@@ -40,10 +50,12 @@ type OriginalTextObserver = Arc<
 pub(super) struct EmbeddedContextBinding {
     invocation: ToolInvocationContext,
     model: ModelResolver,
+    reasoning: ReasoningResolver,
     initial_context: InitialContextObserver,
     transaction_issuer: TransactionIssuer,
     transaction_observer: TransactionObserver,
     original_text: OriginalTextObserver,
+    retained_exchange: ExchangeObserver,
     state: Arc<Mutex<DraftState>>,
     request_reply: Option<EmbeddedRequestReply>,
 }
@@ -89,6 +101,7 @@ impl EmbeddedContextBinding {
         invocation: ToolInvocationContext,
         snapshot: &ContextSnapshot,
         model: ModelResolver,
+        reasoning: ReasoningResolver,
         initial_context: InitialContextObserver,
         store: Arc<harness::store::Store>,
     ) -> Result<Self, String> {
@@ -110,6 +123,13 @@ impl EmbeddedContextBinding {
                 .context_transaction_status(&identity, transaction)
                 .map_err(|error| error.to_string())
         });
+        let exchange_store = store.clone();
+        let exchange_snapshot = original_snapshot.clone();
+        let retained_exchange = Arc::new(move |reference: &ContextReference| {
+            exchange_store
+                .observe_retained_exchange(&exchange_snapshot, reference)
+                .map_err(|error| error.to_string())
+        });
         let original_text = Arc::new(
             move |reference: &ContextReference, selector: &ContextTextSelector| {
                 store
@@ -120,10 +140,12 @@ impl EmbeddedContextBinding {
         Ok(Self {
             invocation,
             model,
+            reasoning,
             initial_context,
             transaction_issuer,
             transaction_observer,
             original_text,
+            retained_exchange,
             request_reply: None,
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
@@ -308,10 +330,12 @@ impl HostedContextBinding for EmbeddedContextBinding {
     ) -> DeferredEffect {
         let shared_state = self.state.clone();
         let model = self.model.clone();
+        let reasoning = self.reasoning.clone();
         let initial_context = self.initial_context.clone();
         let transaction_issuer = self.transaction_issuer.clone();
         let transaction_observer = self.transaction_observer.clone();
         let original_text = self.original_text.clone();
+        let retained_exchange = self.retained_exchange.clone();
         DeferredEffect::blocking(move || {
             let mut state = shared_state.lock();
             match &state.lifecycle {
@@ -345,7 +369,7 @@ impl HostedContextBinding for EmbeddedContextBinding {
                                     reference: None,
                                     detail: error.to_string(),
                                 },
-                            ])))
+                            ])));
                         }
                     };
                     if let Some((existing, transaction)) = &state.staged {
@@ -419,6 +443,15 @@ impl HostedContextBinding for EmbeddedContextBinding {
                         Err(detail) => tidepool_bridge_effects::OriginalTextObservation::OriginalTextUnavailable(detail),
                     }))
                 }
+                ContextReq::ObserveRetainedExchangeWith(reference) => {
+                    let reference = super::context_wire::reference_from_wire(reference);
+                    drop(state);
+                    let observation =
+                        retained_exchange(&reference).map_err(EffectError::Handler)?;
+                    Ok(Response::new(super::context_wire::exchange_to_wire(
+                        observation,
+                    )))
+                }
                 ContextReq::SetNextModelWith(selection) => {
                     let resolved = model(&selection).map_err(EffectError::Handler)?;
                     if resolved.trim().is_empty() {
@@ -428,12 +461,9 @@ impl HostedContextBinding for EmbeddedContextBinding {
                     state.changed = true;
                     Ok(Response::new(()))
                 }
-                ContextReq::SetNextEffortWith(effort) => {
-                    state.draft.next_effort = Some(match effort {
-                        exomonad_actor::ForkEffort::Low => Effort::Low,
-                        exomonad_actor::ForkEffort::Medium => Effort::Medium,
-                        exomonad_actor::ForkEffort::High => Effort::High,
-                    });
+                ContextReq::SetNextReasoningWith(selection) => {
+                    state.draft.next_effort =
+                        Some(reasoning(&selection).map_err(EffectError::Handler)?);
                     state.changed = true;
                     Ok(Response::new(()))
                 }
@@ -488,7 +518,18 @@ mod tests {
                 call_id: "call".into(),
                 namespace: None,
             },
-            model: Arc::new(|model| Ok(model.into())),
+            model: Arc::new(|model| match model {
+                exomonad_actor::Model::CustomModel(exomonad_actor::Backend::DeepSeek, name) => {
+                    Ok(name.clone())
+                }
+                _ => Err("fixture accepts explicit DeepSeek custom models only".into()),
+            }),
+            reasoning: Arc::new(|reasoning| match reasoning {
+                exomonad_actor::Reasoning::DeepSeekReasoning(
+                    exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
+                ) => Ok(Effort::High),
+                _ => Err("fixture accepts DeepSeek high only".into()),
+            }),
             initial_context: Arc::new(|| {
                 Ok(tidepool_bridge_effects::InitialContextObservation::InitialContextAbsent)
             }),
@@ -499,6 +540,9 @@ mod tests {
             }),
             transaction_observer: Arc::new(|_| {
                 Ok(ContextTransactionStatus::Unknown("not retained".into()))
+            }),
+            retained_exchange: Arc::new(|_| {
+                Ok(harness::context::RetainedExchangeObservation::Missing)
             }),
             original_text: Arc::new(|_, _| {
                 Ok(Err(ContextProblem {
@@ -636,7 +680,10 @@ mod tests {
             .unwrap();
         prepare_result(
             &binding,
-            ContextReq::SetNextModelWith("choice-after-refusal".into()),
+            ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                exomonad_actor::Backend::DeepSeek,
+                "choice-after-refusal".into(),
+            )),
             principal,
         )
         .unwrap();
@@ -658,7 +705,9 @@ mod tests {
         assert!(binding.state.lock().staged.is_none());
         prepare_result(
             &binding,
-            ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+            ContextReq::SetNextReasoningWith(exomonad_actor::Reasoning::DeepSeekReasoning(
+                exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
+            )),
             principal,
         )
         .unwrap();
@@ -738,12 +787,14 @@ mod tests {
         binding
             .admit(&execution, &binding.invocation, principal)
             .unwrap();
-        assert!(prepare_result(
-            &binding,
-            ContextReq::GetInitialContextWith,
-            PrincipalId::new(2, 1)
-        )
-        .is_err());
+        assert!(
+            prepare_result(
+                &binding,
+                ContextReq::GetInitialContextWith,
+                PrincipalId::new(2, 1)
+            )
+            .is_err()
+        );
         for _ in 0..2 {
             assert!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal).is_ok());
         }
@@ -806,12 +857,17 @@ mod tests {
             .unwrap();
         let disposition = completion.context;
         assert!(matches!(disposition, ContextDisposition::Unedited));
-        assert!(prepare_result(
-            &binding,
-            ContextReq::SetNextModelWith("late".into()),
-            principal
-        )
-        .is_err());
+        assert!(
+            prepare_result(
+                &binding,
+                ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                    exomonad_actor::Backend::DeepSeek,
+                    "late".into()
+                )),
+                principal
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -824,7 +880,10 @@ mod tests {
             .unwrap();
         prepare_result(
             &binding,
-            ContextReq::SetNextModelWith("updated-model".into()),
+            ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                exomonad_actor::Backend::DeepSeek,
+                "updated-model".into(),
+            )),
             principal,
         )
         .unwrap();
@@ -882,7 +941,10 @@ mod tests {
         assert!(source.completion(output.clone()).is_none());
         prepare_result(
             &binding,
-            ContextReq::SetNextModelWith("resolved-model".into()),
+            ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                exomonad_actor::Backend::DeepSeek,
+                "resolved-model".into(),
+            )),
             principal,
         )
         .unwrap();
@@ -906,12 +968,17 @@ mod tests {
             cause: CellExitCause::Cancelled,
             cleanup_confirmed: true,
         });
-        assert!(prepare_result(
-            &binding,
-            ContextReq::SetNextModelWith("late".into()),
-            principal
-        )
-        .is_err());
+        assert!(
+            prepare_result(
+                &binding,
+                ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                    exomonad_actor::Backend::DeepSeek,
+                    "late".into()
+                )),
+                principal
+            )
+            .is_err()
+        );
         assert_eq!(source.completion(output), Some(owner));
     }
 
@@ -925,7 +992,9 @@ mod tests {
             .unwrap();
         prepare_result(
             &binding,
-            ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+            ContextReq::SetNextReasoningWith(exomonad_actor::Reasoning::DeepSeekReasoning(
+                exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
+            )),
             principal,
         )
         .unwrap();
@@ -955,7 +1024,9 @@ mod tests {
                 .unwrap();
             prepare_result(
                 &binding,
-                ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+                ContextReq::SetNextReasoningWith(exomonad_actor::Reasoning::DeepSeekReasoning(
+                    exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
+                )),
                 principal,
             )
             .unwrap();
@@ -1011,9 +1082,11 @@ mod tests {
                 .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
                 .unwrap();
             binding.cancel();
-            assert!(binding
-                .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
-                .is_none());
+            assert!(
+                binding
+                    .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+                    .is_none()
+            );
             binding.finish(CellExit {
                 execution,
                 cause: CellExitCause::Cancelled,
