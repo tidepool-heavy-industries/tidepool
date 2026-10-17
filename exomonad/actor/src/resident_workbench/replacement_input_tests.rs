@@ -156,18 +156,7 @@ async fn verify_checkpoint(runner: &Runner, predecessor: SessionId, value: Arc<R
 
 #[tokio::test]
 async fn replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
-        .scope_with_client(replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements_with_preparation)
-        )).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements_with_preparation).await;
 }
 
 async fn replacement_inputs_transfer_from_caller_and_borrow_predecessor_across_placements_with_preparation(

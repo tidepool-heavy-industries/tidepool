@@ -42,21 +42,10 @@ impl DispatchEffect<CapturedOutput> for ImmediatePrintProbe {
 
 #[tokio::test]
 async fn expansion_fences_immediate_handler_before_callback_input() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(|preparation| async move {
-            expansion_fences_immediate_handler_with_compiler_owner(preparation).await;
-        }),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        expansion_fences_immediate_handler_with_compiler_owner,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn prepare_callback_fixture(
@@ -276,16 +265,7 @@ async fn expansion_fences_immediate_handler_with_compiler_owner(
 
 #[tokio::test]
 async fn retained_display_runs_after_private_admission_settles_and_current_scope_changes() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner.scope_with_client(retained_display_runs_after_private_admission_settles_and_current_scope_changes_with_preparation))).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(retained_display_runs_after_private_admission_settles_and_current_scope_changes_with_preparation).await;
 }
 
 async fn retained_display_runs_after_private_admission_settles_and_current_scope_changes_with_preparation(
@@ -366,21 +346,10 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
 
 #[tokio::test]
 async fn filesystem_errors_and_lookup_batch_retain_expandable_display() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn filesystem_errors_and_lookup_batch_retain_expandable_display_with_preparation(
@@ -473,21 +442,10 @@ async fn filesystem_errors_and_lookup_batch_retain_expandable_display_with_prepa
 
 #[tokio::test(flavor = "multi_thread")]
 async fn retained_lookup_selection_revisits_and_expands_without_lookup_or_effects() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(|preparation| async move {
-            retained_lookup_selection_with_compiler_owner(preparation).await;
-        }),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        retained_lookup_selection_with_compiler_owner,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn retained_lookup_selection_with_compiler_owner(

@@ -146,21 +146,10 @@ fn execution_with_id(
 
 #[tokio::test]
 async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_with_preparation(
@@ -222,18 +211,10 @@ async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_w
 
 #[tokio::test]
 async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
-        .scope_with_client(blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal_with_preparation)
-        )).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(
+        blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal_with_preparation,
+    )
+    .await;
 }
 
 async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal_with_preparation(
@@ -294,21 +275,10 @@ async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposa
 
 #[tokio::test]
 async fn blocking_source_check_refuses_closed_execution_before_native_admission() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            blocking_source_check_refuses_closed_execution_before_native_admission_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        blocking_source_check_refuses_closed_execution_before_native_admission_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn blocking_source_check_refuses_closed_execution_before_native_admission_with_preparation(
@@ -343,21 +313,10 @@ async fn blocking_source_check_refuses_closed_execution_before_native_admission_
 /// miss a dropped preparation ancestor.
 #[tokio::test(flavor = "current_thread")]
 async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_with_preparation(
@@ -447,21 +406,10 @@ async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking_w
 
 #[tokio::test]
 async fn execution_disposal_cancels_model_with_parked_binding_references() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            execution_disposal_cancels_model_with_parked_binding_references_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        execution_disposal_cancels_model_with_parked_binding_references_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn execution_disposal_cancels_model_with_parked_binding_references_with_preparation(
@@ -483,18 +431,7 @@ async fn execution_disposal_cancels_model_with_parked_binding_references_with_pr
 
 #[tokio::test]
 async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
-        .scope_with_client(terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement_with_preparation)
-        )).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement_with_preparation).await;
 }
 
 async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowledgement_with_preparation(
@@ -531,21 +468,10 @@ async fn terminal_fence_awaits_model_with_retained_binding_after_native_acknowle
 
 #[tokio::test]
 async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            native_cleanup_failure_still_awaits_model_and_retains_both_failures_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        native_cleanup_failure_still_awaits_model_and_retains_both_failures_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures_with_preparation(
@@ -579,18 +505,7 @@ async fn native_cleanup_failure_still_awaits_model_and_retains_both_failures_wit
 
 #[tokio::test]
 async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
-        .scope_with_client(model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged_with_preparation)
-        )).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged_with_preparation).await;
 }
 
 async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_acknowledged_with_preparation(
@@ -626,18 +541,7 @@ async fn model_terminal_failure_is_unconfirmed_after_native_cancellation_was_ack
 
 #[tokio::test]
 async fn terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(preparation_owner
-        .scope_with_client(terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure_with_preparation)
-        )).await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    crate::resident_workbench::with_test_compiler_owner(terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure_with_preparation).await;
 }
 
 async fn terminal_finalization_releases_invocation_reservations_after_model_cleanup_failure_with_preparation(
@@ -714,21 +618,10 @@ async fn terminal_finalization_releases_invocation_reservations_after_model_clea
 
 #[tokio::test]
 async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            items_callbacks_and_after_tool_prepare_on_the_original_model_binding_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        items_callbacks_and_after_tool_prepare_on_the_original_model_binding_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding_with_preparation(
@@ -800,21 +693,10 @@ async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding_wi
 
 #[tokio::test]
 async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            cancellation_closes_model_while_non_model_callback_wait_remains_parked_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        cancellation_closes_model_while_non_model_callback_wait_remains_parked_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked_with_preparation(
@@ -917,21 +799,10 @@ impl crate::HostedContextBinding for ContextOwner {
 
 #[tokio::test]
 async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
-    let mut preparation_owner = crate::CompilerPreparationOwner::new();
-    let cleanup = preparation_owner.cleanup();
-    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-        preparation_owner.scope_with_client(
-            context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_preparation,
-        ),
-    ))
+    crate::resident_workbench::with_test_compiler_owner(
+        context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_preparation,
+    )
     .await;
-    let cleanup = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await;
-    assert!(cleanup.is_confirmed(), "compiler cleanup: {cleanup:?}");
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_preparation(
