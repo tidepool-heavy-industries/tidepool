@@ -104,7 +104,13 @@ data InfoEntry = InfoEntry
     infoAvailability :: Availability,
     infoReferences :: [IdentifierRef]
   }
-  deriving (Eq, Show)
+  deriving (Eq)
+
+-- The compiler-owned nominal Name is selection evidence, not debug output.
+instance Show InfoEntry where
+  show entry = "InfoEntry " ++ show
+    (infoName entry, infoNamespace entry, infoModule entry, infoKind entry,
+      infoDisplay entry, infoAvailability entry, infoReferences entry)
 
 data InspectionResult
   = InspectionType String String Availability
@@ -455,7 +461,13 @@ data TypeMatch = TypeMatch
     typeMatchAvailability :: Availability,
     typeMatchReferences :: [IdentifierRef]
   }
-  deriving (Eq, Show)
+  deriving (Eq)
+
+instance Show TypeMatch where
+  show entry = "TypeMatch " ++ show
+    (typeMatchName entry, typeMatchNamespace entry, typeMatchModule entry,
+      typeMatchSignature entry, typeMatchQuality entry,
+      typeMatchAvailability entry, typeMatchReferences entry)
 
 data IdentifierNamespace
   = ValueIdentifier
