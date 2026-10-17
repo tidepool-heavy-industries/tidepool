@@ -2158,7 +2158,6 @@ struct SelectedOwners {
 #[derive(Clone, Copy, Debug)]
 enum NativeClosureStage {
     Admission,
-    AuthoredCustody,
     AcceptedMerge,
     #[cfg(test)]
     ColdValidation,
@@ -5311,72 +5310,34 @@ impl ArtifactView {
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
-        let ids = artifact_ids(owned);
-        let entries = ids
+        let authored = self
+            .lease
+            .payloads
             .iter()
-            .map(|id| (*id, Arc::clone(&self.lease.payloads[id])))
-            .collect::<BTreeMap<_, _>>();
-        state
-            .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        let owners = SelectedOwners::new(&state, &entries, &ids)?;
-        let roots = entries
-            .values()
-            .filter(|entry| {
+            .filter(|(_, entry)| {
                 accepted_owners.contains(&entry.descriptor.owner)
                     && matches!(&entry.payload, ArtifactPayload::Original(product)
                         if product.module_interface().is_some_and(|interface|
                             matches!(interface.origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
             })
-            .flat_map(|entry| entry.native_group_ordinals.iter().map(|ordinal| NativeGroupKey {
-                artifact: entry.descriptor.id,
-                original_ordinal: *ordinal,
-            }))
-            .collect();
-        // The same owner/version/ordinal resolver used for executable admission
-        // validates full-body dependencies, without installing its planned edges.
-        let (_, groups) = owners.planned_edges(
-            &state,
-            &entries,
-            &roots,
-            NativeClosureStage::AuthoredCustody,
-        )?;
-        let mut requirements = BTreeSet::new();
-        for group in groups {
-            state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            for (owner, dependency) in
-                entries[&group.artifact].native_requirements_for(group.original_ordinal)
-            {
-                #[cfg(test)]
-                state
-                    .native_requirement_rows_examined
-                    .fetch_add(1, Ordering::Relaxed);
-                if let ArtifactDependency::NativeBinding {
-                    generation,
-                    namespace,
-                    occurrence,
-                    record_parent,
-                    ..
-                } = dependency
-                {
-                    let id = owners.interfaces.get(owner).copied().ok_or_else(|| {
-                        failure("validated native binding lacks its interface owner")
-                    })?;
-                    requirements.insert(NativeBindingRequirement {
-                        artifact_id: id,
-                        identity: tidepool_repr::execution_schema::SymbolIdentity {
-                            unit: owner.unit.clone(),
-                            module: owner.module.clone(),
-                            namespace: namespace.clone(),
-                            occurrence: occurrence.clone(),
-                            record_parent: record_parent.clone(),
-                        },
-                        generation: *generation,
-                    });
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+        // Lifetime custody follows every retained issued graph, independently
+        // of compiler namespace and executable demand. It neither chooses a
+        // carrier nor reconstructs missing body availability from payloads.
+        let groups = owned
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) if authored.contains(&group.binding.artifact()) => {
+                    Some(*group)
                 }
-            }
-        }
-        Ok(requirements.into_iter().collect())
+                _ => None,
+            })
+            .collect();
+        Ok(self
+            .native_requirements_for_exact_groups_locked(&state, owned, groups)?
+            .0
+            .bindings)
     }
 
     pub fn native_requirements_from_roots(
