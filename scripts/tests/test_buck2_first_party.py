@@ -1423,7 +1423,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertEqual(history['case_compiler_modes'], {
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof':
             'owned-resident'})
-        self.assertEqual(history['env']['TIDEPOOL_TEST_TRACE_PROFILE'], 'full')
+        self.assertNotIn('TIDEPOOL_TEST_TRACE_PROFILE', history['env'])
 
     def test_delegated_command_resource_target_requires_four_ignored_cases(self):
         metadata = json.loads(self.metadata.read_text())

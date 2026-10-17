@@ -1660,7 +1660,6 @@ tidepool_buildscript_run(
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
-            env["TIDEPOOL_TEST_TRACE_PROFILE"] = "full"
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_source_proof_pairing_test",',

@@ -18460,62 +18460,99 @@ mod tests {
                 std::fs::write(path, b"changed after owned capture").unwrap();
             }
         }
-        let run = crate::artifacts::test_support::with_settlement(|recipient| {
-            crate::CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
-                &command,
-                offer.input_transport_files(),
-                |close| recipient(close),
-            ))
-        })
-        .unwrap();
-        std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
-        std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
-        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .expect("actual current-source inspection compiles");
-        assert!(std::fs::metadata(&inspection_output).unwrap().len() > 0);
-        let persisted_admissions = request.validate_outputs(&output).unwrap();
-        assert_eq!(persisted_admissions.len(), 1);
-        assert!(persisted_admissions[0]
-            .selected_originals
-            .contains_key(&owner));
-        assert_ne!(
-            endpoint.identity().as_bytes(),
-            endpoint.identity().producer_bytes(),
-            "owned input reuse requires the declared resident compiler"
-        );
-        let count = |stderr: &[u8], wanted: &str| -> u64 {
-            String::from_utf8_lossy(stderr)
-                .lines()
-                .filter_map(|line| {
-                    let rest = line.strip_prefix("tidepool-count name=")?;
-                    let (name, count) = rest.split_once(" count=")?;
-                    (name == wanted).then(|| {
-                        count
-                            .split_whitespace()
-                            .next()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap()
-                    })
-                })
-                .sum()
-        };
-        assert!(
-            count(&run.output.stderr, "original_inputs.certificate.misses") > 0,
-            "real history needs full trace and a cold admitted certificate read"
-        );
-        assert!(count(&run.output.stderr, "original_inputs.census.misses") > 0);
-        assert!(count(&run.output.stderr, "original_inputs.graph.misses") > 0);
-        // The compiler universe owns its retained input reader across A/B/A.
-        // Each request and its backing files remain live until actual close.
-        for (label, context, imports) in [
-            ("empty", Arc::new(empty.clone()), false),
-            ("again", persisted.clone(), true),
-        ] {
-            let next_output = root.join(format!("consumer-{label}"));
-            std::fs::create_dir(&next_output).unwrap();
-            let next_source = next_output.join("Consumer.hs");
-            std::fs::write(
+        let history = tidepool_extract_cmd::with_compiler_transaction(
+            |_| {},
+            || {
+                let run = crate::CompileError::compiler_invocation_result(
+                    endpoint.execute_with_input_files(
+                        &command,
+                        offer.input_transport_files(),
+                        |_| {},
+                    ),
+                )
+                .unwrap();
+                std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
+                std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
+                crate::diag::decode_extract_result(
+                    run.success(),
+                    &run.output.stdout,
+                    &run.output.stderr,
+                )
+                .expect("actual current-source inspection compiles");
+                assert!(std::fs::metadata(&inspection_output).unwrap().len() > 0);
+                let persisted_admissions = request.validate_outputs(&output).unwrap();
+                assert_eq!(persisted_admissions.len(), 1);
+                assert!(persisted_admissions[0]
+                    .selected_originals
+                    .contains_key(&owner));
+                assert_ne!(
+                    compiler_identity.as_bytes(),
+                    compiler_identity.producer_bytes(),
+                    "owned input reuse requires the declared resident compiler"
+                );
+                let observations = |stderr: &[u8]| {
+                    let rows = String::from_utf8_lossy(stderr)
+                        .lines()
+                        .filter_map(|line| {
+                            let raw = line.strip_prefix("tidepool-validation ")?;
+                            let row: serde_json::Value = serde_json::from_str(raw).unwrap();
+                            (row["owner"] == "original_inputs"
+                                && row["reason"] == "scope_acquisition")
+                                .then_some(row)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !rows.is_empty(),
+                        "actual scope acquisition summary was not observed"
+                    );
+                    for row in &rows {
+                        assert_eq!(
+                            row["outcome"], "success",
+                            "scope acquisition did not complete"
+                        );
+                        assert!(row["worker_pid"].as_u64().unwrap() > 0);
+                        for kind in ["certificate", "packages", "census", "graph"] {
+                            for suffix in ["hits", "misses"] {
+                                row["counts"][format!("original_inputs.{kind}.{suffix}")]
+                                    .as_u64()
+                                    .expect("required measured counter is absent");
+                            }
+                        }
+                    }
+                    rows
+                };
+                let first_observations = observations(&run.output.stderr);
+                let worker_pid = first_observations[0]["worker_pid"].as_u64().unwrap();
+                let count = |rows: &[serde_json::Value], wanted: &str| -> u64 {
+                    rows.iter()
+                        .map(|row| {
+                            assert_eq!(
+                                row["worker_pid"].as_u64(),
+                                Some(worker_pid),
+                                "history rotated physical worker"
+                            );
+                            row["counts"][wanted]
+                                .as_u64()
+                                .expect("required measured counter is absent")
+                        })
+                        .sum()
+                };
+                assert!(
+                    count(&first_observations, "original_inputs.certificate.misses") > 0,
+                    "real history needs an observed cold admitted certificate read"
+                );
+                assert!(count(&first_observations, "original_inputs.census.misses") > 0);
+                assert!(count(&first_observations, "original_inputs.graph.misses") > 0);
+                // The compiler universe owns its retained input reader across A/B/A.
+                // Each request and its backing files remain live until actual close.
+                for (label, context, imports) in [
+                    ("empty", Arc::new(empty.clone()), false),
+                    ("again", persisted.clone(), true),
+                ] {
+                    let next_output = root.join(format!("consumer-{label}"));
+                    std::fs::create_dir(&next_output).unwrap();
+                    let next_source = next_output.join("Consumer.hs");
+                    std::fs::write(
                 &next_source,
                 if imports {
                     "module Consumer where\nimport PrefixSelectedSupport\nresult = selected\n"
@@ -18524,69 +18561,79 @@ mod tests {
                 },
             )
             .unwrap();
-            let next_offer = crate::artifacts::ModuleCandidateOffer::select_inspection(
-                endpoint.identity().producer_bytes(),
-                &includes,
-                &root.join(format!("scope-{label}")),
-                Some(Arc::new(ExactCompileContext::new(context.clone()))),
-                Vec::new(),
-                &[],
-            )
-            .unwrap();
-            let next_request = next_offer.exact.as_ref().unwrap().clone();
-            let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
-            command
-                .input(&next_source)
-                .includes(&includes)
-                .inspect_type("result")
-                .inspect_out(next_output.join("inspection.cbor"))
-                .inspection_strict()
-                .output_dir(&next_output);
-            let applied = next_offer.apply_to(command, &next_output).unwrap();
-            let next_run = crate::artifacts::test_support::with_settlement(|recipient| {
-                crate::CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
-                    applied.command(),
-                    applied.input_transport_files(),
-                    |close| recipient(close),
-                ))
-            })
-            .unwrap();
-            std::fs::write(
-                root.join(format!("consumer-{label}.stderr")),
-                &next_run.output.stderr,
-            )
-            .unwrap();
-            crate::diag::decode_extract_result(
-                next_run.success(),
-                &next_run.output.stdout,
-                &next_run.output.stderr,
-            )
-            .expect("actual resident input history compiles");
-            let admissions = next_request.validate_outputs(&next_output).unwrap();
-            assert_eq!(admissions.len(), 1);
-            if imports {
-                assert!(admissions[0].selected_originals.contains_key(&owner));
-                assert_eq!(context.semantic_sha256(), persisted.semantic_sha256());
-                assert_eq!(
-                    count(
+                    let (next_endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+                    let next_offer = crate::artifacts::ModuleCandidateOffer::select_inspection(
+                        compiler_identity.producer_bytes(),
+                        &includes,
+                        &root.join(format!("scope-{label}")),
+                        Some(Arc::new(ExactCompileContext::new(context.clone()))),
+                        Vec::new(),
+                        &[],
+                    )
+                    .unwrap();
+                    let next_request = next_offer.exact.as_ref().unwrap().clone();
+                    let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+                    command
+                        .input(&next_source)
+                        .includes(&includes)
+                        .inspect_type("result")
+                        .inspect_out(next_output.join("inspection.cbor"))
+                        .inspection_strict()
+                        .output_dir(&next_output);
+                    let applied = next_offer.apply_to(command, &next_output).unwrap();
+                    let next_run = crate::CompileError::compiler_invocation_result(
+                        next_endpoint.execute_with_input_files(
+                            applied.command(),
+                            applied.input_transport_files(),
+                            |_| {},
+                        ),
+                    )
+                    .unwrap();
+                    let next_observations = observations(&next_run.output.stderr);
+                    for row in &next_observations {
+                        assert_eq!(row["worker_pid"].as_u64(), Some(worker_pid));
+                    }
+                    std::fs::write(
+                        root.join(format!("consumer-{label}.stderr")),
                         &next_run.output.stderr,
-                        "original_inputs.certificate.misses"
-                    ),
-                    0
-                );
-                for metric in [
-                    "original_inputs.certificate.hits",
-                    "original_inputs.packages.hits",
-                    "original_inputs.census.hits",
-                    "original_inputs.graph.hits",
-                ] {
-                    assert!(
-                        count(&next_run.output.stderr, metric) > 0,
-                        "real resident A/B/A did not reuse {metric}"
-                    );
+                    )
+                    .unwrap();
+                    crate::diag::decode_extract_result(
+                        next_run.success(),
+                        &next_run.output.stdout,
+                        &next_run.output.stderr,
+                    )
+                    .expect("actual resident input history compiles");
+                    let admissions = next_request.validate_outputs(&next_output).unwrap();
+                    assert_eq!(admissions.len(), 1);
+                    if imports {
+                        assert!(admissions[0].selected_originals.contains_key(&owner));
+                        assert_eq!(context.semantic_sha256(), persisted.semantic_sha256());
+                        assert_eq!(
+                            count(&next_observations, "original_inputs.certificate.misses"),
+                            0
+                        );
+                        for metric in [
+                            "original_inputs.certificate.hits",
+                            "original_inputs.packages.hits",
+                            "original_inputs.census.hits",
+                            "original_inputs.graph.hits",
+                        ] {
+                            assert!(
+                                count(&next_observations, metric) > 0,
+                                "real resident A/B/A did not reuse {metric}"
+                            );
+                        }
+                    }
                 }
-            }
-        }
+                persisted_admissions
+            },
+        );
+        assert_eq!(
+            history.close,
+            tidepool_extract_cmd::CompilerTransactionClose::Clean
+        );
+        let persisted_admissions = history.action;
         let receipts = std::fs::read_dir(output.join(".exact-compilations"))
             .unwrap()
             .map(|entry| entry.unwrap().path().join("receipt.cbor"))

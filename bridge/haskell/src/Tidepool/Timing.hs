@@ -171,7 +171,11 @@ withValidationTiming True owner reason counts action = do
         Right (Right _) -> "success"
       countFields = case measuredCounts of
         Right values -> [jsonString key ++ ":" ++ show value | (key,value) <- values
-          , key `elem` ["scope_count","input_count","observed_file_count","observed_bytes"]]
+          , key `elem` ["scope_count","input_count","observed_file_count","observed_bytes"
+            , "original_inputs.certificate.hits","original_inputs.certificate.misses"
+            , "original_inputs.packages.hits","original_inputs.packages.misses"
+            , "original_inputs.census.hits","original_inputs.census.misses"
+            , "original_inputs.graph.hits","original_inputs.graph.misses"]]
         Left _ -> []
       fixedFields =
         [ "\"schema\":1"

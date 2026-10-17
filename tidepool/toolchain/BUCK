@@ -1007,7 +1007,6 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
-        "TIDEPOOL_TEST_TRACE_PROFILE": "full",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
