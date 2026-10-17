@@ -452,6 +452,7 @@ fn ordinary_entry_late_binding_warm_repeat_and_restore_preserves_work_frontier()
         )
         .unwrap();
         let compiled = CompiledTurn::from_production_entry(&entry).unwrap();
+        let capsule = resident.prepare_startup_entry(compiled.code()).unwrap();
         assert!(matches!(
             resident
                 .initialize_durable_public_scope(owner.clone(), public)
@@ -461,7 +462,6 @@ fn ordinary_entry_late_binding_warm_repeat_and_restore_preserves_work_frontier()
         let bootstrap = resident
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let capsule = resident.prepare_startup_entry(compiled.code()).unwrap();
         assert!(matches!(
             tidepool_testing::with_settlement(
                 |settlement| resident.run_startup_entry(capsule, settlement)
