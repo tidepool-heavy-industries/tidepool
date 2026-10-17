@@ -2557,7 +2557,7 @@ pub(crate) fn materialize_certified_products_with_validation(
             validation,
         )?;
         #[cfg(test)]
-        record_native_materialization(0, product.product_bytes.len());
+        let native_written_before = validation.written_bytes;
         materialize_copy_with_validation(
             &owned.join(
                 product_path
@@ -2569,6 +2569,11 @@ pub(crate) fn materialize_certified_products_with_validation(
             mode,
             validation,
         )?;
+        #[cfg(test)]
+        record_native_materialization(
+            0,
+            (validation.written_bytes - native_written_before) as usize,
+        );
         materialize_copy_with_validation(
             &owned.join(
                 package_imports_path
