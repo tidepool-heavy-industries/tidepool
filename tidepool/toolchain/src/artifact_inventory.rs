@@ -966,18 +966,9 @@ impl ArtifactRootIntent<'_> {
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
-            Self::PrivateAvailability {
-                selected: offers, ..
-            }
-            | Self::Offered(_, offers) => {
-                let mut requirements = Vec::new();
-                for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
-                    if !requirements.contains(proof) {
-                        requirements.push(proof.clone());
-                    }
-                }
-                requirements
-            }
+            // Checked availability is not a selected graph. Its membership
+            // is queried only for certified fresh dependency demand below.
+            Self::PrivateAvailability { .. } | Self::Offered(..) => Vec::new(),
             Self::Certified(selection) => {
                 let mut requirements = Vec::new();
                 for proof in selection.native_original_requirements() {
@@ -3770,7 +3761,12 @@ impl ArtifactInventory {
                 }
             }
         }
-        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
+        if let ArtifactRootIntent::PrivateAvailability {
+            selected: availability,
+            dependencies,
+            ..
+        } = root_intent
+        {
             native_availability::bind_fresh_product_dependencies(
                 &state,
                 parent,
@@ -3779,7 +3775,7 @@ impl ArtifactInventory {
                     .expect("private compiler namespace"),
                 &selected,
                 &groups,
-                dependencies,
+                availability.iter().chain(dependencies),
                 &mut required_groups,
             )?;
         }
