@@ -6003,7 +6003,12 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
     let root = tempfile::tempdir().unwrap();
     let mut histories = 0;
     for changed_canonical in [false, true] {
-        for changed_body in [false, true] {
+        for (changed_body, reuse_canonical) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            if reuse_canonical && changed_canonical {
+                continue;
+            }
             for mode in 0..3 {
                 for reverse in [false, true] {
                     for duplicate in [false, true] {
@@ -6099,10 +6104,13 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             1 => partial,
                             _ => full,
                         };
+                        let selected_index = if reuse_canonical { 0 } else { 1 };
                         let issued = recover_fixture_compiler_support(
-                            CompilerInputProjection::from_issued_entries(&[entries[1].clone()])
-                                .unwrap(),
-                            sources[1].clone(),
+                            CompilerInputProjection::from_issued_entries(&[entries
+                                [selected_index]
+                                .clone()])
+                            .unwrap(),
+                            sources[selected_index].clone(),
                             [],
                         )
                         .unwrap();
@@ -6117,6 +6125,68 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         );
                         let selected = selected_support.artifacts().clone();
                         let projection = selected_support.projection().clone();
+                        let canonical_id = ArtifactEntry::canonical(match &entries[0].payload {
+                            ArtifactPayload::Original(product) => {
+                                product.module_interface().unwrap().clone()
+                            }
+                            _ => unreachable!(),
+                        })
+                        .descriptor
+                        .id;
+                        let old_carriers = sources[0]
+                            .capture_graph_selection()
+                            .bindings
+                            .into_iter()
+                            .filter(|binding| binding.artifact == entries[0].descriptor.id)
+                            .collect::<Vec<_>>();
+                        let [old_carrier] = old_carriers.as_slice() else {
+                            panic!("one actual original carrier at issuance")
+                        };
+                        let old_canonicals = sources[0]
+                            .binding_dependencies()
+                            .into_iter()
+                            .filter_map(|(from, to, dependency)| match (from, to, dependency) {
+                                (
+                                    ArtifactBindingNode::Artifact(from),
+                                    ArtifactBindingNode::Artifact(to),
+                                    ArtifactDependency::Interface,
+                                ) if from == *old_carrier && to.artifact == canonical_id => {
+                                    Some(to)
+                                }
+                                _ => None,
+                            })
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(old_canonicals.len(), 1);
+                        let old_canonical = *old_canonicals.first().unwrap();
+                        let current_namespace = selected.capture_graph_selection().namespace;
+                        let same_canonical_binding = current_namespace.contains(&old_canonical);
+                        assert!(
+                            current_namespace.iter().all(|binding| entries
+                                .iter()
+                                .all(|entry| binding.artifact != entry.descriptor.id)),
+                            "interface namespace does not select either original carrier"
+                        );
+                        if reuse_canonical {
+                            assert!(
+                                same_canonical_binding,
+                                "positive branch reuses the actual issued canonical owner"
+                            );
+                        } else if changed_body || changed_canonical {
+                            assert!(
+                                !same_canonical_binding,
+                                "independent changed history has a distinct canonical binding"
+                            );
+                            if !changed_canonical {
+                                assert!(current_namespace.iter().any(|binding| binding.artifact == canonical_id), "negative branch has equal canonical bytes with a different issuer");
+                            }
+                        } else {
+                            assert!(
+                                same_canonical_binding,
+                                "identical authenticated history restores the same binding"
+                            );
+                        }
+                        eprintln!("historical availability issuance: changed_canonical={changed_canonical} changed_body={changed_body} reuse_canonical={reuse_canonical} mode={mode} reverse={reverse} duplicate={duplicate} old_canonical={old_canonical:?} selected_namespace={current_namespace:?}");
+
                         if changed_canonical {
                             let incompatible_projection = old_projection.interface_only();
                             assert!(
@@ -6162,11 +6232,9 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .bindings
                             .iter()
                             .all(|node| graph.bindings.contains(node)));
-                        assert!(offer
-                            .custody()
-                            .binding_dependencies()
-                            .iter()
-                            .all(|edge| support.artifacts().binding_dependencies().contains(edge)));
+                        assert!(offer.custody().binding_dependencies().iter().all(|edge| {
+                            support.artifacts().binding_dependencies().contains(edge)
+                        }));
                         let (joined, joined_projection) = selected
                             .merge_fixture_compiler_inputs(
                                 &projection,
@@ -6335,7 +6403,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .is_empty());
                         assert_eq!(request.compiler_inputs().projection, projection);
                         let availability = &request.compiler_inputs().native_transport.availability;
-                        if mode == 2 && !changed_canonical {
+                        if mode == 2 && same_canonical_binding {
                             assert_eq!(
                                 availability.keys().copied().collect::<BTreeSet<_>>(),
                                 BTreeSet::from([entries[0].descriptor.id])
@@ -6360,7 +6428,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
             }
         }
     }
-    assert_eq!(histories, 48);
+    assert_eq!(histories, 72);
 }
 
 #[test]
