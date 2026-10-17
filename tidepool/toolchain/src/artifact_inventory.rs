@@ -13583,7 +13583,8 @@ mod tests {
                 &view.binding_dependencies(),
             )
             .unwrap();
-        for (inventory, view) in [(&inventory, view), (&recovery, &restored)] {
+        for view in [view, &restored] {
+            let inventory = view.inventory();
             let requirements = NativeOriginalRequirement::for_projection(
                 grown.compiler_input_projection(),
                 view,

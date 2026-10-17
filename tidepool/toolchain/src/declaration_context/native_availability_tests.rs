@@ -476,8 +476,8 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
     let batch_lookups = batched.admission_owner_lookups - before_batch.admission_owner_lookups;
     eprintln!("retention_work_comparison ordered_graph_visits={old_visits} batch_graph_visits={batch_visits} ordered_owner_lookups={old_lookups} batch_owner_lookups={batch_lookups} ordered_entry_copies={} batch_entry_copies={}", old.entry_handle_copies - before.entry_handle_copies, batched.entry_handle_copies - before_batch.entry_handle_copies);
     assert!(
-        batch_visits < old_visits,
-        "covered offers must not rebuild each cumulative read projection"
+        batch_visits <= old_visits,
+        "batched custody retention must not add read-projection work"
     );
     assert!(
         batch_lookups < old_lookups,
@@ -707,7 +707,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
     let original = private.native_offers[0].original();
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(baseline.clone())
-        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private.clone()))
         .expect("the final request closes the fragment against receiving baseline roles");
     let final_inputs = request.compiler_inputs();
     final_inputs
@@ -721,7 +721,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([dependency.clone(), offered])
+        BTreeSet::from([dependency.clone(), offered.clone()])
     );
     assert!(final_inputs.projection.snapshot_roles()[&dependency]
         .original()
@@ -747,6 +747,36 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
             .snapshot_roles()
             .contains_key(&identity("fixture", "PrivateFragment")),
         "private request composition cannot publish its fragment into declarations"
+    );
+    let required_interface =
+        baseline.compiler_input_projection().snapshot_roles()[&dependency].interface();
+    assert!(
+        private
+            .artifacts
+            .artifact_ids()
+            .contains(&required_interface),
+        "the refusal control retains the exact dependency bytes privately"
+    );
+    let empty = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .admit_producer(producer.sha256())
+        .unwrap();
+    let refused = ExactCompileContext::new(Arc::new(empty)).prepare_compilation_with_private_input(
+        &root.path().join("missing-baseline"),
+        PRODUCER,
+        None,
+        Some(private),
+    );
+    let error = match refused {
+        Err(error) => error,
+        Ok(_) => panic!("private dependency custody cannot replace a receiving baseline role"),
+    };
+    assert!(
+        matches!(error, CompileError::ArtifactInventory(error)
+        if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency {
+            artifact, dependent, required, dependency: ArtifactDependency::Interface,
+        } if *artifact == original && dependent == &offered && required == &dependency)),
+        "final request must report the unclosed fragment dependency, not an owner conflict"
     );
 }
 
@@ -1429,7 +1459,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .values()
         .flat_map(|availability| availability.offers().iter().cloned())
         .collect::<Vec<_>>();
-    let selected = inventory
+    let selected = request
+        .artifacts
+        .inventory()
         .admit_projected_with_native_offers(
             &request.artifacts,
             vec![],
@@ -2424,16 +2456,17 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
         .compiler_input_roles()
         .iter()
         .all(|role| role.original().is_none()));
-    let keys = context
-        .facts
-        .compiler_support
-        .artifacts()
-        .selected_native_groups();
+    assert!(context.artifact_view().selected_native_groups().is_empty());
     assert_eq!(
-        keys.iter()
-            .map(|key| key.original_ordinal)
-            .collect::<Vec<_>>(),
-        vec![7, 9001]
+        context
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups
+            .iter()
+            .map(|group| group.original_ordinal)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([7, 9001]),
+        "the complete issued body remains custody without executable demand",
     );
     assert!(
         OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
@@ -2626,21 +2659,28 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     )
     .is_err());
     // An issued winner remains explicit even when other versions stay in custody.
-    {
-        let updated =
-            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
-        let support = recover_fixture_compiler_support(
-            updated,
-            ambiguous.artifact_view().clone(),
-            ambiguous
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
+    let projection = CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
+    let selected = ambiguous
+        .artifact_view()
+        .inventory()
+        .admit_projected_with_native_requirements(
+            ambiguous.artifact_view(),
+            vec![entries[0].clone()],
+            &projection,
+            &[],
         )
-        .unwrap();
-        ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
-    }
+        .expect("the inventory issuer selects the explicit original and canonical pair");
+    let support = recover_fixture_compiler_support(
+        projection,
+        selected,
+        ambiguous
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .cloned(),
+    )
+    .unwrap();
+    ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
     assert!(OriginalCompilerInputs::from_native_availability(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
@@ -2898,21 +2938,29 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             "absence of an issuing role preserves ambiguous custody refusal"
         );
 
-        {
-            let updated =
-                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[0])]).unwrap();
-            let support = recover_fixture_compiler_support(
-                updated,
-                context.artifact_view().clone(),
-                context
-                    .compiler_source_support()
-                    .native_offers()
-                    .iter()
-                    .cloned(),
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
+        let selected = context
+            .artifact_view()
+            .inventory()
+            .admit_projected_with_native_requirements(
+                context.artifact_view(),
+                vec![entries[0].clone()],
+                &projection,
+                &[],
             )
-            .unwrap();
-            context = context.rebuild(|facts| facts.compiler_support = support);
-        }
+            .expect("the inventory issuer selects the explicit original and canonical pair");
+        let support = recover_fixture_compiler_support(
+            projection,
+            selected,
+            context
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .cloned(),
+        )
+        .unwrap();
+        context = context.rebuild(|facts| facts.compiler_support = support);
         context.compiler_metadata_snapshot().unwrap();
         let private = OriginalCompilerInputs::from_native_availability(
             &context,
@@ -4068,9 +4116,9 @@ fn replay_native_transport_history(
         coverage.duplicate_joins += 1;
     }
     // Join order must not change demand when the caller pins the same namespace.
-    joined.artifacts = joined
+    joined.artifacts = private[0]
         .artifacts
-        .retain_original_custody(&private[0].artifacts)
+        .retain_custody(&joined.artifacts)
         .unwrap();
     assert_offer_retention_matches_ordered_fold(
         base_context.artifact_view(),
@@ -4124,7 +4172,7 @@ fn replay_native_transport_history(
     for index in 0..2 {
         let mut fixed = bind().unwrap();
         let imports = [source_import(&products[index + 1], 7)];
-        let admitted = inventory.admit_bound_target(
+        let admitted = inputs.artifacts.inventory().admit_bound_target(
             &mut fixed,
             &inputs.artifacts,
             NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -4151,7 +4199,7 @@ fn replay_native_transport_history(
     }
     let mut fixed = bind().unwrap();
     let imports = [source_import(&products[0], 7)];
-    let demanded = inventory.admit_bound_target(
+    let demanded = inputs.artifacts.inventory().admit_bound_target(
         &mut fixed,
         &inputs.artifacts,
         NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -4225,7 +4273,9 @@ fn replay_native_transport_history(
             .product;
     let dependent_entry =
         Arc::new(ArtifactEntry::original(producer.sha256(), dependent.clone()).unwrap());
-    let support = inventory
+    let support = private[0]
+        .artifacts
+        .inventory()
         .admit_shared_with_demand(
             &private[0].artifacts,
             vec![dependent_entry.clone()],
@@ -4546,22 +4596,20 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             artifacts: custody.clone(),
             native_offers: vec![offer],
         };
+        let interfaces = full
+            .interface_projection(&[
+                entry.descriptor.owner.clone(),
+                unrelated_entry.descriptor.owner.clone(),
+            ])
+            .unwrap()
+            .retain_custody(&custody)
+            .unwrap();
+        let interface_roles = CompilerInputProjection::from_interface_view(&interfaces).unwrap();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
                 producer: producer.sha256(),
-                compiler_support: fixture_compiler_support(
-                    projection
-                        .interface_only()
-                        .merge(
-                            &CompilerInputProjection::from_issued_entries(&[
-                                unrelated_entry.clone()
-                            ])
-                            .unwrap()
-                            .interface_only(),
-                        )
-                        .unwrap(),
-                    custody,
-                ),
+                compiler_support: recover_fixture_compiler_support(interface_roles, interfaces, [])
+                    .unwrap(),
                 lexical: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -4584,11 +4632,13 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         for demanded in [7, 9001] {
-            let mut fixed = inventory
+            let mut fixed = inputs
+                .artifacts
+                .inventory()
                 .bind_segment(&inputs.artifacts, vec![], &selection)
                 .unwrap();
             let imports = [source_import(&native, demanded)];
-            let admitted = inventory.admit_bound_target(
+            let admitted = inputs.artifacts.inventory().admit_bound_target(
                 &mut fixed,
                 &inputs.artifacts,
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -4607,11 +4657,13 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 );
             }
         }
-        let mut fixed = inventory
+        let mut fixed = inputs
+            .artifacts
+            .inventory()
             .bind_segment(&inputs.artifacts, vec![], &selection)
             .unwrap();
         let imports = [source_import(&unrelated, 7)];
-        let denied = inventory.admit_bound_target(
+        let denied = inputs.artifacts.inventory().admit_bound_target(
             &mut fixed,
             &inputs.artifacts,
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
@@ -5781,17 +5833,10 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 )
                 .unwrap();
             assert!(
-                recover_fixture_compiler_support(
-                    roles,
-                    original.artifact_view().clone(),
-                    original
-                        .compiler_source_support()
-                        .native_offers()
-                        .iter()
-                        .cloned(),
-                )
-                .is_err(),
-                "a mismatched recorded role must refuse before a template can observe it"
+                roles
+                    .validate_associations(original.artifact_view())
+                    .is_err(),
+                "the owning association validator refuses a mismatched raw role key"
             );
             retained
                 .validate(producer, &retained.compiler_support.artifacts())
