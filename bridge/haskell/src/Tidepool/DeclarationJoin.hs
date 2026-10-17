@@ -72,6 +72,7 @@ import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
 import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature, validateCheckedTypeWitnessBytes)
 import Tidepool.Json (jsonString)
+import Tidepool.BoundedRead (readFileAtMost)
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
@@ -501,11 +502,25 @@ data DeclarationJoinOutcome = DeclarationJoinOutcome
   , outcomeDecision :: JoinDecision
   } deriving (Eq, Show)
 
-readDeclarationJoin :: FilePath -> IO DeclarationJoinInput
-readDeclarationJoin path = do
+-- The discriminator and selected decoder consume one bounded immutable body.
+-- Filesystem errors retain their original IOException category and path.
+data CapturedDeclarationBody = CapturedDeclarationBody !BS.ByteString
+
+captureDeclarationBody :: String -> FilePath -> IO CapturedDeclarationBody
+captureDeclarationBody oversized path = do
+  let limit = 4 * 1024 * 1024
   size <- getFileSize path
-  when (size > 4 * 1024 * 1024) (fail "declaration join exceeds four MiB")
-  bytes <- BS.readFile path
+  when (size > fromIntegral limit) (fail oversized)
+  bytes <- readFileAtMost path (limit + 1)
+  when (BS.length bytes > limit) (fail oversized)
+  pure (CapturedDeclarationBody bytes)
+
+readDeclarationJoin :: FilePath -> IO DeclarationJoinInput
+readDeclarationJoin path =
+  captureDeclarationBody "declaration join exceeds four MiB" path >>= decodeCapturedDeclarationJoin
+
+decodeCapturedDeclarationJoin :: CapturedDeclarationBody -> IO DeclarationJoinInput
+decodeCapturedDeclarationJoin (CapturedDeclarationBody bytes) =
   case deserialiseFromBytes decodeDeclarationJoin (BL.fromStrict bytes) of
     Left failure -> fail (show failure)
     Right (remaining, input) -> do
@@ -790,12 +805,11 @@ data DeclarationInventoryOutcome = DeclarationInventoryOutcome
 
 readDeclarationOperation :: FilePath -> IO DeclarationOperation
 readDeclarationOperation path = do
-  size <- getFileSize path
-  when (size > 4 * 1024 * 1024) (fail "declaration operation exceeds four MiB")
-  bytes <- BS.readFile path
+  captured@(CapturedDeclarationBody bytes) <-
+    captureDeclarationBody "declaration operation exceeds four MiB" path
   case deserialiseFromBytes (decodeListLen >> text) (BL.fromStrict bytes) of
     Left failure -> fail (show failure)
-    Right (_, "TPDJOIN") -> ValidateJoin <$> readDeclarationJoin path
+    Right (_, "TPDJOIN") -> ValidateJoin <$> decodeCapturedDeclarationJoin captured
     Right (_, "TPHOSTBINDINGINTERFACE") -> case deserialiseFromBytes decodeHostInterface (BL.fromStrict bytes) of
       Left failure -> fail (show failure)
       Right (remaining, input) -> do
