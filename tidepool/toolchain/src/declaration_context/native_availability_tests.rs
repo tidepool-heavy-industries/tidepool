@@ -6055,13 +6055,40 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             Some(proof),
                         )
                         .unwrap();
-                        let partial = full
-                            .within_projection(
-                                &old_projection,
+                        let partial_view = sources[0]
+                            .inventory()
+                            .admit_recovery_selection(
                                 &sources[0].inventory().empty_view(),
+                                vec![entries[0].clone()],
+                                &BTreeSet::from([NativeGroupKey {
+                                    artifact: entries[0].descriptor.id,
+                                    original_ordinal: 7,
+                                }]),
                             )
-                            .unwrap()
                             .unwrap();
+                        let partial_proof = NativeOriginalRequirement::from_selected_view(
+                            entries[0].descriptor.id,
+                            &partial_view,
+                        )
+                        .unwrap()
+                        .unwrap();
+                        let partial = IssuedNativeOffer::issue(
+                            entries[0].descriptor.id,
+                            &partial_view,
+                            Some(partial_proof),
+                        )
+                        .unwrap();
+                        assert!(!partial.is_full());
+                        assert_eq!(
+                            partial
+                                .issued_group_carriers()
+                                .unwrap()
+                                .keys()
+                                .map(|group| group.original_ordinal)
+                                .collect::<BTreeSet<_>>(),
+                            BTreeSet::from([7])
+                        );
+                        assert!(full.is_full());
                         let offer = match mode {
                             0 => IssuedNativeOffer::issue(
                                 entries[0].descriptor.id,
@@ -6084,6 +6111,10 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap()
                             .support_for_owners(vec![entries[1].descriptor.owner.clone()])
                             .unwrap();
+                        assert!(
+                            selected_support.native_offers().is_empty(),
+                            "interface observation does not issue native availability"
+                        );
                         let selected = selected_support.artifacts().clone();
                         let projection = selected_support.projection().clone();
                         if changed_canonical {
@@ -6303,11 +6334,26 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .selected_native_groups()
                             .is_empty());
                         assert_eq!(request.compiler_inputs().projection, projection);
-                        assert!(request
-                            .compiler_inputs()
-                            .native_transport
-                            .availability
-                            .is_empty());
+                        let availability = &request.compiler_inputs().native_transport.availability;
+                        if mode == 2 && !changed_canonical {
+                            assert_eq!(
+                                availability.keys().copied().collect::<BTreeSet<_>>(),
+                                BTreeSet::from([entries[0].descriptor.id])
+                            );
+                            let original = &availability[&entries[0].descriptor.id];
+                            assert!(matches!(original.mode, NativeTransportMode::Full));
+                            assert!(original.permits(9001));
+                            assert_eq!(
+                                original.original_owner().module_version,
+                                match &entries[0].payload {
+                                    ArtifactPayload::Original(product) =>
+                                        product.owner().module_version.clone(),
+                                    _ => unreachable!(),
+                                }
+                            );
+                        } else {
+                            assert!(availability.is_empty(), "Partial, Empty, and incompatible canonical offers do not issue private Full");
+                        }
                         histories += 1;
                     }
                 }
