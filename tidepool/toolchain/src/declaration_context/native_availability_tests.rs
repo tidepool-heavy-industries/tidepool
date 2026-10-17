@@ -1395,6 +1395,43 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     assert!(inherited.permits(7));
     assert!(!inherited.permits(9001));
     assert_eq!(inherited.offers(), receipt.offers());
+    let dependency_key = NativeGroupKey {
+        artifact: b_id,
+        original_ordinal: 7,
+    };
+    let exact_groups = inherited
+        .dependency_support(dependency_key, recovered[1].product.owner())
+        .unwrap()
+        .groups()
+        .collect::<BTreeSet<_>>();
+    assert!(!exact_groups.is_empty());
+    assert!(exact_groups
+        .iter()
+        .all(|group| group.binding.artifact() == b_id && group.original_ordinal == 7));
+    assert!(inherited
+        .dependency_support(
+            NativeGroupKey {
+                artifact: b_id,
+                original_ordinal: 9001
+            },
+            recovered[1].product.owner()
+        )
+        .is_none());
+    assert!(
+        inherited
+            .dependency_support(
+                NativeGroupKey {
+                    artifact: a_id,
+                    original_ordinal: 7
+                },
+                recovered[0].product.owner()
+            )
+            .is_none(),
+        "parent proof custody cannot grant parent row rights"
+    );
+    assert!(inherited
+        .dependency_support(dependency_key, recovered[0].product.owner())
+        .is_none());
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         &inputs,
@@ -2005,6 +2042,121 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             )
             .is_err(),
         "typed admission must also preserve the incompatible exact backedge"
+    );
+}
+
+#[test]
+fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
+    use crate::artifact_inventory::{
+        IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+    };
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let a_seed = product("ScopedBackedgeA", 171);
+    let b = dependent_product(
+        "ScopedBackedgeB",
+        172,
+        vec![(7, vec![source_import(&a_seed, 9001)]), (9001, vec![])],
+    );
+    let a = dependent_product(
+        "ScopedBackedgeA",
+        171,
+        vec![(7, vec![source_import(&b, 7)]), (9001, vec![])],
+    );
+    let recovered = recovered_witness_fixtures(&[a, b]);
+    let entries = recovered
+        .iter()
+        .map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let (a_id, b_id) = (entries[0].descriptor.id, entries[1].descriptor.id);
+    let inventory = ArtifactInventory::default();
+    let base = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let historical = inventory
+        .admit_recovery_selection(
+            &base,
+            vec![entries[0].clone()],
+            &BTreeSet::from([NativeGroupKey {
+                artifact: a_id,
+                original_ordinal: 9001,
+            }]),
+        )
+        .unwrap();
+    let historical_group = historical
+        .capture_graph_selection()
+        .native_groups
+        .into_iter()
+        .find(|group| group.binding.artifact() == a_id && group.original_ordinal == 9001)
+        .unwrap();
+    let b_issued = inventory
+        .admit_recovery_selection(
+            &historical,
+            vec![entries[1].clone()],
+            &BTreeSet::from([NativeGroupKey {
+                artifact: b_id,
+                original_ordinal: 7,
+            }]),
+        )
+        .unwrap();
+    let current = inventory
+        .admit_recovery_selection(
+            &b_issued,
+            vec![entries[0].clone()],
+            &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
+                artifact: a_id,
+                original_ordinal,
+            })),
+        )
+        .unwrap();
+    let canonical =
+        ArtifactEntry::canonical(recovered[0].product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    let proof = NativeOriginalRequirement::from_issued_group_custody(a_id, canonical, &current)
+        .unwrap()
+        .unwrap();
+    let offer = IssuedNativeOffer::issue(a_id, &current, Some(proof)).unwrap();
+    assert!(offer.is_full());
+    let parent_groups = offer
+        .proof()
+        .unwrap()
+        .selection
+        .graph_selection()
+        .native_groups
+        .iter()
+        .filter(|group| group.binding.artifact() == a_id && group.original_ordinal == 9001)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(parent_groups.contains(&historical_group));
+    assert!(
+        parent_groups.iter().any(|group| *group != historical_group),
+        "fixture must retain a distinct current A9001 beside B's historical backedge"
+    );
+    let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
+    let metadata = projection
+        .project_metadata(current.metadata_snapshot())
+        .unwrap();
+    let transport =
+        NativeCompilerTransport::issue(&projection, &metadata, &current, &[offer]).unwrap();
+    let support = transport.availability[&a_id]
+        .dependency_support(
+            NativeGroupKey {
+                artifact: a_id,
+                original_ordinal: 9001,
+            },
+            recovered[0].product.owner(),
+        )
+        .unwrap();
+    assert_eq!(
+        support.groups().collect::<BTreeSet<_>>(),
+        BTreeSet::from([historical_group]),
+        "ordinal permission cannot resurrect the unconsumed parent-root binding"
     );
 }
 
@@ -7725,6 +7877,41 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .iter()
         .any(|offer| offer.is_full() && offer.original() == fresh_id));
 
+    // Exercise the continuation ingress with the actual physical request's
+    // opaque row owners, separately from candidate source-support issuance.
+    let issue_from_request = |context: &ExactDeclarationContext| {
+        let request = ProtectedScaffoldRequirements::default().compiler_inputs(context, None)?;
+        let validation = PackageInterfaceValidation::default();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &request,
+            &request.metadata,
+            &validation.inventory,
+        )
+        .map_err(compiler_evidence_failure)?;
+        let rows = selection
+            .issued_native_availability()
+            .cloned()
+            .collect::<Vec<_>>();
+        OriginalCompilerInputs::issue_complete_native_availability_with_source(
+            &request.artifacts,
+            &request.projection,
+            producer.sha256(),
+            &candidates.native_availability,
+            &[],
+            CompleteAvailabilitySource::Request(&rows),
+        )
+    };
+    let continued =
+        issue_from_request(&context).expect("request-owned Full supports fresh dependent body");
+    assert!(continued
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    assert!(continued
+        .native_offers()
+        .iter()
+        .any(|offer| offer.original() == fresh_id && offer.is_full()));
+
     for (ordinals, expected) in [(vec![3], true), (vec![7], false), (vec![], false)] {
         let selected = ordinals
             .iter()
@@ -7801,6 +7988,22 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             BTreeSet::from([3, 7]),
             "physical body census stays complete even when issued availability is bounded"
         );
+        let continued = issue_from_request(&bounded_context);
+        assert_eq!(
+            continued.is_ok(),
+            expected,
+            "request-owned exact group3 is required independently of physical census"
+        );
+        if let Ok(continued) = continued {
+            assert!(continued
+                .issued_artifacts()
+                .selected_native_groups()
+                .is_empty());
+            assert!(continued
+                .native_offers()
+                .iter()
+                .any(|offer| offer.original() == fresh_id && offer.is_full()));
+        }
         let result =
             OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
         assert_eq!(

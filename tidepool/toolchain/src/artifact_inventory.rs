@@ -18,7 +18,9 @@ mod compiler_projection;
 mod native_availability;
 pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
-pub(crate) use native_availability::{validate_consumed_native_namespace, IssuedNativeOffer};
+pub(crate) use native_availability::{
+    validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
+};
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
@@ -930,7 +932,7 @@ enum ArtifactRootIntent<'a> {
     PrivateAvailability {
         projection: &'a CompilerInputProjection,
         selected: &'a [IssuedNativeOffer],
-        dependencies: &'a [IssuedNativeOffer],
+        dependencies: &'a NativeDependencyCatalog<'a>,
     },
     Offered(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
 }
@@ -3382,7 +3384,7 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
         availability: &[IssuedNativeOffer],
-        dependencies: &[IssuedNativeOffer],
+        dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
         let offered = projection
             .roles()

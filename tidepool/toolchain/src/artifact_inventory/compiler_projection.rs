@@ -855,7 +855,12 @@ impl CompilerInputProjection {
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        self.admit_complete_native_products_with_dependencies(parent, entries, offers, &[])
+        self.admit_complete_native_products_with_dependencies(
+            parent,
+            entries,
+            offers,
+            &NativeDependencyCatalog::from_fixture(&[]),
+        )
     }
 
     pub(crate) fn admit_complete_native_products_with_dependencies(
@@ -863,7 +868,7 @@ impl CompilerInputProjection {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
-        dependencies: &[IssuedNativeOffer],
+        dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
         let contributions = self.native_offer_contributions(parent, offers)?;
         parent.inventory().admit_private_complete_products(

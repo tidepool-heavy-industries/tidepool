@@ -1,5 +1,92 @@
 use super::*;
 
+/// Exact dependency grants remain attached to their issuing owner. Request
+/// rows retain narrower per-original permissions than their supporting proofs.
+pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
+
+enum DependencyGrantSource<'a> {
+    Source(Vec<IssuedNativeOffer>),
+    Request(&'a [Arc<crate::declaration_context::NativeTransportAvailability>]),
+    #[cfg(test)]
+    Fixture(&'a [IssuedNativeOffer]),
+}
+
+impl<'a> NativeDependencyCatalog<'a> {
+    pub(crate) fn from_request(
+        rows: &'a [Arc<crate::declaration_context::NativeTransportAvailability>],
+    ) -> Self {
+        Self(DependencyGrantSource::Request(rows))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_fixture(offers: &'a [IssuedNativeOffer]) -> Self {
+        Self(DependencyGrantSource::Fixture(offers))
+    }
+
+    pub(crate) fn from_source(source: &CompilerSourceSupport) -> Result<Self, CompileError> {
+        let consumed = source
+            .native_offers()
+            .iter()
+            .map(|offer| offer.within_projection(source.projection(), source.artifacts()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(Self(DependencyGrantSource::Source(consumed)))
+    }
+
+    fn groups(
+        &self,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
+        let mut groups = imbl::OrdSet::new();
+        match &self.0 {
+            DependencyGrantSource::Request(rows) => {
+                for row in *rows {
+                    if let Some(support) = row.dependency_support(key, owner) {
+                        groups.extend(support.groups());
+                    }
+                }
+            }
+            DependencyGrantSource::Source(offers) => {
+                for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
+                    groups.extend(
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .filter(|group| {
+                                group.binding.artifact() == key.artifact
+                                    && group.original_ordinal == key.original_ordinal
+                            })
+                            .copied(),
+                    );
+                }
+            }
+            #[cfg(test)]
+            DependencyGrantSource::Fixture(offers) => {
+                for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
+                    groups.extend(
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .filter(|group| {
+                                group.binding.artifact() == key.artifact
+                                    && group.original_ordinal == key.original_ordinal
+                            })
+                            .copied(),
+                    );
+                }
+            }
+        }
+        Ok(groups)
+    }
+}
+
 /// Fresh bodies can depend on an available group without selecting it for
 /// execution. Resolve only their certified imports from the supplied offers;
 /// proof roots remain separate from these dependency choices.
@@ -9,7 +96,7 @@ pub(super) fn bind_fresh_product_dependencies(
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
-    offers: &[IssuedNativeOffer],
+    dependencies: &NativeDependencyCatalog<'_>,
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<(), CompileError> {
     let namespace = parent.namespace();
@@ -54,18 +141,31 @@ pub(super) fn bind_fresh_product_dependencies(
         return Ok(());
     }
     let mut offered = imbl::OrdSet::new();
-    for offer in offers {
-        let Some(proof) = offer.proof() else { continue };
-        let graph = proof.selection.graph_selection();
-        validate_issued_selection(state, &projection.nodes, graph)?;
-        offered.extend(graph.native_groups.iter().filter_map(|group| {
-            wanted
-                .contains(&NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal,
-                })
-                .then_some(InventoryNodeKey::Group(*group))
-        }));
+    for key in &wanted {
+        let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
+            unreachable!("certified dependency has an original owner")
+        };
+        offered.extend(
+            dependencies
+                .groups(*key, product.owner())?
+                .into_iter()
+                .map(InventoryNodeKey::Group),
+        );
+    }
+    // Issued bindings must still be in this admission's retained custody.
+    // Following their immutable edges does not choose another historical offer.
+    for node in &offered {
+        if !state.contains_node(node)
+            || admitted_closure(state, [*node].into_iter())
+                .iter()
+                .any(|node| !projection.nodes.contains(node))
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: node.artifact(),
+                },
+            ));
+        }
     }
     let index = NativeSelectionIndex::build(state, &offered);
     for key in wanted {
