@@ -358,11 +358,8 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let admitted = crate::capabilities::CompilerOwnerScope::current().and_then(|owner| {
-                owner
-                    .shared_preparation(client.producer())
-                    .admit_work()
-            });
+            let admitted = crate::capabilities::CompilerOwnerScope::current()
+                .and_then(|owner| owner.shared_preparation(client.producer()).admit_work());
             let compiler_work = match admitted {
                 Ok(ticket) => ticket,
                 Err(error) => {
@@ -460,11 +457,7 @@ impl ToolsetPreparation {
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let compiler_work = crate::capabilities::CompilerOwnerScope::current()
-            .and_then(|owner| {
-                owner
-                    .shared_preparation(client.producer())
-                    .admit_work()
-            })
+            .and_then(|owner| owner.shared_preparation(client.producer()).admit_work())
             .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         let preparation = uuid::Uuid::new_v4();
         let mut wait_timing = crate::call_timing::PreparationWait::restore(preparation);

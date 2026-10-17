@@ -113,7 +113,10 @@ no lexical roots. Selection controls default visibility while retaining the
 certified implementation, instance, and family closure.
 
 Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
-issued by the execution or preparation owner. The ticket opens and settles the
+issued through an explicitly composed compiler service and execution or preparation
+owner scope. Execution control alone does not issue compiler authority. Admission
+creates and registers its own observation and stop control; partial refusal settles
+retained registrations as not started before returning. The ticket opens and settles the
 entire native scope; callers must not create an unrelated cancellation token.
 The ticket returns the opaque settled compiler product for native publication;
 close observations remain reporting data. The compiler owner aggregates nested

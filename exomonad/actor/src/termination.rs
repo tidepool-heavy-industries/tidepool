@@ -1525,10 +1525,7 @@ mod tests {
                 let active = services.with_compiler_owner(
                     crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
                 );
-                active
-                    .admit_work()
-                    .unwrap()
-                    .run(|_| ());
+                active.admit_work().unwrap().run(|_| ());
                 retained.request_shutdown(ActorTerminal::new(kind, "stop active work"));
                 assert!(active.admit_work().is_err());
                 let guard = retained.begin_compiler_finalization().unwrap();

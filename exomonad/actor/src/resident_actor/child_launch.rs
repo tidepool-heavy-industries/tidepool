@@ -1288,59 +1288,62 @@ mod tests {
     ) {
         crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
             let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
-            crate::capabilities::WorkbenchServices::new().with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                crate::RetainedActorExit::new(),
-            ))
-            .scope(async {
-                let parent = SessionId(971);
-                let id = SessionId(972);
-                let root = tempfile::tempdir().unwrap();
-                let root_path = root.path().to_path_buf();
-                let machines = Arc::new(Machines::new());
-                let runner = Runner::new(machines.clone(), source.clone())
-                    .with_child_session_factory(Arc::new(move |id, _, _settlement| {
-                        Ok(Box::new(session(id, &root_path)))
-                    }))
-                    .with_child_bootstrap_program(bootstrap_program());
-                let startup = runner
-                    .provision_child_session(id, RealmId::fresh(), None, &[])
-                    .await
-                    .unwrap()
-                    .startup_lease;
-                let (placement, captured) = captured_placement(&machines, id);
-                let custody = ChildPlacementCustody::new(placement);
-                let actor = ActorRef::first(crate::ActorId(973));
-                custody.transfer_to_actor(actor, placement).unwrap();
-                startup.admitted();
-                let cleanup = crate::lineage::SpawnCleanupOutcome::Unconfirmed(
-                    "child cleanup still retained".into(),
-                );
-                assert!(matches!(
-                    cleanup,
-                    crate::lineage::SpawnCleanupOutcome::Unconfirmed(_)
-                ));
-                release_failed_launch_placement(&runner, parent, &custody)
+            crate::capabilities::WorkbenchServices::new()
+                .with_compiler_owner(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                        crate::RetainedActorExit::new(),
+                    ),
+                )
+                .scope(async {
+                    let parent = SessionId(971);
+                    let id = SessionId(972);
+                    let root = tempfile::tempdir().unwrap();
+                    let root_path = root.path().to_path_buf();
+                    let machines = Arc::new(Machines::new());
+                    let runner = Runner::new(machines.clone(), source.clone())
+                        .with_child_session_factory(Arc::new(move |id, _, _settlement| {
+                            Ok(Box::new(session(id, &root_path)))
+                        }))
+                        .with_child_bootstrap_program(bootstrap_program());
+                    let startup = runner
+                        .provision_child_session(id, RealmId::fresh(), None, &[])
+                        .await
+                        .unwrap()
+                        .startup_lease;
+                    let (placement, captured) = captured_placement(&machines, id);
+                    let custody = ChildPlacementCustody::new(placement);
+                    let actor = ActorRef::first(crate::ActorId(973));
+                    custody.transfer_to_actor(actor, placement).unwrap();
+                    startup.admitted();
+                    let cleanup = crate::lineage::SpawnCleanupOutcome::Unconfirmed(
+                        "child cleanup still retained".into(),
+                    );
+                    assert!(matches!(
+                        cleanup,
+                        crate::lineage::SpawnCleanupOutcome::Unconfirmed(_)
+                    ));
+                    release_failed_launch_placement(&runner, parent, &custody)
+                        .await
+                        .unwrap();
+                    release_failed_launch_placement(&runner, parent, &custody)
+                        .await
+                        .unwrap();
+                    assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+                    assert!(capture_is_live(&machines, placement, &captured));
+                    assert_eq!(*custody.0.lock(), ChildPlacementPhase::ActorOwned(actor));
+                    // The retained child actor, rather than parent launch failure, owns retirement.
+                    runner.retire_root_placement(placement).await.unwrap();
+                    assert!(!capture_is_live(&machines, placement, &captured));
+                    runner.retire_child_session(id, false).await.unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        while machines.kind(id).is_some() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
                     .await
                     .unwrap();
-                release_failed_launch_placement(&runner, parent, &custody)
-                    .await
-                    .unwrap();
-                assert_eq!(machines.kind(id), Some(SlotKind::Idle));
-                assert!(capture_is_live(&machines, placement, &captured));
-                assert_eq!(*custody.0.lock(), ChildPlacementPhase::ActorOwned(actor));
-                // The retained child actor, rather than parent launch failure, owns retirement.
-                runner.retire_root_placement(placement).await.unwrap();
-                assert!(!capture_is_live(&machines, placement, &captured));
-                runner.retire_child_session(id, false).await.unwrap();
-                tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                    while machines.kind(id).is_some() {
-                        tokio::task::yield_now().await;
-                    }
                 })
-                .await
-                .unwrap();
-            })
-            .await;
+                .await;
         })
         .await;
     }

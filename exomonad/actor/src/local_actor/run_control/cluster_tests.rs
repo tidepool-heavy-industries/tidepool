@@ -45,14 +45,18 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
         .is_none());
     assert!(
         matches!(
-            control.settle_root_preparations(Duration::from_millis(20)).await,
+            control
+                .settle_root_preparations(Duration::from_millis(20))
+                .await,
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ),
         "an outstanding prepared reservation still owns unsettled custody"
     );
     drop(reservation);
     assert!(matches!(
-        control.settle_root_preparations(Duration::from_secs(2)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(2))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -68,7 +72,9 @@ async fn finalizing_run_refuses_late_prepared_submission_without_running_produce
     let (control, task) = RunControlClient::start().await.unwrap();
     control.seal().await.unwrap();
     assert!(matches!(
-        control.settle_root_preparations(Duration::from_secs(2)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(2))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -217,11 +223,14 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     let (control, task) = RunControlClient::start().await.unwrap();
     let (other_control, other_task) = RunControlClient::start().await.unwrap();
     let services = crate::capabilities::WorkbenchServices::new();
-    let other_ticket = services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-        other_control.preparation_client().producer(),
-    ))
-    .admit_work()
-    .unwrap();
+    let other_ticket = services
+        .with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                other_control.preparation_client().producer(),
+            ),
+        )
+        .admit_work()
+        .unwrap();
     let other_outcome = other_ticket.run_with_close(|_| ());
     let other_cancellation = other_outcome.host_admission_cancellation().unwrap();
     let client = control.preparation_client();
@@ -260,11 +269,12 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         .unwrap();
     other_cancellation.checkpoint().unwrap();
     assert!(client.claim(|| ()).is_err());
-    assert!(
-        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer()))
-            .admit_work()
-            .is_err()
-    );
+    assert!(services
+        .with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
+        )
+        .admit_work()
+        .is_err());
     assert!(!control.shared_cleanup.observation().is_confirmed());
     assert!(matches!(
         control
@@ -306,7 +316,9 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
 async fn observing_root_preparations_preserves_open_shared_admission() {
     let (control, task) = RunControlClient::start().await.unwrap();
     assert_eq!(
-        control.settle_root_preparations(Duration::from_secs(1)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(1))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     );
     assert!(control.preparation_client().claim(|| ()).is_ok());

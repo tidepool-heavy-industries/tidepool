@@ -18716,7 +18716,8 @@ pub(crate) mod request_tests {
                 let loading = tokio::spawn({
                     let source = source.clone();
                     let selected = selected.clone();
-                    let owner = services.with_compiler_owner(CompilerCloseOwner::Hosted(load_control.clone()));
+                    let owner = services
+                        .with_compiler_owner(CompilerCloseOwner::Hosted(load_control.clone()));
                     async move {
                         owner
                             .scope(source.prepare_source_toolset(
