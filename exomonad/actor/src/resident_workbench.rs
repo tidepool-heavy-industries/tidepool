@@ -479,7 +479,8 @@ pub struct ActorWorkbenchSource {
 }
 
 /// Source configuration bound to one run's preparation lifetime. Clones share
-/// pending work; independently binding a configuration creates independent work.
+/// pending work, including separate bindings to the same issued client.
+/// Independently issued owner lifetimes have independent preparation state.
 #[derive(Clone)]
 pub struct BoundActorWorkbenchSource {
     config: ActorWorkbenchSource,
@@ -1003,8 +1004,8 @@ impl ActorWorkbenchSource {
     ) -> BoundActorWorkbenchSource {
         BoundActorWorkbenchSource {
             config: self,
+            toolset_preparation: preparation.preparation(),
             preparation,
-            toolset_preparation: Default::default(),
         }
     }
 

@@ -606,6 +606,54 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn issued_preparation_clients_share_pending_keys_only_within_their_lifetime() {
+        let mut independent = crate::CompilerPreparationOwner::new();
+        let outcome = independent
+            .scope_with_client(|other| async move {
+                let mut first = crate::CompilerPreparationOwner::new();
+                let first_outcome = first
+                    .scope_with_client(|client| async move {
+                        let state = client.preparation();
+                        let rebound = client.clone().preparation();
+                        let separate = other.preparation();
+                        assert!(Arc::ptr_eq(&state, &rebound));
+                        assert!(!Arc::ptr_eq(&state, &separate));
+                        // Only cache-key metadata is constructed here, never a compiled
+                        // entry, source capability or installation publication.
+                        let key = recipe("same-key");
+                        let (pending, disposition) = state.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::New);
+                        let (joined, disposition) = rebound.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::JoinedPending);
+                        assert!(Arc::ptr_eq(&pending, &joined));
+                        let (distinct, disposition) = separate.lookup(&key);
+                        assert_eq!(disposition, PreparationLookupDisposition::New);
+                        assert!(!Arc::ptr_eq(&pending, &distinct));
+                        let (changed_task, changed) = state.lookup(&recipe("changed-key"));
+                        assert_eq!(changed, PreparationLookupDisposition::New);
+                        state.settle(
+                            key.clone(),
+                            &pending,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        separate.settle(
+                            key,
+                            &distinct,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        (client, other)
+                    })
+                    .await;
+                assert!(first_outcome.cleanup.observation().is_confirmed());
+                let (closed, other) = first_outcome.action;
+                assert!(closed.claim(|| ()).is_err());
+                assert!(other.claim(|| ()).is_ok());
+            })
+            .await;
+        assert!(outcome.cleanup.observation().is_confirmed());
+    }
+
     /// The consumer supplies a genuinely issued entry; this exercises cache
     /// retirement without manufacturing source/native authority for a fixture.
     pub(crate) async fn ready_bound_preserves_installed_lease(ready: Arc<PreparedToolset>) {

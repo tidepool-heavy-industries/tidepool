@@ -344,6 +344,7 @@ impl ActorCompilerCloseOwner {
 #[derive(Clone)]
 pub struct CompilerPreparationClient {
     retained: RetainedActorExit,
+    preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
 }
 
 impl CompilerPreparationClient {
@@ -359,6 +360,10 @@ impl CompilerPreparationClient {
         Ok(claim())
     }
 
+    pub(crate) fn preparation(&self) -> Arc<crate::agent_spec::preparation::ToolsetPreparation> {
+        Arc::clone(&self.preparation)
+    }
+
     pub(crate) fn producer(&self) -> RetainedActorExit {
         self.retained.clone()
     }
@@ -369,6 +374,7 @@ impl CompilerPreparationClient {
 #[derive(Default)]
 pub struct CompilerPreparationOwner {
     retained: RetainedActorExit,
+    preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
 }
 
 impl CompilerPreparationOwner {
@@ -379,6 +385,7 @@ impl CompilerPreparationOwner {
     pub(crate) fn client(&self) -> CompilerPreparationClient {
         CompilerPreparationClient {
             retained: self.retained.clone(),
+            preparation: Arc::clone(&self.preparation),
         }
     }
 
