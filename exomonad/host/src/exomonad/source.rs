@@ -3574,13 +3574,13 @@ mod tests {
                 };
                 assert_eq!(
                     owner
-                        .locate_issued(source, "Project.Work")
+                        .locate_module(source, "Project.Work")
                         .unwrap()
                         .as_ref(),
                     Some(expected)
                 );
                 assert!(owner
-                    .read_issued(source, "Project.Work")
+                    .read_from(source, "Project.Work")
                     .unwrap()
                     .1
                     .contains("work = 1"));
@@ -3588,11 +3588,11 @@ mod tests {
             for index in 0..selected {
                 let module = format!("Project.Locator{index}");
                 assert_eq!(
-                    owner.locate_issued(&b, &module).unwrap(),
+                    owner.locate_module(&b, &module).unwrap(),
                     Some(b_revision.identity.clone())
                 );
             }
-            assert_eq!(owner.locate_issued(&b, "Project.Absent").unwrap(), None);
+            assert_eq!(owner.locate_module(&b, "Project.Absent").unwrap(), None);
             assert_eq!(
                 owner.revision_projection_work(),
                 before,
@@ -3623,14 +3623,14 @@ mod tests {
             assert_eq!(restored.generation_evidence().unwrap().reference, reference);
             assert!(
                 matches!(
-                    owner.locate_issued(&restored, "Project.Work"),
+                    owner.locate_module(&restored, "Project.Work"),
                     Err(exomonad_actor::SourceInspectionError::Unavailable(_))
                 ),
                 "even identical revision identity from another real issuer grants no authority"
             );
             let before = cold.revision_projection_work();
             assert_eq!(
-                cold.locate_issued(&restored, "Project.Work").unwrap(),
+                cold.locate_module(&restored, "Project.Work").unwrap(),
                 Some(b_revision.identity.clone())
             );
             assert_eq!(cold.revision_projection_work(), before);
@@ -3658,21 +3658,21 @@ mod tests {
             let original = std::fs::read(&path).unwrap();
             std::fs::write(&path, b"corrupt issued body").unwrap();
             assert_eq!(
-                owner.locate_issued(&b, "Project.Locator0").unwrap(),
+                owner.locate_module(&b, "Project.Locator0").unwrap(),
                 Some(b_revision.identity.clone())
             );
             assert!(matches!(
-                owner.read_issued(&b, "Project.Locator0"),
+                owner.read_from(&b, "Project.Locator0"),
                 Err(exomonad_actor::SourceInspectionError::Unreadable(_))
             ));
             assert!(cold.restore_source(&reference).is_err());
             std::fs::remove_file(&path).unwrap();
             assert_eq!(
-                owner.locate_issued(&b, "Project.Locator0").unwrap(),
+                owner.locate_module(&b, "Project.Locator0").unwrap(),
                 Some(b_revision.identity.clone())
             );
             assert!(matches!(
-                owner.read_issued(&b, "Project.Locator0"),
+                owner.read_from(&b, "Project.Locator0"),
                 Err(exomonad_actor::SourceInspectionError::Unreadable(_))
             ));
             assert!(cold.restore_source(&reference).is_err());
