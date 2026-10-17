@@ -5872,6 +5872,7 @@ impl ExactDeclarationContext {
 
     /// Select interface custody without losing the original producer when the
     /// selected type closure contains only package Names.
+    #[track_caller]
     pub fn select_interface_roots(
         &self,
         roots: Vec<crate::artifact_inventory::ArtifactId>,

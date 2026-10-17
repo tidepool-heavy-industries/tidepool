@@ -581,6 +581,7 @@ impl CompilerSourceSupport {
         Self::new(projection, artifacts, self.native_offers.iter().cloned())
     }
 
+    #[track_caller]
     pub(crate) fn select_type_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
         let selected = self.selected_interfaces()?;
         let requested = roots.into_iter().collect::<BTreeSet<_>>();
@@ -591,6 +592,36 @@ impl CompilerSourceSupport {
             .map(|(owner, _)| owner.clone())
             .collect::<Vec<_>>();
         if owners.len() != requested.len() {
+            if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+            {
+                let observations = requested
+                    .iter()
+                    .filter(|id| {
+                        !selected
+                            .entries()
+                            .values()
+                            .any(|entry| entry.descriptor.id == **id)
+                    })
+                    .take(32)
+                    .map(|id| {
+                        let entry = self.artifacts.lease.payloads.get(id);
+                        let role = entry
+                            .and_then(|entry| self.projection.roles.get(&entry.descriptor.owner));
+                        (
+                            id,
+                            entry.map(|entry| &entry.descriptor.owner),
+                            entry.map(|entry| entry.is_native()),
+                            role.map(CompilerInputRole::interface),
+                            role.and_then(CompilerInputRole::original),
+                            role.map(CompilerInputRole::is_published_source_original),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                    requested_count = requested.len(), selected_count = selected.entries().len(),
+                    ?observations, caller = %std::panic::Location::caller(),
+                    "type interface root differs from selected compiler role");
+            }
             return Err(failure(
                 "interface root is outside selected compiler interfaces",
             ));
