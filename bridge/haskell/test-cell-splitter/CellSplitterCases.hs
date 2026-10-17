@@ -991,6 +991,13 @@ checkingSourceRequestRoundTrip = do
       assertEqual "hosted selects one inspection operation" (Right InspectionOperation) (admitRequestOperation request)
       assertEqual "hosted is not a generic inspection list" [] (requestInspections request)
     other -> fail ("hosted request rejected: " ++ show other)
+  let overlapping = hosted { hostedLookupOperations = hostedLookupOperations hosted
+        ++ [HostedLookupPrimary 0 "name α" (HostedLookupName (LookupNameInspection "value" Nothing LookupNameOnly))] }
+      repeatedFields = [Input "metadata.hs", Input "type.hs", Input "metadata.hs", Input "metadata.hs", HostedLookup overlapping]
+  case workerRequestFromArgv (workerArgv repeatedFields) of
+    Right (Just request) -> assertEqual "repeated spelling and overlapping ordinal domains are retained"
+      (Just overlapping) (requestHostedLookup request)
+    other -> fail ("valid repeated hosted operation rejected: " ++ show other)
   forM_ [ hostedFields ++ [InspectInfo "value"]
         , hostedFields ++ [HostedLookup hosted]
         , Input "different.hs" : tail hostedFields

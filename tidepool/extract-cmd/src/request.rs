@@ -1852,6 +1852,24 @@ mod tests {
         assert_eq!(decoded.hosted_lookup_batch(), Some(&batch));
         assert_eq!(decoded.mode(), RequestMode::Inspection);
         assert_eq!(batch.operations.len(), 3);
+        // Authored spelling can repeat and primary/reference ordinals are separate domains.
+        let mut overlapping = batch.clone();
+        let mut repeated = overlapping.operations[0].clone();
+        if let HostedLookupOperation::Primary { ordinal, .. } = &mut repeated {
+            *ordinal = 0;
+        }
+        overlapping.operations.push(repeated);
+        let mut repeated_request = request.clone();
+        repeated_request
+            .fields
+            .insert(3, Field::Input("metadata.hs".into()));
+        repeated_request.fields[4] = Field::HostedLookup(overlapping.clone());
+        assert_eq!(
+            ExtractRequest::decode(&repeated_request.encode())
+                .unwrap()
+                .hosted_lookup_batch(),
+            Some(&overlapping)
+        );
     }
 
     #[test]
