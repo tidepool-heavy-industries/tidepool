@@ -909,6 +909,7 @@ impl NativeOriginalRequirement {
 
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
+    ExtendInterfaces,
     SelectedOriginals(&'a crate::certified_products::SelectedOriginalClosure),
 }
 
@@ -6327,11 +6328,26 @@ impl ArtifactView {
         other: &Self,
         incoming: &CompilerInputProjection,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
-        self.merge_compiler_inputs_with_originals(
+        self.merge_compiler_inputs_with_demand(
             projection,
             other,
             incoming,
             CompilerNativeDemand::RoleIssuer,
+        )
+    }
+
+    fn merge_compiler_interfaces(
+        &self,
+        projection: &CompilerInputProjection,
+        interfaces: &compiler_projection::SelectedCompilerInterfaces<'_>,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        let incoming =
+            interfaces.support_for_owners(interfaces.entries().keys().cloned().collect())?;
+        self.merge_compiler_inputs_with_demand(
+            projection,
+            incoming.artifacts(),
+            incoming.projection(),
+            CompilerNativeDemand::ExtendInterfaces,
         )
     }
 
@@ -6355,7 +6371,7 @@ impl ArtifactView {
         // Incoming roles instead belong to this closure's selected originals;
         // required external owners contribute types and retain baseline policy.
         let incoming = projection.source_support(compiled, &owners)?;
-        compiled.merge_compiler_inputs_with_originals(
+        compiled.merge_compiler_inputs_with_demand(
             incoming.projection(),
             self,
             projection,
@@ -6363,7 +6379,7 @@ impl ArtifactView {
         )
     }
 
-    fn merge_compiler_inputs_with_originals(
+    fn merge_compiler_inputs_with_demand(
         &self,
         projection: &CompilerInputProjection,
         other: &Self,
@@ -6389,6 +6405,9 @@ impl ArtifactView {
                 for id in std::iter::once(role.interface()).chain(role.original()) {
                     namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
+            }
+            if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
+                continue;
             }
             let Some(original) = role.original() else {
                 continue;
@@ -6434,12 +6453,26 @@ impl ArtifactView {
         }
         self.validate_issued_merge(other)?;
         let joined = self.merge_validated_namespace(other, namespace.clone())?;
-        let roots = namespace
-            .values()
-            .copied()
-            .map(InventoryNodeKey::Artifact)
-            .chain(groups.values().copied().map(InventoryNodeKey::Group))
-            .collect::<BTreeSet<_>>();
+        let roots = if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
+            let previous = self.namespace();
+            self.roots()
+                .iter()
+                .copied()
+                .chain(
+                    namespace
+                        .iter()
+                        .filter(|(id, binding)| previous.get(id) != Some(binding))
+                        .map(|(_, binding)| InventoryNodeKey::Artifact(*binding)),
+                )
+                .collect::<BTreeSet<_>>()
+        } else {
+            namespace
+                .values()
+                .copied()
+                .map(InventoryNodeKey::Artifact)
+                .chain(groups.values().copied().map(InventoryNodeKey::Group))
+                .collect::<BTreeSet<_>>()
+        };
         let custody = joined
             .roots()
             .iter()

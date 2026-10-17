@@ -5952,7 +5952,11 @@ impl ExactDeclarationContext {
         if context.facts.producer != [0; 32] {
             self = self.admit_producer(context.facts.producer)?;
         }
-        self.extend_interface_artifacts(context.artifact_view())
+        let support = context.compiler_source_support();
+        let interfaces = support.selected_interfaces()?;
+        let selected = self.facts.compiler_support.extend_interfaces(&interfaces)?;
+        self = self.rebuild(|facts| facts.compiler_support = selected);
+        self.finish()
     }
 
     /// Project only interfaces selected by the original checked template. The

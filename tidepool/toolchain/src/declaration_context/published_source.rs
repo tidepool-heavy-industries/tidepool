@@ -730,6 +730,17 @@ mod tests {
             "role-policy merge alone loses the complete closure's second group"
         );
         let support = certified_artifact_view(&originals, published).unwrap();
+        let demanded = (**published)
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support.clone());
+        let extended = demanded
+            .clone()
+            .extend_interface_context(&demanded)
+            .unwrap();
+        assert_eq!(extended.artifact_view().capture_graph_selection().roots,
+            demanded.artifact_view().capture_graph_selection().roots,
+            "type evidence must preserve the existing complete demand independently of published subset policy");
+
         assert_eq!(
             support.projection().snapshot_roles()[&root.descriptor.owner],
             role

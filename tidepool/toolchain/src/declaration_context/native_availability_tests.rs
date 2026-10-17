@@ -5357,6 +5357,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             })
             .collect::<Vec<_>>();
         let owner = entries[0].descriptor.owner.clone();
+        let mut contexts = Vec::new();
         for selected in 0..2 {
             let projection =
                 CompilerInputProjection::from_issued_entries(&[entries[selected].clone()]).unwrap();
@@ -5453,6 +5454,22 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .clone()
                 .extend_interface_context(&original)
                 .unwrap();
+            contexts.push(original.clone());
+            assert_eq!(extended.lexical_graph(), original.lexical_graph());
+            assert_eq!(
+                extended
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .unwrap(),
+                original
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .unwrap()
+            );
+            assert_eq!(
+                extended.artifact_view().capture_graph_selection().namespace,
+                before.namespace
+            );
             assert_eq!(
                 extended.compiler_input_projection(),
                 original.compiler_input_projection()
@@ -5493,6 +5510,14 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             assert!(mismatched
                 .validate(producer, original.artifact_view())
                 .is_err());
+        }
+        if changed_canonical {
+            assert!(
+                matches!(contexts[0].clone().extend_interface_context(&contexts[1]),
+                Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { .. })
+                && matches!(error.owner_conflict, Some(crate::artifact_inventory::ArtifactOwnerConflictEvidence::CompilerRole { .. })))
+            );
         }
     }
 }

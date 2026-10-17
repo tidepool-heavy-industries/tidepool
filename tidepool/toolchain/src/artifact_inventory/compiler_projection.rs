@@ -314,6 +314,18 @@ impl CompilerSourceSupport {
         Self::new(selected.projection, selected.artifacts, offers)
     }
 
+    /// Type evidence adds selected interfaces while the receiver continues to
+    /// own its exact execution demand independently of published source policy.
+    pub(crate) fn extend_interfaces(
+        &self,
+        interfaces: &SelectedCompilerInterfaces<'_>,
+    ) -> Result<Self, CompileError> {
+        let (artifacts, projection) = self
+            .artifacts
+            .merge_compiler_interfaces(&self.projection, interfaces)?;
+        Self::new(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         let (artifacts, projection) = self.artifacts.merge_compiler_inputs(
             &self.projection,
