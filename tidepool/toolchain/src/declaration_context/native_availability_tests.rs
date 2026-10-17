@@ -5405,6 +5405,12 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             );
             assert!(retained.artifacts.selected_native_groups().is_empty());
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
+            let retained_again = retained.retain_in(original.artifact_view()).unwrap();
+            assert_eq!(
+                retained_again.capture_graph_selection().namespace,
+                before.namespace
+            );
+            assert_eq!(retained_again.capture_graph_selection().roots, before.roots);
             let mut malformed = original.clone();
             let mut roles = CompilerInputProjection::default();
             roles
