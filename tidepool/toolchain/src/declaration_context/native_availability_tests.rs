@@ -6331,6 +6331,10 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
     };
     let explicit_a = selected_fragment(left);
     let explicit_b = selected_fragment(right);
+    assert_ne!(
+        explicit_a.demand, explicit_b.demand,
+        "selected demand identity includes exact scoped issuer choices"
+    );
     for (left, right) in [(&explicit_a, &explicit_b), (&explicit_b, &explicit_a)] {
         assert!(
             matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
