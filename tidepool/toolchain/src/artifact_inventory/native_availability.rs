@@ -114,7 +114,7 @@ pub(super) fn bind_fresh_product_dependencies(
         }
         // This group's immutable edges own its historical children. Do not
         // resolve each child again against the receiving namespace.
-        for node in admitted_closure(state, [InventoryNodeKey::Group(group)]) {
+        for node in admitted_closure(state, [InventoryNodeKey::Group(group)].into_iter()) {
             if let InventoryNodeKey::Group(group) = node {
                 validate_consumed_native_namespace(
                     &entries[&group.binding.artifact()],
