@@ -278,6 +278,9 @@ unitVersion (ContextUnitTarget version) = ContextVersion (contextUnitVersionDige
 unitReference :: ContextUnitTarget -> ContextReference
 unitReference (ContextUnitTarget version) = contextUnitVersionReference version
 
+-- | Author a provider-visible body while preserving its canonical original.
+-- A ReasoningText target changes the inference projection; semantic replay at
+-- the live DeepSeek endpoint remains unverified by the offline implementation.
 replaceText :: ContextTextTarget -> Text -> ContextChange
 replaceText (ContextTextTarget version _) = ReplaceContextText
   (contextTextVersionReference version) (contextTextVersionSelector version) (contextTextVersionDigest version)
