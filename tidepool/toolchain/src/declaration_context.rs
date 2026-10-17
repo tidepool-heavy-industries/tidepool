@@ -1998,8 +1998,20 @@ impl RecoveredArtifactInventory {
         bindings: &[ArtifactBinding],
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<Self, RecoveryInventoryError> {
-        let mut captured =
-            Self::capture_inputs(root, products, module_interfaces, joins, values, None)?;
+        Self::bind_captured(
+            Self::capture_inputs(root, products, module_interfaces, joins, values, None)?,
+            descriptors,
+            bindings,
+            edges,
+        )
+    }
+
+    fn bind_captured(
+        mut captured: Self,
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<Self, RecoveryInventoryError> {
         let actual = captured
             .entries
             .iter()
@@ -2240,6 +2252,33 @@ impl RecoveredArtifactInventory {
             )],
         )>,
     ) -> Result<Self, RecoveryInventoryError> {
+        Self::capture_inputs_with_validation(
+            root,
+            products,
+            module_interfaces,
+            joins,
+            values,
+            inventory,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+
+    fn capture_inputs_with_validation(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        inventory: Option<(
+            &[crate::artifact_inventory::ArtifactDescriptor],
+            &[(
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactDependency,
+            )],
+        )>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryInventoryError> {
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
 
@@ -2249,7 +2288,6 @@ impl RecoveredArtifactInventory {
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
         });
-        let mut validation = PackageInterfaceValidation::default();
         let mut entries = Vec::new();
         let mut losses = Vec::new();
         let mut verified_modules = Vec::new();
@@ -2264,7 +2302,7 @@ impl RecoveredArtifactInventory {
             if !selected_modules.insert(reference) {
                 continue;
             }
-            match recovery_artifacts::recover_module_interface(root, reference, &mut validation) {
+            match recovery_artifacts::recover_module_interface(root, reference, validation) {
                 Ok(interface) => verified_modules.push((reference, interface)),
                 Err(error) => losses.push((
                     crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
@@ -2285,10 +2323,7 @@ impl RecoveredArtifactInventory {
             let result = match captured {
                 Some((_, interface)) => {
                     recovery_artifacts::verify_materialized_ref_with_module_interface(
-                        root,
-                        reference,
-                        interface,
-                        &mut validation,
+                        root, reference, interface, validation,
                     )
                 }
                 None => Err(recovery_artifacts::RecoveryArtifactError::InvalidReference),
@@ -2305,9 +2340,7 @@ impl RecoveredArtifactInventory {
         let mut verified_joins = Vec::new();
         for reference in joins {
             match recovery_artifacts::verify_materialized_join_with_validation(
-                root,
-                reference,
-                &mut validation,
+                root, reference, validation,
             ) {
                 Ok(artifact) => verified_joins.push(artifact),
                 Err(error) => losses.push((
@@ -2321,7 +2354,7 @@ impl RecoveredArtifactInventory {
             match recovery_artifacts::verify_materialized_join_with_validation(
                 root,
                 &reference.interface,
-                &mut validation,
+                validation,
             ) {
                 Ok(artifact) => verified_values.push(artifact),
                 Err(error) => losses.push((reference.artifact_id, error)),
@@ -2331,8 +2364,7 @@ impl RecoveredArtifactInventory {
             return Err(RecoveryInventoryError::Artifacts(losses));
         }
         let certified = crate::certified_products::certify_recovery_products_with_validation(
-            verified,
-            &mut validation,
+            verified, validation,
         )
         .map_err(failure)?;
         for original in certified {
@@ -2345,7 +2377,7 @@ impl RecoveredArtifactInventory {
             let entry = ArtifactEntry::original_with_validation(
                 context.owner.facts.producer,
                 product,
-                &mut validation,
+                validation,
             )?;
             entries.push(entry);
         }
@@ -9014,6 +9046,90 @@ mod tests {
             self.recovered
                 .context_with_graph_selection(selection, &roles, vec![])
         }
+    }
+
+    #[test]
+    fn recovery_payload_acquisition_measures_overlapping_exact_contexts() {
+        let pair = bound_recovery_pair_fixture();
+        let capture = |index: usize, work: &mut recovery_artifacts::RecoveryArtifactWork| {
+            let selection = &pair.selections[index];
+            let ids = selection
+                .bindings
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>();
+            let references = pair.references.iter().filter(|reference| {
+                ids.contains(&crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(reference).id)
+            }).cloned().collect::<Vec<_>>();
+            let descriptors = pair
+                .descriptors
+                .iter()
+                .filter(|descriptor| ids.contains(&descriptor.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let selected = selection.bindings.iter().copied().collect::<BTreeSet<_>>();
+            let groups = selection
+                .native_groups
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let edges = pair
+                .edges
+                .iter()
+                .filter(|(from, _, _)| from.is_retained_in(&selected, &groups))
+                .cloned()
+                .collect::<Vec<_>>();
+            recovery_artifacts::with_artifact_work(work, |validation| {
+                let captured = RecoveredArtifactInventory::capture_inputs_with_validation(
+                    pair.directory.path(),
+                    &[],
+                    &references,
+                    &[],
+                    &[],
+                    None,
+                    validation,
+                )?;
+                RecoveredArtifactInventory::bind_captured(
+                    captured,
+                    &descriptors,
+                    &selection.bindings,
+                    &edges,
+                )
+            })
+            .unwrap()
+        };
+        let mut work_a = recovery_artifacts::RecoveryArtifactWork::default();
+        let a = capture(0, &mut work_a);
+        let mut work_b = recovery_artifacts::RecoveryArtifactWork::default();
+        let b = capture(1, &mut work_b);
+        let restore = |inventory: &RecoveredArtifactInventory, index: usize| {
+            let selection = &pair.selections[index];
+            let roles = selection
+                .namespace
+                .iter()
+                .map(|binding| CompilerInputRole::InterfaceOnly {
+                    interface: binding.artifact,
+                })
+                .collect::<Vec<_>>();
+            inventory
+                .context_with_graph_selection(selection, &roles, vec![])
+                .unwrap()
+        };
+        let old = restore(&a, 0);
+        let new = restore(&b, 1);
+        let old_again = restore(&a, 0);
+        assert_eq!(
+            old.artifact_view().capture_graph_selection(),
+            pair.selections[0]
+        );
+        assert_eq!(
+            new.artifact_view().capture_graph_selection(),
+            pair.selections[1]
+        );
+        assert_eq!(old_again.semantic_sha256(), old.semantic_sha256());
+        assert_ne!(old.semantic_sha256(), new.semantic_sha256());
+        assert!(work_a.read_bytes > 0 && work_b.read_bytes > 0);
+        eprintln!("recovery acquisition overlap: A={work_a:?} B={work_b:?}");
     }
 
     #[test]
