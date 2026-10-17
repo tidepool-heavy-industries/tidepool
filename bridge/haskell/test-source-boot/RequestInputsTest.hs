@@ -10,6 +10,7 @@ import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, 
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
@@ -62,6 +63,7 @@ import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
+import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
@@ -74,6 +76,7 @@ import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
   , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
 import Codec.CBOR.Term (Term(..), encodeTerm)
+import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport
@@ -264,6 +267,47 @@ ownedFixtureScope handles path = do
   _ <- readExactScope path >>= either fail pure
   pure path
 
+-- Mutate only an already admitted packet. Its genuine artifact files remain
+-- readable, and the remaining image digest is valid, so missing-part refusal
+-- cannot be explained by an unreadable trap or a stale image checksum.
+missingOwnedPartsRefuse :: FilePath -> IO ()
+missingOwnedPartsRefuse path = do
+  (_,fixture) <- readScopeCodecFixture path
+  (arenas,terms) <- case scopeCodecAcquisition fixture of
+    Just (ContinueCodecOriginals arenas (TList images)) -> pure (arenas,images)
+    _ -> fail "missing-part control needs an admitted continued packet"
+  images <- case deserialiseFromBytes Transport.decodeInputAcquisition
+      (BL.fromStrict (toStrictByteString (encodeTerm (scopeCodecField ScopeCodecAcquisition fixture)))) of
+    Right (remaining,Transport.ContinueOwnedOriginals images) | BL.null remaining -> pure images
+    _ -> fail "admitted continued packet lost its input images"
+  unless (length images == length terms) (fail "continued image oracle lost a packet row")
+  forM_ [InputInterface,InputPackages,InputCertificate,InputCore,InputNative,InputCensus,InputGraph] $ \kind -> do
+    (key,reference) <- case [(key,reference) | Transport.OriginalInputImage _ key _ parts <- images
+        , (actual,reference) <- parts, actual == kind] of
+      selected : _ -> pure selected
+      [] -> fail ("genuine executable packet lacks control kind " ++ show kind)
+    trap <- BS.readFile (originalInputPath reference)
+    unless (digest trap == originalInputSha256 reference && BS.length trap == originalInputLength reference)
+      (fail "missing-part trap differs from its valid original")
+    changed <- forM (zip images terms) $ \(Transport.OriginalInputImage producer owner _ parts,term) ->
+      if owner /= key then pure term else case term of
+        TList [p,u,n,_,TList encodedParts] -> do
+          let retained = filter ((/=kind) . fst) parts
+              keep part = case part of
+                TList (TString tag : _) -> tag /= T.pack (inputKindTag kind)
+                _ -> False
+          pure (TList [p,u,n,TString (T.pack (inputImageDigest producer owner retained)),
+            TList (filter keep encodedParts)])
+        _ -> fail "admitted image has another shape"
+    let mutated = path ++ ".missing-" ++ inputKindTag kind
+    BS.writeFile mutated (toStrictByteString (encodeTerm (scopeCodecTerm
+      (replaceScopeCodecAcquisition (ContinueCodecOriginals arenas (TList changed)) fixture))))
+    refused <- readExactScope mutated
+    unless (either (const True) (const False) refused)
+      (fail ("continued packet acquired a missing part from its readable trap: " ++ show kind))
+    unchanged <- BS.readFile (originalInputPath reference)
+    unless (unchanged == trap) (fail "missing-part refusal changed its original trap")
+
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
@@ -281,6 +325,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "file-only fixture claimed owned continuation reuse")
     owner <- newExactInputOwner
     firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
+    missingOwnedPartsRefuse firstPath
     (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
     secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
     (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)
