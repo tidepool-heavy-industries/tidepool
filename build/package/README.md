@@ -513,6 +513,28 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
+The `persona-release-contracts` supplement runs two actual host histories from
+the same frozen descriptor: authenticated GUI and native status observe the
+same exact operation while its notebook is busy, and a reloaded choice retains
+its file-read continuation across cells. It requires confirmed process, host
+and compiler cleanup and runs serially with a 900-second per-case budget.
+The separate `model-call-policy` supplement executes the frozen libtest's
+typed model selection, frozen alias policy and refusal control. That case uses
+the real Store and scheduler in-process; it does not start a physical host or
+compiler, so absent host/compiler cleanup observations are not successful
+release evidence for those domains. Both supplements use the existing counted
+runner and must execute their complete sealed rosters. They do not establish
+live provider availability.
+
+```sh
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort model-call-policy --output "$MODEL_CALL_POLICY_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort persona-release-contracts --output "$PERSONA_CONTRACT_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
 The `persona-specialists` cohort runs four real Harness scenarios with scripted
 model and Web responses: shared and dedicated Web-only researchers completing
 two schema-bound requests, invalid/duplicate/pending-work reply refusals, and

@@ -57,6 +57,13 @@ SPECIALIST_ACCEPTANCE_TESTS = [
     "actor_host::persona_file_tools_acceptance_tests::installed_file_tools_repair_a_draft_after_notebook_refusal_without_compilation",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
+MODEL_CALL_POLICY_TESTS = [
+    "actor_host::cell_model::tests::typed_cell_model_selection_resolves_frozen_policy_before_provider_work",
+]
+PERSONA_RELEASE_CONTRACT_TESTS = [
+    "actor_host::operation_observation::tests::native_status_and_authenticated_gui_observe_the_same_operation_while_notebook_is_busy",
+    "actor_host::source_reload_tests::reloaded_choice_retains_a_file_read_continuation_across_cells",
+]
 RESPONSE_CONTINUATION_TESTS = [
     "actor_host::embedded_service::restart_tests::driver_reopens_retained_final_without_provider_then_waits_for_explicit_input",
     "actor_host::embedded_service::restart_tests::driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches_admitted_call",
@@ -250,6 +257,19 @@ def cohorts() -> dict:
                 "tests": PERSONA_STARTUP_TESTS, "expected_count": len(PERSONA_STARTUP_TESTS),
                 "ignored": False, "timeout": 1800, "compiler_mode": "owned-resident",
                 "max_jobs": 1, "retain_artifacts": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
+            "model-call-policy": {
+                "tests": MODEL_CALL_POLICY_TESTS,
+                "expected_count": len(MODEL_CALL_POLICY_TESTS),
+                "ignored": False, "timeout": 900, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True},
+            "persona-release-contracts": {
+                "tests": PERSONA_RELEASE_CONTRACT_TESTS,
+                "expected_count": len(PERSONA_RELEASE_CONTRACT_TESTS),
+                "ignored": False, "timeout": 900, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True, "require_confirmed_cleanup": True,
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
                                          "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
