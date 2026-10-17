@@ -1684,7 +1684,7 @@ enum PreparedGenerationCommit {
 /// Preparation binds immutable facts; publication still checks the live actor,
 /// current snapshot, native readiness and cancellation claim under its fence.
 pub(crate) struct PreparedActorGeneration {
-    machine_owner: std::sync::Weak<ActorMachineRegistry>,
+    machine_owner: std::sync::Weak<dyn std::any::Any + Send + Sync>,
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
     prompts: tidepool_runtime::session::ComposedPromptSnapshot,
@@ -1731,10 +1731,11 @@ where
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
-        if !prepared
-            .machine_owner
-            .ptr_eq(&Arc::downgrade(&self.access.machines))
-        {
+        let machine_owner = {
+            let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
+            Arc::downgrade(&owner)
+        };
+        if !prepared.machine_owner.ptr_eq(&machine_owner) {
             return Ok(ActorGenerationCommit::Refused(
                 "prepared generation belongs to a different machine owner".into(),
             ));
@@ -2188,7 +2189,11 @@ where
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let expected = expected_snapshot.generation().cloned();
         let checkout_context = context.clone();
-        let machine_owner = Arc::downgrade(&self.access.machines);
+        // Erasing the generic registry retains its actual allocation identity.
+        let machine_owner = {
+            let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
+            Arc::downgrade(&owner)
+        };
         installation
             .verify_recovered_generation(&references)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
