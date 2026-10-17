@@ -20039,7 +20039,12 @@ pub(crate) mod request_tests {
                 if Arc::ptr_eq(retained, &replacement))
             );
             state.clear();
-            let revision = recovery.store.read_domain(domain).unwrap().unwrap().revision;
+            let revision = recovery
+                .store
+                .read_domain(domain)
+                .unwrap()
+                .unwrap()
+                .revision;
             let decision = tidepool_runtime::session::PublicationDecision::new();
             assert!(matches!(
                 workbench
@@ -20060,7 +20065,12 @@ pub(crate) mod request_tests {
                 "released installation custody refuses late publication before a native claim"
             );
             assert_eq!(
-                recovery.store.read_domain(domain).unwrap().unwrap().revision,
+                recovery
+                    .store
+                    .read_domain(domain)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
                 revision,
                 "late publication cannot change the retained public generation"
             );
