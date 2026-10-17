@@ -28,7 +28,7 @@ pub enum AgentLaunchReq {
         Vec<crate::ActorEffectKeyWire>,
         Option<String>,
         Option<crate::Model>,
-        Option<crate::ForkEffort>,
+        Option<crate::Reasoning>,
         Option<String>,
         crate::WorkerLifetime,
         Option<(i64, i64)>,

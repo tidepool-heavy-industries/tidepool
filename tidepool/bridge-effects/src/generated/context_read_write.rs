@@ -52,6 +52,39 @@ pub struct ContextInspection {
     pub authorship: Vec<ContextTextAuthorship>,
 }
 
+/// Owner-observed retained exchange identity; Store revalidates authority at use.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
+pub struct RetainedExchangeReference {
+    pub raw: String,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RetainedExchangeObservation {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeAvailable(RetainedExchangeReference),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeMissing,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeDenied,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangePending,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeUnpublished,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeNotStarted,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeFailure,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeCancelled,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeCancelledWithReceipt,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeInterrupted,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    RetainedExchangeCancellationUnconfirmed,
+}
+
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextPatch {
@@ -77,6 +110,9 @@ pub enum ContextChange {
         text: String,
         sources: Vec<ContextReference>,
     },
+    /// Append exact successful call/result evidence; Store revalidates source authority and publication.
+    #[haskell(module = "Tidepool.Effects.Core")]
+    AppendRetainedExchange { source: RetainedExchangeReference },
 }
 
 /// Typed context patch refusal; rendered detail never controls behavior.
@@ -248,6 +284,9 @@ pub enum ContextTextSelector {
     /// The visible text of a completed tool result.
     #[haskell(module = "Tidepool.Effects.Core")]
     ToolResultText,
+    /// One plaintext reasoning part; edit authority is qualified by the retained provider contract.
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ReasoningText { part: i64 },
 }
 
 /// A full visible native text field with its exact selector and editability.
@@ -288,6 +327,21 @@ pub enum ContextBlock {
 #[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextDocument {
     pub blocks: Vec<ContextBlock>,
+}
+
+impl RetainedExchangeReference {
+    /// An untrusted raw value becomes a wire id here — infallibly:
+    /// this identity carries no string policy.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
+    /// The validated payload.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
 }
 
 impl ContextTransaction {

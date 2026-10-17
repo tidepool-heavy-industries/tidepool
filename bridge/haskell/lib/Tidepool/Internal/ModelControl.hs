@@ -4,7 +4,7 @@ module Tidepool.Internal.ModelControl where
 import Prelude
 import Data.Text (Text)
 import Tidepool.Aeson
-import Tidepool.Effects.Core (Model)
+import Tidepool.Effects.Core (Model, Reasoning)
 import qualified Tidepool.Aeson.KeyMap as KM
 
 controlObject :: [Text] -> (Object -> Result a) -> Value -> Result a
@@ -13,18 +13,6 @@ controlObject allowed parse = withObject "ModelCall control" $ \o ->
 
 controlCount :: Int -> Result Int
 controlCount count = if count < 0 then Error "negative ModelCall count" else pure count
-
-data ModelEffortEnvelope = ModelLowEffort | ModelMediumEffort | ModelHighEffort deriving (Show, Eq)
-instance ToJSON ModelEffortEnvelope where
-  toJSON ModelLowEffort = toJSON ("low" :: Text)
-  toJSON ModelMediumEffort = toJSON ("medium" :: Text)
-  toJSON ModelHighEffort = toJSON ("high" :: Text)
-instance FromJSON ModelEffortEnvelope where
-  parseJSON = withText "ModelEffortEnvelope" $ \value -> case value of
-    "low" -> pure ModelLowEffort
-    "medium" -> pure ModelMediumEffort
-    "high" -> pure ModelHighEffort
-    _ -> Error "unknown ModelCall control value"
 
 data ModelLimitEnvelope = ModelRequestsLimit | ModelToolsLimit | ModelTokensLimit | ModelDeadlineLimit deriving (Show, Eq)
 instance ToJSON ModelLimitEnvelope where
@@ -46,11 +34,11 @@ instance ToJSON ModelRequestLimits where
 instance FromJSON ModelRequestLimits where
   parseJSON = controlObject ["requests", "tools", "reported_tokens", "seconds"] $ \o -> pure ModelRequestLimits <*> ((o .:? "requests") >>= traverse controlCount) <*> ((o .:? "tools") >>= traverse controlCount) <*> ((o .:? "reported_tokens") >>= traverse controlCount) <*> ((o .:? "seconds") >>= traverse controlCount)
 
-data ModelRequestEnvelope = ModelRequestEnvelope Text Text (Maybe Model) (Maybe ModelEffortEnvelope) ModelRequestLimits Value (Maybe Value) Bool deriving (Show, Eq)
+data ModelRequestEnvelope = ModelRequestEnvelope Text Text (Maybe Model) (Maybe Reasoning) ModelRequestLimits Value (Maybe Value) Bool deriving (Show, Eq)
 instance ToJSON ModelRequestEnvelope where
-  toJSON (ModelRequestEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["instructions" .= f0, "input" .= f1, "model" .= f2, "effort" .= f3, "limits" .= f4, "tools" .= f5, "result_schema" .= f6, "after_tool" .= f7]
+  toJSON (ModelRequestEnvelope f0 f1 f2 f3 f4 f5 f6 f7) = object ["instructions" .= f0, "input" .= f1, "model" .= f2, "reasoning" .= f3, "limits" .= f4, "tools" .= f5, "result_schema" .= f6, "after_tool" .= f7]
 instance FromJSON ModelRequestEnvelope where
-  parseJSON = controlObject ["instructions", "input", "model", "effort", "limits", "tools", "result_schema", "after_tool"] $ \o -> pure ModelRequestEnvelope <*> (o .: "instructions") <*> (o .: "input") <*> (o .:? "model") <*> (o .:? "effort") <*> (o .: "limits") <*> (o .: "tools") <*> (o .:? "result_schema") <*> (o .: "after_tool")
+  parseJSON = controlObject ["instructions", "input", "model", "reasoning", "limits", "tools", "result_schema", "after_tool"] $ \o -> pure ModelRequestEnvelope <*> (o .: "instructions") <*> (o .: "input") <*> (o .:? "model") <*> (o .:? "reasoning") <*> (o .: "limits") <*> (o .: "tools") <*> (o .:? "result_schema") <*> (o .: "after_tool")
 
 data ModelUsageEnvelope = ModelUsageEnvelope Int Int Int Int deriving (Show, Eq)
 instance ToJSON ModelUsageEnvelope where

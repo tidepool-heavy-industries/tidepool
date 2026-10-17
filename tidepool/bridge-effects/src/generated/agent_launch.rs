@@ -3,7 +3,7 @@
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
 #[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 pub enum Backend {
     #[haskell(module = "Tidepool.Effects.Core")]
@@ -13,7 +13,7 @@ pub enum Backend {
 }
 
 #[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 pub enum OpenAIModel {
     #[haskell(module = "Tidepool.Effects.Core")]
@@ -44,7 +44,7 @@ pub enum Model {
 }
 
 #[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 pub enum DeepSeekReasoning {
     #[haskell(module = "Tidepool.Effects.Core")]
@@ -58,7 +58,7 @@ pub enum DeepSeekReasoning {
 }
 
 #[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 pub enum OpenAIReasoning {
     #[haskell(module = "Tidepool.Effects.Core")]
@@ -70,7 +70,7 @@ pub enum OpenAIReasoning {
 }
 
 #[derive(
-    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 #[serde(tag = "tag", content = "contents", deny_unknown_fields)]
 pub enum Reasoning {

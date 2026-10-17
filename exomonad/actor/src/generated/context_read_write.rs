@@ -29,6 +29,7 @@ pub enum ContextReadWriteReq {
         tidepool_bridge_effects::ContextReference,
         tidepool_bridge_effects::ContextTextSelector,
     ),
-    SetNextModelWith(String),
-    SetNextEffortWith(crate::ForkEffort),
+    ObserveRetainedExchangeWith(tidepool_bridge_effects::ContextReference),
+    SetNextModelWith(tidepool_bridge_effects::Model),
+    SetNextReasoningWith(crate::Reasoning),
 }
