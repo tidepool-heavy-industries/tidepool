@@ -3217,6 +3217,73 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.exomonad/workspace/skills")
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_workspace_installed_shared_modules_compile() {
+        let workspace = tempfile::tempdir().unwrap();
+        scaffold_workspace(workspace.path()).unwrap();
+        let shared = workspace.path().join(".exomonad/workspace");
+        assert_eq!(
+            git_stdout(&shared, &["rev-parse", "HEAD"]).await.trim(),
+            scaffold::DEFAULT_WORKSPACE_REV
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared.join("Project/Work.hs")).unwrap(),
+            git_stdout(&shared, &["show", "HEAD:Project/Work.hs"]).await,
+        );
+        assert!(
+            !workspace.path().join(".exomonad/Project/Work.hs").exists(),
+            "the local source root must not shadow installed Project.Work"
+        );
+        // StubLock is for scaffold-only checks. Compilation uses the existing
+        // declared pinned flake inputs; no installed shared source is replaced.
+        let authored = PathBuf::from(
+            std::env::var_os("TIDEPOOL_RECIPE_WORKSPACE").expect("declared recipe workspace"),
+        );
+        let package = authored.parent().unwrap();
+        for name in ["flake.nix", "flake.lock"] {
+            std::fs::copy(package.join(name), workspace.path().join(name)).unwrap();
+        }
+        let git = exomonad_worktree::GitCli::new();
+        git.try_run(workspace.path(), &["add", "--", "flake.nix", "flake.lock"])
+            .unwrap();
+        git.try_run(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Exomonad compile check",
+                "-c",
+                "user.email=compile-check@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "Select declared pinned compiler inputs",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            git_stdout(&shared, &["rev-parse", "HEAD"]).await.trim(),
+            scaffold::DEFAULT_WORKSPACE_REV
+        );
+        let configured = read_project_config(workspace.path()).unwrap().0;
+        assert!(configured
+            .haskell
+            .source_roots
+            .iter()
+            .any(|root| root == "workspace"));
+        assert!(configured
+            .haskell
+            .modules
+            .iter()
+            .any(|module| module == "Project.Work"));
+        check(Some(workspace.path().to_owned()), false)
+            .await
+            .expect(
+                "the installed shared workspace source closure compiles through production check",
+            );
+    }
+
     #[tokio::test]
     async fn new_commits_a_whole_package_into_a_fresh_repository() {
         let parent = tempfile::tempdir().unwrap();
