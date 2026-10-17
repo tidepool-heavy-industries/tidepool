@@ -1,5 +1,5 @@
 //! A canonical/Core-only consumer gains native groups after original source removal.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tidepool_repr::execution_schema::Group;
@@ -81,15 +81,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
             original.yield_sites(),
         )
         .unwrap();
-    let original_seals = interfaces.artifact_view().descriptors();
-    for expected in [&owner, &support] {
-        let interface = original_seals
-            .iter()
-            .find(|descriptor| descriptor.owner == *expected)
-            .expect("original entry has its issued canonical interface");
-        assert_eq!(interface.kind, ArtifactKind::CanonicalModuleInterface);
-        assert!(interface.product_sha256.is_none());
-    }
+    let original_producer = interfaces.toolchain_identity_sha256();
+    assert_ne!(original_producer, [0; 32]);
 
     // Retain the original consumed home-import graph. A lexical selection is
     // separate from native demand, and its complete interface closure is
@@ -109,10 +102,6 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         lexical.insert(selected, node.clone());
     }
     assert!(lexical[&owner].imports.contains(&support));
-    assert!(original_seals.iter().all(|descriptor| {
-        descriptor.kind == ArtifactKind::CanonicalModuleInterface
-            && descriptor.product_sha256.is_none()
-    }));
     // The complete entry may retain native originals. Recover the consumer
     // independently from only its sealed canonical interfaces and Core.
     let durable = tempfile::tempdir().unwrap();
@@ -148,16 +137,56 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .is_empty());
     let consumer_seals = context.artifact_view().descriptors();
     assert_eq!(consumer_seals.len(), lexical.len());
+    assert_eq!(
+        context
+            .compiler_input_roles()
+            .iter()
+            .map(|role| role.interface())
+            .collect::<BTreeSet<_>>(),
+        consumer_seals
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect::<BTreeSet<_>>()
+    );
     assert!(consumer_seals.iter().all(|descriptor| {
         descriptor.kind == ArtifactKind::CanonicalModuleInterface
             && descriptor.product_sha256.is_none()
     }));
     for expected in [&owner, &support] {
-        let original_seal = original_seals
+        let refs = canonical_interfaces
             .iter()
-            .find(|descriptor| descriptor.owner == *expected)
-            .unwrap();
-        assert!(consumer_seals.contains(original_seal));
+            .filter(|reference| {
+                reference.interface.unit == expected.unit
+                    && reference.interface.module == expected.module
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs.len(),
+            1,
+            "the canonical materializer issues one exact owner"
+        );
+        let reference = refs[0];
+        assert_eq!(
+            reference.interface.toolchain_identity_sha256,
+            original_producer
+        );
+        assert!(
+            reference.core.is_some(),
+            "retained Core must come from the canonical issuer"
+        );
+        let recovered = consumer_seals
+            .iter()
+            .filter(|descriptor| descriptor.owner == *expected)
+            .collect::<Vec<_>>();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].producer_sha256,
+            reference.interface.toolchain_identity_sha256
+        );
+        assert_eq!(
+            recovered[0].interface_sha256,
+            reference.interface.skinny_iface_sha256
+        );
     }
 
     // Recover the real support interfaces while omitting the requested owner.
@@ -236,11 +265,14 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
             .iter()
             .flat_map(|group| group.group().binders())
             .all(|binder| { binder.unit == expected.unit && binder.module == expected.module }));
-        let original_seal = original_seals
+        let canonical_seal = consumer_seals
             .iter()
             .find(|descriptor| descriptor.owner == *expected)
             .unwrap();
-        assert!(compiled.artifact_view.descriptors().contains(original_seal));
+        assert!(compiled
+            .artifact_view
+            .descriptors()
+            .contains(canonical_seal));
     }
     let recursive = compiled
         .certified_groups

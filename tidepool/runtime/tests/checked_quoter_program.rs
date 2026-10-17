@@ -96,12 +96,32 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         })
         .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
         assert_eq!(program.items().len(), 3);
+        assert_eq!(
+            (0..3)
+                .map(|index| checked.checked_item(index).unwrap().kind())
+                .collect::<Vec<_>>(),
+            vec![
+                tidepool_toolchain::checked_cell::CheckedItemKind::Expression,
+                tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
+                tidepool_toolchain::checked_cell::CheckedItemKind::Expression
+            ]
+        );
+        assert_eq!(
+            checked.checked_item(0).unwrap().source().trim(),
+            "42 :: Int"
+        );
         for item in program.items() {
             assert!(item.native().is_some());
             assert!(item.native_products().is_some());
         }
         let first = &program.items()[0];
         let sealed = first.native_products().unwrap();
+        let observation = first
+            .native()
+            .unwrap()
+            .observation_name()
+            .expect("expression owns its issued observation capture")
+            .to_owned();
         let prefix = session
             .begin_cell_program(admission, program.clone())
             .unwrap()
@@ -109,10 +129,27 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let reservation = session
             .admit_checked_item(prefix, checked.checked_item(0).unwrap())
             .unwrap();
-        let TurnResult::Expr { compiled, .. } = consume_cell_program_item(reservation).unwrap()
+        assert_eq!(reservation.item().index(), 0);
+        assert_eq!(reservation.observation_name(), Some(observation.as_str()));
+        // Authored expressions execute through their compiler-issued singleton
+        // capture; the sealed execution receipt is a Bind observation.
+        let TurnResult::Bind {
+            compiled,
+            binders,
+            bound,
+            ..
+        } = consume_cell_program_item(reservation).unwrap()
         else {
-            panic!("checked program starts with its first expression");
+            panic!("the authored expression must retain its issued Bind observation");
         };
+        assert_eq!(binders, vec![observation.clone()]);
+        assert_eq!(
+            bound
+                .iter()
+                .map(|binder| binder.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![observation.as_str()]
+        );
         let original_interfaces = first
             .native()
             .unwrap()
