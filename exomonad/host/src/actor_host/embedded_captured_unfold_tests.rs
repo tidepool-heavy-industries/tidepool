@@ -1466,37 +1466,99 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 let JobOutput::CancelledWithReceipt(Err(failure)) = &cancelled else {
                     panic!("parked await must retain its cancelled failure: {cancelled:?}");
                 };
-                assert!(failure.result_receipt().is_none(), "this notebook prefix has no semantic tool value");
-                assert_eq!(embedded_harness::native_output_format(&cancelled), harness::provider::OutputFormat::LegacyOpaque);
-                let recorded = runtime.store().replay_tool_output_operation(&pending).unwrap().unwrap();
-                assert_eq!(recorded.output_format, harness::provider::OutputFormat::LegacyOpaque);
-                assert_eq!(recorded.item.output_format().unwrap(), harness::provider::OutputFormat::LegacyOpaque);
-                assert!(super::embedded_policy::project_retained_result(&recorded, &pending).unwrap().is_none());
-                let receipt = failure.metadata().expect("cancelled await retains structured unit outcomes");
-                assert_eq!(receipt["originalOperation"], serde_json::to_value(&pending).unwrap());
+                assert!(
+                    failure.result_receipt().is_none(),
+                    "this notebook prefix has no semantic tool value"
+                );
+                assert_eq!(
+                    embedded_harness::native_output_format(&cancelled),
+                    harness::provider::OutputFormat::LegacyOpaque
+                );
+                let recorded = runtime
+                    .store()
+                    .replay_tool_output_operation(&pending)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    recorded.output_format,
+                    harness::provider::OutputFormat::LegacyOpaque
+                );
+                assert_eq!(
+                    recorded.item.output_format().unwrap(),
+                    harness::provider::OutputFormat::LegacyOpaque
+                );
+                assert!(
+                    super::embedded_policy::project_retained_result(&recorded, &pending)
+                        .unwrap()
+                        .is_none()
+                );
+                let receipt = failure
+                    .metadata()
+                    .expect("cancelled await retains structured unit outcomes");
+                assert_eq!(
+                    receipt["originalOperation"],
+                    serde_json::to_value(&pending).unwrap()
+                );
                 assert_eq!(receipt["publication"]["status"], "notPublished");
                 assert_eq!(receipt["publication"]["reason"], "cancelled");
-                let units = receipt["items"].as_array().expect("cancelled prefix unit receipts");
-                let (await_unit, prefix) = units.split_last().expect("cancelled await follows committed units");
+                let units = receipt["items"]
+                    .as_array()
+                    .expect("cancelled prefix unit receipts");
+                let (await_unit, prefix) = units
+                    .split_last()
+                    .expect("cancelled await follows committed units");
                 assert!(!prefix.is_empty());
                 assert!(prefix.iter().all(|unit| unit["status"] == "committed"));
                 assert!(units.iter().all(|unit| unit.get("value").is_none()));
                 assert_eq!(await_unit["status"], "rejected");
                 assert_eq!(await_unit["failureLayer"], "effect");
-                let effects = units.iter().flat_map(|unit| unit["operations"].as_array().into_iter().flatten()).collect::<Vec<_>>();
+                let effects = units
+                    .iter()
+                    .flat_map(|unit| unit["operations"].as_array().into_iter().flatten())
+                    .collect::<Vec<_>>();
                 let mut effect_ids = Vec::new();
                 for effect in &effects {
-                    assert!(effect_ids.iter().all(|id| *id != &effect["id"]), "effect boundary recorded more than once: {effect}");
+                    assert!(
+                        effect_ids.iter().all(|id| *id != &effect["id"]),
+                        "effect boundary recorded more than once: {effect}"
+                    );
                     effect_ids.push(&effect["id"]);
                 }
-                assert_eq!(effects.iter().filter(|effect| effect["effect"] == "startActor" && effect["disposition"] == "committed").count(), 2);
-                assert_eq!(effects.iter().filter(|effect| effect["effect"] == "capture context checkpoint" && effect["disposition"] == "committed").count(), 1);
-                assert_eq!(effects.iter().filter(|effect| effect["disposition"] == "unknown").count(), 1);
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(
+                            |effect| effect["effect"] == "startActor" && effect["disposition"] == "committed"
+                        )
+                        .count(),
+                    2
+                );
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(|effect| effect["effect"] == "capture context checkpoint"
+                            && effect["disposition"] == "committed")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(|effect| effect["disposition"] == "unknown")
+                        .count(),
+                    1
+                );
                 let await_effect = effects.last().expect("cancelled await effect is retained");
                 assert_eq!(await_effect["effect"], "awaitWatch");
                 assert_eq!(await_effect["disposition"], "unknown");
-                assert!(effects[..effects.len() - 1].iter().all(|effect| matches!(effect["disposition"].as_str(), Some("read" | "committed"))));
-                let cancelled_provider_item = harness::item::Item::tool_output(&pending.call, harness::item::ToolKind::Custom, &cancelled);
+                assert!(effects[..effects.len() - 1]
+                    .iter()
+                    .all(|effect| matches!(effect["disposition"].as_str(), Some("read" | "committed"))));
+                let cancelled_provider_item = harness::item::Item::tool_output(
+                    &pending.call,
+                    harness::item::ToolKind::Custom,
+                    &cancelled,
+                );
                 assert!(
                     matches!(
                         scheduler
