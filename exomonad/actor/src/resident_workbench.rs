@@ -17825,6 +17825,15 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_retirement_stops_source_preparation_and_retains_physical_settlement() {
+        source_preparation_retirement_history(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_control_failure_stops_source_preparation_without_claiming_cleanup() {
+        source_preparation_retirement_history(true).await;
+    }
+
+    async fn source_preparation_retirement_history(control_failure: bool) {
         let (_, _, config, _session_root) = host_mount_fixture();
         let (run, task) = crate::LocalActorDirectory::start().await.unwrap();
         let source = config.bind_preparation(run.preparation_client());
@@ -17864,7 +17873,11 @@ pub(crate) mod request_tests {
             .await
             .unwrap()
             .unwrap();
-        run.seal().await.unwrap();
+        if control_failure {
+            run.stop_owner_for_test().await;
+        } else {
+            run.seal().await.unwrap();
+        }
         tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
             .await
             .unwrap()
@@ -17893,12 +17906,19 @@ pub(crate) mod request_tests {
             .unwrap()
             .unwrap();
         assert!(outcome.action.is_err());
-        assert_eq!(
-            run.settle_preparations(std::time::Duration::from_secs(2))
-                .await,
-            crate::CleanupComponentOutcome::Confirmed
-        );
-        run.finish_run().await.unwrap();
+        assert!(outcome.cleanup.observation().is_confirmed());
+        let settled = run
+            .settle_preparations(std::time::Duration::from_secs(2))
+            .await;
+        if control_failure {
+            assert!(matches!(
+                settled,
+                crate::CleanupComponentOutcome::Unconfirmed(_)
+            ));
+        } else {
+            assert_eq!(settled, crate::CleanupComponentOutcome::Confirmed);
+            run.finish_run().await.unwrap();
+        }
         task.await.unwrap();
     }
 

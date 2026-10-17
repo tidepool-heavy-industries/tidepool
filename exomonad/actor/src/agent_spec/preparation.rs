@@ -633,6 +633,11 @@ pub(crate) mod tests {
                         let (changed_task, changed) = state.lookup(&recipe("changed-key"));
                         assert_eq!(changed, PreparationLookupDisposition::New);
                         state.settle(
+                            recipe("changed-key"),
+                            &changed_task,
+                            Err(PreparationFailure::Source("refused".into())),
+                        );
+                        state.settle(
                             key.clone(),
                             &pending,
                             Err(PreparationFailure::Source("refused".into())),
