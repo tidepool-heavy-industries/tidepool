@@ -1,4 +1,7 @@
-//! Per-line projection. Unknown payloads are consumed by Serde without a Value tree.
+//! Per-line telemetry projection, not whole-record Unicode/Value validation.
+//! Unknown fields and wrong-shaped known values are unselected opaque payloads;
+//! Serde skips their syntax without decoding their strings or materializing trees.
+//! Selected scalar strings still undergo Serde's Unicode validation.
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::borrow::Cow;
@@ -152,10 +155,12 @@ pub(super) struct Object<'a, const N: usize> {
 impl<'a, const N: usize> Index<&str> for Object<'a, N> {
     type Output = Atom<'a>;
     fn index(&self, name: &str) -> &Self::Output {
-        self.names
+        let index = self
+            .names
             .iter()
             .position(|candidate| *candidate == name)
-            .map_or(&Atom::Missing, |index| &self.values[index])
+            .expect("trace consumer field must be registered");
+        &self.values[index]
     }
 }
 impl<const N: usize> Object<'_, N> {
@@ -342,6 +347,13 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "trace consumer field must be registered")]
+    fn consumer_cannot_request_an_unregistered_projection_field() {
+        let record = Record::default();
+        let _ = &record.fields["new_consumer_without_decoder_registration"];
+    }
+
+    #[test]
     fn selected_fields_borrow_and_last_duplicates_clear_previous_values() {
         let bytes = br#"{"timestamp":"2026-09-23T10:00:00Z","fields":{"actor":"old","actor":null,"total_ms":19,"total_ms":"23","detail":"\u03bb"},"span":{"execution":"old"},"span":false,"spans":[{"execution":"outer"},{"execution":17}]}"#;
         let record: Record<'_> = serde_json::from_slice(bytes).unwrap();
@@ -381,6 +393,25 @@ mod tests {
         assert!(
             serde_json::from_slice::<Record<'_>>(b"{\"fields\":{\"status\":\"\xff\"}}").is_err()
         );
+        for bytes in [
+            br#"{"fields":{"actor":["\ud800"],"status":"Committed"}}"#.as_slice(),
+            br#"{"fields":[{"status":"\ud800"}]}"#,
+            br#"{"span":[{"execution":"\ud800"}]}"#,
+            br#"{"spans":{"execution":"\ud800"}}"#,
+        ] {
+            assert!(serde_json::from_slice::<serde_json::Value>(bytes).is_err());
+            let record: Record<'_> = serde_json::from_slice(bytes).unwrap();
+            assert!(record.fields["actor"].as_str().is_none());
+            assert!(record.span["execution"].as_str().is_none());
+            assert!(record.spans.is_none());
+        }
+        // Value's arbitrary_precision visitor treats this reserved object as a
+        // Number. A typed telemetry scalar deliberately treats objects as absent.
+        let reserved = br#"{"fields":{"total_ms":{"$serde_json::private::Number":"19"}}}"#;
+        let old: serde_json::Value = serde_json::from_slice(reserved).unwrap();
+        assert_eq!(old["fields"]["total_ms"].as_u64(), Some(19));
+        let record: Record<'_> = serde_json::from_slice(reserved).unwrap();
+        assert!(record.fields["total_ms"].as_u64().is_none());
         let deep = format!("{{\"unknown\":{}0{}}}", "[".repeat(200), "]".repeat(200));
         assert!(serde_json::from_str::<serde_json::Value>(&deep).is_err());
         assert!(serde_json::from_str::<Record<'_>>(&deep).is_ok());
