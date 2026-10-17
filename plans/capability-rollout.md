@@ -73,11 +73,23 @@ consumer or construction requirement; do not introduce either preemptively.
   publication after recovery, published subset policy with complete authored
   demand, and historical same-role bindings that must remain custody.
 - Publication continuation fixtures must carry exact prior support through the
-  production continuation path. Investigate reopening after an unrelated offer
-  is added before claiming publication identity is independent of ambient
-  availability. If the owner cannot return the original publication facts,
-  propose an immutable issued publication value; do not reconstruct them by
-  filtering the latest inventory or relax the identity assertion.
+  production continuation path. Published source policy now needs an explicit
+  immutable selection of the native-offer facts chosen by its issuer. Retain
+  references into the existing offer snapshot map, authenticate those facts on
+  recovery, and resolve only the recorded references when reopening. A later
+  offer for the same module can be relevant without belonging to that original
+  publication. Use a domain ID as a locator, never as standalone authority.
+  The implementation parcel must record its format-version change and reject
+  older snapshots that cannot prove the association; do not infer it from the
+  latest inventory or embed a complete context recursively inside its own role.
+  Initial issuance, unrelated later availability, same-owner distinct proofs,
+  missing originals, and real writer/reader recovery belong in its controls.
+- Persistent-policy verification and transient input selection are distinct
+  contracts. Narrowing a compiler invocation must start from its selected
+  owners and retain their required type closure. Reopening a published policy
+  must refuse lost required custody. Do not use a generic-looking projection
+  helper for both jobs; keep these operations on their owning types and cover
+  excluded owners as well as selected ones, including overlapping dependencies.
 - Compiler inventory observations can expose narrow read contracts while exact
   selections remain inventory-issued handles. Do not turn a service trait into
   a universal exemption from recovered-state authentication.
