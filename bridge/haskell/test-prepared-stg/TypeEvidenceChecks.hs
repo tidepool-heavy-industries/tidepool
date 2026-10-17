@@ -545,18 +545,18 @@ assert :: Bool -> String -> IO ()
 assert condition message = unless condition (fail message)
 requireRight :: Show e => Either e a -> IO a
 requireRight = either (fail . show) pure
-nodeAt :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeNodeF constructor TypeIdentity RuntimeRep
+nodeAt :: TypeGraphF constructor identity rep -> TypeNodeId -> TypeNodeF constructor identity rep
 nodeAt graph (TypeNodeId index) = maybe (error "missing finite graph node") id
   (IntMap.lookup (fromIntegral index) (typeGraphNodes graph))
-outgoing :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]
+outgoing :: TypeGraphF constructor identity rep -> TypeNodeId -> [(TypeEdgeRoleF rep, TypeNodeId)]
 outgoing graph (TypeNodeId index) = IntMap.findWithDefault [] (fromIntegral index) (typeGraphEdges graph)
-edge :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeEdgeRoleF RuntimeRep -> TypeNodeId
+edge :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> TypeEdgeRoleF rep -> TypeNodeId
 edge graph root role = case [target | (actual, target) <- outgoing graph root, actual == role] of
   [target] -> target
-  _ -> error ("missing/duplicate finite graph edge " ++ show role)
-rootBody :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> TypeNodeId
+  _ -> error "missing/duplicate finite graph edge"
+rootBody :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> TypeNodeId
 rootBody graph root = case nodeAt graph root of TypeRoot{} -> edge graph root TypeBody; _ -> error "reply is not a scoped root"
-nominal :: TypeGraphF constructor TypeIdentity RuntimeRep -> TypeNodeId -> (TypeIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
+nominal :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> (identity, DeclarationFormF rep, [TypeNodeId])
 nominal graph expression = case nodeAt graph expression of
   TypeNominalApplication -> case nodeAt graph (edge graph expression TypeHead) of
     TypeDeclaration identity _ form _ -> (identity, form, [target | (TypeArgument _, target) <- outgoing graph expression])
