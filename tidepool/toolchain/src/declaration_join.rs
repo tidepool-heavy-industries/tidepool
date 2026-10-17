@@ -734,7 +734,7 @@ fn certify_authored_declaration_inner(
         includes,
         session_root,
         Some(toolchain_identity_sha256),
-        Arc::new(_scratch),
+        _scratch,
         settlement,
     )?;
     let inventories = match outcome.decision {
@@ -1971,7 +1971,7 @@ pub fn inspect_declaration_artifacts(
     )
 }
 
-fn inspect_declaration_artifacts_with_producer(
+pub(crate) fn inspect_declaration_artifacts_with_producer(
     artifacts: &[DeclarationArtifact],
     includes: &[PathBuf],
     session_root: &Path,
@@ -2876,10 +2876,17 @@ mod authored_tests {
         assert_eq!(recovered.semantic_sha256(), live.semantic_sha256());
     }
 
-    #[test]
-    #[ignore = "requires the matched Haskell worker and frontend"]
-    fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
-        use std::sync::Arc;
+    struct OwnedJoinRecoveryFixture {
+        recovered: ExactDeclarationContext,
+        certificate: Arc<CertifiedAuthoredDeclaration>,
+        accepted: AcceptedJoin,
+        lexical: Vec<ExactLexicalNode>,
+        module: SessionModule,
+        original_root: crate::artifact_inventory::ArtifactId,
+        _durable: tempfile::TempDir,
+    }
+
+    fn owned_join_recovery_fixture() -> OwnedJoinRecoveryFixture {
         let source_root = tempfile::tempdir().unwrap();
         let module = SessionModule::lib(Generation(1));
         let source = include_str!("../tests/fixtures/owned-declaration/G1.hs");
@@ -3021,16 +3028,18 @@ mod authored_tests {
         assert_eq!(accepted.expected_public_version(), "paired-public-version");
         assert_eq!(accepted.toolchain_identity_sha256(), expected_producer);
         assert!(!accepted.package_imports_bytes().is_empty());
+        let lexical = vec![ExactLexicalNode {
+            owner: ExactModuleIdentity {
+                unit: owner.unit,
+                module: joined_module,
+            },
+            imports: Vec::new(),
+        }];
         let joined_context = context
             .clone()
-            .extend(&[], &[Arc::new(accepted.clone())], Vec::new())
+            .extend(&[], &[Arc::new(accepted.clone())], lexical.clone())
             .unwrap();
         let descriptors = joined_context.artifact_view().descriptors();
-        let native_groups = joined_context
-            .artifact_view()
-            .selected_native_groups()
-            .into_iter()
-            .collect::<Vec<_>>();
         drop(worker_root);
         drop(source_root);
         let durable = tempfile::tempdir().unwrap();
@@ -3045,28 +3054,37 @@ mod authored_tests {
             crate::recovery_artifacts::verify_materialized_join(durable.path(), &stored.join)
                 .unwrap();
         assert_eq!(verified.interface_bytes, accepted.interface_bytes());
-        let lexical = vec![ExactLexicalNode {
-            owner: ExactModuleIdentity {
-                unit: owner.unit,
-                module: joined_module,
-            },
-            imports: Vec::new(),
-        }];
         let mut joins = stored.anchors.clone();
         joins.push(stored.join.clone());
-        let recovered = ExactDeclarationContext::capture_recovery_with_inventory(
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let store = MemoryBlockstore::new();
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let receipt = writer
+            .materialize_context(None, &joined_context.snapshot())
+            .unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let receipt = crate::exact_context::hydrate_context(&store, receipt.root()).unwrap();
+        let snapshot = receipt.snapshot();
+        let graph = snapshot.graph_selection().unwrap();
+        let inventory = crate::declaration_context::RecoveredArtifactInventory::capture_bound(
             durable.path(),
             &stored.products,
             &stored.module_interfaces,
             &joins,
             &stored.value_interfaces,
             &descriptors,
-            &stored.artifact_dependencies,
-            &native_groups,
-            &joined_context.compiler_input_roles(),
-            lexical.clone(),
+            &graph.bindings,
+            &snapshot.binding_dependencies().unwrap(),
         )
         .unwrap();
+        let mut recovered = inventory.context_with_snapshot(snapshot).unwrap();
+        recovered.bind_snapshot_baseline(&receipt).unwrap();
+        assert_eq!(
+            recovered.semantic_sha256(),
+            joined_context.semantic_sha256()
+        );
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
         assert!(certificate.product().source_sha256().is_some());
@@ -3078,20 +3096,111 @@ mod authored_tests {
             .source_sha256()
             .is_none());
         assert!(recovered.authored_native_root(2).is_err());
-        let recovered_join = certify_recovered_declaration_tip_in_context(
-            Arc::new(recovered.clone()),
-            RecoveryDeclarationSelection {
-                origin: RecoveryDeclarationOrigin::Join,
-                root: recovered.lexical_graph()[0].owner.clone(),
-                lexical: recovered.lexical_graph().to_vec(),
-                exports: certificate.lexical_exports().to_vec(),
-                instances: certificate.instances().clone(),
-                family_closure: certificate.family_closure().to_vec(),
-            },
-            &[],
-        )
+        OwnedJoinRecoveryFixture {
+            recovered,
+            certificate,
+            accepted,
+            lexical,
+            module,
+            original_root,
+            _durable: durable,
+        }
+    }
+
+    fn assert_interface_only_recovery(
+        fixture: &OwnedJoinRecoveryFixture,
+    ) -> RecoveredDeclarationTip {
+        let recovered = fixture.recovered.clone();
+        let certificate = &fixture.certificate;
+        let (recovered_join, native_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                certify_recovered_declaration_tip_in_context(
+                    Arc::new(recovered.clone()),
+                    RecoveryDeclarationSelection {
+                        origin: RecoveryDeclarationOrigin::Join,
+                        root: recovered.lexical_graph()[0].owner.clone(),
+                        lexical: recovered.lexical_graph().to_vec(),
+                        exports: certificate.lexical_exports().to_vec(),
+                        instances: certificate.instances().clone(),
+                        family_closure: certificate.family_closure().to_vec(),
+                    },
+                    &[],
+                )
+            });
+        let recovered_join = recovered_join.unwrap();
+        assert_eq!(
+            native_work,
+            (0, 0),
+            "recovery certifier copied or hashed native bytes"
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let (old_route, old_work) =
+            crate::recovery_artifacts::observe_native_materialization(|| {
+                recovered.materialize_scratch(&scratch)
+            });
+        old_route.unwrap();
+        assert!(
+            old_work.0 > 0 && old_work.1 > 0,
+            "full native scratch must exercise the observed boundary"
+        );
+        let inspection = Arc::new(recovered.clone())
+            .recovery_inspection_inputs()
+            .unwrap();
+        let path = inspection
+            .interface(recovered_join.root())
+            .unwrap()
+            .path
+            .clone();
+        crate::artifacts::test_support::with_settlement(|settlement| {
+            inspection.inspect(&[], settlement)
+        })
         .unwrap();
+        let mut clean_closes = 0;
+        let mutation = crate::artifacts::test_support::with_settlement(|settlement| {
+            inspection.inspect(&[], &mut |close| {
+                if matches!(close, tidepool_extract_cmd::CompilerTransactionClose::Clean) {
+                    clean_closes += 1;
+                    std::fs::write(&path, b"changed during real compiler inspection").unwrap();
+                }
+                settlement(close);
+            })
+        });
+        assert_eq!(
+            clean_closes, 1,
+            "mutation requires the real inventory transaction's clean close"
+        );
+        assert!(
+            matches!(mutation,
+                Err(CompileError::ExtractFailed(ref diagnostic))
+                    if diagnostic == "exact declaration context: recovery inspection interface differs from its issuing context"
+            ),
+            "inspection must reach its owning interface-diff refusal: {mutation:?}"
+        );
+
         assert_eq!(recovered_join.authored_generation(), None);
+        recovered_join
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn recovered_join_inspection_never_materializes_native_products() {
+        assert_interface_only_recovery(&owned_join_recovery_fixture());
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
+        let fixture = owned_join_recovery_fixture();
+        assert_interface_only_recovery(&fixture);
+        let OwnedJoinRecoveryFixture {
+            recovered,
+            certificate,
+            accepted,
+            lexical,
+            module,
+            original_root,
+            _durable,
+        } = fixture;
         let recovered_identity = recovered.semantic_sha256();
         let selected_instances = certificate.instances().clone();
         let extended = recovered
