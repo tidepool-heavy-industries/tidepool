@@ -6725,3 +6725,110 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         );
     }
 }
+
+#[test]
+fn fresh_candidate_dependency_uses_issued_availability_without_selecting_execution() {
+    use crate::artifact_inventory::{
+        ArtifactBindingNode, ExactArtifactSelection, IssuedNativeOffer, NativeOriginalRequirement,
+    };
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let dependency = fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "CandidateDependency",
+            vec![(3, vec![]), (7, vec![])],
+            161,
+            &BTreeMap::new(),
+            b"candidate dependency interface".to_vec(),
+        ),
+        producer.sha256(),
+    );
+    let fresh = dependent_product(
+        "FreshDependingOnAvailableGroup",
+        162,
+        vec![(11, vec![source_import(&dependency, 3)])],
+    );
+    let products = recovered_witness_fixtures(&[dependency, fresh]);
+    let dependency = products[0].product.clone();
+    let fresh = products[1].product.clone();
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+    let inventory = ArtifactInventory::default();
+    let issued = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &issued)
+        .unwrap()
+        .unwrap();
+    let full = IssuedNativeOffer::issue(entry.descriptor.id, &issued, Some(proof)).unwrap();
+    assert!(full.is_full());
+    assert!(full
+        .custody()
+        .capture_graph_selection()
+        .native_groups
+        .iter()
+        .any(
+            |group| group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 3
+        ));
+    let mut graph = issued.capture_graph_selection();
+    let group_roots = graph
+        .roots
+        .iter()
+        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    graph
+        .roots
+        .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
+    graph.custody_roots.extend(group_roots);
+    graph.custody_roots.sort();
+    graph.custody_roots.dedup();
+    let namespace = graph
+        .namespace
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect();
+    let withdrawn = issued
+        .select_issued(
+            namespace,
+            &ExactArtifactSelection::from_recovered_graph_selection(graph),
+        )
+        .unwrap();
+    assert!(withdrawn.selected_native_groups().is_empty());
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let support = recover_fixture_compiler_support(projection, withdrawn, [full.clone()]).unwrap();
+    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: support,
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    assert_eq!(
+        context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].original(),
+        Some(entry.descriptor.id)
+    );
+    assert!(context.artifact_view().selected_native_groups().is_empty());
+    assert_eq!(
+        context.compiler_source_support().native_offers()[0].snapshot_facts(),
+        full.snapshot_facts()
+    );
+    let before = context.artifact_view().capture_graph_selection();
+    let candidates = crate::module_candidates::CandidateSet {
+        manifest_path: PathBuf::from("candidate-native-issuance-only"),
+        by_owner: BTreeMap::new(),
+        native_availability: vec![fresh],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    let inputs = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+        .expect("fresh exact body dependency may consume issued group availability without selecting execution")
+        .unwrap();
+    assert!(inputs
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    assert_eq!(context.artifact_view().capture_graph_selection(), before);
+    assert!(inputs
+        .native_offers()
+        .iter()
+        .any(|offer| offer.is_full() && offer.original() != entry.descriptor.id));
+}
