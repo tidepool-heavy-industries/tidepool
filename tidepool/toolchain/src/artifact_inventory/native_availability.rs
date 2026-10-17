@@ -989,6 +989,13 @@ impl IssuedNativeOffer {
         !self.0.custody.native_originals.is_disjoint(originals)
     }
 
+    pub(super) fn contains_checked_group(&self, group: NativeGroupBinding) -> bool {
+        self.0
+            .custody
+            .reachable
+            .contains(&ArtifactBindingNode::Group(group))
+    }
+
     /// Query only this issuance's checked reachable membership. Complete scope
     /// rows outside the offer's selection cannot supply a missing binding.
     pub(crate) fn group_bindings(

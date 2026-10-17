@@ -12628,6 +12628,22 @@ pub(crate) mod tests {
                     request.compiler_inputs().artifacts().clone()
                 };
                 let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
+                if mode != "current" {
+                    let issued = request
+                        .compiler_inputs()
+                        .compiler_source_support()
+                        .recorded_input_decisions();
+                    assert!(issued.contains_key(&entry.descriptor.owner),
+                        "the actual request issuer records the domain even when it chooses no Group");
+                    assert_eq!(
+                        private.issued_input_decisions().unwrap().recorded_facts(),
+                        issued,
+                        "certified continuation retains exact input choices despite extra custody mode={mode} broaden={broaden}",
+                    );
+                    if mode == "empty" {
+                        assert!(issued[&entry.descriptor.owner].groups.is_empty());
+                    }
+                }
                 let public = Arc::new(
                     ExactDeclarationContext::new(&[], &[], vec![])
                         .unwrap()

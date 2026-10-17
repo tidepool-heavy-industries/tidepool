@@ -688,11 +688,15 @@ impl CompilerSourceSupport {
                 let node = InventoryNodeKey::Group(*group);
                 if *ordinal != group.original_ordinal
                     || group.binding.artifact() != original
-                    || !restored.artifacts.roots().contains(&node)
+                    || !(restored.artifacts.roots().contains(&node)
+                        || restored
+                            .native_offers
+                            .iter()
+                            .any(|offer| offer.contains_checked_group(*group)))
                     || !state.contains_node(&node)
                 {
                     return Err(failure(
-                        "recorded input decision is outside its authenticated selection",
+                        "recorded input decision is outside its authenticated custody",
                     ));
                 }
                 let carriers = state
