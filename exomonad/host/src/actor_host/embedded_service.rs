@@ -262,18 +262,16 @@ impl EmbeddedService {
     ) -> Result<harness::context::ContextProjectionTarget, String> {
         use harness::engine::ResponsesTransport;
         #[cfg(test)]
-        let contract = match &self.test_transport {
-            Some(transport) => transport.response_contract(),
-            None => responses_client(&self.runtime).response_contract(),
+        let selection = match &self.test_transport {
+            Some(transport) => transport.prepare_submission(),
+            None => responses_client(&self.runtime).prepare_submission(),
         };
         #[cfg(not(test))]
-        let contract = responses_client(&self.runtime).response_contract();
-        let (route, protocol) = contract.map_err(|error| error.to_string())?;
-        Ok(harness::context::ContextProjectionTarget {
-            model,
-            route,
-            protocol,
-        })
+        let selection = responses_client(&self.runtime).prepare_submission();
+        let selection = selection.map_err(|error| error.to_string())?;
+        Ok(harness::context::ContextProjectionTarget::for_transport(
+            model, &selection,
+        ))
     }
 
     /// Bind the browser and open the sole run Store before admitting an actor.
