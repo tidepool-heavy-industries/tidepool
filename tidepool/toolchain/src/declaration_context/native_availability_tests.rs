@@ -5837,7 +5837,9 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             );
             assert_eq!(
                 retained.compiler_support.projection().roles(),
-                vec![CompilerInputRole::InterfaceOnly { interface: expected }]
+                vec![CompilerInputRole::InterfaceOnly {
+                    interface: expected
+                }]
             );
             assert_eq!(original.lexical_graph(), before_lexical);
             assert!(retained
@@ -6067,4 +6069,143 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
         histories += 1;
     }
     assert_eq!(histories, 5);
+}
+
+#[test]
+fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeGroupKey, NativeOriginalRequirement};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("SelectedIssuerHistory", 131);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let inventory = ArtifactInventory::default();
+    let issue = |marker, version| {
+        let view = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![
+                    entry.clone(),
+                    Arc::new(ArtifactEntry::canonical(
+                        product(marker, version).module_interface().unwrap().clone(),
+                    )),
+                ],
+            )
+            .unwrap();
+        let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &view)
+            .unwrap()
+            .expect("the actual issuer selected native groups");
+        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &view, Some(proof)).unwrap();
+        assert!(offer.is_full());
+        (view, offer)
+    };
+    let (left, a) = issue("HistoricalIssuerA", 132);
+    let (right, b) = issue("CurrentIssuerB", 133);
+    let exact_groups = |view: &ArtifactView| {
+        view.capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|node| match node {
+                crate::artifact_inventory::ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == entry.descriptor.id =>
+                {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let a_groups = exact_groups(&left);
+    let b_groups = exact_groups(&right);
+    assert_eq!(a_groups.len(), 2);
+    assert_eq!(b_groups.len(), 2);
+    assert!(a_groups.is_disjoint(&b_groups));
+    let support = fixture_compiler_support(projection.clone(), right.clone());
+    let original_graph = support.artifacts().capture_graph_selection();
+    for extra in [
+        vec![b.clone()],
+        vec![a.clone(), b.clone()],
+        vec![b.clone(), a.clone()],
+    ] {
+        let includes_a = extra.iter().any(|offer| offer == &a);
+        let carried = support.retain_offers(extra).unwrap();
+        let graph = carried.artifacts().capture_graph_selection();
+        assert_eq!(
+            graph.roots, original_graph.roots,
+            "adding availability cannot change selected demand"
+        );
+        assert_eq!(
+            graph.namespace, original_graph.namespace,
+            "adding availability cannot change selected namespace"
+        );
+        assert_eq!(exact_groups(carried.artifacts()), b_groups);
+        if includes_a {
+            assert!(a
+                .custody()
+                .binding_dependencies()
+                .iter()
+                .all(|edge| carried.artifacts().binding_dependencies().contains(edge)));
+        }
+        assert_eq!(
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, carried.artifacts())
+                .unwrap()
+                .as_ref(),
+            b.proof()
+        );
+        let context = Arc::new(ExactDeclarationContext::from_facts(
+            DeclarationContextFacts {
+                producer: producer.sha256(),
+                compiler_support: carried,
+                lexical: Default::default(),
+                template_imports: None,
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            },
+        ));
+        let baseline = ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&context, None)
+            .expect("independently selected B remains valid with A only in availability custody");
+        assert_eq!(exact_groups(&baseline.artifacts), b_groups);
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("native-issuance-does-not-read-manifest"),
+            by_owner: BTreeMap::new(),
+            native_availability: vec![native.clone()],
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .expect("reusing a candidate cannot promote historical A into a second root")
+            .unwrap();
+        assert!(reused.artifacts.selected_native_groups().is_empty());
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(context)
+            .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(reused))
+            .unwrap();
+        assert_eq!(exact_groups(&request.compiler_inputs().artifacts), b_groups);
+    }
+    // Both issuer proofs explicitly supplied as root authority remain a real conflict.
+    let both = right
+        .retain_issued_offer_custody([a.clone(), b.clone()])
+        .unwrap();
+    let error = projection
+        .admit_interfaces_with_native_offers(&both, vec![entry.clone()], &[a, b])
+        .unwrap_err();
+    assert!(matches!(error, CompileError::ArtifactInventory(error)
+        if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+            if artifact == entry.descriptor.id)));
+    assert_eq!(
+        right
+            .selected_native_groups()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: 7
+            },
+            NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: 9001
+            }
+        ])
+    );
 }
