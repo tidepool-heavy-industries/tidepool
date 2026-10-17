@@ -12168,6 +12168,7 @@ pub(crate) mod tests {
         let mut observed = 0;
         for mode in ["canonical", "issued", "full"] {
             let inventory = ArtifactInventory::default();
+            let mut full_selection = None;
             let view = if mode == "full" {
                 let complete = inventory
                     .admit_shared(&inventory.empty_view(), vec![entry.clone()])
@@ -12179,6 +12180,40 @@ pub(crate) mod tests {
                     [],
                 )
                 .unwrap();
+                let owner = entry.descriptor.owner.clone();
+                let seed_context = ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &complete,
+                    roles.clone(),
+                    vec![crate::declaration_join::ExactLexicalNode {
+                        owner: owner.clone(),
+                        imports: vec![],
+                    }],
+                    owner,
+                    &[],
+                )
+                .unwrap();
+                let seed_root = tempfile::tempdir().unwrap();
+                let seed_request = ExactCompileContext::new(Arc::new(seed_context))
+                    .prepare_compilation(seed_root.path(), producer_bytes)
+                    .unwrap();
+                let seed_availability = seed_request
+                    .compiler_inputs()
+                    .native_availability(entry.descriptor.id)
+                    .unwrap();
+                assert!(seed_availability.permits(9001));
+                assert!(seed_availability
+                    .offers()
+                    .iter()
+                    .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+                full_selection = Some(
+                    CertifiedSourceSelection::from_compiler_inputs(
+                        seed_request.compiler_inputs(),
+                        &seed_request.compiler_inputs().metadata,
+                        &InventoryOperation::new(Default::default()),
+                    )
+                    .unwrap(),
+                );
                 let narrowed = support
                     .select_support_roots(vec![roles.roles()[0].interface()])
                     .unwrap()
@@ -12220,22 +12255,53 @@ pub(crate) mod tests {
                 projection
             };
             let owner = entry.descriptor.owner.clone();
-            let context = ExactDeclarationContext::from_authenticated_execution(
-                producer.sha256(),
-                &view,
-                projection,
-                vec![crate::declaration_join::ExactLexicalNode {
-                    owner: owner.clone(),
-                    imports: vec![],
-                }],
-                owner,
-                &[],
-            )
-            .unwrap();
+            let lexical = vec![crate::declaration_join::ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }];
+            let context = if let Some(selection) = &full_selection {
+                let context = ExactDeclarationContext::from_source_selection(
+                    producer.sha256(),
+                    selection,
+                    &view,
+                    lexical,
+                    owner,
+                    &[],
+                )
+                .unwrap();
+                assert!(context
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+                assert!(context.artifact_view().selected_native_groups().is_empty());
+                context
+            } else {
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &view,
+                    projection,
+                    lexical,
+                    owner,
+                    &[],
+                )
+                .unwrap()
+            };
             let root = tempfile::tempdir().unwrap();
             let request = ExactCompileContext::new(Arc::new(context))
                 .prepare_compilation(root.path(), producer_bytes)
                 .unwrap();
+            if mode == "full" {
+                assert!(request
+                    .compiler_inputs()
+                    .artifacts
+                    .selected_native_groups()
+                    .is_empty());
+                assert!(
+                    request.groups.is_empty(),
+                    "carried Full availability does not select executable groups"
+                );
+            }
             let scope: Value =
                 ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                     .unwrap();
