@@ -72,7 +72,13 @@ fn deployment_export_writes_one_evidence_blob_for_78_module_rows() {
     let names = (0..78)
         .map(|index| format!("Owner{index:03}"))
         .collect::<Vec<_>>();
-    let fixture = Fixture::with_modules(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    use crate::module_candidates::publication_observer::{self, Stage};
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = events.clone();
+    let fixture = publication_observer::with_observer(
+        move |event| observed.borrow_mut().push(event),
+        || Fixture::with_modules(&names.iter().map(String::as_str).collect::<Vec<_>>()),
+    );
     let catalog = fixture.catalog();
     assert_eq!(catalog.modules.len(), 78);
     assert_eq!(
@@ -94,6 +100,62 @@ fn deployment_export_writes_one_evidence_blob_for_78_module_rows() {
             .count(),
         1
     );
+    let mut encodes = 0u64;
+    let mut encoded_bytes = 0u64;
+    let mut writes = 0u64;
+    let mut written_bytes = 0u64;
+    let mut checks = 0u64;
+    let reference = &catalog.modules[0].evidence;
+    let physical = fs::read(fixture.output.join(&reference.path)).unwrap();
+    assert_eq!(physical.len() as u64, reference.length);
+    assert_eq!(sha(&physical), reference.sha256);
+    for event in events.borrow().iter() {
+        match event {
+            Stage::CatalogEvidenceEncoded { sha256, bytes } => {
+                assert_eq!(sha256, &reference.sha256);
+                assert_eq!(*bytes, reference.length);
+                encodes += 1;
+                encoded_bytes += bytes;
+            }
+            Stage::CatalogEvidenceWritten {
+                sha256,
+                bytes,
+                path,
+            } => {
+                assert_eq!(sha256, &reference.sha256);
+                assert_eq!(*bytes, reference.length);
+                assert_eq!(fs::read(path).unwrap(), physical);
+                writes += 1;
+                written_bytes += bytes;
+            }
+            Stage::CatalogCohortChecked {
+                owners,
+                proof_modules,
+            } => {
+                assert_eq!(*owners, 78);
+                assert_eq!(*proof_modules, 78);
+                checks += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        encodes > 0 && checks > 0,
+        "writer observations must be nonvacuous"
+    );
+    assert_eq!(writes, 1);
+    eprintln!("catalog-proof-work owners=78 sha256={} bounded_json_encodes={encodes} encoded_bytes={encoded_bytes} completed_writes={writes} written_bytes={written_bytes} complete_cohort_checks={checks}", reference.sha256);
+    // Independent reader and unbounded test oracle verify the writer's bounded
+    // encoding without adding work inside the measured export scope.
+    let package = fixture.load().unwrap();
+    assert_eq!(
+        physical,
+        serde_json::to_vec(&package.records[0].evidence).unwrap()
+    );
+    if let Some(artifacts) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+        let destination = PathBuf::from(artifacts).join("catalog-proof.json");
+        fs::write(destination, physical).unwrap();
+    }
 }
 
 #[test]

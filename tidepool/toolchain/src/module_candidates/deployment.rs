@@ -1505,6 +1505,13 @@ fn require_complete_cohort<'a>(
             });
         }
     }
+    #[cfg(test)]
+    super::publication_observer::observe(
+        super::publication_observer::Stage::CatalogCohortChecked {
+            owners: owners.len(),
+            proof_modules: evidence.modules.len(),
+        },
+    );
     Ok(())
 }
 
@@ -1706,60 +1713,56 @@ mod tests {
             let selection =
                 NativeCatalogSourceSelection::capture_under(&source, RootPolicy::Fixture).unwrap();
             let include = selection.include_roots();
-            let (_, mut prepared) = super::super::prepare_publication(
-                &producer_identity,
-                &include,
-                &evidence,
-                parsed,
-                "target",
-                super::super::CandidateVersionOrigin::Ordinary,
-                &[],
-            );
-            for record in &mut prepared.records {
-                let owner = record.original_owner.owner();
-                let product =
-                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-                        owner.clone(),
-                        record.interface.clone(),
-                        record.products.clone(),
-                        record.package_imports.clone(),
-                        crate::certified_products::encode_home_certification(
-                            &owner,
-                            &[],
-                            package_witnesses,
-                        )
-                        .unwrap(),
-                    )
-                    .with_source_sha256(super::super::parse_sha(&record.source_sha256).unwrap());
-                let requirements = (dependency && record.module == "B").then(|| {
-                    std::collections::BTreeMap::from([(
-                        ("u".into(), "A".into()),
-                        super::super::parse_sha(&sha(b"A")).unwrap(),
-                    )])
-                });
-                let product =
-                    crate::certified_products::fixture_finalized_product_with_requirements(
-                        product,
-                        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            let (_, products, rows, package_rows) = parsed
+                .copy_for_publication()
+                .unwrap()
+                .into_publication_parts();
+            let mut package_rows = package_rows.unwrap();
+            let originals = products
+                .iter()
+                .zip(rows)
+                .map(|(product, bytes)| {
+                    let packages = package_rows
+                        .remove(&(product.unit.clone(), product.module.clone()))
+                        .unwrap();
+                    let source_sha256 = super::super::parse_sha(&sha(&fs::read(module_source(
+                        &product.module,
+                    ))
+                    .unwrap()))
+                    .unwrap();
+                    let owner = CachedHomeOwner {
+                        unit: product.unit.clone(),
+                        module: product.module.clone(),
+                        module_version: super::super::module_version_for_product(
                             &producer_identity,
-                        )
-                        .sha256(),
-                        requirements,
-                    );
-                record.original_certification = product.certification_bytes().to_vec();
-                record.module_interface_proof = product.module_interface().cloned();
-            }
-            if with_execution {
+                            &include,
+                            &super::super::hex(&source_sha256),
+                            &product.interface,
+                            &bytes,
+                            &packages,
+                        ),
+                        skinny_iface_sha256: Sha256::digest(&product.interface).into(),
+                        product_sha256: Sha256::digest(&bytes).into(),
+                    };
+                    (
+                        owner,
+                        product.interface.clone(),
+                        bytes,
+                        packages,
+                        source_sha256,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let graph = if with_execution {
                 use crate::execution_source::{
                     CertifiedExecutionSourceGraph, ExecutionSourceAdmission,
                     ExecutionSourceGraphInput,
                 };
                 let input = root.path().join("Input.hs");
                 fs::write(&input, b"target").unwrap();
-                let owners = prepared
-                    .records
+                let owners = originals
                     .iter()
-                    .map(|record| super::super::computed_owner(&record.data))
+                    .map(|(owner, ..)| owner.clone())
                     .collect::<Vec<_>>();
                 let fresh = owners
                     .iter()
@@ -1774,22 +1777,48 @@ mod tests {
                     exact_imports: &std::collections::BTreeMap::new(), owners: &owners, fresh_owners: &fresh,
                     retained_sources: &std::collections::BTreeMap::new(), packages: package_witnesses,
                 }).unwrap() else { panic!("graph"); };
-                for record in &mut prepared.records {
-                    let owner = record.original_owner.owner();
-                    let seal = &record.original_certification;
-                    record.original_certification =
-                        crate::certified_products::bind_home_execution_source(
-                            seal,
-                            &owner,
-                            graph.digest(),
-                            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                        )
-                        .unwrap();
-                    record.execution_source_sha256 = Some(graph.digest());
-                    record.execution_source = Some(graph.clone());
+                Some(graph)
+            } else {
+                None
+            };
+            let certified = originals.into_iter().map(|(owner, interface, bytes, packages, source_sha256)| {
+                let mut seal = crate::certified_products::encode_home_certification(
+                    &owner, &[], package_witnesses,
+                ).unwrap();
+                if let Some(graph) = &graph {
+                    seal = crate::certified_products::bind_home_execution_source(
+                        &seal, &owner, graph.digest(),
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    ).unwrap();
                 }
-                prepared.graphs.insert(graph.digest(), graph);
-            }
+                let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                    owner.clone(), interface, bytes, packages, seal,
+                ).with_source_sha256(source_sha256);
+                let requirements = (dependency && owner.module == "B").then(|| {
+                    std::collections::BTreeMap::from([(
+                        ("u".into(), "A".into()),
+                        super::super::parse_sha(&sha(b"A")).unwrap(),
+                    )])
+                });
+                let product = crate::certified_products::fixture_finalized_product_with_requirements(
+                    product,
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity).sha256(),
+                    requirements,
+                );
+                match &graph {
+                    Some(graph) => product.with_execution_source(graph.clone()).unwrap(),
+                    None => product,
+                }
+            }).collect::<Vec<_>>();
+            let (_, prepared) = super::super::prepare_publication(
+                &producer_identity,
+                &include,
+                &evidence,
+                parsed,
+                "target",
+                super::super::CandidateVersionOrigin::Ordinary,
+                &certified,
+            );
             export_under(
                 &output,
                 &selection,
@@ -2669,6 +2698,59 @@ fn write_ref(
     })
 }
 
+struct ExportEvidence<'a> {
+    evidence: &'a crate::cache::DependencyEvidence,
+    reference: Option<FileRef>,
+}
+
+impl ExportEvidence<'_> {
+    fn reference(
+        &mut self,
+        root: &Path,
+        inventory: &InventoryOperation,
+    ) -> Result<&FileRef, ModulePackageError> {
+        if self.reference.is_none() {
+            let bytes = encode_json(
+                self.evidence,
+                inventory,
+                RECORD_LIMIT,
+                "evidence encoding",
+                false,
+            )?;
+            let digest = sha(&bytes);
+            #[cfg(test)]
+            super::publication_observer::observe(
+                super::publication_observer::Stage::CatalogEvidenceEncoded {
+                    sha256: digest.clone(),
+                    bytes: bytes.len() as u64,
+                },
+            );
+            self.reference = Some(write_ref(
+                root,
+                PathBuf::from("evidence").join(format!("{digest}.json")),
+                &bytes,
+                RECORD_LIMIT,
+                inventory,
+            )?);
+            #[cfg(test)]
+            {
+                let reference = self.reference.as_ref().expect("successful evidence write");
+                super::publication_observer::observe(
+                    super::publication_observer::Stage::CatalogEvidenceWritten {
+                        sha256: reference.sha256.clone(),
+                        bytes: reference.length,
+                        path: root.join(&reference.path),
+                    },
+                );
+            }
+        }
+        Ok(self
+            .reference
+            .as_ref()
+            .expect("evidence receipt was issued"))
+    }
+}
+
 /// Export only after the shared front door has authenticated worker receipts.
 pub(crate) fn export(
     output_root: &Path,
@@ -2695,7 +2777,7 @@ fn export_under(
     let inventory = &prepared.inventory;
     let producer = prepared.endpoint_identity;
     let include = prepared.include;
-    let evidence = prepared.evidence.evidence();
+    let evidence = prepared.cohort.evidence();
     source_selection.validate_under(policy)?;
     if producer != authority.producer_identity {
         return Err(ModulePackageError::CompilerMismatch);
@@ -2713,13 +2795,10 @@ fn export_under(
     if output_root.join("catalog.json").exists() {
         return Err(ModulePackageError::Format("catalog already exists"));
     }
-    let records = &prepared.records;
+    let records = prepared.cohort.records();
     require_complete_cohort(records, evidence)?;
     if records.is_empty() {
         return Err(ModulePackageError::Bounds);
-    }
-    for record in records {
-        require_complete_cohort(records, &record.evidence)?;
     }
     validate_closed(records, source_selection)?;
     inventory
@@ -2727,7 +2806,10 @@ fn export_under(
         .and_then(|_| inventory.reserve::<FileRef>(prepared.graphs.len()))
         .map_err(|_| ModulePackageError::Bounds)?;
     let mut modules = Vec::with_capacity(records.len());
-    let mut shared_evidence = std::collections::BTreeMap::<String, (Vec<u8>, FileRef)>::new();
+    let mut evidence_receipt = ExportEvidence {
+        evidence,
+        reference: None,
+    };
     let mut validation =
         crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(inventory.clone());
     for record in records {
@@ -2783,38 +2865,7 @@ fn export_under(
             version_origin: Some(record.version_origin.clone()),
             execution_source_sha256: record.execution_source_sha256,
         };
-        let evidence_bytes = encode_json(
-            &record.evidence,
-            inventory,
-            RECORD_LIMIT,
-            "evidence encoding",
-            false,
-        )?;
-        let evidence_sha256 = sha(&evidence_bytes);
-        let evidence = if let Some((existing_bytes, reference)) =
-            shared_evidence.get(&evidence_sha256)
-        {
-            if existing_bytes.len() != evidence_bytes.len() || existing_bytes != &evidence_bytes {
-                return Err(ModulePackageError::Format(
-                    "dependency evidence digest collision",
-                ));
-            }
-            reference.clone()
-        } else {
-            inventory
-                .reserve::<(Vec<u8>, FileRef)>(1)
-                .and_then(|_| inventory.charge(evidence_bytes.len()))
-                .map_err(|_| ModulePackageError::Bounds)?;
-            let reference = write_ref(
-                output_root,
-                PathBuf::from("evidence").join(format!("{evidence_sha256}.json")),
-                &evidence_bytes,
-                RECORD_LIMIT,
-                inventory,
-            )?;
-            shared_evidence.insert(evidence_sha256, (evidence_bytes, reference.clone()));
-            reference
-        };
+        let evidence = evidence_receipt.reference(output_root, inventory)?.clone();
         modules.push(ModuleFiles {
             module_interface,
             owner: write_ref(
