@@ -2688,7 +2688,7 @@ interfaceMeasurementDiagnostics = bracket temporary removeDirectoryRecursive $ \
 -- candidate in copyable, fully-qualified form plus the two fixes: qualify
 -- the use, or hide one import. This compiles a genuine two-import ambiguity
 -- through the typed target diagnostic path and checks the same renderer
--- used by @app/Main.hs@'s @reportDiags@: both qualified candidates and fixes.
+-- used by the worker completion renderer: both qualified candidates and fixes.
 ambiguousOccurrenceHintCompilation :: IO ()
 ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let reviewPath = root </> "Review.hs"

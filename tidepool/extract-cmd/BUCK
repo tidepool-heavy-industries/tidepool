@@ -237,6 +237,7 @@ rust_filegroup(
     name = "daemon_integration_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
+        "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
         "tests/daemon_integration.rs": "tidepool/extract-cmd/tests/daemon_integration.rs",
         "tests/daemon_integration/native_fairness.rs": "tidepool/extract-cmd/tests/daemon_integration/native_fairness.rs",
         "tests/daemon_integration/resident_bind.hs": "tidepool/extract-cmd/tests/daemon_integration/resident_bind.hs",

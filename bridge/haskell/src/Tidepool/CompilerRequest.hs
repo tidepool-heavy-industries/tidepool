@@ -14,7 +14,7 @@ module Tidepool.CompilerRequest
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
 
-import Control.Exception (Exception, bracket, evaluate, throwIO)
+import Control.Exception (Exception, evaluate, throwIO)
 import Control.Monad (forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
@@ -71,6 +71,8 @@ import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 import Tidepool.Session
   ( SessionScope, preparedResumeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName )
 import Tidepool.TypedSegment (TypedSegment)
+import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore), withCompletionRelease
+  , PhaseSink, CompletionPhase(..), emitPhase, releaseWithPhase)
 
 -- No caller-maintained compiler record updates: argument normalization, exact
 -- admission and the one executor are bound before any mode consumes the request.
@@ -89,12 +91,12 @@ boundRequestExactScope (BoundCompilerRequest _ _ _ exact _ _ _) = exact
 boundParserFlags :: BoundCompilerRequest -> DynFlags
 boundParserFlags (BoundCompilerRequest scope _ _ _ _ _ _) = scopedParserFlags scope
 
-withBoundCompilerRequest :: CompilerScope -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO a
-withBoundCompilerRequest compilerScope parsed use = do
+withBoundCompilerRequest :: PhaseSink -> CompilerScope -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO (Completion a)
+withBoundCompilerRequest sink compilerScope parsed use = do
   grant <- either fail pure (compilerExecutionGrant (requestCompilerJobs parsed))
-  bracket getNumCapabilities setNumCapabilities $ \_previous -> do
+  withCompletionRelease CapabilitiesRestore getNumCapabilities (releaseWithPhase sink CapabilitiesRestore . setNumCapabilities) $ \_previous -> do
     setNumCapabilities (requestCompilerCapabilities parsed)
-    withCompilerExecutor grant $ \executor -> do
+    withCompilerExecutor sink grant $ \executor -> do
       args <- if requestHarnessProfile parsed && not (requestCheckSource parsed)
         then spliceHarnessProfilePragma parsed else pure parsed
       operation <- case admitRequestOperation args of
@@ -140,7 +142,10 @@ withBoundCompilerRequest compilerScope parsed use = do
               && Map.null (requestRetainedGenerations args))
               (throwIO CheckedPurposeMismatch)
         pure scope
-      use (BoundCompilerRequest compilerScope args operation exact grant executor Nothing)
+      emitPhase sink BodyStarted
+      result <- use (BoundCompilerRequest compilerScope args operation exact grant executor Nothing)
+      emitPhase sink BodyFinished
+      pure result
 
 -- A cell's issued lexical prefix changes only these compilation inputs. The
 -- request's grant, physical search inputs and auxiliary owner remain bound.

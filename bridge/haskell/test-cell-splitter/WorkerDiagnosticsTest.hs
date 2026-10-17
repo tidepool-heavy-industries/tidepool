@@ -5,9 +5,8 @@ module WorkerDiagnosticsTest (runWorkerDiagnosticsTests) where
 import Control.Exception
   ( AsyncException(..), ErrorCall, Exception(..), IOException, SomeException
   , asyncExceptionFromException, asyncExceptionToException, bracket, evaluate
-  , finally, fromException, throwIO, toException, try )
+  , fromException, throwIO, toException, try )
 import Control.Monad (forM_, unless)
-import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import GHC.Types.Error (emptyMessages)
 import GHC.Types.SourceError (mkSrcErr)
 import System.Directory
@@ -15,7 +14,7 @@ import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO
-  ( hClose, hFlush, openTempFile, readFile', stderr, stdout )
+  ( hClose, openTempFile, readFile' )
 import Tidepool.Binders (CellSourceSpan(..), CellSplitError(..))
 import Tidepool.DiagJson
   ( DependencyLoadFailure(..), Diag(..), DiagSeverity(..), InputRejection(..)
@@ -24,6 +23,7 @@ import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.DeclarationJoin (JoinRejection(..))
 import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..), renderFamilyConsistencyRejection)
 import Tidepool.WorkerDiagnostics
+import Tidepool.RequestCompletion (captureCompletion)
 
 -- Cancellation can be wrapped by an application-specific exception type.
 data WrappedCancellation = WrappedCancellation deriving (Eq, Show)
@@ -80,10 +80,12 @@ runWorkerDiagnosticsTests = withScratch $ \root -> do
             "Error: " ++ show (userError "ordinary worker error") ++ "\n")
         ]
   forM_ cases $ \(failure, outcome, diagnostics, human) -> do
-    (code, machine, debug) <- captureChannels root (reportDiags (Left failure))
+    completed <- captureCompletion (throwIO failure)
+    (code, machine, debug) <- renderCompletion completed CaptureComplete
     unless (code == ExitFailure 1 && machine == renderDiagsJson outcome diagnostics ++ "\n"
         && debug == human) (fail ("failure diagnostic channels changed: " ++ show failure))
-  (code, machine, debug) <- captureChannels root (reportDiagsWithWarnings (Right [warning]))
+  completed <- captureCompletion (pure [warning])
+  (code, machine, debug) <- renderCompletion completed CaptureComplete
   unless (code == ExitSuccess && machine == renderDiagsJson ReportSuccess [warning] ++ "\n"
       && null debug) (fail "warning success diagnostic channels changed")
 
@@ -127,25 +129,3 @@ withScratch = bracket acquire removeDirectoryRecursive
       removeFile path
       createDirectory path
       pure path
-
--- The test runner is serial. Brackets restore both process-global handles even
--- when an assertion or reporting operation fails; writable captures close
--- before GHC opens the same paths for reading.
-captureChannels :: FilePath -> IO a -> IO (a, String, String)
-captureChannels root action =
-  bracket (hDuplicate stdout) hClose $ \savedOut ->
-  bracket (hDuplicate stderr) hClose $ \savedErr ->
-  bracket (openTempFile root "stdout") (hClose . snd) $ \(outPath, outHandle) ->
-  bracket (openTempFile root "stderr") (hClose . snd) $ \(errPath, errHandle) -> do
-    result <- (do
-      hDuplicateTo outHandle stdout
-      hDuplicateTo errHandle stderr
-      action) `finally`
-        (hFlush stdout `finally`
-          (hFlush stderr `finally`
-            (hDuplicateTo savedOut stdout `finally` hDuplicateTo savedErr stderr)))
-    hClose outHandle
-    hClose errHandle
-    out <- readFile' outPath
-    err <- readFile' errPath
-    pure (result, out, err)

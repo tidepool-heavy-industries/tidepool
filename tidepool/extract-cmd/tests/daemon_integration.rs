@@ -1557,3 +1557,174 @@ fn owned_compiler_case_child() {
         .to_string()
         .contains("direct fallback is forbidden"));
 }
+
+/// Transport control through the actual frontend/endpoint. The substitute
+/// worker emits diagnostics only; it never issues compiler products.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owned transport fixture and actual frontend control"
+)]
+fn direct_failed_end_retains_diagnostics_without_replay_or_worker_reuse() {
+    use std::os::unix::ffi::OsStrExt;
+    let frontend = compiler_inputs::require_compiler_executables();
+    let actual_worker = compiler_inputs::required_executable(
+        "TIDEPOOL_EXTRACT_WORKER",
+        std::env::var_os("TIDEPOOL_EXTRACT_WORKER"),
+    )
+    .unwrap();
+    let probe = Command::new(actual_worker)
+        .arg("--print-worker-request-flag")
+        .output()
+        .unwrap();
+    assert!(probe.status.success());
+    assert!(!std::str::from_utf8(&probe.stdout)
+        .unwrap()
+        .trim()
+        .is_empty());
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("control.rs");
+    fs::write(
+        &source,
+        include_str!("../src/test_fixtures/control_ack_worker.rs"),
+    )
+    .unwrap();
+    let fixture = scratch.path().join("worker");
+    assert!(Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&fixture)
+        .status()
+        .unwrap()
+        .success());
+    fs::copy(&fixture, scratch.path().join("launcher")).unwrap();
+    fs::write(scratch.path().join("phase"), [17]).unwrap();
+    fs::write(scratch.path().join("release"), b"fail END immediately").unwrap();
+    fs::write(scratch.path().join("request-flag"), probe.stdout).unwrap();
+    fs::write(
+        scratch.path().join("frontend-path"),
+        frontend.as_os_str().as_bytes(),
+    )
+    .unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        scratch.path().join("launcher"),
+    ));
+    command.input(scratch.path().join("TransportOnly.hs"));
+    let error = command
+        .bind_direct()
+        .unwrap()
+        .execute(&command)
+        .unwrap_err();
+    assert!(!error.definitely_unsubmitted());
+    assert!(!error.permits_rebind());
+    let retained = error
+        .completion_failure()
+        .expect("received report was lost with failed END");
+    assert_eq!(retained.diagnostic().exit_code(), 23);
+    assert_eq!(retained.diagnostic().stdout(), b"body-report-v1");
+    // Direct keeps raw diagnostics; daemon's companion control retains only
+    // its existing caller-visible projection. This is intentionally not parity.
+    assert_eq!(
+        retained.diagnostic().stderr(),
+        b"visible diagnostic v1\ntidepool-timing phase=fixture ms=1\n"
+    );
+    assert!(!retained.end_cause().is_empty());
+    let pids = fs::read_to_string(scratch.path().join("worker-pids")).unwrap();
+    assert_eq!(pids.lines().count(), 1, "accepted request was replayed");
+    let first = pids.lines().next().unwrap();
+    assert!(
+        !Path::new("/proc").join(first).exists(),
+        "failed worker was not reaped before diagnostic delivery"
+    );
+    let next = command.bind_direct().unwrap().execute(&command).unwrap();
+    assert!(next.success());
+    assert_eq!(next.output.stdout, b"1");
+    let pids = fs::read_to_string(scratch.path().join("worker-pids")).unwrap();
+    assert_eq!(pids.lines().count(), 2);
+    assert_ne!(pids.lines().next(), pids.lines().nth(1));
+}
+
+/// Exercise both real Main completion boundaries: ordinary direct worker CLI,
+/// and the actual frontend's one-shot framed route, for success and source refusal.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "actual declared compiler boundary controls"
+)]
+fn production_main_reports_once_after_direct_and_framed_completion() {
+    let frontend = compiler_inputs::require_compiler_executables();
+    let worker = compiler_inputs::required_executable(
+        "TIDEPOOL_EXTRACT_WORKER",
+        std::env::var_os("TIDEPOOL_EXTRACT_WORKER"),
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("CompletionMain.hs");
+    let command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&frontend));
+    let issuer = command.bind_direct().unwrap();
+    let producer = issuer.identity().producer_hex();
+    drop(issuer);
+    for source_fails in [false, true] {
+        fs::write(
+            &source,
+            if source_fails {
+                "module CompletionMain where\nresult :: Int\nresult = True\n"
+            } else {
+                "module CompletionMain where\nresult :: Int\nresult = 41\n"
+            },
+        )
+        .unwrap();
+        let mut direct = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&frontend));
+        direct.input(&source).check_source();
+        let output = Command::new(&worker)
+            .args(direct.worker_argv())
+            .env("TIDEPOOL_COMPILER_PRODUCER", &producer)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            !source_fails,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["version"], 2);
+        assert_eq!(
+            report["outcome"],
+            if source_fails {
+                "source-failure"
+            } else {
+                "success"
+            }
+        );
+
+        let out = scratch.path().join(if source_fails {
+            "refused-products"
+        } else {
+            "products"
+        });
+        let mut framed = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&frontend));
+        framed.input(&source).output_dir(&out).target("result");
+        let result = framed.bind_direct().unwrap().execute(&framed).unwrap();
+        assert_eq!(
+            result.success(),
+            !source_fails,
+            "{}",
+            String::from_utf8_lossy(&result.output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.output.stdout).unwrap();
+        assert_eq!(report["version"], 2);
+        assert_eq!(
+            report["outcome"],
+            if source_fails {
+                "source-failure"
+            } else {
+                "success"
+            }
+        );
+        assert_eq!(out.join("result.prepared.cbor").exists(), !source_fails);
+        if !source_fails {
+            assert!(out.join("module-products.cbor").is_file());
+        }
+    }
+}

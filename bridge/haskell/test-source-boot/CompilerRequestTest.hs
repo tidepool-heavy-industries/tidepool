@@ -1,8 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease) where
 
+import Tidepool.RequestCompletion (finishCompletion)
+
 import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, fromException, throwIO, try)
-import Control.Monad (forM_, unless, void)
+import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -33,7 +35,7 @@ withRequestFixture action = withScratch $ \work -> do
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   args <- requestFor work
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
-    withBoundCompilerRequest scope args $ \request -> action scope request work
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> action scope request work
 
 compileA :: BoundCompilerRequest -> FilePath -> IO PreparedCompilation
 compileA request work = compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
@@ -117,7 +119,7 @@ completedRequestRelease = withScratch $ \work -> do
   copyFile "test-source-boot/fixtures/BoundPreparedA.hs" (work </> "BoundPreparedA.hs")
   args <- requestFor work
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
-    completed <- withBoundCompilerRequest scope args $ \request -> do
+    completed <- (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
       first <- compileA request work
       projectA "__result" first
       originals <- newPreparedOriginalInterfaceArtifacts (preparedCompilationResult first) work

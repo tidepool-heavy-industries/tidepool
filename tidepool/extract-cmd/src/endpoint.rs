@@ -1584,10 +1584,7 @@ impl CompilerEndpoint {
                 drop(stdin);
                 crate::EXTRACT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 daemon::decode_output(endpoint.stdout_mut()?).map_err(|error| {
-                    SpawnError::indeterminate(
-                        endpoint.program.clone(),
-                        io::Error::other(error.to_string()),
-                    )
+                    SpawnError::indeterminate(endpoint.program.clone(), io::Error::other(error))
                 })?
             }
             Transport::Daemon { socket, epoch } => {
@@ -1609,8 +1606,9 @@ impl CompilerEndpoint {
                                 error.to_string(),
                             ));
                         }
-                        let source = io::Error::other(error.to_string());
-                        if error.permits_rebind() {
+                        let permits_rebind = error.permits_rebind();
+                        let source = io::Error::other(error);
+                        if permits_rebind {
                             return Err(SpawnError::not_submitted(socket.as_os_str(), source));
                         } else {
                             return Err(SpawnError::indeterminate(socket.as_os_str(), source));
@@ -2214,10 +2212,7 @@ impl CompilerTransaction {
                         SpawnError::indeterminate(endpoint.program.clone(), source)
                     })?;
                 daemon::decode_output(endpoint.stdout_mut()?).map_err(|error| {
-                    SpawnError::indeterminate(
-                        endpoint.program.clone(),
-                        io::Error::other(error.to_string()),
-                    )
+                    SpawnError::indeterminate(endpoint.program.clone(), io::Error::other(error))
                 })?
             }
             TransactionTransport::Daemon {
@@ -2225,10 +2220,7 @@ impl CompilerTransaction {
                 socket,
             } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request.worker_argv())
                 .map_err(|error| {
-                    SpawnError::indeterminate(
-                        socket.as_os_str(),
-                        io::Error::other(error.to_string()),
-                    )
+                    SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error))
                 })?,
         };
         Ok(ExtractRun {

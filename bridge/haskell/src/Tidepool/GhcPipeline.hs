@@ -40,6 +40,10 @@ module Tidepool.GhcPipeline
   , withExactInterfaceTransaction
   ) where
 
+import Tidepool.RequestCompletion
+  ( CleanupStage(CompilerScopeRestore), captureCompletion, withCompletionRelease
+  , attemptReleases, appendCleanupFailures, finishCompletion )
+
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr', loadIfaceByteCode, generateFreshByteCode, mkCgInteractiveGuts)
 import GHC.Driver.Pipeline (compileOne')
@@ -3572,7 +3576,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       (\_ prepared -> completedPreparedModule observer prepared) tasks
                 case executorFor selection of
                   Just executor -> lowerWith executor
-                  Nothing -> withCompilerExecutor executionGrant lowerWith
+                  Nothing -> withCompilerExecutor (const (pure ())) executionGrant lowerWith >>= finishCompletion
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case bodyTier of
             OptimizeEveryModule -> do
@@ -4895,7 +4899,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
     reifyGhc $ \session ->
       let restoreBase = reflectGhc (setSession baseEnv) session
           runRequest :: CompilerScopeRunner
-          runRequest clearRecovery action = bracket acquire release $ \() -> do
+          runRequest clearRecovery action =
+            withCompletionRelease CompilerScopeRestore acquire release (\() -> do
             phase <- newIORef CompilerReady
             interrupted <- newIORef False
             interpreterAttempt <- newIORef InterpreterConfirmed
@@ -4934,20 +4939,24 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         -- Failed home/finder/memo choices remain private.
                         -- Demand-loaded fixed package facts survive on the
                         -- same owner used by lazy completed interfaces.
-                        clearRecovery
-                        writeIORef active Nothing
                         mutation <- readIORef interpreterAttempt
-                        recoverCompilerInterpreter interpreter baseEnv
-                          (mutation == InterpreterMutationPending)
-                        when (mutation == InterpreterMutationPending) $ do
-                          purpose <- readIORef operationPurpose
-                          identity <- readIORef operationIdentity
-                          emitReuse timing (ReuseContext identity purpose)
-                            NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
-                        restoreBase
-                        writeIORef phase CompilerReady
-                        writeIORef availability ResidentBusy
-                        throwIO failure
+                        failures <- attemptReleases $
+                          [(CompilerScopeRestore, clearRecovery)
+                          ,(CompilerScopeRestore, writeIORef active Nothing)
+                          ,(CompilerScopeRestore, recoverCompilerInterpreter interpreter baseEnv
+                            (mutation == InterpreterMutationPending))] ++
+                          (if mutation == InterpreterMutationPending then
+                            [(CompilerScopeRestore, do
+                                purpose <- readIORef operationPurpose
+                                identity <- readIORef operationIdentity
+                                emitReuse timing (ReuseContext identity purpose)
+                                  NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing)]
+                          else []) ++ [(CompilerScopeRestore, restoreBase)]
+                        when (null failures) $ do
+                          writeIORef phase CompilerReady
+                          writeIORef availability ResidentBusy
+                        completed <- captureCompletion (throwIO failure)
+                        finishCompletion (appendCleanupFailures completed failures)
                   writeIORef interpreterAttempt InterpreterConfirmed
                   writeIORef phase CompilerReady
                   pure result
@@ -4994,16 +5003,26 @@ withResidentCompilerScopes baseIncludes useRequests = do
                 finish = do
                   writeIORef phase CompilerClosed
                   cancelled <- readIORef interrupted
-                  when cancelled $ do
-                    recoverCompilerInterpreter interpreter baseEnv True
-                    purpose <- readIORef operationPurpose
-                    identity <- readIORef operationIdentity
-                    emitReuse timing (ReuseContext identity purpose)
-                      NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
-                    writeIORef availability ResidentBusy
-                  writeIORef active Nothing
-                  restoreBase
-            action (CompilerScope compile compileCompleted readScope runOperation parserFlags) `finally` finish
+                  failures <- attemptReleases $
+                    (if cancelled then
+                      [(CompilerScopeRestore, recoverCompilerInterpreter interpreter baseEnv True)
+                      ,(CompilerScopeRestore, do
+                          purpose <- readIORef operationPurpose
+                          identity <- readIORef operationIdentity
+                          emitReuse timing (ReuseContext identity purpose)
+                            NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing)
+                      ]
+                    else []) ++
+                    [(CompilerScopeRestore, writeIORef active Nothing)
+                    ,(CompilerScopeRestore, restoreBase)]
+                  if null failures
+                    then when cancelled (writeIORef availability ResidentBusy)
+                    else writeIORef availability ResidentPoisoned
+                  completed <- captureCompletion (pure ())
+                  finishCompletion (appendCleanupFailures completed failures)
+            withCompletionRelease CompilerScopeRestore (pure ()) (const finish)
+              (const (captureCompletion (action (CompilerScope compile compileCompleted readScope runOperation parserFlags)))))
+              >>= finishCompletion
           acquire = do
             caller <- myThreadId
             unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
@@ -5020,9 +5039,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
               writeIORef availability ResidentPoisoned
               restoreBase
               writeIORef availability ResidentAvailable
-      in useRequests runRequest `finally` do
-        writeIORef availability ResidentClosed
-        forM_ (hsc_interp baseEnv) retireCompilerInterpreter
+      in withCompletionRelease CompilerScopeRestore (pure ())
+        (\() -> do
+          writeIORef availability ResidentClosed
+          forM_ (hsc_interp baseEnv) retireCompilerInterpreter)
+        (const (captureCompletion (useRequests runRequest))) >>= finishCompletion
 
 -- | Auxiliary exact-interface operations borrow the same resident owner. Home
 -- visibility starts empty; installed-package facts retain their matched closure.

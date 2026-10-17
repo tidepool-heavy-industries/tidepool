@@ -65,6 +65,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 // Compiler artifacts are file-backed; only complete diagnostics cross this boundary.
 const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
+const UNCONFIRMED_RESPONSE: &[u8; 8] = b"TPCU0001";
+const MAX_END_CAUSE_BYTES: u32 = 64 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
 const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI003";
@@ -638,6 +640,7 @@ pub(crate) enum DaemonError {
     Cancelled,
     /// The daemon acknowledged acceptance before the enclosed response error.
     AfterAcceptance(Box<DaemonError>),
+    CompletionUnconfirmed(crate::CompilerCompletionFailure),
     Protocol(String),
     ResponseTooLarge {
         declared: u64,
@@ -646,6 +649,14 @@ pub(crate) enum DaemonError {
 }
 
 impl DaemonError {
+    pub(crate) fn completion_failure(&self) -> Option<&crate::CompilerCompletionFailure> {
+        match self {
+            Self::CompletionUnconfirmed(failure) => Some(failure),
+            Self::AfterAcceptance(error) => error.completion_failure(),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn is_not_accepted(&self) -> bool {
         matches!(
@@ -681,6 +692,11 @@ impl std::fmt::Display for DaemonError {
             DaemonError::AfterAcceptance(error) => {
                 write!(f, "daemon response failed after acceptance: {error}")
             }
+            DaemonError::CompletionUnconfirmed(failure) => write!(
+                f,
+                "compiler report received but transaction cleanup unconfirmed: {}",
+                failure.end_cause()
+            ),
             DaemonError::Protocol(message) => write!(f, "daemon protocol error: {message}"),
             DaemonError::ResponseTooLarge { declared, remaining } => write!(
                 f,
@@ -1172,6 +1188,39 @@ fn read_response_frame<R: Read>(r: &mut R, remaining: &mut u32) -> Result<Vec<u8
 /// real socket).
 pub(crate) fn decode_response<R: Read>(r: &mut R) -> Result<(i32, Vec<u8>, Vec<u8>), DaemonError> {
     let code_bytes = read_exact_or_crash(r, 4)?;
+    if code_bytes.as_slice() == &UNCONFIRMED_RESPONSE[..4] {
+        let version = read_exact_or_crash(r, 4)?;
+        if version.as_slice() != &UNCONFIRMED_RESPONSE[4..] {
+            return Err(DaemonError::Protocol(
+                "unsupported unconfirmed compiler response version".into(),
+            ));
+        }
+        let code = read_u32(r)? as i32;
+        let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
+        let stdout = read_response_frame(r, &mut remaining)?;
+        let stderr = read_response_frame(r, &mut remaining)?;
+        let cause_length = read_u32(r)?;
+        let cause_remaining = remaining.min(MAX_END_CAUSE_BYTES);
+        if cause_length > cause_remaining {
+            return Err(DaemonError::ResponseTooLarge {
+                declared: u64::from(cause_length),
+                remaining: u64::from(cause_remaining),
+            });
+        }
+        let cause = read_exact_or_crash(r, cause_length as usize)?;
+        let end_cause = String::from_utf8(cause)
+            .map_err(|_| DaemonError::Protocol("compiler END cause is not UTF-8".into()))?;
+        return Err(DaemonError::CompletionUnconfirmed(
+            crate::CompilerCompletionFailure {
+                diagnostic: crate::ReceivedCompilerDiagnostic {
+                    code,
+                    stdout,
+                    stderr,
+                },
+                end_cause,
+            },
+        ));
+    }
     let code = i32::from_le_bytes([code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3]]);
     let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
     let stdout = read_response_frame(r, &mut remaining)?;
@@ -1423,10 +1472,20 @@ fn service_transaction(
         } else {
             tracing::error!(run_id, %error, transaction, "compiler transaction failed");
         }
-        // The accepted request(s) stay indeterminate; do not replay them.
-        // Drop the connection before replacing the failed worker.
-        drop(connection);
+        // The accepted request(s) stay indeterminate; diagnostic bytes cannot
+        // acknowledge END. Retire this worker before reporting that distinction.
         worker.abort();
+        if let Some((code, stdout, stderr, _, _)) = &one_shot_response {
+            let delivered = write_unconfirmed_response(
+                &mut connection,
+                *code,
+                stdout,
+                stderr,
+                &error.to_string(),
+            );
+            log_reject_failure(run_id, "report with failed END evidence", delivered);
+        }
+        drop(connection);
         if !config.persistent {
             return Err(error);
         }
@@ -2921,11 +2980,45 @@ pub(crate) fn write_response(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), FrontendError> {
+    if code.to_le_bytes() == UNCONFIRMED_RESPONSE[..4] {
+        return Err(FrontendError::Daemon(
+            "compiler exit code is a reserved response control word".into(),
+        ));
+    }
     check_response_size(stdout.len() as u64 + stderr.len() as u64)?;
     let mut response = code.to_le_bytes().to_vec();
     push_frame(&mut response, stdout);
     push_frame(&mut response, stderr);
     stream.write_all(&response).map_err(FrontendError::Io)
+}
+
+/// Error-only envelope: a received report cannot confirm END or become Output.
+/// The old decoder rejects its second word as an oversized frame, before allocation.
+pub(crate) fn write_unconfirmed_response(
+    mut stream: impl Write,
+    code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    end_cause: &str,
+) -> Result<(), FrontendError> {
+    check_response_size(stdout.len() as u64 + stderr.len() as u64 + end_cause.len() as u64)?;
+    if end_cause.len() as u64 > u64::from(MAX_END_CAUSE_BYTES) {
+        return Err(daemon_frontend_error(DaemonError::ResponseTooLarge {
+            declared: end_cause.len() as u64,
+            remaining: u64::from(MAX_END_CAUSE_BYTES),
+        }));
+    }
+    stream
+        .write_all(UNCONFIRMED_RESPONSE)
+        .and_then(|()| stream.write_all(&code.to_le_bytes()))
+        .map_err(FrontendError::Io)?;
+    for bytes in [stdout, stderr, end_cause.as_bytes()] {
+        stream
+            .write_all(&(bytes.len() as u32).to_le_bytes())
+            .and_then(|()| stream.write_all(bytes))
+            .map_err(FrontendError::Io)?;
+    }
+    stream.flush().map_err(FrontendError::Io)
 }
 
 fn check_response_size(total: u64) -> Result<(), FrontendError> {
@@ -5205,6 +5298,159 @@ tidepool-reuse-error: witness failed\n";
     }
 
     #[test]
+    fn unconfirmed_response_retains_diagnostics_without_completed_output() {
+        let mut wire = Vec::new();
+        write_unconfirmed_response(
+            &mut wire,
+            0,
+            b"primary report",
+            b"original stderr",
+            "END lost",
+        )
+        .unwrap();
+        let failure = decode_output(&mut Cursor::new(&wire)).unwrap_err();
+        let original = failure.completion_failure().unwrap();
+        assert_eq!(original.diagnostic().exit_code(), 0);
+        assert_eq!(original.diagnostic().stdout(), b"primary report");
+        assert_eq!(original.diagnostic().stderr(), b"original stderr");
+        assert_eq!(original.end_cause(), "END lost");
+        let failure = DaemonError::AfterAcceptance(Box::new(failure));
+        assert!(failure.was_accepted());
+        assert!(!failure.permits_rebind());
+        let exposed = crate::SpawnError::indeterminate("bound compiler", io::Error::other(failure));
+        assert!(!exposed.definitely_unsubmitted());
+        assert!(!exposed.permits_rebind());
+        assert_eq!(
+            exposed.completion_failure().unwrap().diagnostic().stdout(),
+            b"primary report"
+        );
+
+        // The previous decoder reads a signed exit code then an output length.
+        // Both interpretations must fail closed, including wait-status truncation.
+        let old_code = i32::from_le_bytes(wire[..4].try_into().unwrap());
+        let old_length = u32::from_le_bytes(wire[4..8].try_into().unwrap());
+        assert_ne!(encode_wait_status(old_code), 0);
+        assert!(old_length > MAX_RESPONSE_PAYLOAD_BYTES);
+        let mut ordinary = Vec::new();
+        assert!(write_response(&mut ordinary, old_code, b"", b"").is_err());
+        assert!(ordinary.is_empty());
+
+        for end in 0..wire.len() {
+            let error = decode_output(&mut Cursor::new(&wire[..end])).unwrap_err();
+            assert!(
+                error.completion_failure().is_none(),
+                "partial envelope issued evidence at {end}"
+            );
+        }
+        wire[7] = b'2';
+        assert!(matches!(
+            decode_output(&mut Cursor::new(wire)),
+            Err(DaemonError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn unconfirmed_response_rejects_invalid_end_cause_and_failed_delivery() {
+        let mut wire = UNCONFIRMED_RESPONSE.to_vec();
+        wire.extend_from_slice(&1i32.to_le_bytes());
+        push_frame(&mut wire, b"body report");
+        push_frame(&mut wire, b"visible diagnostic");
+        push_frame(&mut wire, &[0xff]);
+        let error = decode_output(&mut Cursor::new(wire)).unwrap_err();
+        assert!(matches!(error, DaemonError::Protocol(_)));
+        assert!(error.completion_failure().is_none());
+
+        struct Disconnected;
+        impl Write for Disconnected {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "peer retired"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(
+            write_unconfirmed_response(
+                &mut Disconnected,
+                1,
+                b"body report",
+                b"visible diagnostic",
+                "END failed"
+            )
+            .is_err(),
+            "diagnostic delivery loss became confirmed completion"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_response_does_not_hide_final_flush_failure() {
+        struct FlushLost(Vec<u8>);
+        impl Write for FlushLost {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "diagnostic delivery lost",
+                ))
+            }
+        }
+        let mut output = FlushLost(Vec::new());
+        assert!(matches!(write_unconfirmed_response(
+            &mut output, 23, b"body report", b"visible diagnostic", "original END failure"
+        ), Err(FrontendError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe));
+        // Even when all bytes reached the buffer, they issue only diagnostics.
+        let error = decode_output(&mut Cursor::new(output.0)).unwrap_err();
+        assert_eq!(
+            error.completion_failure().unwrap().end_cause(),
+            "original END failure"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_response_bounds_combined_diagnostics_and_end_cause() {
+        let mut wire = Vec::new();
+        assert!(write_unconfirmed_response(
+            &mut wire,
+            1,
+            &vec![0; MAX_RESPONSE_PAYLOAD_BYTES as usize],
+            b"",
+            "x"
+        )
+        .is_err());
+        assert!(wire.is_empty(), "combined budget refused after encoding");
+        assert!(write_unconfirmed_response(
+            &mut wire,
+            1,
+            b"",
+            b"",
+            &"x".repeat(MAX_END_CAUSE_BYTES as usize + 1)
+        )
+        .is_err());
+        assert!(wire.is_empty(), "END cause budget refused after encoding");
+
+        let mut header = UNCONFIRMED_RESPONSE.to_vec();
+        header.extend_from_slice(&1i32.to_le_bytes());
+        push_frame(&mut header, b"original");
+        push_frame(&mut header, b"");
+        header.extend_from_slice(&u32::MAX.to_le_bytes());
+        let length = header.len();
+        let mut reader = Cursor::new(header);
+        assert!(
+            matches!(decode_output(&mut reader), Err(DaemonError::ResponseTooLarge {
+            declared, remaining
+        }) if declared == u64::from(u32::MAX) && remaining == u64::from(MAX_END_CAUSE_BYTES))
+        );
+        assert_eq!(
+            reader.position(),
+            length as u64,
+            "decoder read an oversized END body"
+        );
+    }
+
+    #[test]
     fn response_payload_limit_matches_worker_capture_budget() {
         let source = include_str!("../../../bridge/haskell/src/Tidepool/WorkerServer.hs");
         let definition = format!("maxResponsePayloadBytes = {}", MAX_RESPONSE_PAYLOAD_BYTES);
@@ -5964,14 +6210,14 @@ tidepool-reuse-error: witness failed\n";
     fn one_shot_response_commits_after_cleanup_and_only_early_disconnect_replaces_worker() {
         let scratch = tempfile::tempdir().unwrap();
         let fixture = compile_control_ack_worker(scratch.path());
-        for cancel in [false, true] {
+        for (phase, cancel) in [(2, false), (2, true), (17, false), (17, true)] {
             let dir = scratch
                 .path()
-                .join(if cancel { "cancel" } else { "complete" });
+                .join(format!("phase-{phase}-cancel-{cancel}"));
             std::fs::create_dir(&dir).unwrap();
             let worker_bin = dir.join("worker");
             std::fs::copy(&fixture, &worker_bin).unwrap();
-            std::fs::write(dir.join("phase"), [2]).unwrap();
+            std::fs::write(dir.join("phase"), [phase]).unwrap();
             let socket = dir.join("daemon.sock");
             let prepared = PreparedWorker::for_test(worker_bin).unwrap();
             let config = DaemonConfig {
@@ -6037,9 +6283,24 @@ tidepool-reuse-error: witness failed\n";
                     client
                         .set_read_timeout(Some(Duration::from_secs(4)))
                         .unwrap();
-                    let output = decode_output(&mut client).unwrap();
-                    assert_eq!(output.status.code(), Some(0));
-                    assert_eq!(output.stdout, b"1");
+                    if phase == 17 {
+                        let error = decode_output(&mut client).unwrap_err();
+                        let retained = error.completion_failure().unwrap();
+                        assert_eq!(retained.diagnostic().exit_code(), 23);
+                        assert_eq!(retained.diagnostic().stdout(), b"body-report-v1");
+                        assert_eq!(retained.diagnostic().stderr(), b"visible diagnostic v1");
+                        assert!(!retained.end_cause().is_empty());
+                        let pids = std::fs::read_to_string(dir.join("worker-pids")).unwrap();
+                        let first = pids.lines().next().unwrap();
+                        assert!(
+                            !Path::new("/proc").join(first).exists(),
+                            "diagnostic published before exact failed worker was reaped"
+                        );
+                    } else {
+                        let output = decode_output(&mut client).unwrap();
+                        assert_eq!(output.status.code(), Some(0));
+                        assert_eq!(output.stdout, b"1");
+                    }
                 }
             }
             let started = Instant::now();
@@ -6055,7 +6316,16 @@ tidepool-reuse-error: witness failed\n";
                 response_pending,
                 "one-shot response was visible before END_ACK: {observed:?}"
             );
-            assert_eq!(retained_count, if cancel { b"1" } else { b"2" });
+            assert_eq!(
+                retained_count,
+                if cancel || phase == 17 { b"1" } else { b"2" }
+            );
+            let pids = std::fs::read_to_string(dir.join("worker-pids")).unwrap();
+            assert_eq!(
+                pids.lines().count(),
+                if cancel || phase == 17 { 2 } else { 1 },
+                "failed/abandoned END reused or replayed into the old worker"
+            );
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "early disconnect waited for the 10s deadline"

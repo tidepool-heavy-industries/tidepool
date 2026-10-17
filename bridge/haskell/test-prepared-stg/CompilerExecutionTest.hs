@@ -6,18 +6,25 @@ import Control.Concurrent (forkFinally, killThread)
 import Control.Concurrent.MVar
   (MVar, newEmptyMVar, putMVar, readMVar)
 import Control.Exception
-  (AsyncException(ThreadKilled), SomeException, bracket, catch, finally, fromException, throwIO, try)
-import Control.Monad (forM_, unless)
+  (AsyncException(ThreadKilled), Exception(..), SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, catch, finally, fromException, throwIO, try)
+import Control.Monad ((>=>), foldM, forM_, unless)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Timeout (timeout)
 import Tidepool.CompilerExecution
+import Tidepool.ExtractUtil (trySynchronous)
+import Tidepool.RequestCompletion
 import Tidepool.Test.Runner (TestTree, testCase, testGroup)
 
 compilerExecutionTests :: TestTree
 compilerExecutionTests = testGroup "compiler execution"
-  [ testCase "independent tasks overlap and publish completion before ordered return" overlap
+  [ testCase "completion adapters preserve primary and ordered release facts" completionAdapters
+  , testCase "nested release cancellation preserves identity and attempts every release" nestedReleaseCancellation
+  , testCase "successful body warnings survive failed release" completionWarnings
+  , testCase "phase sink cannot replace outcome or skip an acquired release" phaseSinkFailures
+  , testCase "exception adapters preserve cancellation through synchronous guards" completionSynchronousGuard
+  , testCase "independent tasks overlap and publish completion before ordered return" overlap
   , testCase "completion-triggered work shares the admitted bound" completionWork
   , testCase "dynamic demand incorporates ready ancestors before blocked descendants" dynamicDemand
   , testCase "cancellation joins running work and fences submission" cancellation
@@ -52,7 +59,7 @@ overlap = within $ do
   release <- mapM (const newEmptyMVar) entered
   completion <- newEmptyMVar
   callbacks <- newIORef []
-  bracket (start $ withCompilerExecutor (jobs 2) $ \executor ->
+  bracket (start $ (withCompilerExecutor (const (pure ())) (jobs 2) >=> finishCompletion) $ \executor ->
     runCompilerTasks executor
       (\ordinal -> putMVar (entered !! ordinal) () >> readMVar (release !! ordinal) >> pure ordinal)
       (\ordinal _ -> do
@@ -74,7 +81,7 @@ completionWork = within $ do
         (atomicModifyIORef' active (\(current, peak) -> let next = current + 1 in ((next, max peak next), ())))
         (const (atomicModifyIORef' active (\(current, peak) -> ((current - 1, peak), ()))))
         (const (pure value))
-  withCompilerExecutor (jobs 2) $ \executor -> do
+  (withCompilerExecutor (const (pure ())) (jobs 2) >=> finishCompletion) $ \executor -> do
     result <- runCompilerTasks executor task
       (\(value :: Int) _ -> do
         children <- runCompilerTasks executor task (\_ _ -> pure ()) [value + 10, value + 20]
@@ -90,7 +97,7 @@ dynamicDemand = within $ do
   ancestor <- newEmptyMVar
   releaseChild <- newEmptyMVar
   incorporated <- newEmptyMVar
-  bracket (start $ withCompilerExecutor (jobs 2) $ \executor ->
+  bracket (start $ (withCompilerExecutor (const (pure ())) (jobs 2) >=> finishCompletion) $ \executor ->
     runCompilerWorklist executor
       (\value -> case value of
         0 -> pure value
@@ -113,7 +120,7 @@ cancellation = within $ do
   retained <- newEmptyMVar
   done <- newEmptyMVar
   thread <- forkFinally
-    (withCompilerExecutor (jobs 1) $ \executor -> do
+    ((withCompilerExecutor (const (pure ())) (jobs 1) >=> finishCompletion) $ \executor -> do
       putMVar retained executor
       runCompilerTasks executor
         (\() -> (putMVar entered () >> readMVar never) `finally` putMVar finalized ())
@@ -139,7 +146,7 @@ caughtCancellation = within $ do
   never <- newEmptyMVar
   settled <- newEmptyMVar
   published <- newIORef False
-  executor <- withCompilerExecutor (jobs 1) $ \executor -> do
+  executor <- (withCompilerExecutor (const (pure ())) (jobs 1) >=> finishCompletion) $ \executor -> do
     _ <- forkFinally
       (runCompilerTasks executor
         (\() -> (putMVar entered () >> readMVar never) `catch` \failure ->
@@ -169,7 +176,7 @@ failedWork = within $ do
   never <- newEmptyMVar
   finished <- newEmptyMVar
   _ <- forkFinally
-    (withCompilerExecutor (jobs 2) $ \executor -> runCompilerTasks executor
+    ((withCompilerExecutor (const (pure ())) (jobs 2) >=> finishCompletion) $ \executor -> runCompilerTasks executor
       (\ordinal -> if ordinal == (0 :: Int)
         then readMVar running >> fail "deliberate compiler task failure"
         else (putMVar running () >> readMVar never) `finally` putMVar finalized ())
@@ -187,7 +194,7 @@ dynamicCancellation = within $ do
   done <- newEmptyMVar
   incorporated <- newIORef []
   thread <- forkFinally
-    (withCompilerExecutor (jobs 1) $ \executor -> runCompilerWorklist executor
+    ((withCompilerExecutor (const (pure ())) (jobs 1) >=> finishCompletion) $ \executor -> runCompilerWorklist executor
       (\value -> if value == (0 :: Int) then pure value
         else (putMVar entered () >> readMVar never >> pure value) `finally` putMVar finalized ())
       (\value _ -> do
@@ -209,7 +216,7 @@ callbackFailure = within $ do
   never <- newEmptyMVar
   done <- newEmptyMVar
   _ <- forkFinally
-    (withCompilerExecutor (jobs 2) $ \executor -> runCompilerWorklist executor
+    ((withCompilerExecutor (const (pure ())) (jobs 2) >=> finishCompletion) $ \executor -> runCompilerWorklist executor
       (\value -> if value == (0 :: Int) then pure value
         else (putMVar running () >> readMVar never >> pure value) `finally` putMVar finalized ())
       (\value _ -> if value == 0
@@ -244,3 +251,157 @@ reuseOracle = do
       ("reuse closure disagreed with reachability oracle: " ++ show (graph, valid))
   assert (Set.null (dependencyClosedReuse (Map.singleton (0 :: Int) (Set.singleton 3)) (Set.singleton 0)))
     "missing dependency remained reusable"
+
+-- Authored markers distinguish the primary cause from actual release events.
+-- Repeated identical stages are separate events, not a set to deduplicate.
+data CompletionMarker = BodyMarker | ReleaseMarker Int deriving (Eq, Show)
+instance Exception CompletionMarker
+
+data CompletionCancellation = CompletionCancellation Int deriving (Eq, Show)
+instance Exception CompletionCancellation where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
+
+completionAdapters :: IO ()
+completionAdapters = do
+  forM_ [False, True] $ \bodyFails -> forM_ [1 .. 6] $ \releaseCount -> do
+    completed <- captureCompletion $ if bodyFails then throwIO BodyMarker else pure ()
+    failures <- attemptReleases
+      [(stage, throwIO (ReleaseMarker ordinal))
+      | (ordinal, stage) <- zip [0 .. releaseCount - 1]
+          (cycle [ExecutorStop, CaptureRead, ExecutorStop])]
+    let original = appendCleanupFailures completed failures
+        expected = take releaseCount (cycle [ExecutorStop, CaptureRead, ExecutorStop])
+        verify known = do
+          let actual = completionFailures known
+          assert (map cleanupStage actual == expected)
+            "adapter changed release order or multiplicity"
+          assert (map (fromException . cleanupException) actual
+              == map (Just . ReleaseMarker) [0 .. releaseCount - 1])
+            "adapter changed independent release causes"
+          case completionResult known of
+            BodyFailed failure -> assert (bodyFails && fromException failure == Just BodyMarker)
+              "adapter changed the primary cause"
+            BodyAbortedByCleanup -> assert (not bodyFails)
+              "adapter erased an independent primary cause"
+            BodySucceeded () -> fail "failed release was converted into a finished value"
+    _ <- foldM (\known _ -> do
+        next <- captureCompletion (finishCompletion known)
+        verify next
+        pure next) original [1 .. 32 :: Int]
+    pure ()
+
+nestedReleaseCancellation :: IO ()
+nestedReleaseCancellation = do
+  nestedReleaseCancellationFor (toException ThreadKilled)
+    (\failure -> fromException failure == Just ThreadKilled)
+  nestedReleaseCancellationFor (toException (CompletionCancellation 73))
+    (\failure -> fromException failure == Just (CompletionCancellation 73))
+
+nestedReleaseCancellationFor :: SomeException -> (SomeException -> Bool) -> IO ()
+nestedReleaseCancellationFor originalCancellation isOriginalCancellation = do
+  attempted <- newIORef []
+  let mark value = atomicModifyIORef' attempted (\known -> (known ++ [value], ()))
+  inner <- withCompletionRelease CaptureClose (pure ())
+    (\_ -> mark (0 :: Int) >> throwIO originalCancellation)
+    (\_ -> captureCompletion (throwIO (ReleaseMarker 0) :: IO ()))
+  completed <- captureCompletion (throwIO BodyMarker :: IO ())
+  failures <- attemptReleases
+    [ (OutputRestore, mark 1 >> finishCompletion inner)
+    , (CaptureRemove, mark 2 >> throwIO (ReleaseMarker 2))
+    , (CapabilitiesRestore, mark 3)
+    ]
+  let outer = appendCleanupFailures completed failures
+  observed <- readIORef attempted
+  assert (observed == [0, 1, 2, 3]) "nested cancellation skipped an owed release"
+  assert (map cleanupStage (completionFailures outer) == [OutputRestore, CaptureClose, CaptureRemove])
+    "nested release lost its owner's stages or invented another failure"
+  assert (case completionResult outer of
+      BodyFailed failure -> fromException failure == Just BodyMarker
+      _ -> False) "nested release replaced the independent primary"
+  assert (case completionAsync outer of
+      Just failure -> isOriginalCancellation failure
+      Nothing -> False) "nested release hid the original asynchronous exception"
+  roundtrip <- captureCompletion (finishCompletion outer)
+  assert (map cleanupStage (completionFailures roundtrip) == [OutputRestore, CaptureClose, CaptureRemove])
+    "nested release assessment was duplicated by an exception adapter"
+  assert (case completionAsync roundtrip of
+      Just failure -> isOriginalCancellation failure
+      Nothing -> False) "exception adapter swallowed nested cancellation"
+
+completionWarnings :: IO ()
+completionWarnings = do
+  completed <- withCompletionRelease ExecutorStop (pure ())
+    (\_ -> throwIO (ReleaseMarker 0))
+    (\_ -> captureCompletion (pure ["authored warning"]))
+  assert (case completionResult completed of
+      BodySucceeded warnings -> warnings == ["authored warning"]
+      _ -> False) "release failure discarded the successful body's warnings"
+  assert (map cleanupStage (completionFailures completed) == [ExecutorStop])
+    "successful body cleared the failed executor release"
+
+phaseSinkFailures :: IO ()
+phaseSinkFailures = do
+  forM_ [False, True] $ \asynchronous -> forM_ [False, True] $ \atStart -> do
+    released <- newIORef (0 :: Int)
+    seen <- newIORef []
+    let sink phase = do
+          atomicModifyIORef' seen (\known -> (known ++ [show phase], ()))
+          case phase of
+            CleanupStarted ExecutorStop | atStart -> interrupt
+            CleanupFinished ExecutorStop | not atStart -> interrupt
+            _ -> pure ()
+        interrupt = if asynchronous then throwIO (CompletionCancellation 91)
+          else throwIO (ReleaseMarker 91)
+    completed <- withCompletionRelease ExecutorStop (pure ())
+      (const (releaseWithPhase sink ExecutorStop
+        (atomicModifyIORef' released (\known -> (known + 1, ())))))
+      (const (captureCompletion (pure ["original warning"])))
+    actual <- readIORef released
+    events <- readIORef seen
+    assert (actual == 1) "phase sink skipped or repeated the actual release"
+    assert (events == ["CleanupStarted ExecutorStop", "CleanupFinished ExecutorStop"])
+      "phase sink skipped or repeated a bounded phase record"
+    assert (case completionResult completed of
+        BodySucceeded warnings -> warnings == ["original warning"]
+        _ -> False) "phase sink replaced the original body result"
+    assert (length (completionFailures completed) == if asynchronous then 1 else 0)
+      "phase sink invented a synchronous cleanup failure or lost cancellation"
+    assert (case completionAsync completed of
+        Just failure -> asynchronous && fromException failure == Just (CompletionCancellation 91)
+        Nothing -> not asynchronous) "phase sink changed asynchronous exception identity"
+
+completionSynchronousGuard :: IO ()
+completionSynchronousGuard = do
+  forM_ [False, True] $ \primaryAsync -> do
+    completed <- withCompletionRelease ExecutorStop (pure ())
+      (const (throwIO (if primaryAsync then toException (ReleaseMarker 17)
+        else toException (CompletionCancellation 82))))
+      (const (captureCompletion (throwIO (if primaryAsync then toException (CompletionCancellation 81)
+        else toException BodyMarker) :: IO ())))
+    guarded <- captureCompletion (trySynchronous (finishCompletion completed))
+    assert (case completionResult guarded of
+        BodySucceeded _ -> False
+        _ -> True) "synchronous guard swallowed nested cancellation"
+    assert (map cleanupStage (completionFailures guarded) == [ExecutorStop])
+      "synchronous guard discarded or multiplied release assessment"
+    assert (case completionAsync guarded of
+        Just actual -> fromException actual == Just (CompletionCancellation (if primaryAsync then 81 else 82))
+        Nothing -> False) "synchronous guard changed original cancellation identity"
+    assert (case completionResult guarded of
+        BodyFailed actual -> if primaryAsync
+          then fromException actual == Just (CompletionCancellation 81)
+          else fromException actual == Just BodyMarker
+        _ -> False) "synchronous guard replaced the independent body cause"
+  synchronous <- withCompletionRelease ExecutorStop (pure ())
+    (const (throwIO (ReleaseMarker 19)))
+    (const (captureCompletion (throwIO BodyMarker :: IO ())))
+  guarded <- trySynchronous (finishCompletion synchronous)
+  case guarded of
+    Right _ -> fail "synchronous release failure became success"
+    Left failure -> do
+      normalized <- captureCompletion (throwIO failure :: IO ())
+      assert (case completionAsync normalized of Nothing -> True; Just _ -> False)
+        "synchronous release was fabricated into cancellation"
+      assert (map cleanupStage (completionFailures normalized) == [ExecutorStop])
+        "synchronous guard lost the original ordered release evidence"

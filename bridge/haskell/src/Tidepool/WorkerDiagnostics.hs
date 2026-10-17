@@ -6,15 +6,16 @@ module Tidepool.WorkerDiagnostics
   , throwCellSplitError
   , sourceFailureDiagnostics
   , renderInspectionDiagnostics
-  , reportDiags
-  , reportDiagsWithWarnings
+  , CaptureAssessment(..), renderCompletion
   ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO)
 import Data.List (intercalate)
 import GHC.Types.SourceError (SourceError)
 import System.Exit (ExitCode(..))
-import System.IO (hPutStrLn, stderr)
+import Tidepool.RequestCompletion
+  ( Completion, BodyOutcome(..), completionResult, completionFailures, completionAsync
+  , cleanupStage, cleanupException )
 import Tidepool.FamilyConsistency (FamilyConsistencyRejection, renderFamilyConsistencyRejection)
 import Tidepool.Binders (CellSplitError(..), CellSourceSpan(..))
 import Tidepool.DiagJson
@@ -64,13 +65,39 @@ renderInspectionDiagnostics = intercalate "\n" . map render
       Nothing -> ""
 
 
--- | Emit one JSON report on stdout and a human-readable failure on stderr.
--- The caller owns process exit; failures return exit code 1.
-reportDiags :: Either SomeException () -> IO ExitCode
-reportDiags = reportDiagsWithWarnings . fmap (const [])
+-- Capture rejection is independent of body failure and release uncertainty.
+-- A bounded diagnostic refusal with confirmed release may reuse the worker.
+data CaptureAssessment = CaptureComplete | CaptureBudgetRejected String | CaptureUnavailable
 
-reportDiagsWithWarnings :: Either SomeException [Diag] -> IO ExitCode
-reportDiagsWithWarnings (Left e) = do
+-- Both direct CLI and framed transport call this after their owning releases.
+-- This function produces one report; it never writes a terminal channel.
+renderCompletion :: Completion [Diag] -> CaptureAssessment -> IO (ExitCode, String, String)
+renderCompletion completed capture = do
+  case completionAsync completed of
+    Just failure -> throwIO failure
+    Nothing -> pure ()
+  let (bodyOutcome, primary, human, failureCode) = case completionResult completed of
+        BodySucceeded warnings -> (ReportSuccess, warnings, "", ExitSuccess)
+        BodyFailed failure ->
+          let (outcome, diagnostics, debug, code) = failureDiagnostics failure
+          in (outcome, diagnostics, debug, code)
+        BodyAbortedByCleanup -> (ReportWorkerFailure, [], "", ExitFailure 1)
+      releaseDiagnostics =
+        [Diag Nothing DiagError ("compiler cleanup " ++ show (cleanupStage failure)
+          ++ ": " ++ show (cleanupException failure))
+        | failure <- completionFailures completed]
+      captureDiagnostics = case capture of
+        CaptureComplete -> []
+        CaptureBudgetRejected message -> [Diag Nothing DiagError message]
+        CaptureUnavailable -> [Diag Nothing DiagError "compiler output capture unavailable"]
+      additional = releaseDiagnostics ++ captureDiagnostics
+      outcome = if null additional then bodyOutcome else ReportWorkerFailure
+      code = if null additional then failureCode else ExitFailure 1
+      debug = human ++ concatMap ((++ "\n") . dMessage) additional
+  pure (code, renderDiagsJson outcome (primary ++ additional) ++ "\n", debug)
+
+failureDiagnostics :: SomeException -> (ReportOutcome, [Diag], String, ExitCode)
+failureDiagnostics e =
   let (outcome, diags) = case fromException e of
         Just (rejection :: InputRejection) -> (ReportInputRejected, [Diag Nothing DiagError (show rejection)])
         Nothing -> case fromException e of
@@ -89,12 +116,10 @@ reportDiagsWithWarnings (Left e) = do
                   Just (rejection :: FamilyConsistencyRejection) ->
                     (ReportSourceFailure, [Diag Nothing DiagError (renderFamilyConsistencyRejection rejection)])
                   Nothing -> (ReportWorkerFailure, [diagFromException e])
-  putStrLn (renderDiagsJson outcome diags)
-  -- Debug copy for humans only; stdout (above) is the authoritative machine
-  -- contract.
-  case fromException e of
-    Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-    Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-  pure (ExitFailure 1)
-reportDiagsWithWarnings (Right warnings) =
-  putStrLn (renderDiagsJson ReportSuccess warnings) >> pure ExitSuccess
+      human = case fromException e of
+        Just (se :: SourceError) -> "Compilation failed.\n" ++ show se ++ "\n"
+        Nothing -> "Error: " ++ show e ++ "\n"
+      code = case fromException e of
+        Just (InvalidWorkerRequest _) -> ExitFailure 2
+        _ -> ExitFailure 1
+  in (outcome, diags, human, code)

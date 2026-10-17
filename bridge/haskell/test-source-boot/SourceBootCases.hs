@@ -1,5 +1,7 @@
 module SourceBootCases where
 
+import Tidepool.RequestCompletion (finishCompletion)
+
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
@@ -30,7 +32,7 @@ import Control.Exception (SomeException, IOException, AsyncException(ThreadKille
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (newMVar, modifyMVar_, readMVar)
 import Data.IntMap.Strict qualified as IntMap
-import Control.Monad (foldM, forM, forM_, unless, void, when)
+import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word32, Word64)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
@@ -419,7 +421,7 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
         maybe (fail (label ++ " timed out within its executor lifetime and cleanup")) pure result
       exercise label width queue includeAll completeEveryOwner = do
         grant <- either fail pure (compilerExecutionGrant width)
-        boundedSchedule label $ withCompilerExecutor grant $ \executor -> do
+        boundedSchedule label $ (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
           bodyCache <- newPreparedBodyCache
           rawCache <- newOriginalProjectionCollector
           completionOrder <- newIORef []
@@ -3703,7 +3705,7 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "restored capture did not independently reproduce the original packet"
   pendingBodyCache <- newPreparedBodyCache
   pendingRawCache <- newOriginalProjectionCollector
-  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+  (withCompilerExecutor (const (pure ())) serialCompilerExecutionGrant >=> finishCompletion) $ \executor -> do
     let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules paired)))
           (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture") (prCanonicalInterfaceAdmissions (pprPipelineResult paired))
@@ -3751,7 +3753,7 @@ originalProjectionProducts = withScratch $ \work -> do
         [value | value <- originals, pmModule value /= pmModule consumer] $ \value -> do
           stable <- makeStableName value
           pure (pmModule value,stable)
-  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+  (withCompilerExecutor (const (pure ())) serialCompilerExecutionGrant >=> finishCompletion) $ \executor -> do
     (firstDemand,_) <- demand executor
     (secondDemand,_) <- demand executor
     firstBodies <- recoveredIdentities firstDemand
