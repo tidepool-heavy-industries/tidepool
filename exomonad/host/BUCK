@@ -205,7 +205,7 @@ tidepool_rust_library(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -355,7 +355,7 @@ tidepool_rust_binary(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -505,7 +505,7 @@ tidepool_rust_binary(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -679,7 +679,7 @@ tidepool_rust_isolated_test(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "exomonad/host/src/bin/exomonad.rs",
@@ -1025,7 +1025,7 @@ tidepool_rust_binary(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "exomonad/host/src/actor_host/coherent_reload_acceptance_tests.rs",
@@ -2369,7 +2369,7 @@ tidepool_rust_isolated_test(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "exomonad/host/tests/exomonad_action_surface.rs",
@@ -2471,7 +2471,7 @@ tidepool_rust_isolated_test(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "exomonad/host/tests/exomonad_namespace_entry.rs",
@@ -2562,7 +2562,7 @@ tidepool_rust_isolated_test(
         ":exomonad_host",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
         "exomonad/host/tests/exomonad_workspace_check.rs",
