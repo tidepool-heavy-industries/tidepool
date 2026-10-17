@@ -30,13 +30,26 @@ pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
 }
 
 pub(super) fn prepared_scaffold(config: &mut super::ActorHostConfig) {
-    scaffold(config);
     let embedded = config
         .embedded
         .clone()
         .expect("the hosted test owns its transport settings");
+    let defaults = crate::exomonad::ExomonadAgentDefaults {
+        model: config.model.clone(),
+        reasoning: config.reasoning.clone(),
+    };
+    defaults
+        .validate()
+        .expect("the hosted test model and reasoning select the same backend");
+    assert_eq!(
+        embedded.provider,
+        defaults.model.backend(),
+        "the hosted test transport and model select the same backend"
+    );
+    scaffold(config);
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
         project.launch.embedded = Some(embedded);
+        project.defaults = defaults;
     });
     commit_workspace(&config.workspace);
 }
