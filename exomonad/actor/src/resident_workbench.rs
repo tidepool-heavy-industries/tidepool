@@ -246,6 +246,14 @@ pub(crate) fn with_test_compiler_owner<T, F: std::future::Future<Output = T>>(
 }
 
 #[cfg(test)]
+fn with_test_bound_source<T, F: std::future::Future<Output = T>>(
+    config: ActorWorkbenchSource,
+    operation: impl FnOnce(BoundActorWorkbenchSource) -> F,
+) -> impl std::future::Future<Output = T> {
+    with_test_compiler_owner(move |client| operation(config.bind_preparation(client)))
+}
+
+#[cfg(test)]
 #[test]
 fn compiler_owner_wrapper_size_does_not_scale_with_operation_state() {
     fn operation<const N: usize>() -> impl std::future::Future<Output = ()> {
@@ -691,7 +699,7 @@ impl BoundActorWorkbenchSource {
                 && ready.selection().map(|selection| selection.recipe())
                     == Some(installer_program_recipe(&recipe)?)
             {
-                return Ok(ready.clone());
+                return self.preparation.claim(|| ready.clone());
             }
         }
         let prepared = self
@@ -13608,6 +13616,28 @@ pub(crate) mod request_tests {
     use super::*;
 
     #[tokio::test]
+    async fn bound_source_rebinding_preserves_exact_issuer_pending_state() {
+        with_test_compiler_owner(|client| async move {
+            let config = ActorWorkbenchSource::new("", Vec::new());
+            let first = config.clone().bind_preparation(client.clone());
+            let rebound = config.clone().bind_preparation(client);
+            assert!(Arc::ptr_eq(
+                &first.toolset_preparation,
+                &rebound.toolset_preparation
+            ));
+            with_test_compiler_owner(|independent| async move {
+                let other = config.bind_preparation(independent);
+                assert!(!Arc::ptr_eq(
+                    &first.toolset_preparation,
+                    &other.toolset_preparation
+                ));
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn empty_checkpoint_retirement_preserves_nonempty_machine_admission() {
         with_test_compiler_owner(empty_checkpoint_retirement_preserves_nonempty_machine_admission_with_preparation_client).await
     }
@@ -14101,7 +14131,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn typed_host_mount_carriers_compile_and_bind() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (machines, context, mut source, _root) = actor_registry_fixture();
             source.workbench_imports.extend_text("qualified Data.Text as TidepoolHostText");
             let (workbench, context) = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None)
@@ -14284,9 +14314,16 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cleanup_scope_captures_compiler_owner_when_polled() {
+        with_test_compiler_owner(cleanup_scope_captures_compiler_owner_when_polled_with_client)
+            .await;
+    }
+
+    async fn cleanup_scope_captures_compiler_owner_when_polled_with_client(
+        preparation_client: crate::CompilerPreparationClient,
+    ) {
         let workbench = ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
             Arc::new(crate::ActorMachineRegistry::new()),
-            ActorWorkbenchSource::new("", Vec::new()),
+            ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation_client),
             None,
         );
         let descriptor = crate::ActorDescriptor::new(
@@ -14677,6 +14714,7 @@ pub(crate) mod request_tests {
         assert!(!workbench
             .access
             .source
+            .config
             .preamble
             .contains("import qualified Tidepool.Effects.Core"));
         let first = workbench
@@ -15261,7 +15299,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn mutation_after_whole_cell_preparation_refuses_stale_item_and_fresh_preparation_succeeds(
     ) {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (machines, context, source, _root) = actor_registry_fixture();
             let (workbench, context) = ResidentActorWorkbench::new(
                 machines,
@@ -17824,6 +17862,58 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_pre_actor_preparation_scope_stops_and_joins_physical_work() {
+        let (_, _, config, _session_root) = host_mount_fixture();
+        let mut lifetime = crate::CompilerPreparationOwner::new();
+        let cleanup = lifetime.cleanup();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancellation_seen) = tokio::sync::oneshot::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let mut operation = Box::pin(lifetime.scope_with_client(|client| async move {
+            let source = config.bind_preparation(client);
+            let barrier = parking_lot::Mutex::new(Some((entered, cancelled, finish)));
+            source
+                .toolset_preparation
+                .observe_fresh_launch(Arc::new(move || {
+                    let (entered, cancelled, finish) = barrier.lock().take().unwrap();
+                    entered.send(()).unwrap();
+                    while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
+                        std::thread::yield_now();
+                    }
+                    cancelled.send(()).unwrap();
+                    finish
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                }));
+            source
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CheckpointSourceLayer::default(),
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await
+        }));
+        tokio::select! {
+            entered = started => entered.unwrap(),
+            _ = &mut operation => panic!("preparation completed before controlled retirement"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => panic!("preparation never entered"),
+        }
+        drop(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cleanup.observation().is_confirmed());
+        release.send(()).unwrap();
+        assert!(cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(15))
+            .await
+            .is_confirmed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_retirement_stops_source_preparation_and_retains_physical_settlement() {
         source_preparation_retirement_history(false).await;
     }
@@ -18071,14 +18161,7 @@ pub(crate) mod request_tests {
             (&changed, "42"),
             (&warm_original, "41"),
         ] {
-            run_native_instance_effect_probe(
-                preparation_client.clone(),
-                source.clone(),
-                prepared,
-                &support,
-                expected,
-            )
-            .await;
+            run_native_instance_effect_probe(source.clone(), prepared, &support, expected).await;
         }
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
@@ -18088,7 +18171,6 @@ pub(crate) mod request_tests {
     }
 
     async fn run_native_instance_effect_probe(
-        preparation_client: crate::CompilerPreparationClient,
         source: BoundActorWorkbenchSource,
         prepared: &PreparedSourceToolset,
         support: &[exomonad_tool::ToolEffectKey],
@@ -18190,7 +18272,6 @@ pub(crate) mod request_tests {
     }
 
     async fn run_native_quoted_probe(
-        preparation_client: crate::CompilerPreparationClient,
         mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: crate::ActorSessionContext,
         source: BoundActorWorkbenchSource,
@@ -18394,7 +18475,6 @@ pub(crate) mod request_tests {
         assert_eq!(immediate.acquisition(), fresh.acquisition());
         let (immediate_session, immediate_context, _, _immediate_root) = host_mount_fixture();
         run_native_quoted_probe(
-            preparation_client.clone(),
             immediate_session,
             immediate_context,
             handoff_source,
@@ -18436,7 +18516,6 @@ pub(crate) mod request_tests {
         // Its prepared bytes can stay equal when the quoted tool body changes.
         let (successor_session, successor_context, _, _successor_root) = host_mount_fixture();
         run_native_quoted_probe(
-            preparation_client.clone(),
             successor_session,
             successor_context,
             source.clone(),
@@ -18478,8 +18557,8 @@ pub(crate) mod request_tests {
         );
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.
-        source.toolset_preparation = Default::default();
-        source.toolset_support_manifests = Default::default();
+        let mut cold_config = source.config.clone();
+        cold_config.toolset_support_manifests = Default::default();
         let selected = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: [fresh
@@ -18490,79 +18569,83 @@ pub(crate) mod request_tests {
             .collect(),
         });
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let load_control = crate::WorkbenchExecutionControl::untracked();
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let (release, proceed) = std::sync::mpsc::channel();
-        let proceed = parking_lot::Mutex::new(proceed);
-        source.toolset_preparation.observe_completed_load(Arc::new({
-            let entered = entered.clone();
-            move || {
-                entered.notify_one();
-                proceed
-                    .lock()
-                    .recv_timeout(Duration::from_secs(15))
-                    .unwrap();
-            }
-        }));
-        let loading = tokio::spawn({
-            let source = source.clone();
-            let selected = selected.clone();
-            let owner = CompilerCloseOwner::Hosted(load_control.clone());
+        with_test_bound_source(cold_config.clone(), |source| {
+            let fresh = fresh.clone();
             async move {
-                owner
-                    .scope(source.prepare_source_toolset(
-                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                        selected,
-                        &[],
-                        &[],
-                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                    ))
+                let load_control = crate::WorkbenchExecutionControl::untracked();
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let (release, proceed) = std::sync::mpsc::channel();
+                let proceed = parking_lot::Mutex::new(proceed);
+                source.toolset_preparation.observe_completed_load(Arc::new({
+                    let entered = entered.clone();
+                    move || {
+                        entered.notify_one();
+                        proceed
+                            .lock()
+                            .recv_timeout(Duration::from_secs(15))
+                            .unwrap();
+                    }
+                }));
+                let loading = tokio::spawn({
+                    let source = source.clone();
+                    let selected = selected.clone();
+                    let owner = CompilerCloseOwner::Hosted(load_control.clone());
+                    async move {
+                        owner
+                            .scope(source.prepare_source_toolset(
+                                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                                selected,
+                                &[],
+                                &[],
+                                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                            ))
+                            .await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(15), entered.notified())
                     .await
+                    .unwrap();
+                assert!(matches!(
+                    load_control.compiler_close_observations().as_slice(),
+                    [crate::termination::CompilerWorkClose::Pending]
+                ));
+                assert!(load_control.request_cancellation());
+                assert!(load_control.publication_decision().claim_commit().is_none());
+                release.send(()).unwrap();
+                let loaded = tokio::time::timeout(Duration::from_secs(15), loading)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    load_control.compiler_close_observations().as_slice(),
+                    [crate::termination::CompilerWorkClose::Settled(
+                        tidepool_runtime::CompilerTransactionClose::NotStarted
+                    )]
+                ));
+                assert!(matches!(
+                    loaded.acquisition(),
+                    crate::ToolsetAcquisition::DeploymentOriginal { .. }
+                ));
+                assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
+                assert_eq!(
+                    fresh.prepared.entry.compiled().prepared(),
+                    loaded.prepared.entry.compiled().prepared()
+                );
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+
+                run_native_quoted_probe(
+                    session,
+                    context,
+                    source.clone(),
+                    &loaded.prepared.entry,
+                    "41",
+                )
+                .await;
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
             }
-        });
-        tokio::time::timeout(Duration::from_secs(15), entered.notified())
-            .await
-            .unwrap();
-        assert!(matches!(
-            load_control.compiler_close_observations().as_slice(),
-            [crate::termination::CompilerWorkClose::Pending]
-        ));
-        assert!(load_control.request_cancellation());
-        assert!(load_control.publication_decision().claim_commit().is_none());
-        release.send(()).unwrap();
-        let loaded = tokio::time::timeout(Duration::from_secs(15), loading)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            load_control.compiler_close_observations().as_slice(),
-            [crate::termination::CompilerWorkClose::Settled(
-                tidepool_runtime::CompilerTransactionClose::NotStarted
-            )]
-        ));
-        assert!(matches!(
-            loaded.acquisition(),
-            crate::ToolsetAcquisition::DeploymentOriginal { .. }
-        ));
-        assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
-        assert_eq!(
-            fresh.prepared.entry.compiled().prepared(),
-            loaded.prepared.entry.compiled().prepared()
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-
-        run_native_quoted_probe(
-            preparation_client.clone(),
-            session,
-            context,
-            source.clone(),
-            &loaded.prepared.entry,
-            "41",
-        )
+        })
         .await;
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
         let retried_source = snapshot(crate::SourceEntryStorage::FreshCompilation {
             directory: storage.path().to_owned(),
@@ -18575,60 +18658,70 @@ pub(crate) mod request_tests {
             .join("entry/raw/meta.cbor");
         let original_metadata = std::fs::read(&metadata).unwrap();
         std::fs::write(&metadata, b"post-publication fault").unwrap();
-        source.toolset_preparation = Default::default();
-        assert!(with_test_compiler_owner(|_| source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            retried_source.clone(),
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .is_err());
-        std::fs::write(&metadata, original_metadata).unwrap();
-        let retried = with_test_compiler_owner(|_| {
-            source.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                retried_source,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            )
+        with_test_bound_source(cold_config.clone(), |source| {
+            let fresh = fresh.clone();
+            let input = input.clone();
+            let completed_executions = completed_executions.clone();
+            async move {
+                assert!(source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        retried_source.clone(),
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+                    .is_err());
+                std::fs::write(&metadata, original_metadata).unwrap();
+                let retried = source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        retried_source,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    retried.acquisition(),
+                    crate::ToolsetAcquisition::ExistingRunOriginal { .. }
+                ));
+                assert_eq!(
+                    retried.completed_entry_selection().unwrap(),
+                    (recipe, original)
+                );
+                assert_eq!(
+                    retried.prepared.entry.compiled().prepared(),
+                    fresh.prepared.entry.compiled().prepared()
+                );
+                assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+                assert_eq!(
+                    std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+                    completed_executions
+                );
+            }
         })
-        .await
-        .unwrap();
-        assert!(matches!(
-            retried.acquisition(),
-            crate::ToolsetAcquisition::ExistingRunOriginal { .. }
-        ));
-        assert_eq!(
-            retried.completed_entry_selection().unwrap(),
-            (recipe, original)
-        );
-        assert_eq!(
-            retried.prepared.entry.compiled().prepared(),
-            fresh.prepared.entry.compiled().prepared()
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-        assert_eq!(
-            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
-            completed_executions
-        );
+        .await;
         let invalid = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: [(recipe.to_owned(), uuid::Uuid::new_v4())]
                 .into_iter()
                 .collect(),
         });
-        source.toolset_preparation = Default::default();
         assert!(
-            with_test_compiler_owner(|_| source.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                invalid,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            ))
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        invalid,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
             .await
             .is_err(),
             "a missing owner-selected original cannot fall back to source"
@@ -18639,25 +18732,27 @@ pub(crate) mod request_tests {
             completed_executions
         );
 
-        source.toolset_preparation = Default::default();
         let uncovered = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: storage.path().to_owned(),
             selections: Default::default(),
         });
         assert!(matches!(
-            with_test_compiler_owner(|_| source.prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                uncovered,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            ))
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        uncovered,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
             .await,
             Err(ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
         ));
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
-        source.toolset_preparation = Default::default();
         let missing = snapshot(crate::SourceEntryStorage::CompletedOriginal {
             directory: authored.path().join("absent-entries"),
             selections: [fresh
@@ -18667,15 +18762,21 @@ pub(crate) mod request_tests {
             .into_iter()
             .collect(),
         });
-        assert!(with_test_compiler_owner(|_| source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            missing,
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .is_err());
+        assert!(
+            with_test_bound_source(cold_config.clone(), |source| async move {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        missing,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+            })
+            .await
+            .is_err()
+        );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
     }
 
@@ -19953,14 +20054,14 @@ pub(crate) mod request_tests {
             "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
             installation.effect_row,
         );
-        let mut imports = source.workbench_imports.clone();
+        let mut imports = source.config.workbench_imports.clone();
         imports.extend_text("qualified QuotedAgentSpec");
         imports.extend_text("qualified Tidepool.Agent.Contract");
         imports.extend_text("qualified Tidepool.Effects.Core");
         imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
         imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
         let templates = resident_workbench_templates(
-            &source.preamble,
+            &source.config.preamble,
             &dispatcher_effects,
             &imports.template_text(),
         );
@@ -20035,7 +20136,6 @@ pub(crate) mod request_tests {
         .unwrap();
         let (ordinary_session, ordinary_context, _, _ordinary_root) = host_mount_fixture();
         run_native_quoted_probe(
-            preparation_client.clone(),
             ordinary_session,
             ordinary_context,
             source.clone(),
@@ -20045,7 +20145,6 @@ pub(crate) mod request_tests {
         .await;
         let (original_session, original_context, _, _original_root) = host_mount_fixture();
         run_native_quoted_probe(
-            preparation_client.clone(),
             original_session,
             original_context,
             source.clone(),
@@ -20137,7 +20236,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, mut source, _root) = host_mount_fixture();
             let authored = tempfile::tempdir().unwrap();
             std::fs::write(
@@ -20594,7 +20693,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn explicit_replacement_fence_refuses_changed_dispatch_and_retired_actor() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, _root) = host_mount_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
@@ -21291,7 +21390,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn child_publication_issues_drop_custody_without_claiming_collision_peers() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let id = tidepool_repr::SessionId(812);
             let root = tempfile::tempdir().unwrap();
             let root_path = root.path().to_path_buf();
@@ -21359,8 +21458,17 @@ pub(crate) mod request_tests {
         .await
     }
 
-    #[test]
-    fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle(
+    #[tokio::test]
+    async fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle() {
+        with_test_compiler_owner(|client| async move {
+            child_session_factory_builds_a_type_checking_session_and_inserts_it_idle_with_client(
+                client,
+            )
+        })
+        .await;
+    }
+
+    fn child_session_factory_builds_a_type_checking_session_and_inserts_it_idle_with_client(
         preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
@@ -22950,8 +23058,15 @@ pub(crate) mod request_tests {
         );
     }
 
-    #[test]
-    fn spawn_child_session_without_an_installed_factory_is_a_named_error(
+    #[tokio::test]
+    async fn spawn_child_session_without_an_installed_factory_is_a_named_error() {
+        with_test_compiler_owner(|client| async move {
+            spawn_child_session_without_an_installed_factory_is_a_named_error_with_client(client)
+        })
+        .await;
+    }
+
+    fn spawn_child_session_without_an_installed_factory_is_a_named_error_with_client(
         preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, _context, source, _root) = actor_registry_fixture();
@@ -23650,7 +23765,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn request_annotations_survive_checked_prologue_adoption_and_publication() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, public_context, mut source, inputs, _root) =
                 activation_input_fixture(|_| {});
             let evidence = inputs[0].type_evidence().clone();
@@ -25422,7 +25537,7 @@ pub(crate) mod request_tests {
             private_context.placement.lexical_scope = execution.private_scope;
             let private_workbench = ResidentActorWorkbench::new(
                 workbench.access.machines.clone(),
-                (workbench.access.source.clone()).bind_preparation(preparation_client.clone()),
+                workbench.access.source.clone(),
                 None,
             )
             .with_compilation_authority(
@@ -25666,7 +25781,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn twenty_distinct_activation_values_share_one_renderer_after_parent_failure() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, inputs, _root) = distinct_renderer_input_fixture();
             assert_eq!(inputs.len(), 20);
             let machines = Arc::new(ActorMachineRegistry::new());
@@ -26132,7 +26247,7 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cached_renderer_recheckout_refuses_stale_mount_and_preserves_ready_code() {
-        with_test_compiler_owner(|preparation_client| async {
+        with_test_compiler_owner(|preparation_client| async move {
             let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));

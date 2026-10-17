@@ -215,6 +215,13 @@ proptest::proptest! {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     let (control, task) = RunControlClient::start().await.unwrap();
+    let (other_control, other_task) = RunControlClient::start().await.unwrap();
+    let other_ticket = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+        other_control.preparation_client().producer(),
+    )
+    .register_work()
+    .unwrap();
+    let other_cancellation = other_ticket.cancellation().host_admission_cancellation();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
@@ -248,6 +255,7 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         .await
         .unwrap()
         .unwrap();
+    other_cancellation.checkpoint().unwrap();
     assert!(client.claim(|| ()).is_err());
     assert!(
         crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
@@ -259,12 +267,30 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         control.settle_preparations(Duration::from_millis(10)).await,
         crate::CleanupComponentOutcome::Unconfirmed(_)
     ));
+    assert_eq!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert!(
+        control.finish_run().await.is_err(),
+        "resource settlement cannot finalize pending shared compilation"
+    );
     release.send(()).unwrap();
     physical.await.unwrap();
     assert_eq!(
         control.settle_preparations(Duration::from_secs(2)).await,
         crate::CleanupComponentOutcome::Confirmed
     );
+    other_ticket.run(|_| ());
+    other_control.seal().await.unwrap();
+    assert_eq!(
+        other_control
+            .settle_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    other_control.owner.stop(None);
+    other_task.await.unwrap();
     control.owner.stop(None);
     task.await.unwrap();
 }

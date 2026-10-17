@@ -26,7 +26,9 @@ fn context(session: SessionId, scope: ScopeId) -> ActorSessionContext {
     }
 }
 
-fn fixture() -> (
+fn fixture(
+    preparation: crate::CompilerPreparationClient,
+) -> (
     Arc<Registry>,
     Workbench,
     SessionId,
@@ -48,24 +50,24 @@ fn fixture() -> (
     machines.insert_idle(session_id, Box::new(session));
     let workbench = Workbench::new(
         Arc::clone(&machines),
-        ActorWorkbenchSource::new("", Vec::new()),
+        ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation),
         None,
     );
     (machines, workbench, session_id, retired, root)
 }
 
 async fn unknown_session(request: InspectionRequest) {
-    let mut owner = crate::CompilerPreparationOwner::new();
-    let outcome = owner.scope(unknown_session_with_owner(request)).await;
-    assert!(outcome
-        .cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await
-        .is_confirmed());
+    crate::resident_workbench::with_test_compiler_owner(|client| {
+        unknown_session_with_owner(client, request)
+    })
+    .await;
 }
 
-async fn unknown_session_with_owner(request: InspectionRequest) {
-    let (machines, workbench, other, _, _root) = fixture();
+async fn unknown_session_with_owner(
+    preparation: crate::CompilerPreparationClient,
+    request: InspectionRequest,
+) {
+    let (machines, workbench, other, _, _root) = fixture(preparation.clone());
     let missing = SessionId(12);
     let before = machines.peek(other, ResidentSession::run_context).unwrap();
     let error = inspect(&workbench, context(missing, ScopeId::ROOT), request)
@@ -87,17 +89,17 @@ async fn unknown_session_with_owner(request: InspectionRequest) {
 }
 
 async fn retired_scope(request: InspectionRequest) {
-    let mut owner = crate::CompilerPreparationOwner::new();
-    let outcome = owner.scope(retired_scope_with_owner(request)).await;
-    assert!(outcome
-        .cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
-        .await
-        .is_confirmed());
+    crate::resident_workbench::with_test_compiler_owner(|client| {
+        retired_scope_with_owner(client, request)
+    })
+    .await;
 }
 
-async fn retired_scope_with_owner(request: InspectionRequest) {
-    let (machines, workbench, session, retired, _root) = fixture();
+async fn retired_scope_with_owner(
+    preparation: crate::CompilerPreparationClient,
+    request: InspectionRequest,
+) {
+    let (machines, workbench, session, retired, _root) = fixture(preparation.clone());
     let before = machines
         .peek(session, ResidentSession::run_context)
         .unwrap();
@@ -132,8 +134,19 @@ async fn retired_scope_with_owner(request: InspectionRequest) {
 
 #[tokio::test]
 async fn compiler_inspection_requires_cleanup_owner_before_checkout() {
+    crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+        // Source preparation lifetime is explicit, while this new task has no
+        // inherited task-local compiler owner for the inspection being refused.
+        tokio::spawn(async move { compiler_inspection_without_owner(preparation).await })
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+async fn compiler_inspection_without_owner(preparation: crate::CompilerPreparationClient) {
     for request in [InspectionRequest::Recovery, InspectionRequest::Bindings] {
-        let (machines, workbench, session, _, _root) = fixture();
+        let (machines, workbench, session, _, _root) = fixture(preparation.clone());
         let before = machines
             .peek(session, ResidentSession::run_context)
             .unwrap();

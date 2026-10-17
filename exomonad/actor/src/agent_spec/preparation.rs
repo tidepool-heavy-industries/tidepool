@@ -434,7 +434,14 @@ impl ToolsetPreparation {
                 .with_current_subscriber(),
             );
         }
-        task.wait_observed(disposition).await
+        let outcome = task.wait_observed(disposition).await;
+        if outcome.is_ok() {
+            client
+                .claim(|| outcome)
+                .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?
+        } else {
+            outcome
+        }
     }
 
     /// Reopen the exact completed original selected by durable installation
@@ -476,7 +483,13 @@ impl ToolsetPreparation {
             .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
         producer_timing.complete(outcome.is_ok());
         wait_timing.complete(outcome.is_ok());
-        outcome
+        if outcome.is_ok() {
+            client
+                .claim(|| outcome)
+                .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?
+        } else {
+            outcome
+        }
     }
 
     fn settle(

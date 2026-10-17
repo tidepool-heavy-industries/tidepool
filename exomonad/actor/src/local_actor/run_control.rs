@@ -901,6 +901,7 @@ impl Actor for RunControl {
                             })
                     });
                 let confirmed = state.phase == RunPhase::Retired
+                    && state.shared_compiler.cleanup().observation().is_confirmed()
                     && matches!(
                         state.resource_retirement,
                         ResourceRetirement::Settled(crate::CleanupComponentOutcome::Confirmed)
@@ -933,19 +934,25 @@ impl Actor for RunControl {
             }
             RunControlMessage::FinalizationTargets { reply } => {
                 let result = match state.phase {
-                    RunPhase::Retired => Ok(RunFinalizationTargets::Retire(
-                        state
-                            .reservations
-                            .values()
-                            .filter(|record| matches!(record.phase, ReservationPhase::Registered))
-                            .filter_map(|record| {
-                                record.lifecycle.clone().map(|lifecycle| {
-                                    let cell = record.executor.clone();
-                                    (lifecycle, cell)
+                    RunPhase::Retired
+                        if state.shared_compiler.cleanup().observation().is_confirmed() =>
+                    {
+                        Ok(RunFinalizationTargets::Retire(
+                            state
+                                .reservations
+                                .values()
+                                .filter(|record| {
+                                    matches!(record.phase, ReservationPhase::Registered)
                                 })
-                            })
-                            .collect(),
-                    )),
+                                .filter_map(|record| {
+                                    record.lifecycle.clone().map(|lifecycle| {
+                                        let cell = record.executor.clone();
+                                        (lifecycle, cell)
+                                    })
+                                })
+                                .collect(),
+                        ))
+                    }
                     RunPhase::Finalizing => Ok(RunFinalizationTargets::Finalize(
                         state.finalization_grants(),
                     )),
@@ -955,6 +962,7 @@ impl Actor for RunControl {
             }
             RunControlMessage::CompleteRun { reply } => {
                 if state.phase == RunPhase::Finalizing
+                    && state.shared_compiler.cleanup().observation().is_confirmed()
                     && state.reservations.values().all(|record| {
                         record
                             .executor

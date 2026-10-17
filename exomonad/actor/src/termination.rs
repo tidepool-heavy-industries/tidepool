@@ -1040,6 +1040,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unpolled_shared_client_scope_closes_its_admission() {
+        let mut owner = CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let operation = owner.scope_with_client(|_| std::future::pending::<()>());
+        assert!(!cleanup.observation().is_confirmed());
+        drop(operation);
+        assert!(cleanup.observation().is_confirmed());
+        assert!(owner.client().claim(|| ()).is_err());
+    }
+
     #[tokio::test]
     async fn public_compiler_owner_retains_current_receipt_and_independent_action() {
         let mut owner = super::CompilerPreparationOwner::new();
