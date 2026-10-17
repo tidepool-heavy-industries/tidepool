@@ -3427,12 +3427,7 @@ fn seal_turn_outputs_with_validation(
             (products, Some(globals), Some(packages))
         }
         None => {
-            validation
-                .inventory
-                .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
-                    CompileError::ExtractFailed("source evidence accounting overflow".into())
-                })?)
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            charge_source_evidence(&validation.inventory, evidence_bytes.len())?;
             timing::record_inventory_work(
                 "products.certify.before",
                 output_dir,
@@ -4360,6 +4355,17 @@ pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductP
 /// Validate consumed bytes and import witnesses against a build action's
 /// declared module and complete readable source trees. This shares the worker
 /// dependency reader with ordinary artifact admission and grants no execution.
+fn charge_source_evidence(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+    bytes: usize,
+) -> Result<(), CompileError> {
+    operation
+        .charge(bytes.checked_mul(64).ok_or_else(|| {
+            CompileError::ExtractFailed("source evidence accounting overflow".into())
+        })?)
+        .map_err(|error| compiler_evidence_failure(error.into()))
+}
+
 pub fn validate_prepared_fixture_sources(
     evidence_bytes: &[u8],
     source: &Path,
@@ -4867,6 +4873,7 @@ fn compile_invocation_inner(
                     }
                 },
             )?;
+            charge_source_evidence(bundle.operation(), bundle.dependencies().len())?;
             validate_prepared_fixture_sources(bundle.dependencies(), &input_path, inv.include)?;
             let raw = bundle.targets();
             let artifacts = assemble_portable(bundle.metadata(), &raw, &mut on_stage)?;
@@ -4927,11 +4934,7 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
-        inventory_operation
-            .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
-                CompileError::ExtractFailed("source evidence accounting overflow".into())
-            })?)
-            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        charge_source_evidence(&inventory_operation, evidence_bytes.len())?;
         if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
