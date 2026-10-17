@@ -2361,9 +2361,11 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             .collect::<Vec<_>>();
         let projection =
             CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
-        let namespace = base
-            .with_compiler_projection(&projection)
+        let namespace = recover_fixture_compiler_support(projection.clone(), base.clone(), [])
             .unwrap()
+            .finalize_namespace()
+            .unwrap()
+            .artifacts()
             .retain_custody(&views[0])
             .unwrap()
             .retain_custody(&views[1])
