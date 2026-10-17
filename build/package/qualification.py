@@ -1096,7 +1096,8 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
                "--target", target, "--source-root", str(original), "--output-root", str(output)]
     invocation_root = output.with_name(output.name + ".invocation") if operation is CatalogProducerOperation.INSPECT else None
     primary = None
-    secondary = None
+    secondary = []
+    retention_error = None
     return_code = None
     started = time.monotonic_ns()
     invocation = {
@@ -1133,24 +1134,37 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
         try:
             verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
                                            record_origin=args.retention_record_origin)
-        except Exception as error:
-            secondary = error
+        except BaseException as error:
+            retention_error = error
+            error.add_note("catalog source retention recheck failed")
+            secondary.append(error)
         if invocation_root is not None:
-            write_json(invocation_root / "outcome.json", {
-                **invocation, "producer_exit_code": return_code,
-                "timed_out": isinstance(primary, subprocess.TimeoutExpired),
-                "producer_error": str(primary) if primary is not None else None,
-                "retention_recheck": {"passed": secondary is None,
-                                      "error": str(secondary) if secondary is not None else None},
-                "completed": primary is None and secondary is None,
-                "elapsed_ns": time.monotonic_ns() - started,
-            })
+            try:
+                write_json(invocation_root / "outcome.json", {
+                    **invocation, "producer_exit_code": return_code,
+                    "timed_out": isinstance(primary, subprocess.TimeoutExpired),
+                    "producer_error": str(primary) if primary is not None else None,
+                    "retention_recheck": {"passed": retention_error is None,
+                                          "error": str(retention_error) if retention_error is not None else None},
+                    "completed": primary is None and retention_error is None,
+                    "elapsed_ns": time.monotonic_ns() - started,
+                })
+            except BaseException as error:
+                error.add_note("catalog invocation outcome publication failed")
+                secondary.append(error)
     if primary is not None:
-        if secondary is not None:
-            raise ValueError(f"producer failed: {primary}; retention recheck failed: {secondary}") from primary
+        if secondary:
+            if primary.__cause__ is not None:
+                secondary.insert(0, primary.__cause__)
+            raise primary from BaseExceptionGroup("catalog invocation secondary failures", secondary)
         raise primary
-    if secondary is not None:
-        raise secondary
+    if secondary:
+        first, *later = secondary
+        if later:
+            if first.__cause__ is not None:
+                later.insert(0, first.__cause__)
+            raise first from BaseExceptionGroup("catalog invocation secondary failures", later)
+        raise first
     return original
 
 
@@ -2605,6 +2619,11 @@ def main(argv=None) -> int:
         return 0
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"native qualification failed: {error}", file=sys.stderr)
+        if isinstance(error.__cause__, BaseExceptionGroup):
+            for secondary in error.__cause__.exceptions:
+                notes = "; ".join(getattr(secondary, "__notes__", ()))
+                print(f"secondary failure ({notes or type(secondary).__name__}): {secondary}",
+                      file=sys.stderr)
         return 1
 
 

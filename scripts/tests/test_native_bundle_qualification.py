@@ -2,6 +2,7 @@
 import importlib.util
 import contextlib
 import io
+import errno
 import json
 import os
 from pathlib import Path
@@ -3153,9 +3154,12 @@ class CatalogSourceTests(unittest.TestCase):
             (original / 'lib/Library.hs').write_text('source changed during failed inspection')
             return subprocess.CompletedProcess(command, 9)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
-            with self.assertRaisesRegex(ValueError, 'producer failed:.*retention recheck failed:'):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
                 qualification.inspect_native_catalog(args)
         evidence = args.output.with_name(args.output.name + '.invocation')
+        self.assertEqual(failure.exception.returncode, 9)
+        self.assertIsInstance(failure.exception.__cause__, BaseExceptionGroup)
+        self.assertIsInstance(failure.exception.__cause__.exceptions[0], ValueError)
         report = json.loads((evidence / 'outcome.json').read_text())
         self.assertEqual(report['producer_exit_code'], 9)
         self.assertIn('returned non-zero exit status 9', report['producer_error'])
@@ -3197,6 +3201,96 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual((evidence / 'stdout.log').read_bytes(), b'compiler started\n')
         self.assertEqual((evidence / 'stderr.log').read_bytes(), b'partial compiler diagnostics\n')
         self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+
+    def real_inspection_with_failed_publication(self, *, exit_code, change_source=False, interrupt=None):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'real-inspection')
+        args.producer.write_text('#!' + sys.executable + '\n' +
+            'import pathlib,sys\n' +
+            ('pathlib.Path(' + repr(str(original / 'lib/Library.hs')) +
+             ').write_text("changed by real local producer")\n' if change_source else '') +
+            'print("actual local producer stdout", flush=True)\n' +
+            'print("actual local producer stderr", file=sys.stderr, flush=True)\n' +
+            'sys.exit(' + str(exit_code) + ')\n')
+        args.producer.chmod(0o700)
+        actual_run, write_json = qualification.subprocess.run, qualification.write_json
+        publication = OSError(errno.ENOSPC, 'injected outcome publication failure')
+        observed = []
+        def execute(command, **kwargs):
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            result = actual_run(command, **kwargs)
+            observed.append(result.returncode)
+            if interrupt is not None:
+                raise interrupt
+            return result
+        def publish(path, value):
+            if path.name == 'outcome.json':
+                raise publication
+            return write_json(path, value)
+        with self.nix_checks(nar, [pin]), \
+                patch.object(qualification.subprocess, 'run', side_effect=execute), \
+                patch.object(qualification, 'write_json', side_effect=publish):
+            try:
+                qualification.inspect_native_catalog(args)
+            except BaseException as error:
+                failure = error
+            else:
+                self.fail('required outcome publication failure must refuse completion')
+        self.assertEqual(observed, [exit_code])
+        evidence = args.output.with_name(args.output.name + '.invocation')
+        self.assertEqual((evidence / 'stdout.log').read_text(), 'actual local producer stdout\n')
+        self.assertEqual((evidence / 'stderr.log').read_text(), 'actual local producer stderr\n')
+        self.assertFalse((evidence / 'outcome.json').exists())
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+        return failure, publication
+
+    def test_real_inspection_body_retention_and_publication_failures_preserve_primary_and_order(self):
+        failure, publication = self.real_inspection_with_failed_publication(exit_code=17, change_source=True)
+        self.assertIsInstance(failure, subprocess.CalledProcessError)
+        self.assertEqual(failure.returncode, 17)
+        secondary = failure.__cause__.exceptions
+        self.assertEqual(len(secondary), 2)
+        self.assertIsInstance(secondary[0], ValueError)
+        self.assertIn('declared action snapshot', str(secondary[0]))
+        self.assertIs(secondary[1], publication)
+
+    def test_real_inspection_interrupt_identity_survives_publication_failure(self):
+        interrupt = KeyboardInterrupt('original invocation cancellation')
+        failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
+        self.assertIs(failure, interrupt)
+        self.assertEqual(failure.__cause__.exceptions, (publication,))
+
+    def test_real_inspection_preserves_existing_primary_cause_before_later_publication(self):
+        interrupt = KeyboardInterrupt('original invocation cancellation')
+        cause = OSError(errno.EIO, 'existing invocation cause')
+        interrupt.__cause__ = cause
+        failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
+        self.assertIs(failure, interrupt)
+        self.assertEqual(failure.__cause__.exceptions, (cause, publication))
+
+    def test_real_inspection_clean_body_publication_failure_remains_nonpass(self):
+        failure, publication = self.real_inspection_with_failed_publication(exit_code=0)
+        self.assertIs(failure, publication)
+
+    def test_inspection_cli_preserves_secondary_publication_diagnostic(self):
+        primary = subprocess.CalledProcessError(17, ['local-producer'])
+        secondary = OSError(errno.ENOSPC, 'actual outcome publication unavailable')
+        secondary.add_note('catalog invocation outcome publication failed')
+        primary.__cause__ = BaseExceptionGroup('catalog invocation secondary failures', [secondary])
+        arguments = ['inspect-catalog']
+        for name in ('snapshot', 'source-root', 'declared-source-root', 'retention-record',
+                     'retention-record-origin', 'runtime-tools', 'producer', 'frontend',
+                     'worker', 'deployment', 'ghc-libdir', 'libraries', 'output'):
+            arguments.extend(['--' + name, str(self.root / name)])
+        stderr = io.StringIO()
+        with patch.object(qualification, 'inspect_native_catalog', side_effect=primary), \
+                contextlib.redirect_stderr(stderr):
+            code = qualification.main(arguments)
+        self.assertEqual(code, 1)
+        self.assertIn('exit status 17', stderr.getvalue())
+        self.assertIn('catalog invocation outcome publication failed', stderr.getvalue())
+        self.assertIn('actual outcome publication unavailable', stderr.getvalue())
 
     def test_inspection_timeout_bounds_refuse_before_source_or_process_work(self):
         for timeout in (-1, 0, 599, 1801):
