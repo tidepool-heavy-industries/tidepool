@@ -2429,6 +2429,7 @@ class NativeQualificationTests(unittest.TestCase):
                               'environment': {}, 'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
                               'profile': 'fast-dev', 'native_catalog': {'catalog_sha256': 'c' * 64}}
                 def execute(command, **kwargs):
+                    self.assertEqual(kwargs['env']['EXOMONAD_NIX_OFFLINE'], '1')
                     self.assertEqual(command, ['/pinned/runtime-tools/bin/bash', str(root / 'share/exomonad/packaged-catalog-consumer.sh'),
                         str(path), '/pinned/runtime-tools/bin/bwrap', str(output), '/pinned/runtime-tools/bin/python3'])
                     if passed is not None:
@@ -2437,6 +2438,7 @@ class NativeQualificationTests(unittest.TestCase):
                     path.write_text('changed after admission')
                     return subprocess.CompletedProcess(command, 0)
                 with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.dict(os.environ, {'EXOMONAD_NIX_OFFLINE': '0'}), \
                      patch.object(qualification.subprocess, 'run', side_effect=execute):
                     self.assertEqual(qualification.run_catalog_gate(SimpleNamespace(descriptor=path, output=output)), expected_code)
                 report = json.loads((output / 'report.json').read_text())
