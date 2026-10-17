@@ -2527,12 +2527,67 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             .project_metadata(namespace.metadata_snapshot())
             .unwrap();
         for selected in [offers.clone(), vec![offers[1].clone(), offers[0].clone()]] {
-            let error =
+            let transport =
                 NativeCompilerTransport::issue(&projection, &metadata, &namespace, &selected)
-                    .err()
-                    .expect("competing exact Full qualifications cannot be unioned or ranked");
-            assert!(matches!(error, CompileError::ArtifactInventory(error)
-                if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. })));
+                    .unwrap();
+            let available = &transport.availability[&entry.descriptor.id];
+            assert!(available.permits(9001));
+            assert_eq!(available.offers().len(), 2);
+            for offer in &offers {
+                assert!(available.offers().contains(offer));
+            }
+            let support =
+                recover_fixture_compiler_support(projection.clone(), namespace.clone(), [])
+                    .unwrap()
+                    .retain_offers(selected)
+                    .unwrap();
+            let context = Arc::new(ExactDeclarationContext::from_facts(
+                DeclarationContextFacts {
+                    producer: producer.sha256(),
+                    compiler_support: support,
+                    lexical: Default::default(),
+                    template_imports: None,
+                    original_instance_environment: OriginalInstanceEnvironment::Unknown,
+                },
+            ));
+            let root = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(context)
+                .prepare_compilation(root.path(), PRODUCER)
+                .unwrap();
+            assert_eq!(wire_mode(&request, "EqualPrivateFull"), full_mode());
+            assert!(wire_groups(&request)["EqualPrivateFull"].is_empty());
+            let inputs = request.compiler_inputs();
+            assert!(inputs
+                .projection
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(inputs.artifacts.selected_native_groups().is_empty());
+            let validation = PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let mut fixed = inputs
+                .artifacts
+                .inventory()
+                .bind_segment(&inputs.artifacts, vec![], &selection)
+                .unwrap();
+            let imports = [source_import(&native, 9001)];
+            let demanded = inputs.artifacts.inventory().admit_bound_target(
+                &mut fixed,
+                &inputs.artifacts,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            );
+            assert!(
+                matches!(demanded, Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == entry.descriptor.id)),
+                "availability preserves alternatives until an exact demand needs a unique binding"
+            );
         }
         if !shared_carrier {
             let namespace = views[0].retain_custody(&views[1]).unwrap();
@@ -4492,6 +4547,7 @@ fn replay_native_transport_history(
     } = history;
     let (same_root, overlap, shared_carrier, reverse, duplicate) =
         (*same_root, *overlap, *shared_carrier, *reverse, *duplicate);
+    eprintln!("native transport history: {history:?}");
     assert!(
         !same_root || overlap,
         "one root has one authored dependency"

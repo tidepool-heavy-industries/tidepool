@@ -1297,10 +1297,11 @@ impl NativeCompilerTransport {
         }
         let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
-        // A type-only role cannot choose between independently qualified histories.
-        let mut qualified = BTreeMap::new();
+        // The compiler metadata carries one physical original for each owner.
+        // Exact historical offers for that same payload remain alternatives.
+        let mut originals_by_owner = BTreeMap::new();
         for offer in offers {
-            let Some(witness) = offer.qualified_private_availability(roles, artifacts) else {
+            let Some(_) = offer.qualified_private_availability(roles, artifacts) else {
                 continue;
             };
             let entry = metadata
@@ -1309,8 +1310,8 @@ impl NativeCompilerTransport {
                 .get(&offer.original())
                 .ok_or_else(|| failure("qualified native original is outside request custody"))?;
             let owner = &entry.descriptor.owner;
-            if let Some(previous) = qualified.insert(owner.clone(), witness) {
-                if previous != witness {
+            if let Some(previous) = originals_by_owner.insert(owner.clone(), offer.original()) {
+                if previous != offer.original() {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::NativeOwnerAmbiguity {
                             owner: owner.clone(),
