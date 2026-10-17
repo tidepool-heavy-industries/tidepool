@@ -1182,7 +1182,11 @@ mod tests {
                     testing::identity("Helpers", &format!("helper{index}"))
                 } else {
                     let suffix = index - helpers;
-                    let name = if reverse_names { exports - 1 - suffix } else { suffix };
+                    let name = if reverse_names {
+                        exports - 1 - suffix
+                    } else {
+                        suffix
+                    };
                     testing::identity("Fixture", &format!("export{name}"))
                 };
                 top
@@ -1208,9 +1212,14 @@ mod tests {
                     required_generation: generation,
                 });
                 match index % 4 {
-                    0 => ImportOwner::Source { version: ModuleVersion([8; 32]), binder },
+                    0 => ImportOwner::Source {
+                        version: ModuleVersion([8; 32]),
+                        binder,
+                    },
                     1 => ImportOwner::Package {
-                        unit: binder.unit.clone(), module: binder.module.clone(), binder,
+                        unit: binder.unit.clone(),
+                        module: binder.module.clone(),
+                        binder,
                         interface_digest: [7; 32],
                     },
                     2 => ImportOwner::Retained {
@@ -1218,7 +1227,10 @@ mod tests {
                         generation: 9,
                     },
                     _ => ImportOwner::CodeExport {
-                        binder, generation: 9, root_id: 11, interface_digest: None,
+                        binder,
+                        generation: 9,
+                        root_id: 11,
+                        interface_digest: None,
                     },
                 }
             })
@@ -1233,7 +1245,8 @@ mod tests {
         };
         let all = testing::projected_group(wire, 11).unwrap();
         let bytes = tidepool_test_data::prepared_encode::encode_projected_group(&all);
-        let mut value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let ciborium::value::Value::Array(fields) = &mut value else {
             panic!("normal group encoder must emit an array")
         };
@@ -1245,12 +1258,15 @@ mod tests {
         binders.drain(..helpers);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-        let projected = parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
+        let projected =
+            parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
         (
             CachedHomeOwner {
-                unit: "fixture".into(), module: "Fixture".into(),
+                unit: "fixture".into(),
+                module: "Fixture".into(),
                 module_version: ModuleVersion([1; 32]),
-                skinny_iface_sha256: [2; 32], product_sha256: [3; 32],
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
             },
             projected,
             imports,
@@ -1263,7 +1279,8 @@ mod tests {
         use proptest::test_runner::{Config, TestRunner};
 
         let check = |helpers, exports, imports, reverse, split, offset| {
-            let (owner, projected, owners) = outlined_fixture(helpers, exports, imports, reverse, split, offset);
+            let (owner, projected, owners) =
+                outlined_fixture(helpers, exports, imports, reverse, split, offset);
             let group = CertifiedGroup::admit(owner, projected, owners).unwrap();
             OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
             let actual = SourceGroupOutline::from_certified(&group);
@@ -1284,13 +1301,18 @@ mod tests {
                     }
                 }
             }
-            let expected_imports = definitions.globals().iter().zip(group.imports())
+            let expected_imports = definitions
+                .globals()
+                .iter()
+                .zip(group.imports())
                 .filter_map(|(global, owner)| match owner {
                     ImportOwner::Source { version, .. } => Some(SourceBinder {
-                        version: version.clone(), binder: global.identity.clone(),
+                        version: version.clone(),
+                        binder: global.identity.clone(),
                     }),
                     _ => None,
-                }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
             prop_assert_eq!(&actual.owner, group.owner());
             prop_assert_eq!(actual.original_ordinal, group.original_ordinal());
             prop_assert_eq!(&actual.tops, &expected);
@@ -1302,23 +1324,30 @@ mod tests {
             // It also sensitizes the budget to restoring that route above.
             OUTLINE_ROWS.with(|rows| rows.set([0; 4]));
             let projected = SourceGroupOutline::from_definitions(
-                group.owner().clone(), group.original_ordinal(), group.binders(),
-                definitions, expected_imports,
-            ).unwrap();
+                group.owner().clone(),
+                group.original_ordinal(),
+                group.binders(),
+                definitions,
+                expected_imports,
+            )
+            .unwrap();
             let general_rows = OUTLINE_ROWS.with(|rows| rows.get());
             prop_assert_eq!(projected.tops, expected);
             prop_assert_eq!(projected.imports, actual.imports);
             prop_assert_eq!(general_rows[0], helpers + exports);
             prop_assert_ne!(general_rows, touched);
             if helpers == 512 {
-                eprintln!("certified outline work: {}", serde_json::json!({
-                    "helpers": helpers, "exports": exports, "imports": imports,
-                    "definition_rows": touched[0], "export_rows": touched[1],
-                    "source_import_comparisons": touched[2], "import_rows": touched[3],
-                    "general_definition_rows": general_rows[0],
-                    "general_source_import_comparisons": general_rows[2],
-                    "oracle_definition_rows": oracle_rows,
-                }));
+                eprintln!(
+                    "certified outline work: {}",
+                    serde_json::json!({
+                        "helpers": helpers, "exports": exports, "imports": imports,
+                        "definition_rows": touched[0], "export_rows": touched[1],
+                        "source_import_comparisons": touched[2], "import_rows": touched[3],
+                        "general_definition_rows": general_rows[0],
+                        "general_source_import_comparisons": general_rows[2],
+                        "oracle_definition_rows": oracle_rows,
+                    })
+                );
             }
             Ok(())
         };
@@ -1326,48 +1355,90 @@ mod tests {
         // budget is exercised independently of generated coverage.
         check(512, 1, 12, true, false, 3).unwrap();
         check(8, 0, 0, false, true, 0).unwrap();
-        let strategy = (1usize..65, 0usize..13, 0usize..13, any::<bool>(), any::<bool>(), 0u32..4);
+        let strategy = (
+            1usize..65,
+            0usize..13,
+            0usize..13,
+            any::<bool>(),
+            any::<bool>(),
+            0u32..4,
+        );
         let mut config = proptest::test_runner::contextualize_config(Config::default());
         config.source_file = Some(file!());
-        config.test_name = Some(concat!(module_path!(), "::certified_outlines_match_full_definitions_and_visit_only_exports"));
-        TestRunner::new(config).run(&strategy, |(h, e, i, r, s, o)| check(h, e, i, r, s, o)).unwrap();
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::certified_outlines_match_full_definitions_and_visit_only_exports"
+        ));
+        TestRunner::new(config)
+            .run(&strategy, |(h, e, i, r, s, o)| check(h, e, i, r, s, o))
+            .unwrap();
     }
 
     #[test]
     fn certified_outline_admission_preserves_owner_import_and_inventory_refusals() {
         let (owner, projected, imports) = outlined_fixture(2, 2, 4, true, true, 1);
         let mut bad_source = imports.clone();
-        let ImportOwner::Source { binder, .. } = &mut bad_source[0] else { unreachable!() };
+        let ImportOwner::Source { binder, .. } = &mut bad_source[0] else {
+            unreachable!()
+        };
         binder.occurrence = "foreign".into();
         let mut bad_package = imports.clone();
-        let ImportOwner::Package { unit, .. } = &mut bad_package[1] else { unreachable!() };
+        let ImportOwner::Package { unit, .. } = &mut bad_package[1] else {
+            unreachable!()
+        };
         *unit = "foreign".into();
         let mut bad_retained = imports.clone();
-        let ImportOwner::Retained { generation, .. } = &mut bad_retained[2] else { unreachable!() };
+        let ImportOwner::Retained { generation, .. } = &mut bad_retained[2] else {
+            unreachable!()
+        };
         *generation = 10;
         let mut bad_export = imports.clone();
-        let ImportOwner::CodeExport { generation, .. } = &mut bad_export[3] else { unreachable!() };
+        let ImportOwner::CodeExport { generation, .. } = &mut bad_export[3] else {
+            unreachable!()
+        };
         *generation = 10;
         let mut bad_source_generation = imports.clone();
         bad_source_generation[0] = ImportOwner::Retained {
-            id: tidepool_repr::SessionVarId::from_extract(1), generation: 9,
+            id: tidepool_repr::SessionVarId::from_extract(1),
+            generation: 9,
         };
-        for malformed in [Vec::new(), bad_source, bad_package, bad_retained, bad_export, bad_source_generation] {
+        for malformed in [
+            Vec::new(),
+            bad_source,
+            bad_package,
+            bad_retained,
+            bad_export,
+            bad_source_generation,
+        ] {
             assert!(CertifiedGroup::admit(owner.clone(), projected.clone(), malformed).is_err());
         }
-        for (unit, module) in [("", "Fixture"), ("foreign", "Fixture"), ("fixture", "Foreign")] {
+        for (unit, module) in [
+            ("", "Fixture"),
+            ("foreign", "Fixture"),
+            ("fixture", "Foreign"),
+        ] {
             let mut malformed = owner.clone();
             malformed.unit = unit.into();
             malformed.module = module.into();
             assert!(CertifiedGroup::admit(malformed, projected.clone(), imports.clone()).is_err());
         }
-        let valid = CertifiedGroup::admit(owner.clone(), projected.clone(), imports.clone()).unwrap();
-        assert!(matches!(GroupInventory::new(&[valid.clone(), valid.clone()]), Err(DemandError::DuplicateGroup { .. })));
+        let valid =
+            CertifiedGroup::admit(owner.clone(), projected.clone(), imports.clone()).unwrap();
+        assert!(matches!(
+            GroupInventory::new(&[valid.clone(), valid.clone()]),
+            Err(DemandError::DuplicateGroup { .. })
+        ));
         let mut conflicting = owner;
         conflicting.product_sha256 = [99; 32];
         let other = CertifiedGroup::admit(conflicting, projected, imports).unwrap();
-        assert!(matches!(GroupInventory::new(&[valid, other]), Err(DemandError::ConflictingOwner { .. })));
-        assert!(matches!(GroupInventory::new(&[group("same", 11, &[]), group("same", 12, &[])]), Err(DemandError::DuplicateBinder(_))));
+        assert!(matches!(
+            GroupInventory::new(&[valid, other]),
+            Err(DemandError::ConflictingOwner { .. })
+        ));
+        assert!(matches!(
+            GroupInventory::new(&[group("same", 11, &[]), group("same", 12, &[])]),
+            Err(DemandError::DuplicateBinder(_))
+        ));
     }
 
     #[test]
