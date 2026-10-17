@@ -2700,19 +2700,17 @@ fn write_ref(
 
 struct ExportEvidence<'a> {
     evidence: &'a crate::cache::DependencyEvidence,
+    root: &'a Path,
+    inventory: &'a InventoryOperation,
     reference: Option<FileRef>,
 }
 
 impl ExportEvidence<'_> {
-    fn reference(
-        &mut self,
-        root: &Path,
-        inventory: &InventoryOperation,
-    ) -> Result<&FileRef, ModulePackageError> {
+    fn reference(&mut self) -> Result<&FileRef, ModulePackageError> {
         if self.reference.is_none() {
             let bytes = encode_json(
                 self.evidence,
-                inventory,
+                self.inventory,
                 RECORD_LIMIT,
                 "evidence encoding",
                 false,
@@ -2726,11 +2724,11 @@ impl ExportEvidence<'_> {
                 },
             );
             self.reference = Some(write_ref(
-                root,
+                self.root,
                 PathBuf::from("evidence").join(format!("{digest}.json")),
                 &bytes,
                 RECORD_LIMIT,
-                inventory,
+                self.inventory,
             )?);
             #[cfg(test)]
             {
@@ -2739,7 +2737,7 @@ impl ExportEvidence<'_> {
                     super::publication_observer::Stage::CatalogEvidenceWritten {
                         sha256: reference.sha256.clone(),
                         bytes: reference.length,
-                        path: root.join(&reference.path),
+                        path: self.root.join(&reference.path),
                     },
                 );
             }
@@ -2808,6 +2806,8 @@ fn export_under(
     let mut modules = Vec::with_capacity(records.len());
     let mut evidence_receipt = ExportEvidence {
         evidence,
+        root: output_root,
+        inventory,
         reference: None,
     };
     let mut validation =
@@ -2865,7 +2865,7 @@ fn export_under(
             version_origin: Some(record.version_origin.clone()),
             execution_source_sha256: record.execution_source_sha256,
         };
-        let evidence = evidence_receipt.reference(output_root, inventory)?.clone();
+        let evidence = evidence_receipt.reference()?.clone();
         modules.push(ModuleFiles {
             module_interface,
             owner: write_ref(

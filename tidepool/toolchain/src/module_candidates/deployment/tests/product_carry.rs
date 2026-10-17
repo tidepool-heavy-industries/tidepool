@@ -145,6 +145,11 @@ fn deployment_export_writes_one_evidence_blob_for_78_module_rows() {
     );
     assert_eq!(writes, 1);
     eprintln!("catalog-proof-work owners=78 sha256={} bounded_json_encodes={encodes} encoded_bytes={encoded_bytes} completed_writes={writes} written_bytes={written_bytes} complete_cohort_checks={checks}", reference.sha256);
+    assert_eq!(
+        encodes, 1,
+        "one bounded encoding for the issued cohort proof"
+    );
+    assert_eq!(checks, 1, "one complete-cohort validation at export");
     // Independent reader and unbounded test oracle verify the writer's bounded
     // encoding without adding work inside the measured export scope.
     let package = fixture.load().unwrap();
@@ -165,16 +170,18 @@ fn export_evidence_refuses_bounds_and_failed_writes_without_issuing_a_receipt() 
     let package = fixture.load().unwrap();
     let evidence = &*package.records[0].evidence;
     let root = fixture._root.path().join("refused-export");
-    let mut receipt = ExportEvidence {
-        evidence,
-        reference: None,
-    };
     let inventory = InventoryOperation::new(InventoryDecodeLimits {
         max_bytes: 1,
         ..Default::default()
     });
+    let mut receipt = ExportEvidence {
+        evidence,
+        root: &root,
+        inventory: &inventory,
+        reference: None,
+    };
     assert!(matches!(
-        receipt.reference(&root, &inventory),
+        receipt.reference(),
         Err(ModulePackageError::Bounds)
     ));
     assert!(receipt.reference.is_none());
@@ -186,8 +193,14 @@ fn export_evidence_refuses_bounds_and_failed_writes_without_issuing_a_receipt() 
     fs::create_dir(&root).unwrap();
     fs::write(root.join("evidence"), b"blocked directory").unwrap();
     let inventory = InventoryOperation::new(Default::default());
+    let mut receipt = ExportEvidence {
+        evidence,
+        root: &root,
+        inventory: &inventory,
+        reference: None,
+    };
     assert!(matches!(
-        receipt.reference(&root, &inventory),
+        receipt.reference(),
         Err(ModulePackageError::Io { .. })
     ));
     assert!(receipt.reference.is_none());
@@ -199,13 +212,15 @@ fn export_evidence_refuses_bounds_and_failed_writes_without_issuing_a_receipt() 
     let mut oversized = evidence.clone();
     oversized.packages.push("x".repeat(RECORD_LIMIT));
     let absent = fixture._root.path().join("oversized-export");
+    let inventory = InventoryOperation::new(Default::default());
     let mut receipt = ExportEvidence {
         evidence: &oversized,
+        root: &absent,
+        inventory: &inventory,
         reference: None,
     };
-    let inventory = InventoryOperation::new(Default::default());
     assert!(matches!(
-        receipt.reference(&absent, &inventory),
+        receipt.reference(),
         Err(ModulePackageError::Bounds)
     ));
     assert!(receipt.reference.is_none());
