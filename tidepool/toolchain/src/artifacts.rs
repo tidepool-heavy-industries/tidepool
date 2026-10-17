@@ -4427,7 +4427,10 @@ impl ParsedSourceEvidence {
             .map_err(|failure| source_evidence_failure(input, failure))
     }
 
-    fn authenticate_build_input(self, input: &Path) -> Result<(), CompileError> {
+    fn authenticate_build_input(
+        self,
+        input: &Path,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
         cache::CompletedSourceEvidence::from_worker_evidence(
             self.0,
             input,
@@ -4437,8 +4440,21 @@ impl ParsedSourceEvidence {
             CompileError::ExtractFailed(
                 "build-action consumed bytes or import witnesses changed".into(),
             )
-        })?;
-        Ok(())
+        })
+    }
+
+    fn admit_build_action(
+        self,
+        input: &Path,
+        include: &[PathBuf],
+        expected_source: &str,
+    ) -> Result<cache::CompletedSourceEvidence, CompileError> {
+        self.validate_build_action_closure(input, include)?;
+        let completed = self.authenticate_build_input(input)?;
+        completed
+            .validate_expected_source(expected_source)
+            .map_err(|failure| source_evidence_failure(input, failure))?;
+        Ok(completed)
     }
 }
 
@@ -4475,7 +4491,7 @@ pub fn validate_prepared_fixture_sources(
         source,
     )?;
     parsed.validate_build_action_closure(source, include)?;
-    parsed.authenticate_build_input(source)
+    parsed.authenticate_build_input(source).map(|_| ())
 }
 
 /// Validate observations from a fresh corpus compilation owned by a native
@@ -4940,12 +4956,13 @@ fn compile_invocation_inner(
                     }
                 },
             )?;
-            validate_prepared_fixture_sources(
+            ParsedSourceEvidence::parse(
                 bundle.operation(),
                 bundle.dependencies(),
+                SourceEvidenceUse::BuildAction,
                 &input_path,
-                inv.include,
-            )?;
+            )?
+            .admit_build_action(&input_path, inv.include, inv.source)?;
             let raw = bundle.targets();
             let artifacts = assemble_portable(bundle.metadata(), &raw, &mut on_stage)?;
             std::fs::create_dir(output)?;
@@ -7156,8 +7173,30 @@ mod module_product_tests {
             &source,
         )
         .unwrap();
+        let mismatch = parsed.admit_build_action(&source, &[], "different invocation text");
+        assert!(matches!(mismatch,
+            Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                    index: 0,
+                    reason: cache::SourceWitnessFailure::Changed { expected, actual }
+                } if expected == format!("{:x}", Sha256::digest(text.as_bytes()))
+                    && actual == format!("{:x}", Sha256::digest(b"different invocation text"))))
+        ));
+        assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
+        let parsed = ParsedSourceEvidence::parse(
+            &operation,
+            &bytes,
+            SourceEvidenceUse::BuildAction,
+            &source,
+        )
+        .unwrap();
         std::fs::write(&source, "changed physical input").unwrap();
-        assert!(parsed.authenticate_build_input(&source).is_err());
+        assert!(matches!(
+            parsed.admit_build_action(&source, &[], "different invocation text"),
+            Err(CompileError::ExtractFailed(message))
+                if message == "build-action consumed bytes or import witnesses changed",
+        ));
         assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
     }
 
@@ -7406,6 +7445,60 @@ mod module_product_tests {
         assert!(consumer.imports.iter().any(|imported| {
             imported.module == "ModuleProductA" && imported.selected.is_some()
         }));
+    }
+
+    /// Construct the reachable interval where the frontend captured A but the
+    /// physical file supplied to the real worker is already B.
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn real_worker_portable_build_refuses_changed_captured_source_before_export() {
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
+        let physical = std::fs::read_to_string(fixture_root.join("ModuleProductB.hs")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("ModuleProductB.hs");
+        std::fs::write(&input, &physical).unwrap();
+        let roots = [fixture_root];
+        let histories = [
+            physical.clone(),
+            format!("{physical}\n-- captured before physical replacement\n"),
+            physical.replace("module ModuleProductB", "module PriorProductB"),
+        ];
+        for (index, captured) in histories.iter().enumerate() {
+            let output = root.path().join(format!("export-{index}"));
+            let invocation = CompileInvocation {
+                source: captured,
+                targets: &["consume"],
+                include: &roots,
+                fallback_module_name: "ModuleProductB",
+            };
+            let result = compile_invocation_inner(
+                &invocation,
+                &mut |_, _, _| {},
+                CompilationPolicy::BuildAction {
+                    source_path: &input,
+                    scratch: root.path(),
+                    export: BuildActionExport::PreparedFixture { output: &output },
+                },
+            );
+            if index == 0 {
+                assert!(result.is_ok(), "unchanged worker input: {:?}", result.err());
+                assert!(output.join("consume.prepared.cbor").is_file());
+                assert!(output.join("meta.cbor").is_file());
+            } else {
+                assert!(
+                    !output.exists(),
+                    "a refused source cannot publish portable output"
+                );
+                assert!(matches!(result,
+                    Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                        certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
+                        if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                            reason: cache::SourceWitnessFailure::Changed { .. }, ..
+                        }))
+                ));
+            }
+        }
     }
 
     #[test]
