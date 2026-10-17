@@ -17,6 +17,7 @@ module Tidepool.TypePolicy
   , stabilizeEffectRows
   ) where
 
+import Control.Monad (unless)
 import Control.Monad.State.Strict
 import Control.Exception (Exception)
 import qualified Data.ByteString as BS
