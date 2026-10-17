@@ -17,14 +17,23 @@ mod product_decode_observer;
 #[cfg(test)]
 mod protected_native_availability_tests;
 #[cfg(test)]
-mod publication_observer {
+pub(crate) mod publication_observer {
     use std::cell::RefCell;
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum Stage {
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum Stage {
         BeforeOwner,
         BeforeInterface,
         Completed,
+        ProofEncoded {
+            sha256: String,
+            bytes: u64,
+        },
+        ProofPublished {
+            sha256: String,
+            bytes: u64,
+            path: std::path::PathBuf,
+        },
     }
 
     type Observer = Box<dyn FnMut(Stage)>;
@@ -41,7 +50,7 @@ mod publication_observer {
         });
     }
 
-    pub(super) fn with_observer<T>(
+    pub(crate) fn with_observer<T>(
         observer: impl FnMut(Stage) + 'static,
         action: impl FnOnce() -> T,
     ) -> T {
@@ -6043,9 +6052,10 @@ pub(crate) mod tests {
             let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let observed = reached.clone();
             let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let expected_stage = stage.clone();
             let result = publication_observer::with_observer(
                 move |actual| {
-                    if actual == stage {
+                    if actual == expected_stage {
                         observed.store(true, std::sync::atomic::Ordering::SeqCst);
                         stop.cancel();
                     }

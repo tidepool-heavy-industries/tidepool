@@ -121,8 +121,15 @@ impl<'a> PublicationEvidence<'a> {
         };
         let reference = shared.0.reference.get()?.as_ref()?;
         fs::create_dir_all(root).ok()?;
-        tidepool_atomic_write::write_best_effort(&evidence_path(root, &reference.sha256), bytes)
-            .ok()
+        let path = evidence_path(root, &reference.sha256);
+        tidepool_atomic_write::write_best_effort(&path, bytes).ok()?;
+        #[cfg(test)]
+        super::publication_observer::observe(super::publication_observer::Stage::ProofPublished {
+            sha256: reference.sha256.clone(),
+            bytes: reference.encoded_len,
+            path,
+        });
+        Some(())
     }
 }
 
@@ -229,13 +236,16 @@ pub(super) fn encode_evidence(evidence: &DependencyEvidence) -> Option<(Evidence
     if bytes.len() > RECORD_LIMIT {
         return None;
     }
-    Some((
-        EvidenceRef {
-            sha256: sha(&bytes),
-            encoded_len: bytes.len() as u64,
-        },
-        bytes,
-    ))
+    let reference = EvidenceRef {
+        sha256: sha(&bytes),
+        encoded_len: bytes.len() as u64,
+    };
+    #[cfg(test)]
+    super::publication_observer::observe(super::publication_observer::Stage::ProofEncoded {
+        sha256: reference.sha256.clone(),
+        bytes: reference.encoded_len,
+    });
+    Some((reference, bytes))
 }
 
 fn evidence_path(root: &Path, digest: &str) -> PathBuf {
