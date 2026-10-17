@@ -169,6 +169,7 @@ struct NativeOfferCustody {
     lease: Arc<ViewLease>,
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     native_originals: BTreeSet<ArtifactId>,
+    artifact_carriers: BTreeSet<ArtifactBinding>,
     #[cfg(test)]
     observed: Arc<OnceLock<ArtifactView>>,
 }
@@ -180,9 +181,14 @@ impl NativeOfferCustody {
         reachable: imbl::OrdSet<ArtifactBindingNode>,
     ) -> Result<Self, CompileError> {
         let mut native_originals = BTreeSet::new();
+        let mut artifact_carriers = BTreeSet::new();
         for node in &reachable {
-            let ArtifactBindingNode::Group(group) = node else {
-                continue;
+            let group = match node {
+                ArtifactBindingNode::Artifact(carrier) => {
+                    artifact_carriers.insert(*carrier);
+                    continue;
+                }
+                ArtifactBindingNode::Group(group) => group,
             };
             let mut carriers = state
                 .outgoing(*node)
@@ -214,6 +220,7 @@ impl NativeOfferCustody {
             lease,
             reachable,
             native_originals,
+            artifact_carriers,
             #[cfg(test)]
             observed: Arc::new(OnceLock::new()),
         })
@@ -851,6 +858,14 @@ impl IssuedNativeOffer {
 
     pub(super) fn custody_lease(&self) -> &Arc<ViewLease> {
         &self.0.custody.lease
+    }
+
+    pub(super) fn artifact_carriers(&self) -> &BTreeSet<ArtifactBinding> {
+        &self.0.custody.artifact_carriers
+    }
+
+    pub(super) fn offers_groups_for(&self, originals: &BTreeSet<ArtifactId>) -> bool {
+        !self.0.custody.native_originals.is_disjoint(originals)
     }
 
     /// Query only this issuance's checked reachable membership. Complete scope

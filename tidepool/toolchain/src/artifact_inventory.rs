@@ -3354,12 +3354,7 @@ impl ArtifactInventory {
             .filter_map(CompilerInputRole::original)
             .collect::<BTreeSet<_>>();
         for offer in offers {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
+            if !offered.contains(&offer.original()) && !offer.offers_groups_for(&offered) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: offer.original(),
@@ -3428,12 +3423,7 @@ impl ArtifactInventory {
             .filter_map(CompilerInputRole::original)
             .collect::<BTreeSet<_>>();
         for offer in availability {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
+            if !offered.contains(&offer.original()) && !offer.offers_groups_for(&offered) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: offer.original(),
@@ -6861,6 +6851,7 @@ impl ArtifactView {
     ) -> Result<Self, CompileError> {
         let mut parents = vec![Arc::clone(&self.lease)];
         let mut payloads = BTreeMap::new();
+        let mut selection = self.lease.selection.as_ref().clone();
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         for offer in offers {
             let incoming = offer.custody_lease();
@@ -6890,15 +6881,26 @@ impl ArtifactView {
                 };
                 payloads.insert(*id, retained);
             }
+            for (scope, proof) in &incoming.selection.scopes {
+                if !selection.scopes.contains_key(scope) {
+                    selection.scopes.insert(*scope, proof.clone());
+                }
+            }
+            for carrier in offer.artifact_carriers() {
+                selection
+                    .custody_roots
+                    .insert(ArtifactBindingNode::Artifact(*carrier), ());
+            }
             parents.push(Arc::clone(incoming));
         }
         if parents.len() == 1 {
             return Ok(self.clone());
         }
-        let selection = selection_snapshot_for_lease(&state, &self.namespace(), &[], &[], &parents);
+        let selection = Arc::new(selection);
         drop(state);
-        // Incoming availability snapshots have no executable roots or namespace.
-        // Their exact custody seeds and ordered materialization owners survive.
+        // Artifact carriers retain type facts and exact acquisition handles.
+        // Native Group availability remains in its opaque offer owner instead
+        // of becoming another selected-view closure to expand on every read.
         let lease = ViewLease::from_issued_draft(
             ViewDraft {
                 roots: vec![],
