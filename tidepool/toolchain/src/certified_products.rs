@@ -1486,6 +1486,22 @@ pub(crate) fn decode_receipt_with_operation(
     Ok(decoded.receipt)
 }
 
+/// Preserve the exact graph bytes consumed by receipt decoding in the same
+/// physical observation scope as the other original output inputs.
+pub(crate) fn decode_receipt_with_validation(
+    bytes: &[u8],
+    output_dir: &Path,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> CertResult<CertifiedReceipt> {
+    let receipt = decode_receipt_with_operation(bytes, Some(output_dir), &validation.inventory)?;
+    if let WorkerExecutionSource::ExactAvailable { bytes, .. } = &receipt.source_recipe {
+        validation
+            .record_captured_bytes(&output_dir.join("execution-source.cbor"), bytes)
+            .map_err(CertificationError::CapturedModulePayload)?;
+    }
+    Ok(receipt)
+}
+
 struct DecodedReceiptPacket {
     kind: CompleteProductKind,
     receipt: CertifiedReceipt,
@@ -19113,6 +19129,31 @@ pub(crate) mod tests {
         };
         assert_eq!(digest, graph.digest());
         assert_eq!(bytes.as_ref(), graph.bytes());
+        let (_, observations) =
+            crate::recovery_artifacts::PackageInterfaceValidation::capture_entry(
+                root.path(),
+                Arc::new(InventoryOperation::new(Default::default())),
+                |validation| decode_receipt_with_validation(&encoded, root.path(), validation),
+            )
+            .unwrap();
+        assert!(
+            observations
+                .entry_owned_paths()
+                .contains(Path::new("execution-source.cbor")),
+            "the actual receipt consumer must retain its graph read"
+        );
+        observations
+            .verify_entry_inventory(
+                root.path(),
+                &BTreeMap::from([(PathBuf::from("execution-source.cbor"), hex(&graph.digest()))]),
+            )
+            .unwrap();
+        assert!(observations
+            .verify_entry_inventory(
+                root.path(),
+                &BTreeMap::from([(PathBuf::from("execution-source.cbor"), hex(&[42; 32]))])
+            )
+            .is_err());
         std::fs::write(&path, b"changed source recipe").unwrap();
         assert!(decode_receipt_in(&encoded, Some(root.path())).is_err());
         let header = receipt_payload_mut(&mut value);

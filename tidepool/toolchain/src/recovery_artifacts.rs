@@ -2995,6 +2995,64 @@ pub(crate) fn verify_materialized_join_with_validation(
     })
 }
 
+// This consumer control accepts only an already compiler-certified product;
+// it cannot create one or manufacture source/native authority.
+#[cfg(test)]
+pub(crate) fn check_entry_unsealed_input_observations(product: &CertifiedRecoveryProduct) {
+    let root = tempfile::tempdir().unwrap();
+    let certificate = root.path().join("original.census");
+    let packages = root.path().join("original.packages");
+    fs::write(&certificate, product.certification_bytes()).unwrap();
+    fs::write(&packages, product.package_imports_bytes()).unwrap();
+    let (_, observations) = PackageInterfaceValidation::capture_entry(
+        root.path(),
+        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        )),
+        |validation| {
+            let owner = product.owner();
+            read_certification(&certificate, None, owner, validation)?;
+            read_package_imports(
+                &packages,
+                None,
+                &owner.unit,
+                &owner.module,
+                &owner.skinny_iface_sha256,
+                validation,
+            )?;
+            Ok::<_, RecoveryArtifactError>(())
+        },
+    )
+    .unwrap();
+    let observed = observations.entry_owned_paths();
+    assert!(
+        observed.contains(Path::new("original.census")),
+        "unsealed certification reader escaped capture"
+    );
+    assert!(
+        observed.contains(Path::new("original.packages")),
+        "unsealed package reader escaped capture"
+    );
+    observations
+        .verify_entry_inventory(
+            root.path(),
+            &BTreeMap::from([
+                (
+                    PathBuf::from("original.census"),
+                    hex(&Sha256::digest(product.certification_bytes()).into()),
+                ),
+                (
+                    PathBuf::from("original.packages"),
+                    hex(&Sha256::digest(product.package_imports_bytes()).into()),
+                ),
+            ]),
+        )
+        .unwrap();
+    assert!(observations
+        .verify_entry_inventory(root.path(), &BTreeMap::new())
+        .is_err());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

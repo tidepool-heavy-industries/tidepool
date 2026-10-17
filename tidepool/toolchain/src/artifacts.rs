@@ -3422,25 +3422,16 @@ fn seal_turn_outputs_with_validation(
     }
     let ordinary_receipt = if source_segment.is_none() {
         Some(
-            certified_products::decode_receipt_with_operation(
+            certified_products::decode_receipt_with_validation(
                 &receipt_bytes,
-                Some(output_dir),
-                &validation.inventory,
+                output_dir,
+                validation,
             )
             .map_err(compiler_evidence_failure)?,
         )
     } else {
         None
     };
-    if let Some(receipt) = &ordinary_receipt {
-        if let certified_products::WorkerExecutionSource::ExactAvailable { bytes, .. } =
-            &receipt.source_recipe
-        {
-            validation
-                .record_captured_bytes(&output_dir.join("execution-source.cbor"), bytes)
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        }
-    }
     let valid =
         evidence.filter(|evidence| source_segment.is_some() || evidence.revalidate(source).is_ok());
     let Some(valid) = valid else {
@@ -8444,6 +8435,12 @@ mod module_product_tests {
                 "actual entry admission did not observe {name}"
             );
         }
+        let original = first
+            .products()
+            .recovery_products
+            .first()
+            .expect("real retained entry fixture must issue an original product");
+        crate::recovery_artifacts::check_entry_unsealed_input_observations(original);
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {
