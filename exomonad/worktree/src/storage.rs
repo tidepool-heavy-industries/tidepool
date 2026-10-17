@@ -76,9 +76,14 @@ impl DurableJsonDir {
         self.dir.join(format!("{id}.json"))
     }
 
-    /// Whether `id` currently has a file on disk.
-    pub fn exists(&self, id: &str) -> bool {
-        self.path_for(id).exists()
+    /// Observe presence without treating inaccessible storage as absence.
+    pub fn exists(&self, id: &str) -> Result<bool, WorktreeError> {
+        let path = self.path_for(id);
+        match fs::metadata(&path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(storage_failure(&path, error)),
+        }
     }
 
     /// Durably write `bytes` for `id` — a temp file in this directory,
