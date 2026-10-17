@@ -7153,16 +7153,12 @@ fn recovery_interface_materialization_work_is_independent_of_native_body_growth(
     );
 }
 
-#[test]
-fn recovery_interface_projection_preserves_native_availability_modes() {
-    let baseline = product("InspectBaseline", 31);
-    let required = product("InspectRequired", 32);
-    let unused = product("InspectUnused", 33);
+fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationContext> {
     let inventory = ArtifactInventory::default();
     let entry = Arc::new(
         ArtifactEntry::original(
             CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
-            baseline.clone(),
+            product.clone(),
         )
         .unwrap(),
     );
@@ -7170,7 +7166,7 @@ fn recovery_interface_projection_preserves_native_availability_modes() {
     let view = inventory
         .admit_shared(&inventory.empty_view(), vec![entry])
         .unwrap();
-    let full = Arc::new(ExactDeclarationContext::from_facts(
+    Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
             compiler_support: fixture_compiler_support(projection, view),
@@ -7178,7 +7174,15 @@ fn recovery_interface_projection_preserves_native_availability_modes() {
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
-    ));
+    ))
+}
+
+#[test]
+fn recovery_interface_projection_preserves_native_availability_modes() {
+    let baseline = product("InspectBaseline", 31);
+    let required = product("InspectRequired", 32);
+    let unused = product("InspectUnused", 33);
+    let full = native_context(&baseline);
     assert!(full
         .compiler_source_support()
         .native_offers()
@@ -7211,4 +7215,71 @@ fn recovery_interface_projection_preserves_native_availability_modes() {
         );
         assert_eq!(after.lexical, before.lexical);
     }
+}
+
+#[test]
+fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
+    let baseline = native_context(&product("InspectedOwner", 48));
+    let before = baseline.recovery_inspection_inputs().unwrap();
+    let incoming = baseline
+        .artifact_view()
+        .inventory()
+        .admit_shared(
+            baseline.artifact_view(),
+            vec![Arc::new(
+                ArtifactEntry::original(
+                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+                    product("UnrelatedNativeOwner", 49),
+                )
+                .unwrap(),
+            )],
+        )
+        .unwrap();
+    let support = baseline
+        .compiler_source_support()
+        .retain_custody(&incoming)
+        .unwrap();
+    let expanded = Arc::new(
+        baseline
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support),
+    );
+    assert!(
+        expanded.artifact_view().artifact_ids().len()
+            > baseline.artifact_view().artifact_ids().len(),
+        "native custody must actually grow"
+    );
+    let after = expanded.recovery_inspection_inputs().unwrap();
+    let roster = |inputs: &RecoveryInspectionInputs| {
+        inputs
+            .0
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.interface.unit.clone(),
+                    artifact.interface.module.clone(),
+                    artifact.interface.sha256.clone(),
+                    artifact.interface.requirements.clone(),
+                    artifact.product.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roster(&before), roster(&after));
+    let files = |inputs: &RecoveryInspectionInputs| {
+        std::fs::read_dir(inputs.0.directory.path().join("artifacts"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        files(&before),
+        files(&after),
+        "unrelated native custody must add no copied inspection files or native payload"
+    );
 }
