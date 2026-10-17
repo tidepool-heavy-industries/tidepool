@@ -8421,6 +8421,12 @@ mod module_product_tests {
             1,
             "fresh preparation hands off its staging validation without loading again"
         );
+        let observed = production_entry::entry_observed_inputs();
+        for name in [prepared_artifact_name("__prepared"), "meta.cbor".into(), "asks.json".into(),
+            "module-products.cbor".into(), "module-package-imports.cbor".into(),
+            "dependencies.json".into(), "certified-products.cbor".into(), "compiler-inputs.cbor".into()] {
+            assert!(observed.contains(Path::new(&name)), "actual entry admission did not observe {name}");
+        }
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {

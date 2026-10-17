@@ -1016,6 +1016,13 @@ pub fn capture_recovery_artifact_observations<T, E>(
 }
 
 impl RetainedRecoveryArtifactObservations {
+    #[cfg(test)]
+    pub(crate) fn entry_owned_paths(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.files.iter().filter(|(_, file)| file.owned)
+            .map(|(path, _)| path.strip_prefix(&self.root).expect("confined entry observation").to_owned())
+            .collect()
+    }
+
     pub(crate) fn verify_entry_inventory(
         &self,
         root: &Path,
@@ -1217,6 +1224,13 @@ impl PackageInterfaceValidation {
             );
         }
         Ok(())
+    }
+
+    fn admitted_digest(&mut self, path: &Path, bytes: &[u8]) -> [u8; 32] {
+        match self.observed.as_ref().and_then(|files| files.get(path)) {
+            Some(observed) => observed.sha256,
+            None => self.digest(bytes),
+        }
     }
 
     pub(crate) fn with_inventory(
@@ -1479,7 +1493,7 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    if expected_sha256.is_some_and(|expected| &validation.digest(&bytes) != expected) {
+    if expected_sha256.is_some_and(|expected| &validation.admitted_digest(path, &bytes) != expected) {
         return Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(
             path.to_path_buf(),
         ));
@@ -1525,7 +1539,7 @@ fn read_package_imports(
         ));
     }
     if let Some(expected) = expected_sha256 {
-        if &validation.digest(&bytes) != expected {
+        if &validation.admitted_digest(path, &bytes) != expected {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
         validation.record_observed(path, *expected, bytes.len() as u64, true)?;
@@ -1848,7 +1862,7 @@ fn read_checked(
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     let bytes = read_admission_bytes(path, limit, validation)?;
     validation.read_bytes += bytes.len() as u64;
-    if &validation.digest(&bytes) != expected {
+    if &validation.admitted_digest(path, &bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
     }
     validation.record_observed(path, *expected, bytes.len() as u64, true)?;
@@ -2971,9 +2985,8 @@ mod tests {
     fn entry_observations_bind_consumed_bytes_before_manifest_and_refuse_escape() {
         let directory = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(directory.path()).unwrap();
-        for name in ["meta.cbor", "__prepared.cbor", "asks.json", "module-products.cbor",
-            "module-package-imports.cbor", "dependencies.json", "certified-products.cbor",
-            "compiler-inputs.cbor", "execution-source.cbor"] {
+        // This primitive control does not establish production reader coverage.
+        for name in ["admitted.bin"] {
             let path = root.join(name);
             fs::write(&path, b"admitted").unwrap();
             let (bytes, observations) = PackageInterfaceValidation::capture_entry(

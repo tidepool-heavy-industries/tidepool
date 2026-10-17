@@ -160,6 +160,16 @@ pub struct ProductionEntryOutput {
     source_path: PathBuf,
 }
 
+#[cfg(test)]
+thread_local! {
+    static ENTRY_OBSERVED_INPUTS: std::cell::RefCell<std::collections::BTreeSet<PathBuf>> = Default::default();
+}
+
+#[cfg(test)]
+pub(super) fn entry_observed_inputs() -> std::collections::BTreeSet<PathBuf> {
+    ENTRY_OBSERVED_INPUTS.with(|inputs| inputs.borrow().clone())
+}
+
 // Publication-only coupling of the existing semantic owner to the exact
 // physical bytes admitted by its private constructor.
 struct AdmittedOriginalEntry {
@@ -226,6 +236,8 @@ fn admit_original_entry(
                 }, dependency_selection))
             },
         )?;
+    #[cfg(test)]
+    ENTRY_OBSERVED_INPUTS.with(|inputs| *inputs.borrow_mut() = physical.entry_owned_paths());
     Ok(AdmittedOriginalEntry { output, physical, dependency_selection })
 }
 
