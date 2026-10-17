@@ -3282,6 +3282,13 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                             supplied = {command[index + 1]: command[index + 2]
                                         for index, value in enumerate(command) if value == '--setenv'}
                             self.assertNotIn('TIDEPOOL_EXTRACT_DAEMON_SOCKET', supplied)
+                            self.assertEqual(supplied['EXOMONAD_NIX_OFFLINE'], '1')
+                            self.assertEqual(set(supplied), set(selected) | {
+                                'EXOMONAD_NIX_OFFLINE', 'HOME', 'TMPDIR', 'XDG_CACHE_HOME',
+                                'TIDEPOOL_EXTRACT_NO_DAEMON', 'TIDEPOOL_COMPILE_CACHE_DIR',
+                                'TIDEPOOL_BUILD_PRODUCTS_DIR'})
+                            for name in ('POISON_AMBIENT_SENTINEL', 'POISON_AMBIENT_SECRET', 'HTTP_PROXY'):
+                                self.assertNotIn(name, supplied)
                             self.assertIn('--clearenv', command)
                             # Actual receiving owner clears ambient selection and binds only
                             # the paths carried by the production namespace command.
@@ -3311,6 +3318,10 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
 
                         with patch.object(sys, 'argv', ['namespace', str(descriptor),
                                                        '/pinned/bwrap', str(root / 'evidence'), sys.executable]), \
+                             patch.dict(os.environ, {'EXOMONAD_NIX_OFFLINE': '0',
+                                                     'POISON_AMBIENT_SENTINEL': 'never-forward',
+                                                     'POISON_AMBIENT_SECRET': 'synthetic-secret-sentinel',
+                                                     'HTTP_PROXY': 'http://ambient.invalid'}), \
                              patch.object(subprocess, 'run', side_effect=consume), \
                              self.assertRaises(SystemExit) as stopped:
                             exec(compile(namespace_source, 'packaged-catalog-consumer.sh', 'exec'), {})

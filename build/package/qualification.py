@@ -1712,9 +1712,9 @@ def execution_environment(descriptor: dict) -> dict:
     return environment
 
 
-def qualification_execution_environment(descriptor: dict) -> dict:
+def qualification_execution_environment(descriptor: dict, *, inherit_parent: bool = True) -> dict:
     """Qualification may resolve only already retained Nix inputs."""
-    environment = execution_environment(descriptor)
+    environment = execution_environment(descriptor) if inherit_parent else dict(descriptor["environment"])
     environment["EXOMONAD_NIX_OFFLINE"] = "1"
     return environment
 

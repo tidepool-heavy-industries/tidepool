@@ -267,7 +267,9 @@ Qualification `run` and `catalog-gate` force `EXOMONAD_NIX_OFFLINE=1`
 through their shared execution-environment owner, after clearing ambient
 selections. Scaffold locking and frozen flake-source admission must use
 already retained inputs; unavailable inputs refuse rather than fetch. The
-existing delegated runner forwards that exact policy. Ordinary package
+existing delegated runner forwards that exact policy. The catalog namespace
+uses the same policy over only its canonical descriptor environment, retaining
+its clear-environment boundary without forwarding ambient variables. Ordinary package
 `exec` and deployment configuration keep their own Nix policy. This restricts
 Nix resolution; synthetic provider or local-HTTP proof remains a separate
 requirement for each selected workload.

@@ -22,7 +22,7 @@ bundle = Path(record["bundle_root"])
 if (record["stdlib_mode"] != "catalog-backed"
         or record["programs"]["libtest"] != str(bundle / "bin/tidepool-tests")):
     raise SystemExit("catalog gate requires the exact qualified native bundle")
-environment = dict(record["environment"])
+environment = qualification["qualification_execution_environment"](record, inherit_parent=False)
 environment.update({
     "HOME": "/tmp/home", "TMPDIR": "/tmp", "XDG_CACHE_HOME": "/tmp/cache",
     "TIDEPOOL_EXTRACT_NO_DAEMON": "1", "TIDEPOOL_COMPILE_CACHE_DIR": "/tmp/compile-cache",
