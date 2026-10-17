@@ -1142,8 +1142,23 @@ pub struct OriginalAvailabilityRefusal {
     pub original_ordinal: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum InputDecisionRefusal {
+    MissingContinuationOwner,
+    MissingDecision,
+    NativeOwnerMismatch,
+    ArtifactIdentityMismatch,
+    RoleMismatch,
+    UnexpectedVersion,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("input native decision for {owner:?} refused: {reason:?}")]
+    InputDecision {
+        owner: crate::declaration_join::ExactModuleIdentity,
+        reason: InputDecisionRefusal,
+    },
     #[error("compiler host work interrupted: {0}")]
     Interrupted(#[source] std::io::Error),
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -2410,10 +2425,17 @@ fn duplicate_source_binder(
 
 /// Exact type and native roles issued for one compiler request, completed by
 /// that request's validated output rows. Full retained custody is not an offer.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CertifiedSourceSelection {
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    input_origin: CertifiedInputOrigin,
+}
+
+#[derive(Clone, Debug)]
+enum CertifiedInputOrigin {
+    Continuation(Arc<crate::artifact_inventory::CompilerSourceSupport>),
+    NewProducts,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -2468,9 +2490,16 @@ enum ReceiptSourceSelection {
 
 #[derive(Clone, Debug)]
 struct ReceiptNativeSelection {
+    origin: ReceiptNativeOrigin,
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
     availability: ReceiptNativeAvailability,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReceiptNativeOrigin {
+    Input,
+    NewProduct,
 }
 
 #[derive(Clone, Debug)]
@@ -2531,6 +2560,46 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn continuation_input(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> CertResult<
+        Option<(
+            &crate::artifact_inventory::CompilerSourceSupport,
+            &CachedHomeOwner,
+        )>,
+    > {
+        let Some(native) = self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+            .and_then(ReceiptSourceSelection::native)
+        else {
+            return Ok(None);
+        };
+        if matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+            return Ok(None);
+        }
+        let refusal = |reason| CertificationError::InputDecision {
+            owner: owner.clone(),
+            reason,
+        };
+        if !matches!(native.version, ReceiptSourceVersion::Original) {
+            return Err(refusal(InputDecisionRefusal::UnexpectedVersion));
+        }
+        let CertifiedInputOrigin::Continuation(source) = &self.input_origin else {
+            return Err(refusal(InputDecisionRefusal::MissingContinuationOwner));
+        };
+        Ok(Some((source, &native.owner)))
+    }
+
+    fn new_product_ingress() -> Self {
+        Self {
+            modules: Arc::new(BTreeMap::new()),
+            produced_types: None,
+            input_origin: CertifiedInputOrigin::NewProducts,
+        }
+    }
+
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
@@ -2577,6 +2646,8 @@ impl CertifiedSourceSelection {
     ) -> CertResult<Self> {
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
+        selected.input_origin =
+            CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -2601,6 +2672,7 @@ impl CertifiedSourceSelection {
                     "request original compiler owner",
                 ));
             }
+            native.origin = ReceiptNativeOrigin::Input;
             native.availability =
                 ReceiptNativeAvailability::Issued(inputs.native_availability(original).ok_or(
                     CertificationError::Mismatch("request original availability"),
@@ -3171,7 +3243,7 @@ impl CertifiedSourceSelection {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
-        let mut selected = Self::default();
+        let mut selected = Self::new_product_ingress();
         for product in products {
             let witness = product
                 .original_native()
@@ -3203,6 +3275,7 @@ impl CertifiedSourceSelection {
                         .descriptor
                         .id,
                         native: ReceiptNativeSelection {
+                            origin: ReceiptNativeOrigin::NewProduct,
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
                             availability: ReceiptNativeAvailability::NewProduct {
@@ -3311,6 +3384,7 @@ impl CertifiedSourceSelection {
             ReceiptSourceSelection::Native {
                 interface,
                 native: ReceiptNativeSelection {
+                    origin: ReceiptNativeOrigin::NewProduct,
                     owner: owner.clone(),
                     version,
                     availability: ReceiptNativeAvailability::NewProduct {
@@ -8309,7 +8383,7 @@ pub(crate) fn certify_products_with_validation(
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?;
             CertifiedSourceSelection::from_compiler_inputs(inputs, metadata, &validation.inventory)?
         }
-        None => CertifiedSourceSelection::default(),
+        None => CertifiedSourceSelection::new_product_ingress(),
     };
     for interface in &module_interfaces {
         source_selection.admit_interface(
@@ -11637,7 +11711,7 @@ pub(crate) mod tests {
                 binder: binder.clone()
             }
         );
-        let mut current_selection = CertifiedSourceSelection::default();
+        let mut current_selection = CertifiedSourceSelection::new_product_ingress();
         current_selection
             .admit_current(
                 new.owner(),
@@ -11777,7 +11851,7 @@ pub(crate) mod tests {
         let products = [original.clone(), old_helper.clone(), new_helper.clone()];
         let mut validation = PackageInterfaceValidation::default();
         let sources = available_original_source_map(&products, &[], &validation.inventory).unwrap();
-        let mut current = CertifiedSourceSelection::default();
+        let mut current = CertifiedSourceSelection::new_product_ingress();
         current
             .admit_current(
                 new_helper.owner(),
@@ -11984,7 +12058,7 @@ pub(crate) mod tests {
             (staged.clone(), ProductOrigin::RetainedCore),
         );
         let operation = InventoryOperation::new(Default::default());
-        let mut selection = CertifiedSourceSelection::default();
+        let mut selection = CertifiedSourceSelection::new_product_ingress();
         selection
             .admit_current(
                 &staged,
@@ -12531,7 +12605,7 @@ pub(crate) mod tests {
             if mode == "current" {
                 // A newly certified complete product is issued by the current
                 // source owner, independently of this request's empty baseline.
-                selection = CertifiedSourceSelection::default();
+                selection = CertifiedSourceSelection::new_product_ingress();
                 selection
                     .admit_current(
                         product.owner(),

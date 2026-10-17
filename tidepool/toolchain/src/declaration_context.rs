@@ -691,6 +691,11 @@ impl OriginalCompilerInputs {
         let projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
+        let decisions =
+            crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                selection,
+                &projection,
+            )?;
         let preferred = selection
             .native_original_requirements()
             .cloned()
@@ -740,7 +745,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(&artifacts, &native_offers)?;
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         Ok(Self {
-            demand: OriginalInputDemand::RolePolicy,
+            demand: OriginalInputDemand::Issued(decisions),
             projection,
             artifacts,
             native_offers,
@@ -985,7 +990,7 @@ impl OriginalCompilerInputs {
 
 pub(crate) struct RequestCompilerInputs {
     // Retained availability outlives the transport subset consumed by this request.
-    source_support: crate::artifact_inventory::CompilerSourceSupport,
+    source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: CompilerArtifactMetadata,
     native_transport: NativeCompilerTransport,
     declaration_semantic_sha256: [u8; 32],
@@ -1250,6 +1255,12 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    pub(crate) fn shared_compiler_source_support(
+        &self,
+    ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        Arc::clone(&self.source_support)
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
@@ -1334,7 +1345,7 @@ impl ProtectedScaffoldRequirements {
             support.native_offers(),
         )?;
         Ok(RequestCompilerInputs {
-            source_support: support,
+            source_support: Arc::new(support),
             metadata,
             native_transport,
             declaration_semantic_sha256,

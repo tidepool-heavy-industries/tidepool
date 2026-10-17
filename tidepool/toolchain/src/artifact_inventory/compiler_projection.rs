@@ -179,10 +179,84 @@ pub(crate) struct IssuedInputNativeDecisions {
 }
 
 impl IssuedInputNativeDecisions {
+    pub(crate) fn from_certified_continuation(
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        use crate::certified_products::{CertificationError, InputDecisionRefusal};
+        let mut result = Self::default();
+        for (owner, role) in projection.snapshot_roles() {
+            let Some(original) = role.original() else {
+                continue;
+            };
+            let Some((source, native_owner)) = selection
+                .continuation_input(owner)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+            else {
+                continue;
+            };
+            let refusal = |reason| {
+                CompileError::CompilerEvidence(Box::new(CertificationError::InputDecision {
+                    owner: owner.clone(),
+                    reason,
+                }))
+            };
+            let admitted = source
+                .selected
+                .get(owner)
+                .ok_or_else(|| refusal(InputDecisionRefusal::ArtifactIdentityMismatch))?;
+            let (_, entry) = admitted
+                .original
+                .as_ref()
+                .ok_or_else(|| refusal(InputDecisionRefusal::ArtifactIdentityMismatch))?;
+            if entry.descriptor.id != original
+                || admitted.interface.1.descriptor.id != role.interface()
+            {
+                return Err(refusal(InputDecisionRefusal::ArtifactIdentityMismatch));
+            }
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(refusal(InputDecisionRefusal::ArtifactIdentityMismatch));
+            };
+            if product.owner() != native_owner {
+                return Err(refusal(InputDecisionRefusal::NativeOwnerMismatch));
+            }
+            let fact = source
+                .input_decisions
+                .facts
+                .get(owner)
+                .ok_or_else(|| refusal(InputDecisionRefusal::MissingDecision))?;
+            if source.projection.snapshot_roles().get(owner) != Some(&fact.role) {
+                return Err(refusal(InputDecisionRefusal::RoleMismatch));
+            }
+            if !matches!(role, CompilerInputRole::ReusableOriginal { .. }) {
+                return Err(refusal(InputDecisionRefusal::RoleMismatch));
+            }
+            result.facts.insert(
+                owner.clone(),
+                RecordedInputNativeDecision {
+                    role: role.clone(),
+                    groups: fact.groups.clone(),
+                },
+            );
+        }
+        Ok(result)
+    }
+
     pub(crate) fn recorded_facts(
         &self,
     ) -> &imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision> {
         &self.facts
+    }
+
+    fn for_exact_roles(&self, projection: &CompilerInputProjection) -> Self {
+        Self {
+            facts: self
+                .facts
+                .iter()
+                .filter(|(owner, fact)| projection.snapshot_roles().get(*owner) == Some(&fact.role))
+                .map(|(owner, fact)| (owner.clone(), fact.clone()))
+                .collect(),
+        }
     }
 
     pub(crate) fn restricted(
@@ -362,6 +436,18 @@ impl CompilerSourceSupport {
         artifacts: ArtifactView,
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
+        let decisions = self.input_decisions.for_exact_roles(&projection);
+        let mut support = Self::new(projection, artifacts, offers)?;
+        support.input_decisions = decisions;
+        Ok(support)
+    }
+
+    fn rebuild_narrowed(
+        &self,
+        projection: CompilerInputProjection,
+        artifacts: ArtifactView,
+        offers: impl IntoIterator<Item = IssuedNativeOffer>,
+    ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
         let mut support = Self::new(projection, artifacts, offers)?;
         support.input_decisions = decisions;
@@ -373,7 +459,7 @@ impl CompilerSourceSupport {
         incoming: Option<&IssuedInputNativeDecisions>,
     ) -> Result<Self, CompileError> {
         if let Some(incoming) = incoming {
-            for (owner, fact) in incoming.restricted(&self.projection, &self.artifacts).facts {
+            for (owner, fact) in incoming.for_exact_roles(&self.projection).facts {
                 if let Some(previous) = self.input_decisions.facts.get_mut(&owner) {
                     for (ordinal, group) in fact.groups {
                         if previous
@@ -516,10 +602,41 @@ impl CompilerSourceSupport {
             .cloned();
         // Availability is retained evidence. The request transport below owns
         // which exact own roots or dependency subclosures it consumes.
-        Self::new(projection, artifacts, offers).map(|mut support| {
-            support.input_decisions = decisions;
+        let mut support = Self::new(projection, artifacts, offers)?;
+        support.input_decisions = decisions;
+        let has_unissued_original =
             support
-        })
+                .projection
+                .snapshot_roles()
+                .iter()
+                .any(|(owner, role)| {
+                    role.original().is_some()
+                        && support
+                            .input_decisions
+                            .facts
+                            .get(owner)
+                            .is_none_or(|fact| &fact.role != role)
+                });
+        if has_unissued_original {
+            // Resolve policy only at the real input issuer. A carried empty
+            // decision is already resolved and must suppress policy fallback.
+            let (artifacts, projection, decisions) =
+                support.artifacts.merge_compiler_inputs_with_demand(
+                    &support.projection,
+                    &support.artifacts,
+                    &CompilerInputProjection::default(),
+                    CompilerNativeDemand::SourceSelections {
+                        left: Some(&support.input_decisions),
+                        right: None,
+                    },
+                    CompilerInputValidation::ReceivedFragment,
+                )?;
+            let mut resolved =
+                Self::new(projection, artifacts, support.native_offers.iter().cloned())?;
+            resolved.input_decisions = decisions;
+            return Ok(resolved);
+        }
+        Ok(support)
     }
 
     pub(crate) fn from_recovered_selection(
@@ -692,13 +809,15 @@ impl CompilerSourceSupport {
             .compiler_support_projection(artifacts, admissions)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
             .for_source_owners(&owners);
+        let continuation =
+            IssuedInputNativeDecisions::from_certified_continuation(selection, &incoming)?;
         let (artifacts, projection, decisions) = self.artifacts.merge_compiler_inputs_with_demand(
             &self.projection,
             artifacts,
             &incoming,
             CompilerNativeDemand::SourceSelections {
                 left: Some(&self.input_decisions),
-                right: None,
+                right: Some(&continuation),
             },
             CompilerInputValidation::ReceivedFragment,
         )?;
@@ -809,9 +928,7 @@ impl CompilerSourceSupport {
                 }
             }
         }
-        let input_decisions = self
-            .input_decisions
-            .restricted(&projection, &self.artifacts);
+        let input_decisions = self.input_decisions.for_exact_roles(&projection);
         Ok(Self {
             projection,
             artifacts: self.artifacts.clone(),
@@ -955,7 +1072,7 @@ impl CompilerSourceSupport {
                 }
             })
         });
-        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     pub(crate) fn publish_original(
@@ -1021,7 +1138,7 @@ impl CompilerSourceSupport {
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.rebuild(projection, artifacts, offers)
+        self.rebuild_narrowed(projection, artifacts, offers)
     }
 
     pub(crate) fn source_support(
@@ -1040,7 +1157,7 @@ impl CompilerSourceSupport {
                 },
             )
             .collect::<Result<Vec<_>, _>>()?;
-        self.rebuild(selected.projection, selected.artifacts, offers)
+        self.rebuild_narrowed(selected.projection, selected.artifacts, offers)
     }
 
     /// Type evidence adds selected interfaces while the receiver continues to
