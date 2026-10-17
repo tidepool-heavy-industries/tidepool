@@ -13,7 +13,6 @@ pub(super) fn bind_fresh_product_dependencies(
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<(), CompileError> {
     let namespace = parent.namespace();
-    let projection = parent.read_projection(state);
     let mut wanted = BTreeSet::new();
     for group in fresh {
         let entry = &entries[&group.artifact];
@@ -55,17 +54,17 @@ pub(super) fn bind_fresh_product_dependencies(
     }
     let mut offered = imbl::OrdSet::new();
     for offer in offers {
-        let Some(proof) = offer.proof() else { continue };
-        let graph = proof.selection.graph_selection();
-        validate_issued_selection(state, &projection.nodes, graph)?;
-        offered.extend(graph.native_groups.iter().filter_map(|group| {
-            wanted
-                .contains(&NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal,
-                })
-                .then_some(InventoryNodeKey::Group(*group))
-        }));
+        for key in &wanted {
+            for group in offer.group_bindings(*key) {
+                let node = InventoryNodeKey::Group(group);
+                if !state.contains_node(&node) {
+                    return Err(failure(
+                        "issued dependency scope is outside receiving inventory",
+                    ));
+                }
+                offered.insert(node);
+            }
+        }
     }
     let index = NativeSelectionIndex::build(state, &offered);
     for key in wanted {
@@ -168,14 +167,19 @@ pub(crate) fn validate_consumed_native_namespace(
 #[derive(Clone)]
 struct NativeOfferCustody {
     lease: Arc<ViewLease>,
+    reachable: imbl::OrdSet<ArtifactBindingNode>,
     #[cfg(test)]
     observed: Arc<OnceLock<ArtifactView>>,
 }
 
 impl NativeOfferCustody {
-    fn from_lease(lease: Arc<ViewLease>) -> Self {
+    fn from_checked_nodes(
+        lease: Arc<ViewLease>,
+        reachable: imbl::OrdSet<ArtifactBindingNode>,
+    ) -> Self {
         Self {
             lease,
+            reachable,
             #[cfg(test)]
             observed: Arc::new(OnceLock::new()),
         }
@@ -323,6 +327,7 @@ impl IssuedNativeOffer {
         let requested_originals = originals.iter().copied().collect::<BTreeSet<_>>();
         let mut issued_roots =
             BTreeMap::<(ArtifactId, ArtifactBinding), BTreeMap<u32, NativeGroupBinding>>::new();
+        let mut ambiguous_roots = BTreeSet::new();
         for root in &source.admission_roots {
             let ArtifactBindingNode::Group(group) = root else {
                 continue;
@@ -344,11 +349,7 @@ impl IssuedNativeOffer {
                     .or_default()
                     .insert(group.original_ordinal, *group);
                 if prior.is_some_and(|prior| prior != *group) {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: group.binding.artifact(),
-                        },
-                    ));
+                    ambiguous_roots.insert((group.binding.artifact(), carrier));
                 }
             }
         }
@@ -379,6 +380,11 @@ impl IssuedNativeOffer {
                 *source.selection.namespace.get(&interface).ok_or_else(|| {
                     failure("complete availability lacks exact canonical carrier")
                 })?;
+            if ambiguous_roots.contains(&(original, carrier)) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+                ));
+            }
             let roots = issued_roots
                 .remove(&(original, carrier))
                 .unwrap_or_default();
@@ -454,7 +460,7 @@ impl IssuedNativeOffer {
                 interface,
                 owner: entry.descriptor.owner.clone(),
                 body,
-                custody: NativeOfferCustody::from_lease(lease),
+                custody: NativeOfferCustody::from_checked_nodes(lease, nodes),
             })));
         }
         drop(state);
@@ -611,12 +617,16 @@ impl IssuedNativeOffer {
                 (body, custody)
             }
         };
+        let reachable = {
+            let state = custody.lease.inventory.0.lock().expect("inventory lock");
+            custody.read_projection(&state).nodes.clone()
+        };
         Ok(Self(Arc::new(NativeOfferFacts {
             original,
             interface,
             owner: entry.descriptor.owner.clone(),
             body,
-            custody: NativeOfferCustody::from_lease(custody.lease),
+            custody: NativeOfferCustody::from_checked_nodes(custody.lease, reachable),
         })))
     }
 
@@ -751,12 +761,40 @@ impl IssuedNativeOffer {
         &self.0.custody.lease
     }
 
+    /// Query only this issuance's checked reachable membership. Complete scope
+    /// rows outside the offer's selection cannot supply a missing binding.
+    pub(super) fn group_bindings(
+        &self,
+        key: NativeGroupKey,
+    ) -> impl Iterator<Item = NativeGroupBinding> + '_ {
+        self.0
+            .custody
+            .lease
+            .selection
+            .scopes
+            .keys()
+            .filter_map(move |selection| {
+                let group = NativeGroupBinding {
+                    binding: NativeGroupIssuer {
+                        artifact: key.artifact,
+                        selection: *selection,
+                    },
+                    original_ordinal: key.original_ordinal,
+                };
+                self.0
+                    .custody
+                    .reachable
+                    .contains(&ArtifactBindingNode::Group(group))
+                    .then_some(group)
+            })
+    }
+
     pub(crate) fn issued_group_carriers(
         &self,
     ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {
-        let Some(proof) = self.proof() else {
+        if self.proof().is_none() {
             return Ok(BTreeMap::new());
-        };
+        }
         let state = self
             .0
             .custody
@@ -765,11 +803,14 @@ impl IssuedNativeOffer {
             .0
             .lock()
             .expect("inventory lock");
-        proof
-            .selection
-            .graph_selection()
-            .native_groups
+        self.0
+            .custody
+            .reachable
             .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
             .map(|group| {
                 let mut carriers = state
                     .outgoing(ArtifactBindingNode::Group(*group))
