@@ -534,15 +534,27 @@ impl OriginalCompilerInputs {
                 .then(|| entry.descriptor.owner.clone())
             })
             .collect::<BTreeSet<_>>();
-        let carried = if authored.is_empty() {
+        let selected = context
+            .compiler_input_projection()
+            .snapshot_roles()
+            .iter()
+            .filter_map(|(owner, role)| {
+                (authored.contains(owner) && role.original().is_some()).then(|| owner.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let fallback = authored
+            .difference(&selected)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let carried = if fallback.is_empty() {
             None
         } else {
             let mut projection = context
                 .compiler_input_projection()
-                .for_source_owners(&authored);
+                .for_source_owners(&fallback);
             for offer in context.facts.compiler_support.native_offers() {
                 let facts = offer.snapshot_facts();
-                if !authored.contains(&facts.owner) {
+                if !fallback.contains(&facts.owner) {
                     continue;
                 }
                 let Some(role) = context
@@ -586,7 +598,20 @@ impl OriginalCompilerInputs {
                 .iter()
                 .any(|role| role.original().is_some())
         });
-        Ok(carried)
+        if selected.is_empty() {
+            return Ok(carried);
+        }
+        let source = &context.facts.compiler_support;
+        let selected = Self {
+            demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
+            projection: source.projection().for_source_owners(&selected),
+            artifacts: source.artifacts().clone(),
+            native_offers: source.native_offers().to_vec(),
+        };
+        Ok(Some(match carried {
+            Some(carried) => selected.merge(&carried)?,
+            None => selected,
+        }))
     }
 
     pub(crate) fn from_candidates(

@@ -3014,6 +3014,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         context = context
             .retain_issued_native_offers(private.native_offers().iter().cloned())
             .unwrap();
+        let selected_context = context.clone();
         // The inventory issuer explicitly selects complete original censuses;
         // the compiler issuer still names exactly one of those native bodies.
         {
@@ -3141,6 +3142,53 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         )
         .unwrap();
         assert!(other.native_offers().iter().any(|offer| offer.is_full()));
+        for reverse in [false, true] {
+            let mut historical = selected_context.clone();
+            let mut offers = historical
+                .compiler_source_support()
+                .native_offers()
+                .to_vec();
+            offers.extend(other.native_offers().iter().cloned());
+            if reverse {
+                offers.reverse();
+            }
+            historical.facts.compiler_support = historical
+                .compiler_source_support()
+                .retain_offers(offers)
+                .unwrap();
+            let before = historical.artifact_view().selected_native_groups();
+            assert!(
+                before.is_empty(),
+                "the selected authored owner has explicit zero demand"
+            );
+            let direct = OriginalCompilerInputs::reuse_selected_authored(&historical)
+                .unwrap()
+                .expect("catalog-absent authored reuse carries its selected exact owner");
+            assert_eq!(direct.artifacts.selected_native_groups(), before);
+            assert!(direct.selected_demand_source().is_some());
+            assert_eq!(
+                direct
+                    .projection
+                    .snapshot_roles()
+                    .get(&identity("main", &module))
+                    .unwrap()
+                    .original(),
+                Some(current_native),
+            );
+            assert!(direct
+                .native_offers()
+                .iter()
+                .any(|offer| offer.original() == other.native_offers()[0].original()));
+            let mixed = OriginalCompilerInputs::from_selected_authored_declarations(
+                &historical,
+                producer,
+                std::slice::from_ref(current),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(mixed.artifacts.selected_native_groups(), before);
+            assert_eq!(mixed.projection, direct.projection);
+        }
         for reverse in [false, true] {
             let mut offers = other.native_offers().to_vec();
             if reverse {
