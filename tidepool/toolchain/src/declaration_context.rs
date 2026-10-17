@@ -10822,7 +10822,7 @@ mod tests {
         #![proptest_config(proptest::test_runner::Config::with_cases(24))]
         #[test]
         fn merkle_context_history_matches_canonical_and_cold_facts(
-            operations in proptest::collection::vec((proptest::prelude::any::<u16>(), 0u8..6), 1..28),
+            operations in proptest::collection::vec((proptest::prelude::any::<u16>(), 0u8..7), 1..28),
         ) {
             use fvm_ipld_blockstore::{Blockstore,MemoryBlockstore};
             use crate::exact_context::{Materializer,hydrate_context};
@@ -10840,6 +10840,15 @@ mod tests {
             let left = empty.clone().with_published_source_originals(&alpha).unwrap();
             let right = empty.clone().with_published_source_originals(&beta).unwrap();
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
+            assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
+                "published fixture must carry a real issued decision domain");
+            let interface_roots = left.compiler_input_projection().roles().into_iter()
+                .map(|role| role.interface()).collect();
+            let withdrawn_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
+            let withdrawn = left.clone().rebuild(|facts| facts.compiler_support = withdrawn_support).finish().unwrap();
+            assert!(!withdrawn.compiler_source_support().recorded_input_decisions().is_empty());
+            assert!(withdrawn.compiler_source_support().recorded_input_decisions().values()
+                .all(|fact| fact.groups.is_empty()), "withdrawal preserves domains but no chosen Group");
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
             let initial = materializer.materialize_context(None,&left.snapshot()).unwrap();
@@ -10856,7 +10865,8 @@ mod tests {
                     },
                     3 => empty.clone(),
                     4 => right.clone(),
-                    _ => joined.clone(),
+                    5 => joined.clone(),
+                    _ => withdrawn.clone(),
                 };
                 assert_context_observation_wire(&next);
                 let snapshot = next.snapshot();
@@ -10879,6 +10889,11 @@ mod tests {
                 let restored = hydrate_context(&store,result.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),snapshot.graph_selection().unwrap());
                 proptest::prop_assert_eq!(restored.snapshot().compiler_roles(),snapshot.compiler_roles());
+                proptest::prop_assert_eq!(
+                    &restored.snapshot().input_decisions,
+                    next.compiler_source_support().recorded_input_decisions(),
+                    "the real incremental writer/reader must preserve issued empty domains and exact Group references",
+                );
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),snapshot.lexical());
                 proptest::prop_assert_eq!(restored.snapshot().producer_sha256(),snapshot.producer_sha256());
                 let graph = restored.snapshot().graph_selection().unwrap();
@@ -10892,6 +10907,11 @@ mod tests {
                     interfaces: view.interface_dependencies(),
                 };
                 let mut recovered = inventory.context_with_snapshot(restored.snapshot()).unwrap();
+                proptest::prop_assert_eq!(
+                    recovered.compiler_source_support().recorded_input_decisions(),
+                    next.compiler_source_support().recorded_input_decisions(),
+                    "authenticated context recovery must preserve the same issued choices without policy resurrection",
+                );
                 proptest::prop_assert_eq!(recovered.original_instance_environment(),&OriginalInstanceEnvironment::Unknown);
                 assert_context_observation_wire(&recovered);
                 recovered.bind_snapshot_baseline(&restored).unwrap();
@@ -10905,6 +10925,10 @@ mod tests {
             for (context,receipt) in history {
                 let restored = hydrate_context(&store,receipt.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),context.lexical_graph());
+                proptest::prop_assert_eq!(
+                    &restored.snapshot().input_decisions,
+                    context.compiler_source_support().recorded_input_decisions(),
+                );
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),context.snapshot().graph_selection().unwrap());
             }
         }
