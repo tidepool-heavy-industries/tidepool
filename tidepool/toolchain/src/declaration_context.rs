@@ -322,12 +322,26 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// Complete private compiler inputs from one already certified output.
 /// This retains exact native roles and their custody without publishing either
 /// authored lexical rights or persistent source-reuse roles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum OriginalInputDemand {
     RolePolicy,
     // This is the existing immutable selection owner, not a census of its custody.
     SelectedSource(ArtifactView),
 }
+
+impl PartialEq for OriginalInputDemand {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::RolePolicy, Self::RolePolicy) => true,
+            (Self::SelectedSource(left), Self::SelectedSource(right)) => {
+                crate::artifact_inventory::ExactArtifactSelection::capture(left)
+                    == crate::artifact_inventory::ExactArtifactSelection::capture(right)
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for OriginalInputDemand {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OriginalCompilerInputs {
