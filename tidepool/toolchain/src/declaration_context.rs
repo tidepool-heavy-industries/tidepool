@@ -8328,58 +8328,24 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     fields(inclusive = true)
 )]
 pub(crate) fn certified_artifact_view(
-    producer: [u8; 32],
-    products: &[CertifiedRecoveryProduct],
-    interfaces: &[ExactInterfaceOwner],
-    joined: &[CertifiedJoinedInterface],
-    compiled: &ArtifactView,
-    baseline: Option<&ExactDeclarationContext>,
-) -> Result<ArtifactView, CompileError> {
-    let view = baseline.map_or_else(
-        || ArtifactInventory::default().empty_view(),
-        |context| context.artifact_view().clone(),
-    );
-    let mut validation = PackageInterfaceValidation::default();
-    let selected = products
-        .iter()
-        .map(|product| {
-            ArtifactEntry::original_with_validation(producer, product.clone(), &mut validation)
-                .map(|entry| entry.descriptor.id)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let view = {
+    originals: &crate::certified_products::SelectedOriginalClosure,
+    baseline: &ExactDeclarationContext,
+) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+    let (view, projection) = {
         let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.certified_artifact_view.merge", inclusive = true).entered();
-        view.merge(&compiled.select_roots(selected)?)?
+        baseline
+            .artifact_view()
+            .merge_selected_original_closure(baseline.compiler_input_projection(), originals)?
     };
-    let mut entries = Vec::new();
-    for product in products {
-        let owner = identity(&product.owner().unit, &product.owner().module);
-        interfaces
+    crate::artifact_inventory::CompilerSourceSupport::new(
+        projection,
+        view,
+        baseline
+            .compiler_source_support()
+            .native_offers()
             .iter()
-            .find(|interface| interface.owner == owner)
-            .ok_or_else(|| failure("original interface metadata missing"))?;
-        entries.push(ArtifactEntry::original_with_validation(
-            producer,
-            product.clone(),
-            &mut validation,
-        )?);
-    }
-    for join in joined {
-        let owner = identity(join.unit(), join.module());
-        let requirements = interfaces
-            .iter()
-            .find(|interface| interface.owner == owner)
-            .ok_or_else(|| failure("joined interface metadata missing"))?
-            .requirements
-            .clone();
-        entries.push(ArtifactEntry::interface(
-            join.clone(),
-            JoinedInterfaceRole::LexicalJoin,
-            requirements,
-        ));
-    }
-    let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.certified_artifact_view.admit", inclusive = true).entered();
-    view.inventory().admit(&view, entries)
+            .cloned(),
+    )
 }
 
 fn text(value: impl Into<String>) -> Value {

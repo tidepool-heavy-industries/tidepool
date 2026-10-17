@@ -907,6 +907,11 @@ impl NativeOriginalRequirement {
     }
 }
 
+enum CompilerNativeDemand<'a> {
+    RoleIssuer,
+    SelectedOriginals(&'a crate::certified_products::SelectedOriginalClosure),
+}
+
 enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
@@ -6322,6 +6327,38 @@ impl ArtifactView {
         other: &Self,
         incoming: &CompilerInputProjection,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        self.merge_compiler_inputs_with_originals(
+            projection,
+            other,
+            incoming,
+            CompilerNativeDemand::RoleIssuer,
+        )
+    }
+
+    /// Authored certification carries its complete demand separately from
+    /// published role policy. Historical same-role demand remains custody.
+    pub(crate) fn merge_selected_original_closure(
+        &self,
+        projection: &CompilerInputProjection,
+        originals: &crate::certified_products::SelectedOriginalClosure,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        let compiled = originals.native_closure();
+        let incoming = projection.within_view(compiled);
+        compiled.merge_compiler_inputs_with_originals(
+            &incoming,
+            self,
+            projection,
+            CompilerNativeDemand::SelectedOriginals(originals),
+        )
+    }
+
+    fn merge_compiler_inputs_with_originals(
+        &self,
+        projection: &CompilerInputProjection,
+        other: &Self,
+        incoming: &CompilerInputProjection,
+        demand: CompilerNativeDemand<'_>,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
         projection.validate(self)?;
         incoming.validate(other)?;
         let selected = projection.merge(incoming)?;
@@ -6345,9 +6382,21 @@ impl ArtifactView {
             let Some(original) = role.original() else {
                 continue;
             };
-            let requirement = match NativeOriginalRequirement::from_role(role.clone()) {
-                Some(issued) => Some(issued),
-                None => NativeOriginalRequirement::from_selected_view(original, source)?,
+            let closure = match &demand {
+                CompilerNativeDemand::SelectedOriginals(originals)
+                    if originals.contains_original(original) =>
+                {
+                    Some(*originals)
+                }
+                _ => None,
+            };
+            let requirement = if let Some(originals) = closure {
+                NativeOriginalRequirement::from_selected_view(original, originals.native_closure())?
+            } else {
+                match NativeOriginalRequirement::from_role(role.clone()) {
+                    Some(issued) => Some(issued),
+                    None => NativeOriginalRequirement::from_selected_view(original, source)?,
+                }
             };
             for requirement in requirement {
                 for root in &requirement.selection.graph_selection().roots {

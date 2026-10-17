@@ -2419,6 +2419,17 @@ pub(crate) struct SelectedOriginalClosure {
 }
 
 impl SelectedOriginalClosure {
+    pub(crate) fn contains_original(
+        &self,
+        original: crate::artifact_inventory::ArtifactId,
+    ) -> bool {
+        self.selected.contains(&original)
+    }
+
+    pub(crate) fn native_closure(&self) -> &crate::artifact_inventory::ArtifactView {
+        &self.native_closure
+    }
+
     pub(crate) fn products(&self) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
         &self.products
     }

@@ -726,7 +726,7 @@ fn certify_authored_declaration_inner(
             .clone()
             .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
     );
-    let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
+    let (_scratch, artifacts, original_imports, source_lexical_imports, _joined_interfaces) =
         planned::admit_authored_artifact_closure(
             &originals,
             &selected_owner,
@@ -780,45 +780,11 @@ fn certify_authored_declaration_inner(
         })
         .cloned()
         .collect();
-    let interfaces = artifacts
-        .iter()
-        .map(|artifact| ExactInterfaceOwner {
-            owner: ExactModuleIdentity {
-                unit: artifact.interface.unit.clone(),
-                module: artifact.interface.module.clone(),
-            },
-            requirements: artifact
-                .interface
-                .requirements
-                .iter()
-                .map(|(unit, module)| ExactModuleIdentity {
-                    unit: unit.clone(),
-                    module: module.clone(),
-                })
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    let artifacts = crate::declaration_context::certified_artifact_view(
-        toolchain_identity_sha256,
-        &products,
-        &interfaces,
-        &joined_interfaces,
-        &compiled.artifact_view,
-        Some(artifact_context.as_ref()),
-    )?;
-    let compiler_projection =
-        authored_compiler_projection(&artifact_context, &artifacts, selected)?;
+    let compiler_support =
+        crate::declaration_context::certified_artifact_view(&originals, artifact_context.as_ref())?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-            compiler_projection,
-            artifacts,
-            artifact_context
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )?,
+        compiler_support,
         lexical_exports: inventory.exports,
         introduced_exports,
         instances: inventory.instances,
@@ -828,35 +794,6 @@ fn certify_authored_declaration_inner(
         original_imports,
         source_lexical_imports,
     })
-}
-
-fn authored_compiler_projection(
-    context: &ExactDeclarationContext,
-    artifacts: &crate::artifact_inventory::ArtifactView,
-    selected: &CertifiedRecoveryProduct,
-) -> Result<crate::artifact_inventory::CompilerInputProjection, CompileError> {
-    let entries = artifacts
-        .entries()
-        .into_iter()
-        .filter(|entry| {
-            matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
-            if product.owner() == selected.owner())
-        })
-        .collect::<Vec<_>>();
-    if entries.len() != 1 {
-        return Err(contract("authored compiler offer lacks its exact original"));
-    }
-    let projection = context
-        .compiler_input_projection()
-        .within_view(artifacts)
-        .merge(
-            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(artifacts)?,
-        )?
-        .merge(
-            &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)?,
-        )?;
-    projection.validate(artifacts)?;
-    Ok(projection)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -5043,6 +5043,75 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             context.artifact_view().capture_graph_selection()
                         );
                         assert!(restored.lexical_graph().is_empty());
+                        // Publish a fresh authored cohort after durable recovery, while
+                        // retaining the historical offer without selecting its namespace.
+                        let ArtifactPayload::Original(current) = &entries[1].payload else {
+                            unreachable!()
+                        };
+                        let fresh = product("FreshPublishedConsumer", 94);
+                        let compiled = certified_product_artifact_view(
+                            producer.sha256(),
+                            &[current.clone(), fresh],
+                            &[],
+                            None,
+                        )
+                        .unwrap();
+                        let native_entries = compiled
+                            .entries()
+                            .into_iter()
+                            .filter(|entry| matches!(&entry.payload, ArtifactPayload::Original(_)))
+                            .collect::<Vec<_>>();
+                        let fresh_projection =
+                            CompilerInputProjection::from_issued_entries(&native_entries).unwrap();
+                        let fresh_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                            &fresh_projection, &compiled.metadata_snapshot(),
+                            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                        ).unwrap();
+                        let originals = fresh_selection
+                            .selected_original_closure(&compiled)
+                            .unwrap();
+                        let source_support = fresh_projection
+                            .source_support(
+                                &compiled,
+                                &native_entries
+                                    .iter()
+                                    .map(|entry| entry.descriptor.owner.clone())
+                                    .collect(),
+                            )
+                            .unwrap();
+                        let publication_context = restored
+                            .clone()
+                            .extend_issued_compiler_support(&source_support)
+                            .unwrap();
+                        let published =
+                            certified_artifact_view(&originals, &publication_context).unwrap();
+                        assert_eq!(published.native_offer_observations().unwrap(), expected);
+                        assert!(originals
+                            .native_closure()
+                            .capture_graph_selection()
+                            .roots
+                            .iter()
+                            .filter(|root| matches!(
+                                root,
+                                crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                            ))
+                            .all(|root| published
+                                .artifacts()
+                                .capture_graph_selection()
+                                .roots
+                                .contains(root)));
+                        assert!(originals
+                            .native_closure()
+                            .binding_dependencies()
+                            .iter()
+                            .all(|edge| published
+                                .artifacts()
+                                .binding_dependencies()
+                                .contains(edge)));
+                        assert_eq!(
+                            published.projection(),
+                            publication_context.compiler_input_projection()
+                        );
                         let request = ExactCompileContext::new(Arc::new(restored))
                             .prepare_compilation(
                                 &root.path().join(format!("request-{histories}")),

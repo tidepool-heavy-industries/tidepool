@@ -616,6 +616,153 @@ mod tests {
     use tidepool_repr::execution_schema::SymbolIdentity;
 
     #[test]
+    fn authored_certifier_keeps_published_subset_policy_separate_from_complete_demand() {
+        let producer = [2; 32];
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
+                    "PublishedSubset",
+                    vec![(3, vec![]), (29, vec![])],
+                    1,
+                    &BTreeMap::new(),
+                    b"published interface".to_vec(),
+                ),
+                producer,
+            ),
+        ])
+        .remove(0)
+        .product;
+        let root = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+        let target = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                producer,
+                "fixture",
+                "Target",
+                BTreeMap::new(),
+            ),
+        ));
+        let inventory = ArtifactInventory::default();
+        let early = NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 3,
+        };
+        let view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![root.clone(), target.clone()],
+                &BTreeSet::from([early]),
+            )
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[root.clone(), target.clone()]).unwrap();
+        let issued = ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            &view,
+            projection.clone(),
+            vec![
+                ExactLexicalNode {
+                    owner: target.descriptor.owner.clone(),
+                    imports: vec![root.descriptor.owner.clone()],
+                },
+                ExactLexicalNode {
+                    owner: root.descriptor.owner.clone(),
+                    imports: vec![],
+                },
+            ],
+            target.descriptor.owner.clone(),
+            &[
+                target.descriptor.owner.clone(),
+                root.descriptor.owner.clone(),
+            ],
+        )
+        .unwrap();
+        let publication = issued
+            .issue_published_source_original("revision", "input", &root.descriptor.owner)
+            .unwrap();
+        let published = publication.context();
+        let before = published.artifact_view().capture_graph_selection();
+        let before_sha = published.semantic_sha256();
+        let complete_inventory = ArtifactInventory::default();
+        let complete = complete_inventory
+            .admit_shared(&complete_inventory.empty_view(), vec![root.clone(), target])
+            .unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &complete.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let originals = selection.selected_original_closure(&complete).unwrap();
+        let original_graph = originals.native_closure().capture_graph_selection();
+        let role =
+            published.compiler_input_projection().snapshot_roles()[&root.descriptor.owner].clone();
+        let policy =
+            crate::artifact_inventory::NativeOriginalRequirement::from_role(role.clone()).unwrap();
+        assert_eq!(
+            policy
+                .selection
+                .graph_selection()
+                .roots
+                .iter()
+                .filter(|node| matches!(
+                    node,
+                    crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(originals.native_closure().selected_native_groups().len(), 2);
+        let legacy_incoming = published
+            .compiler_input_projection()
+            .within_view(originals.native_closure());
+        let (policy_only, _) = originals
+            .native_closure()
+            .merge_compiler_inputs(
+                &legacy_incoming,
+                published.artifact_view(),
+                published.compiler_input_projection(),
+            )
+            .unwrap();
+        assert_eq!(
+            policy_only.selected_native_groups(),
+            BTreeSet::from([early]),
+            "role-policy merge alone loses the complete closure's second group"
+        );
+        let support = certified_artifact_view(&originals, published).unwrap();
+        assert_eq!(
+            support.projection().snapshot_roles()[&root.descriptor.owner],
+            role
+        );
+        for group in original_graph.roots.iter().filter(|node| {
+            matches!(
+                node,
+                crate::artifact_inventory::ArtifactBindingNode::Group(_)
+            )
+        }) {
+            assert!(
+                support
+                    .artifacts()
+                    .capture_graph_selection()
+                    .roots
+                    .contains(group),
+                "published policy replaced the complete issued demand"
+            );
+        }
+        assert!(originals
+            .native_closure()
+            .binding_dependencies()
+            .iter()
+            .all(|edge| support.artifacts().binding_dependencies().contains(edge)));
+        assert_eq!(published.artifact_view().capture_graph_selection(), before);
+        assert_eq!(
+            published.semantic_sha256(),
+            before_sha,
+            "joining custody must not mutate the immutable publication"
+        );
+    }
+
+    #[test]
     fn published_native_custody_does_not_require_dependency_namespace_originals() {
         let producer = [2; 32];
         let native = |module: &str, groups, version, requirements| {

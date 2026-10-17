@@ -787,7 +787,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
             .clone()
             .retain_issued_native_offers(issued_inputs.native_offers().iter().cloned())?,
     );
-    let (_scratch, artifacts, original_imports, mut source_lexical_imports, joined_interfaces) =
+    let (_scratch, artifacts, original_imports, mut source_lexical_imports, _joined_interfaces) =
         admit_authored_artifact_closure(
             originals,
             &original_owner,
@@ -838,27 +838,11 @@ pub(crate) fn certify_same_offer_planned_declaration(
         })
         .collect::<Vec<_>>();
     inventory.validate(&original_owner, &interfaces)?;
-    let artifacts = crate::declaration_context::certified_artifact_view(
-        toolchain_identity_sha256,
-        products,
-        &interfaces,
-        &joined_interfaces,
-        sealed_artifacts,
-        Some(artifact_context.as_ref()),
-    )?;
-    let compiler_projection =
-        authored_compiler_projection(&artifact_context, &artifacts, selected)?;
+    let compiler_support =
+        crate::declaration_context::certified_artifact_view(&originals, artifact_context.as_ref())?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-            compiler_projection,
-            artifacts,
-            artifact_context
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )?,
+        compiler_support,
         lexical_exports: inventory.selection.exports.clone(),
         introduced_exports: inventory.selection.exports,
         instances: inventory.selection.instances,
@@ -986,27 +970,95 @@ mod tests {
         )
         .unwrap();
         let products = [current, authored.clone()];
-        let interfaces = products
-            .iter()
-            .map(|product| ExactInterfaceOwner {
-                owner: ExactModuleIdentity {
-                    unit: product.owner().unit.clone(),
-                    module: product.owner().module.clone(),
-                },
-                requirements: vec![],
-            })
-            .collect::<Vec<_>>();
-        let view = crate::declaration_context::certified_artifact_view(
-            [1; 32],
-            &products,
-            &interfaces,
-            &[],
-            &compiled,
-            Some(&baseline),
+        let issued = CompilerInputProjection::from_issued_entries(
+            &compiled
+                .entries()
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.payload,
+                        crate::artifact_inventory::ArtifactPayload::Original(_)
+                    )
+                })
+                .collect::<Vec<_>>(),
         )
         .unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &issued,
+                &compiled.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let originals = selection.selected_original_closure(&compiled).unwrap();
+        let original_graph = originals.native_closure().capture_graph_selection();
+        let available = issued
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .map(|original| {
+                let proof =
+                    crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                        original, &compiled,
+                    )
+                    .unwrap()
+                    .unwrap();
+                IssuedNativeOffer::issue(original, &compiled, Some(proof)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let scoped = compiled
+            .interface_projection(
+                &products
+                    .iter()
+                    .map(|product| ExactModuleIdentity {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .with_compiler_projection(&issued)
+            .unwrap();
+        assert!(scoped.selected_native_groups().is_empty());
+        let baseline = authored_interface_context(
+            Some(&Arc::new(baseline)),
+            &scoped,
+            &issued,
+            products.iter().map(|product| ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            }),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let baseline = baseline
+            .as_ref()
+            .clone()
+            .retain_issued_native_offers(available)
+            .unwrap();
+        let support =
+            crate::declaration_context::certified_artifact_view(&originals, &baseline).unwrap();
+        let view = support.artifacts();
+        let graph = view.capture_graph_selection();
+        for root in &original_graph.roots {
+            if matches!(
+                root,
+                crate::artifact_inventory::ArtifactBindingNode::Group(_)
+            ) {
+                assert!(
+                    graph.roots.contains(root),
+                    "certification lost an issued complete group root"
+                );
+            }
+        }
+        for scope in &original_graph.selections {
+            assert!(
+                graph.selections.contains(scope),
+                "certification changed an issued dependency scope"
+            );
+        }
         assert!(view.artifact_ids().contains(&old_entry.descriptor.id));
-        let roles = authored_compiler_projection(&baseline, &view, &authored).unwrap();
+        let roles = support.projection();
         assert_eq!(
             roles
                 .snapshot_roles()
@@ -1015,12 +1067,28 @@ mod tests {
                 .interface(),
             projection.roles()[0].interface()
         );
-        assert!(roles
-            .snapshot_roles()
-            .get(&old_entry.descriptor.owner)
-            .unwrap()
-            .original()
-            .is_none());
+        assert_eq!(
+            roles
+                .snapshot_roles()
+                .get(&current_entry.descriptor.owner)
+                .unwrap()
+                .original(),
+            Some(current_entry.descriptor.id)
+        );
+        let authored_entry = ArtifactEntry::original([1; 32], authored).unwrap();
+        assert_eq!(
+            roles
+                .snapshot_roles()
+                .get(&authored_entry.descriptor.owner)
+                .unwrap()
+                .original(),
+            Some(authored_entry.descriptor.id)
+        );
+        assert!(originals
+            .native_closure()
+            .binding_dependencies()
+            .iter()
+            .all(|edge| view.binding_dependencies().contains(edge)));
     }
 
     fn issued_originals(
