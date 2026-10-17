@@ -1911,6 +1911,261 @@ fn encode_scope_manifest_with_published(
     Ok(bytes)
 }
 
+/// Immutable payload custody for one recovery manifest. Graph selections and
+/// compiler authority are authenticated separately for every exact context.
+pub struct RecoveredArtifactAcquisition {
+    root: PathBuf,
+    payloads: BTreeMap<ArtifactId, AcquiredRecoveryPayload>,
+    work: recovery_artifacts::RecoveryArtifactWork,
+}
+
+#[derive(Clone)]
+struct AcquiredRecoveryPayload {
+    reference: RecoveryPayloadReference,
+    entry: Arc<ArtifactEntry>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum RecoveryPayloadReference {
+    Original(RecoveryArtifactRef),
+    Canonical(recovery_artifacts::RecoveryModuleInterfaceRef),
+    Join(RecoveryJoinRef),
+    Value(RecoveryValueInterfaceRef),
+}
+
+impl RecoveryPayloadReference {
+    fn id(&self) -> ArtifactId {
+        use crate::artifact_inventory::ArtifactDescriptor;
+        match self {
+            Self::Original(reference) => ArtifactDescriptor::from_recovery_product(reference).id,
+            Self::Canonical(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference).id
+            }
+            Self::Join(reference) => ArtifactDescriptor::from_recovery_join(reference).id,
+            Self::Value(reference) => {
+                ArtifactDescriptor::from_recovery_value_interface(reference).id
+            }
+        }
+    }
+}
+
+impl RecoveredArtifactAcquisition {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            payloads: BTreeMap::new(),
+            work: Default::default(),
+        }
+    }
+
+    fn references(
+        products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+    ) -> Result<BTreeMap<ArtifactId, RecoveryPayloadReference>, RecoveryInventoryError> {
+        let mut references = BTreeMap::new();
+        let mut originals = BTreeSet::new();
+        for reference in products {
+            let reference = RecoveryPayloadReference::Original(reference.clone());
+            if !originals.insert(reference.id()) {
+                return Err(failure("duplicate recovery original").into());
+            }
+        }
+        for reference in products
+            .iter()
+            .cloned()
+            .map(RecoveryPayloadReference::Original)
+            .chain(
+                module_interfaces
+                    .iter()
+                    .cloned()
+                    .map(RecoveryPayloadReference::Canonical),
+            )
+            .chain(
+                products
+                    .iter()
+                    .filter_map(|product| product.module_interface.clone())
+                    .map(RecoveryPayloadReference::Canonical),
+            )
+            .chain(joins.iter().cloned().map(RecoveryPayloadReference::Join))
+            .chain(values.iter().cloned().map(RecoveryPayloadReference::Value))
+        {
+            if references
+                .get(&reference.id())
+                .is_some_and(|previous| previous != &reference)
+            {
+                return Err(
+                    failure("recovery payload identity has conflicting exact references").into(),
+                );
+            }
+            references.insert(reference.id(), reference);
+        }
+        Ok(references)
+    }
+
+    /// Copy only demanded immutable handles before leaving the owner's short
+    /// publication lock. Physical acquisition runs on this local stage.
+    pub fn stage_inputs(
+        &self,
+        products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+    ) -> Result<Self, RecoveryInventoryError> {
+        let references = Self::references(products, module_interfaces, joins, values)?;
+        let mut stage = Self::new(&self.root);
+        for (id, reference) in references {
+            if let Some(held) = self.payloads.get(&id) {
+                if held.reference != reference {
+                    return Err(failure("held recovery payload has another exact reference").into());
+                }
+                stage.payloads.insert(id, held.clone());
+            }
+        }
+        Ok(stage)
+    }
+
+    /// Authenticate missing payloads, then validate this exact graph without
+    /// borrowing another snapshot's edges, roles or lexical requirements.
+    pub fn capture_bound(
+        &mut self,
+        products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
+        let references = Self::references(products, module_interfaces, joins, values)?;
+        let mut missing_products = Vec::new();
+        let mut missing_interfaces = Vec::new();
+        let mut missing_joins = Vec::new();
+        let mut missing_values = Vec::new();
+        let mut held_interfaces = BTreeMap::new();
+        for (id, reference) in &references {
+            if let Some(held) = self.payloads.get(id) {
+                if &held.reference != reference {
+                    return Err(failure("held recovery payload has another exact reference").into());
+                }
+                if let (
+                    RecoveryPayloadReference::Canonical(reference),
+                    ArtifactPayload::Canonical(interface),
+                ) = (reference, &held.entry.payload)
+                {
+                    held_interfaces.insert(reference.clone(), interface.clone());
+                }
+                continue;
+            }
+            match reference {
+                RecoveryPayloadReference::Original(reference) => {
+                    missing_products.push(reference.clone())
+                }
+                RecoveryPayloadReference::Canonical(reference) => {
+                    missing_interfaces.push(reference.clone())
+                }
+                RecoveryPayloadReference::Join(reference) => missing_joins.push(reference.clone()),
+                RecoveryPayloadReference::Value(reference) => {
+                    missing_values.push(reference.clone())
+                }
+            }
+        }
+        let captured = if missing_products.is_empty()
+            && missing_interfaces.is_empty()
+            && missing_joins.is_empty()
+            && missing_values.is_empty()
+        {
+            BTreeMap::new()
+        } else {
+            recovery_artifacts::with_artifact_work(&mut self.work, |validation| {
+                RecoveredArtifactInventory::capture_inputs_with_validation(
+                    &self.root,
+                    &missing_products,
+                    &missing_interfaces,
+                    &missing_joins,
+                    &missing_values,
+                    None,
+                    validation,
+                    &held_interfaces,
+                )
+            })?
+            .entries
+        };
+        if captured.keys().any(|id| !references.contains_key(id)) {
+            return Err(failure("unexpected acquired recovery payload").into());
+        }
+        let mut entries = BTreeMap::new();
+        let mut producer = [0; 32];
+        for id in references.keys() {
+            let entry = self
+                .payloads
+                .get(id)
+                .map(|held| held.entry.clone())
+                .or_else(|| captured.get(id).cloned())
+                .ok_or_else(|| failure("recovered payload acquisition omitted requested bytes"))?;
+            if entry.descriptor.producer_sha256 == [0; 32]
+                || (producer != [0; 32] && producer != entry.descriptor.producer_sha256)
+            {
+                return Err(failure("producer identity differs").into());
+            }
+            producer = entry.descriptor.producer_sha256;
+            entries.insert(*id, entry);
+        }
+        let bound = RecoveredArtifactInventory::bind_captured(
+            RecoveredArtifactInventory {
+                producer,
+                entries,
+                recorded_inventory: false,
+                bindings: BTreeSet::new(),
+                binding_edges: Vec::new(),
+                interfaces: Vec::new(),
+            },
+            descriptors,
+            bindings,
+            edges,
+        )?;
+        for (id, entry) in captured {
+            self.payloads
+                .entry(id)
+                .or_insert_with(|| AcquiredRecoveryPayload {
+                    reference: references[&id].clone(),
+                    entry,
+                });
+        }
+        Ok(bound)
+    }
+
+    /// Publish staged additions only after the caller rechecks its current run
+    /// and store owners. A concurrent identical admission keeps its held owner.
+    pub fn append(&mut self, stage: Self) -> Result<(), RecoveryInventoryError> {
+        if self.root != stage.root
+            || stage.payloads.iter().any(|(id, incoming)| {
+                self.payloads
+                    .get(id)
+                    .is_some_and(|held| held.reference != incoming.reference)
+            })
+        {
+            return Err(
+                failure("staged recovery payload conflicts with its acquisition owner").into(),
+            );
+        }
+        for (id, payload) in stage.payloads {
+            self.payloads.entry(id).or_insert(payload);
+        }
+        self.work.hash_bytes += stage.work.hash_bytes;
+        self.work.read_bytes += stage.work.read_bytes;
+        self.work.written_bytes += stage.work.written_bytes;
+        self.work.decoded_bytes += stage.work.decoded_bytes;
+        Ok(())
+    }
+
+    /// Work observed at this owner's actual payload validation boundary.
+    pub fn work(&self) -> recovery_artifacts::RecoveryArtifactWork {
+        self.work
+    }
+}
+
 /// One recovery admission owns authenticated original bytes. Scoped contexts
 /// share these immutable entries without reopening or decoding artifacts.
 pub struct RecoveredArtifactInventory {
@@ -2260,6 +2515,7 @@ impl RecoveredArtifactInventory {
             values,
             inventory,
             &mut PackageInterfaceValidation::default(),
+            &BTreeMap::new(),
         )
     }
 
@@ -2278,6 +2534,10 @@ impl RecoveredArtifactInventory {
             )],
         )>,
         validation: &mut PackageInterfaceValidation,
+        held_interfaces: &BTreeMap<
+            recovery_artifacts::RecoveryModuleInterfaceRef,
+            crate::certified_products::CertifiedModuleInterface,
+        >,
     ) -> Result<Self, RecoveryInventoryError> {
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
@@ -2300,6 +2560,10 @@ impl RecoveredArtifactInventory {
                 .filter_map(|product| product.module_interface.as_ref()),
         ) {
             if !selected_modules.insert(reference) {
+                continue;
+            }
+            if let Some(interface) = held_interfaces.get(reference) {
+                verified_modules.push((reference, interface.clone()));
                 continue;
             }
             match recovery_artifacts::recover_module_interface(root, reference, validation) {
@@ -9088,6 +9352,7 @@ mod tests {
                     &[],
                     None,
                     validation,
+                    &BTreeMap::new(),
                 )?;
                 RecoveredArtifactInventory::bind_captured(
                     captured,
@@ -9130,6 +9395,73 @@ mod tests {
         assert_ne!(old.semantic_sha256(), new.semantic_sha256());
         assert!(work_a.read_bytes > 0 && work_b.read_bytes > 0);
         eprintln!("recovery acquisition overlap: A={work_a:?} B={work_b:?}");
+        let mut acquisition = RecoveredArtifactAcquisition::new(pair.directory.path());
+        let mut observations = Vec::new();
+        let mut root_payload = None;
+        for index in [0, 1, 0] {
+            let selection = &pair.selections[index];
+            let ids = selection
+                .bindings
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>();
+            let references = pair.references.iter().filter(|reference| {
+                ids.contains(&crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(reference).id)
+            }).cloned().collect::<Vec<_>>();
+            let descriptors = pair
+                .descriptors
+                .iter()
+                .filter(|descriptor| ids.contains(&descriptor.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let selected = selection.bindings.iter().copied().collect::<BTreeSet<_>>();
+            let groups = selection
+                .native_groups
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let edges = pair
+                .edges
+                .iter()
+                .filter(|(from, _, _)| from.is_retained_in(&selected, &groups))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut stage = acquisition
+                .stage_inputs(&[], &references, &[], &[])
+                .unwrap();
+            let captured = stage
+                .capture_bound(
+                    &[],
+                    &references,
+                    &[],
+                    &[],
+                    &descriptors,
+                    &selection.bindings,
+                    &edges,
+                )
+                .unwrap();
+            let context = restore(&captured, index);
+            assert_eq!(
+                context.artifact_view().capture_graph_selection(),
+                *selection
+            );
+            if let Some(root) = &root_payload {
+                assert!(Arc::ptr_eq(root, &captured.entries[&pair.root_id]));
+            } else {
+                root_payload = Some(captured.entries[&pair.root_id].clone());
+            }
+            observations.push(stage.work());
+            acquisition.append(stage).unwrap();
+        }
+        assert_eq!(observations[0], work_a);
+        assert!(observations[1].read_bytes < work_b.read_bytes);
+        assert!(observations[1].decoded_bytes < work_b.decoded_bytes);
+        assert_eq!(
+            observations[2],
+            recovery_artifacts::RecoveryArtifactWork::default()
+        );
+        assert_eq!(acquisition.payloads.len(), 3);
+        eprintln!("recovery acquisition delta: {observations:?}");
     }
 
     #[test]

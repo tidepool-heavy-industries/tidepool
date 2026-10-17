@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tidepool_toolchain::declaration_join::{
     certify_recovered_declaration_tip_in_context, ClassInstanceEvidence, DeclarationExport,
     DeclarationKind, ExportIdentity, ExportNamespace, InstanceInventory,
-    RecoveredArtifactInventory, RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
+    RecoveredArtifactAcquisition, RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
 };
 
 /// Configured native composition backed by the lifetime run lock. This trait
@@ -44,12 +44,15 @@ pub(super) struct OwnedRecoveryManifest {
     root: PathBuf,
     path: PathBuf,
     artifact_root: PathBuf,
-    contexts: parking_lot::Mutex<
-        BTreeMap<
-            tidepool_toolchain::exact_context::ContextRoot,
-            Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-        >,
+    hydration: parking_lot::Mutex<RecoveryHydration>,
+}
+
+struct RecoveryHydration {
+    contexts: BTreeMap<
+        tidepool_toolchain::exact_context::ContextRoot,
+        Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     >,
+    acquisition: RecoveredArtifactAcquisition,
 }
 
 pub(super) fn same_manifest_owner(
@@ -101,7 +104,7 @@ impl OwnedRecoveryManifest {
     }
 }
 
-/// Authenticate the payload union once for this acquisition, then reissue each
+/// Acquire only newly demanded immutable payloads, then authenticate each exact
 /// demanded context through the compiler inventory owner. Historical roots
 /// outside this set do not cause artifact reads or compiler reconstruction.
 fn hydrate_context_roots(
@@ -114,10 +117,10 @@ fn hydrate_context_roots(
         .store()
         .ensure_ready()
         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-    let cached = owner.contexts.lock();
+    let cached = owner.hydration.lock();
     let demanded = roots
         .iter()
-        .filter(|root| !cached.contains_key(*root))
+        .filter(|root| !cached.contexts.contains_key(*root))
         .cloned()
         .collect::<Vec<_>>();
     drop(cached);
@@ -169,17 +172,23 @@ fn hydrate_context_roots(
             }
         }
     }
-    let inventory = RecoveredArtifactInventory::capture_bound(
-        &owner.artifact_root,
-        &products,
-        &interfaces,
-        &joins,
-        &values,
-        &descriptors,
-        &bindings.into_iter().collect::<Vec<_>>(),
-        &edges.into_iter().collect::<Vec<_>>(),
-    )
-    .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
+    let mut stage = owner
+        .hydration
+        .lock()
+        .acquisition
+        .stage_inputs(&products, &interfaces, &joins, &values)
+        .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
+    let inventory = stage
+        .capture_bound(
+            &products,
+            &interfaces,
+            &joins,
+            &values,
+            &descriptors,
+            &bindings.into_iter().collect::<Vec<_>>(),
+            &edges.into_iter().collect::<Vec<_>>(),
+        )
+        .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let mut restored = Vec::new();
     for receipt in receipts {
         let snapshot = receipt.snapshot();
@@ -191,7 +200,17 @@ fn hydrate_context_roots(
         restored.push((receipt.root().clone(), Arc::new(context)));
     }
     owner.validate_owner()?;
-    owner.contexts.lock().extend(restored);
+    graph
+        .store()
+        .ensure_ready()
+        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+    let mut held = owner.hydration.lock();
+    held.acquisition
+        .append(stage)
+        .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
+    for (root, context) in restored {
+        held.contexts.entry(root).or_insert(context);
+    }
     Ok(())
 }
 
@@ -200,8 +219,9 @@ fn cached_context(
     root: &tidepool_toolchain::exact_context::ContextRoot,
 ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, SessionError> {
     owner
-        .contexts
+        .hydration
         .lock()
+        .contexts
         .get(root)
         .cloned()
         .ok_or(SessionError::WrongPublicManifestTicket)
@@ -364,7 +384,10 @@ impl SessionLib {
             root,
             path: path.clone(),
             artifact_root: artifact_root.clone(),
-            contexts: Default::default(),
+            hydration: parking_lot::Mutex::new(RecoveryHydration {
+                contexts: BTreeMap::new(),
+                acquisition: RecoveredArtifactAcquisition::new(&artifact_root),
+            }),
         });
         owner.validate_owner()?;
         store
