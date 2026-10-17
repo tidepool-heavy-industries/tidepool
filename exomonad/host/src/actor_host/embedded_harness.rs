@@ -2449,21 +2449,95 @@ mod round_control_tests {
     }
 
     #[test]
-    fn native_cancelled_owner_projects_a_cancelled_error_receipt() {
-        let output = native_terminal_output(
-            Err("ordinary waiter error".into()),
-            Ok(WorkbenchCancellationOutcome::Cancelled {
-                execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([6; 16]),
-                reply: Err(exomonad_actor::KernelInvocationFailure::Failed {
-                    actor: ActorRef::first(exomonad_actor::ActorId(1)),
-                    detail: "native abort with retained prefix".into(),
-                    receipts: Vec::new(),
-                    diagnostic: None,
+    fn native_cancelled_owner_preserves_value_free_and_value_bearing_failure_formats() {
+        use harness::model::{CallId, RequestId};
+        use harness::provider::OutputFormat;
+        use tidepool_runtime::session::{
+            WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchNotPublishedReason,
+            WorkbenchPublicationOutcome,
+        };
+        let operation = OperationId {
+            origin: ConversationIdentity::Embedded {
+                run: "cancel-format".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "1".into(),
+            },
+            request: RequestId("original-request".into()),
+            call: CallId("original-call".into()),
+        };
+        for (value, expected_format) in [
+            (None, OutputFormat::LegacyOpaque),
+            (Some(json!(42)), OutputFormat::NativeReceiptV1),
+        ] {
+            let value_bearing = value.is_some();
+            let output = native_terminal_output(
+                Err("ordinary waiter error".into()),
+                Ok(WorkbenchCancellationOutcome::Cancelled {
+                    execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(
+                        [6; 16],
+                    ),
+                    reply: Err(exomonad_actor::KernelInvocationFailure::Workbench(
+                        exomonad_actor::KernelWorkbenchFailure {
+                            execution_failure_kind: None,
+                            actor: ActorRef::first(exomonad_actor::ActorId(1)),
+                            receipts: vec![WorkbenchItemReceipt {
+                                presentation: None,
+                                index: 0,
+                                kind: None,
+                                span: None,
+                                source_items: Vec::new(),
+                                status: WorkbenchItemStatus::Committed,
+                                output: "private prefix".into(),
+                                value,
+                                diagnostics: Vec::new(),
+                                failure_layer: None,
+                                warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
+                                operations: Vec::new(),
+                                terminal_transfer: None,
+                            }],
+                            point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit {
+                                index: 1,
+                            },
+                            publication: Some(WorkbenchPublicationOutcome::NotPublished {
+                                reason: WorkbenchNotPublishedReason::Cancelled,
+                            }),
+                            total: 2,
+                            detail: "native abort with retained prefix".into(),
+                            diagnostic: None,
+                        },
+                    )),
                 }),
-            }),
-            None,
-        );
-        assert!(matches!(output, JobOutput::CancelledWithReceipt(Err(_))));
+                Some(&operation),
+            );
+            let JobOutput::CancelledWithReceipt(Err(failure)) = &output else {
+                panic!("{output:?}");
+            };
+            let metadata = failure.metadata().unwrap();
+            assert_eq!(
+                metadata["originalOperation"],
+                serde_json::to_value(&operation).unwrap()
+            );
+            assert_eq!(
+                metadata["publication"],
+                json!({"status":"notPublished","reason":"cancelled"})
+            );
+            assert_eq!(failure.result_receipt().is_some(), value_bearing);
+            assert_eq!(native_output_format(&output), expected_format);
+            if let Some(receipt) = failure.result_receipt() {
+                assert_eq!(
+                    receipt["nativeResult"]["operation"],
+                    serde_json::to_value(
+                        super::super::embedded_policy::native_original(&operation).unwrap()
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    receipt["nativeResult"]["body"]["items"][0]["value"],
+                    json!(42)
+                );
+            }
+        }
     }
 
     #[test]
