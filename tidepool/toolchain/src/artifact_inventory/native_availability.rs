@@ -5,26 +5,22 @@ use super::*;
 pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
 
 enum DependencyGrantSource<'a> {
-    Source(Vec<IssuedNativeOffer>),
-    Request(&'a [Arc<crate::declaration_context::NativeTransportAvailability>]),
-    #[cfg(test)]
-    Fixture(&'a [IssuedNativeOffer]),
+    Source {
+        source: &'a CompilerSourceSupport,
+        offers: Vec<IssuedNativeOffer>,
+    },
+    Request(&'a crate::declaration_context::ContinuationNativeInputs<'a>),
 }
 
 impl<'a> NativeDependencyCatalog<'a> {
     pub(crate) fn from_request(
-        rows: &'a [Arc<crate::declaration_context::NativeTransportAvailability>],
+        inputs: &'a crate::declaration_context::ContinuationNativeInputs<'a>,
     ) -> Self {
-        Self(DependencyGrantSource::Request(rows))
+        Self(DependencyGrantSource::Request(inputs))
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_fixture(offers: &'a [IssuedNativeOffer]) -> Self {
-        Self(DependencyGrantSource::Fixture(offers))
-    }
-
-    pub(crate) fn from_source(source: &CompilerSourceSupport) -> Result<Self, CompileError> {
-        let consumed = source
+    pub(crate) fn from_source(source: &'a CompilerSourceSupport) -> Result<Self, CompileError> {
+        let offers = source
             .native_offers()
             .iter()
             .map(|offer| offer.within_projection(source.projection(), source.artifacts()))
@@ -32,7 +28,25 @@ impl<'a> NativeDependencyCatalog<'a> {
             .into_iter()
             .flatten()
             .collect();
-        Ok(Self(DependencyGrantSource::Source(consumed)))
+        Ok(Self(DependencyGrantSource::Source { source, offers }))
+    }
+
+    pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
+        match &self.0 {
+            DependencyGrantSource::Source { source, .. } => source.input_decisions(),
+            DependencyGrantSource::Request(inputs) => inputs.input_decisions(),
+        }
+    }
+
+    pub(crate) fn decision<'b>(
+        &'b self,
+        projection: &CompilerInputProjection,
+        owner: &ExactModuleIdentity,
+    ) -> InputNativeDecision<'b> {
+        match projection.snapshot_roles().get(owner) {
+            Some(role) => self.input_decisions().for_role(owner, role),
+            None => InputNativeDecision::UnissuedPolicy,
+        }
     }
 
     fn groups(
@@ -42,21 +56,15 @@ impl<'a> NativeDependencyCatalog<'a> {
     ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
         let mut groups = imbl::OrdSet::new();
         match &self.0 {
-            DependencyGrantSource::Request(rows) => {
-                for row in *rows {
+            DependencyGrantSource::Request(inputs) => {
+                for row in inputs.availability_rows() {
                     if let Some(support) = row.dependency_support(key, owner) {
                         groups.extend(support.groups());
                     }
                 }
             }
-            DependencyGrantSource::Source(offers) => {
+            DependencyGrantSource::Source { offers, .. } => {
                 for offer in offers {
-                    groups.extend(offer.group_bindings(key));
-                }
-            }
-            #[cfg(test)]
-            DependencyGrantSource::Fixture(offers) => {
-                for offer in *offers {
                     groups.extend(offer.group_bindings(key));
                 }
             }
@@ -72,6 +80,7 @@ pub(super) fn bind_fresh_product_dependencies(
     state: &InventoryState,
     parent: &ArtifactView,
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    roles: &CompilerInputProjection,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
     dependencies: &NativeDependencyCatalog<'_>,
@@ -144,7 +153,6 @@ pub(super) fn bind_fresh_product_dependencies(
             ));
         }
     }
-    let index = NativeSelectionIndex::build(state, &offered);
     let mut selected_roots = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
     for node in parent.lease.selection.roots.keys() {
         if let InventoryNodeKey::Group(group) = node {
@@ -166,7 +174,12 @@ pub(super) fn bind_fresh_product_dependencies(
             .descriptor
             .id;
         if let Some(binding) = namespace.get(&canonical) {
-            for (carrier, ordinal) in index.groups.keys() {
+            for node in &offered {
+                let InventoryNodeKey::Group(group) = node else {
+                    continue;
+                };
+                let carrier = &group.binding;
+                let ordinal = &group.original_ordinal;
                 if carrier.artifact != key.artifact
                     || *ordinal != key.original_ordinal
                     || namespace
@@ -182,7 +195,7 @@ pub(super) fn bind_fresh_product_dependencies(
                             && *edge == ArtifactDependency::Interface
                     })
                 {
-                    candidates.insert(index.resolve(*carrier, *ordinal)?);
+                    candidates.insert(*group);
                 }
             }
         }
@@ -196,6 +209,21 @@ pub(super) fn bind_fresh_product_dependencies(
                         artifact: key.artifact,
                     },
                 ));
+            }
+        }
+        if let InputNativeDecision::IssuedChoices(choices) =
+            dependencies.decision(roles, &entries[&key.artifact].descriptor.owner)
+        {
+            if let Some(chosen) = choices.get(&key.original_ordinal) {
+                if !candidates.contains(chosen) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: key.artifact,
+                            original_ordinal: key.original_ordinal,
+                        },
+                    ));
+                }
+                candidates = BTreeSet::from([*chosen]);
             }
         }
         let Some(group) = candidates.first().copied() else {

@@ -1150,17 +1150,37 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         },
     ));
     let root = tempfile::tempdir().unwrap();
+    let close_source = |selected: &ArtifactView, supplied: &[NativeOriginalRequirement]| {
+        let offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
+            &baseline, selected, supplied,
+        )
+        .unwrap();
+        let support = recover_fixture_compiler_support(
+            baseline.clone(),
+            selected.retain_custody(&broad).unwrap(),
+            offers,
+        )
+        .unwrap();
+        let source_context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: support,
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        ProtectedScaffoldRequirements::default().compiler_inputs(&source_context, None)
+    };
     for (index, supplied, expected) in [
         (0, vec![left_proof.clone()], left_group),
         (1, vec![left_proof.clone(), left_proof.clone()], left_group),
         (2, Vec::new(), right_group),
     ] {
-        let input = OriginalCompilerInputs::issue_complete_native_availability(
-            &view,
-            &baseline,
+        let source =
+            close_source(if supplied.is_empty() { &right } else { &left }, &supplied).unwrap();
+        let input = OriginalCompilerInputs::from_checked_support_products(
+            source.compiler_source_support(),
             producer.sha256(),
             std::slice::from_ref(consumer),
-            &supplied,
         )
         .unwrap();
         let issued = input
@@ -1201,14 +1221,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
         assert_eq!(wire_mode(&request, "CarriedDependency"), issued_mode(&[7]));
     }
+    let left_source = close_source(&left, &[left_proof]).unwrap();
+    let right_source = close_source(&right, &[right_proof]).unwrap();
     assert!(matches!(
-        OriginalCompilerInputs::issue_complete_native_availability(
-            &view,
-            &baseline,
-            producer.sha256(),
-            std::slice::from_ref(consumer),
-            &[left_proof, right_proof],
-        ),
+        left_source.compiler_source_support().merge(right_source.compiler_source_support()),
         Err(CompileError::ArtifactInventory(error))
             if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
                 if artifact == native_entry.descriptor.id)
@@ -1547,9 +1563,17 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
 
     let private = OriginalCompilerInputs::from_selection(&selected, &b).unwrap();
+    let continuation =
+        ContinuationNativeInputs::from_selection(&selected, &private.projection).unwrap();
+    let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
     let admitted = private
         .projection
-        .admit_interfaces_with_native_offers(&private.artifacts, vec![], &private.native_offers)
+        .admit_interfaces_with_native_offers(
+            &private.artifacts,
+            vec![],
+            &private.native_offers,
+            &catalog,
+        )
         .unwrap();
     let graph = admitted.capture_graph_selection();
     assert!(graph
@@ -1611,9 +1635,13 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .values()
         .flat_map(|availability| availability.offers().iter().cloned())
         .collect::<Vec<_>>();
+    let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
+        request.compiler_source_support(),
+    )
+    .unwrap();
     let selected = request
         .projection()
-        .admit_interfaces_with_native_offers(&request.artifacts(), vec![], &offers)
+        .admit_interfaces_with_native_offers(&request.artifacts(), vec![], &offers, &catalog)
         .unwrap();
     let graph = selected.capture_graph_selection();
     assert!(graph
@@ -2055,11 +2083,20 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
     };
-    ProtectedScaffoldRequirements::default()
+    let issued = ProtectedScaffoldRequirements::default()
         .compiler_inputs(&context(b.clone(), projection.clone()), Some(&private))
         .expect("without a conflicting selected A, B retains its real A9001 dependency");
+    let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
+        issued.compiler_source_support(),
+    )
+    .unwrap();
     projection
-        .admit_interfaces_with_native_offers(&private.artifacts, vec![], &private.native_offers)
+        .admit_interfaces_with_native_offers(
+            &private.artifacts,
+            vec![],
+            &private.native_offers,
+            &catalog,
+        )
         .expect("typed admission accepts the same exact dependency closure");
 
     let replacement = product("BackedgeAncestor", 99);
@@ -2094,6 +2131,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
                 &private.artifacts,
                 vec![replacement],
                 &private.native_offers,
+                &catalog,
             )
             .is_err(),
         "typed admission must also preserve the incompatible exact backedge"
@@ -3532,7 +3570,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     // An issued winner remains explicit even when other versions stay in custody.
     let projection = CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
     let selected = projection
-        .admit_interfaces_with_native_offers(
+        .admit_interfaces_under_unissued_policy(
             ambiguous.artifact_view(),
             vec![entries[0].clone()],
             &[],
@@ -3811,7 +3849,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         let projection =
             CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
         let selected = projection
-            .admit_interfaces_with_native_offers(
+            .admit_interfaces_under_unissued_policy(
                 context.artifact_view(),
                 vec![entries[0].clone()],
                 &[],
@@ -5079,11 +5117,25 @@ fn replay_native_transport_history(
         ))
     };
     let private = std::array::from_fn::<_, 2, _>(|index| {
-        OriginalCompilerInputs::from_native_availability_with_requirements(
-            &context(&sources[index]),
+        let context = context(&sources[index]);
+        let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
+            proofs[index].original,
+            &sources[index],
+            Some(proofs[index].clone()),
+        )
+        .unwrap();
+        let support = context
+            .compiler_source_support()
+            .retain_offers([offer])
+            .unwrap();
+        let context = context
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support);
+        OriginalCompilerInputs::from_native_availability(
+            &context,
             producer,
             std::slice::from_ref(&products[index + 1]),
-            std::slice::from_ref(&proofs[index]),
         )
         .unwrap()
     });
@@ -5266,12 +5318,28 @@ fn replay_native_transport_history(
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let produced = OriginalCompilerInputs::issue_complete_native_availability(
+    let actual_context = context(&base);
+    let actual_request = ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&actual_context, Some(&private[0]))
+        .unwrap();
+    let operation = PackageInterfaceValidation::default();
+    let actual_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &actual_request,
+            &actual_request.metadata,
+            &operation.inventory,
+        )
+        .unwrap();
+    let continuation =
+        ContinuationNativeInputs::from_selection(&actual_selection, actual_request.projection())
+            .unwrap();
+    let produced = OriginalCompilerInputs::issue_complete_native_availability_with_source(
         &support,
-        &private[0].projection,
+        actual_request.projection(),
         producer.sha256(),
         std::slice::from_ref(&dependent),
-        std::slice::from_ref(&proofs[0]),
+        &native_requirement_facts(actual_request.compiler_source_support().native_offers()),
+        CompleteAvailabilitySource::Request(&continuation),
     )
     .unwrap();
     coverage.dependent_issuances += 1;
@@ -7338,19 +7406,23 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         .remove(1)
         .product;
     let parent_entry = Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
-    let parent_projection = projection
-        .merge(&CompilerInputProjection::from_issued_entries(&[parent_entry.clone()]).unwrap())
-        .unwrap();
-    let parent_view = parent_projection
-        .admit_complete_native_products(&left, vec![parent_entry.clone()], std::slice::from_ref(&a))
-        .unwrap();
-    let parent_proof =
-        NativeOriginalRequirement::from_selected_view(parent_entry.descriptor.id, &parent_view)
-            .unwrap()
-            .unwrap();
-    let parent_offer =
-        IssuedNativeOffer::issue(parent_entry.descriptor.id, &parent_view, Some(parent_proof))
-            .unwrap();
+    let support =
+        recover_fixture_compiler_support(projection.clone(), left.clone(), [a.clone()]).unwrap();
+    let parent_input = OriginalCompilerInputs::from_checked_support_products(
+        &support,
+        producer.sha256(),
+        std::slice::from_ref(match &parent_entry.payload {
+            ArtifactPayload::Original(product) => product,
+            _ => unreachable!(),
+        }),
+    )
+    .unwrap();
+    let parent_offer = parent_input
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == parent_entry.descriptor.id)
+        .unwrap()
+        .clone();
     let groups = parent_offer.issued_group_carriers().unwrap();
     let parent_group = *groups
         .keys()
@@ -7495,13 +7567,10 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             );
         }
     }
-    // Both issuer proofs explicitly supplied as root authority remain a real conflict.
-    let both = right
-        .retain_issued_offer_custody([a.clone(), b.clone()])
-        .unwrap();
-    let error = projection
-        .admit_interfaces_with_native_offers(&both, vec![entry.clone()], &[a, b])
-        .unwrap_err();
+    // Two actual selected decision owners conflict; broader offer custody alone
+    // does not create a second selected choice.
+    let left_support = fixture_compiler_support(projection.clone(), left.clone());
+    let error = left_support.merge(&support).unwrap_err();
     assert!(matches!(error, CompileError::ArtifactInventory(error)
         if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
             if artifact == entry.descriptor.id)));
@@ -7977,17 +8046,15 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let rows = selection
-            .issued_native_availability()
-            .cloned()
-            .collect::<Vec<_>>();
+        let continuation =
+            ContinuationNativeInputs::from_selection(&selection, request.projection())?;
         OriginalCompilerInputs::issue_complete_native_availability_with_source(
             &request.artifacts(),
             &request.projection(),
             producer.sha256(),
             &candidates.native_availability,
             &[],
-            CompleteAvailabilitySource::Request(&rows),
+            CompleteAvailabilitySource::Request(&continuation),
         )
     };
     let continued =

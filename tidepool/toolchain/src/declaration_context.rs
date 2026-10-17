@@ -451,12 +451,13 @@ impl OriginalCompilerInputs {
         producer: [u8; 32],
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability(
+        Self::issue_complete_native_availability_with_source(
             support.artifacts(),
             support.projection(),
             producer,
             products,
             &native_requirement_facts(support.native_offers()),
+            CompleteAvailabilitySource::Candidate(support),
         )
     }
 
@@ -691,21 +692,13 @@ impl OriginalCompilerInputs {
         let projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
-        let decisions =
-            crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
-                selection,
-                &projection,
-            )?;
+        let continuation = ContinuationNativeInputs::from_selection(selection, &projection)?;
         let preferred = selection
             .native_original_requirements()
             .cloned()
             .collect::<Vec<_>>();
-        let availability = selection
-            .issued_native_availability()
-            .cloned()
-            .collect::<Vec<_>>();
         let mut native_offers = Vec::new();
-        for issued in &availability {
+        for issued in continuation.availability_rows() {
             for offer in issued.offers() {
                 if !native_offers.contains(offer) {
                     native_offers.push(offer.clone());
@@ -727,7 +720,7 @@ impl OriginalCompilerInputs {
                 producer,
                 &complete,
                 &preferred,
-                CompleteAvailabilitySource::Request(&availability),
+                CompleteAvailabilitySource::Request(&continuation),
             )?;
             native_offers.extend(issued.native_offers);
             issued.artifacts
@@ -749,7 +742,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(&artifacts, &native_offers)?;
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         Ok(Self {
-            demand: OriginalInputDemand::Issued(decisions),
+            demand: OriginalInputDemand::Issued(continuation.decisions),
             projection,
             artifacts,
             native_offers,
@@ -764,40 +757,10 @@ impl OriginalCompilerInputs {
         producer: CanonicalProducerIdentity,
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
-        Self::from_native_availability_with_requirements(context, producer, products, &[])
-    }
-
-    #[cfg(test)]
-    fn from_native_availability_with_requirements(
-        context: &ExactDeclarationContext,
-        producer: CanonicalProducerIdentity,
-        products: &[CertifiedRecoveryProduct],
-        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-    ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability(
-            &context.owner.facts.compiler_support.artifacts(),
-            &context.owner.facts.compiler_support.projection(),
+        Self::from_checked_support_products(
+            context.compiler_source_support(),
             producer.sha256(),
             products,
-            availability,
-        )
-    }
-
-    #[cfg(test)]
-    fn issue_complete_native_availability(
-        inventory: &ArtifactView,
-        baseline: &CompilerInputProjection,
-        producer_sha256: [u8; 32],
-        products: &[CertifiedRecoveryProduct],
-        availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-    ) -> Result<Self, CompileError> {
-        Self::issue_complete_native_availability_with_source(
-            inventory,
-            baseline,
-            producer_sha256,
-            products,
-            availability,
-            CompleteAvailabilitySource::Fixture,
         )
     }
 
@@ -899,12 +862,8 @@ impl OriginalCompilerInputs {
             CompleteAvailabilitySource::Candidate(source) => {
                 crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
             }
-            CompleteAvailabilitySource::Request(rows) => {
-                crate::artifact_inventory::NativeDependencyCatalog::from_request(rows)
-            }
-            #[cfg(test)]
-            CompleteAvailabilitySource::Fixture => {
-                crate::artifact_inventory::NativeDependencyCatalog::from_fixture(&dependency_offers)
+            CompleteAvailabilitySource::Request(inputs) => {
+                crate::artifact_inventory::NativeDependencyCatalog::from_request(inputs)
             }
         };
         // Physical request permissions are already frozen in its row catalog.
@@ -918,6 +877,7 @@ impl OriginalCompilerInputs {
             inventory,
             entries.clone(),
             namespace_offers,
+            &dependencies,
         )?;
         let native_offers = effective
             .issue_complete_native_availability(
@@ -1044,12 +1004,41 @@ enum NativeTransportMode {
     IssuedGroups,
 }
 
+/// One validated continuation supplies both physical availability and choices.
+/// No caller can combine rows from one request with another request's decisions.
+pub(crate) struct ContinuationNativeInputs<'a> {
+    _selection: &'a crate::certified_products::CertifiedSourceSelection,
+    rows: Vec<Arc<NativeTransportAvailability>>,
+    decisions: crate::artifact_inventory::IssuedInputNativeDecisions,
+}
+
+impl<'a> ContinuationNativeInputs<'a> {
+    fn from_selection(
+        selection: &'a crate::certified_products::CertifiedSourceSelection,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            _selection: selection,
+            rows: selection.issued_native_availability().cloned().collect(),
+            decisions:
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    selection, projection,
+                )?,
+        })
+    }
+
+    pub(crate) fn availability_rows(&self) -> &[Arc<NativeTransportAvailability>] {
+        &self.rows
+    }
+    pub(crate) fn input_decisions(&self) -> &crate::artifact_inventory::IssuedInputNativeDecisions {
+        &self.decisions
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CompleteAvailabilitySource<'a> {
     Candidate(&'a crate::artifact_inventory::CompilerSourceSupport),
-    Request(&'a [Arc<NativeTransportAvailability>]),
-    #[cfg(test)]
-    Fixture,
+    Request(&'a ContinuationNativeInputs<'a>),
 }
 
 impl NativeTransportAvailability {

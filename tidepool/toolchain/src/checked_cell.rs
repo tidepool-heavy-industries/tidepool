@@ -6295,8 +6295,12 @@ mod tests {
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
+                let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
+                    context.compiler_source_support(),
+                )
+                .unwrap();
                 let admitted = projection
-                    .admit_interfaces_with_native_offers(available, vec![], &offers)
+                    .admit_interfaces_with_native_offers(available, vec![], &offers, &catalog)
                     .unwrap();
                 admitted
                     .native_requirements_from_roots(&[NativeRequirementRoot::Group {
@@ -6313,23 +6317,13 @@ mod tests {
                 .compiler_artifact_view()
                 .merge_fixture_selections(captured[1 - first].compiler_artifact_view())
                 .unwrap();
-            let requirements =
-                NativeOriginalRequirement::for_projection(projection, &ambiguous, &[]).unwrap();
             let before = ambiguous.capture_graph_selection();
             let nodes = ambiguous.inventory().node_count();
-            let admitted = requirements
-                .iter()
-                .map(|requirement| {
-                    crate::artifact_inventory::IssuedNativeOffer::issue(
-                        requirement.original,
-                        &ambiguous,
-                        Some(requirement.clone()),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|offers| {
-                    projection.admit_interfaces_with_native_offers(&ambiguous, vec![], &offers)
-                });
+            // Conflicting choices come from the two actual captured issuers,
+            // not from treating every available proof as a selected root.
+            let admitted = sources[first]
+                .compiler_source_support()
+                .merge(sources[1 - first].compiler_source_support());
             assert!(
                 matches!(admitted, Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
                 ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == native_id))

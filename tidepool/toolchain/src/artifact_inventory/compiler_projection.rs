@@ -178,7 +178,24 @@ pub(crate) struct IssuedInputNativeDecisions {
     pub(super) facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
 }
 
+/// This is a carried choice constraint, never native availability or demand.
+pub(crate) enum InputNativeDecision<'a> {
+    UnissuedPolicy,
+    IssuedChoices(&'a imbl::OrdMap<u32, NativeGroupBinding>),
+}
+
 impl IssuedInputNativeDecisions {
+    pub(crate) fn for_role(
+        &self,
+        owner: &ExactModuleIdentity,
+        role: &CompilerInputRole,
+    ) -> InputNativeDecision<'_> {
+        match self.facts.get(owner).filter(|fact| &fact.role == role) {
+            Some(fact) => InputNativeDecision::IssuedChoices(&fact.groups),
+            None => InputNativeDecision::UnissuedPolicy,
+        }
+    }
+
     pub(crate) fn from_certified_continuation(
         selection: &crate::certified_products::CertifiedSourceSelection,
         projection: &CompilerInputProjection,
@@ -201,33 +218,15 @@ impl IssuedInputNativeDecisions {
                     reason,
                 }))
             };
-            let admitted = source
-                .selected
-                .get(owner)
-                .ok_or_else(|| refusal(InputDecisionRefusal::ArtifactIdentityMismatch))?;
-            let (_, entry) = admitted
-                .original
-                .as_ref()
-                .ok_or_else(|| refusal(InputDecisionRefusal::ArtifactIdentityMismatch))?;
-            if entry.descriptor.id != original
-                || admitted.interface.1.descriptor.id != role.interface()
+            let choices = match source
+                .checked_native_input_decision(original, role.interface(), native_owner)
+                .map_err(refusal)?
             {
-                return Err(refusal(InputDecisionRefusal::ArtifactIdentityMismatch));
-            }
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(refusal(InputDecisionRefusal::ArtifactIdentityMismatch));
+                InputNativeDecision::IssuedChoices(choices) => choices,
+                InputNativeDecision::UnissuedPolicy => {
+                    return Err(refusal(InputDecisionRefusal::MissingDecision))
+                }
             };
-            if product.owner() != native_owner {
-                return Err(refusal(InputDecisionRefusal::NativeOwnerMismatch));
-            }
-            let fact = source
-                .input_decisions
-                .facts
-                .get(owner)
-                .ok_or_else(|| refusal(InputDecisionRefusal::MissingDecision))?;
-            if source.projection.snapshot_roles().get(owner) != Some(&fact.role) {
-                return Err(refusal(InputDecisionRefusal::RoleMismatch));
-            }
             if !matches!(role, CompilerInputRole::ReusableOriginal { .. }) {
                 return Err(refusal(InputDecisionRefusal::RoleMismatch));
             }
@@ -235,7 +234,7 @@ impl IssuedInputNativeDecisions {
                 owner.clone(),
                 RecordedInputNativeDecision {
                     role: role.clone(),
-                    groups: fact.groups.clone(),
+                    groups: choices.clone(),
                 },
             );
         }
@@ -561,6 +560,50 @@ impl CompilerSourceSupport {
             .iter()
             .map(|offer| offer.snapshot_facts().identity())
             .collect()
+    }
+
+    pub(crate) fn checked_native_input_decision(
+        &self,
+        original: ArtifactId,
+        canonical: ArtifactId,
+        native_owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Result<InputNativeDecision<'_>, crate::certified_products::InputDecisionRefusal> {
+        use crate::certified_products::InputDecisionRefusal;
+        let owner = ExactModuleIdentity {
+            unit: native_owner.unit.clone(),
+            module: native_owner.module.clone(),
+        };
+        let Some(role) = self.projection.roles.get(&owner) else {
+            return Ok(InputNativeDecision::UnissuedPolicy);
+        };
+        let Some(selected_original) = role.original() else {
+            return Ok(InputNativeDecision::UnissuedPolicy);
+        };
+        let admitted = self
+            .selected
+            .get(&owner)
+            .ok_or(InputDecisionRefusal::ArtifactIdentityMismatch)?;
+        let (_, entry) = admitted
+            .original
+            .as_ref()
+            .ok_or(InputDecisionRefusal::ArtifactIdentityMismatch)?;
+        if selected_original != original
+            || entry.descriptor.id != original
+            || role.interface() != canonical
+            || admitted.interface.1.descriptor.id != canonical
+        {
+            return Err(InputDecisionRefusal::ArtifactIdentityMismatch);
+        }
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(InputDecisionRefusal::ArtifactIdentityMismatch);
+        };
+        if product.owner() != native_owner {
+            return Err(InputDecisionRefusal::NativeOwnerMismatch);
+        }
+        match self.input_decisions.for_role(&owner, role) {
+            InputNativeDecision::UnissuedPolicy => Err(InputDecisionRefusal::MissingDecision),
+            issued => Ok(issued),
+        }
     }
 
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
@@ -1003,10 +1046,12 @@ impl CompilerSourceSupport {
             .collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.projection.merge(&issued)?;
+        let catalog = NativeDependencyCatalog::from_source(self)?;
         let artifacts = projection.admit_interfaces_with_native_offers(
             &self.artifacts,
             entries,
             &self.native_offers,
+            &catalog,
         )?;
         self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
     }
@@ -1276,25 +1321,34 @@ impl CompilerInputProjection {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
+        catalog: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
         let contributions = self.native_namespace_contributions(parent, offers)?;
-        parent
-            .inventory()
-            .admit_projected_with_native_offers(parent, entries, self, &contributions)
+        parent.inventory().admit_projected_with_native_offers(
+            parent,
+            entries,
+            self,
+            &contributions,
+            Some(catalog),
+        )
     }
 
+    // Pure initial-policy oracle for explicitly issued original/canonical pairs.
+    // Existing request/source continuations must use the catalog-bearing entry.
     #[cfg(test)]
-    pub(crate) fn admit_complete_native_products(
+    pub(crate) fn admit_interfaces_under_unissued_policy(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        self.admit_complete_native_products_with_dependencies(
+        let contributions = self.native_namespace_contributions(parent, offers)?;
+        parent.inventory().admit_projected_with_native_offers(
             parent,
             entries,
-            offers,
-            &NativeDependencyCatalog::from_fixture(&[]),
+            self,
+            &contributions,
+            None,
         )
     }
 
@@ -1307,24 +1361,6 @@ impl CompilerInputProjection {
     ) -> Result<super::native_availability::CheckedNativeAvailability, CompileError> {
         let contributions = self.native_namespace_contributions(parent, offers)?;
         parent.inventory().issue_private_complete_availability(
-            parent,
-            entries,
-            self,
-            &contributions,
-            dependencies,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn admit_complete_native_products_with_dependencies(
-        &self,
-        parent: &ArtifactView,
-        entries: Vec<Arc<ArtifactEntry>>,
-        offers: &[IssuedNativeOffer],
-        dependencies: &NativeDependencyCatalog<'_>,
-    ) -> Result<ArtifactView, CompileError> {
-        let contributions = self.native_namespace_contributions(parent, offers)?;
-        parent.inventory().admit_private_complete_products(
             parent,
             entries,
             self,

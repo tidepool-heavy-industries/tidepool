@@ -1150,6 +1150,7 @@ pub enum InputDecisionRefusal {
     ArtifactIdentityMismatch,
     RoleMismatch,
     UnexpectedVersion,
+    UnavailableChosenBinding,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2579,6 +2580,20 @@ enum ReceiptSourceVersion {
     RetainedCore,
 }
 
+/// A missing input choice cannot become permission to issue a fresh binding.
+pub(crate) enum NativeGroupCandidates {
+    IssuedAvailability(BTreeSet<crate::artifact_inventory::NativeGroupBinding>),
+    NewProduct(BTreeSet<crate::artifact_inventory::NativeGroupBinding>),
+}
+
+impl NativeGroupCandidates {
+    pub(crate) fn bindings(&self) -> &BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
+        match self {
+            Self::IssuedAvailability(groups) | Self::NewProduct(groups) => groups,
+        }
+    }
+}
+
 impl CertifiedSourceSelection {
     /// A validated output with no certified original rows carries no inherited
     /// input choice. This cannot construct a native role or availability.
@@ -3075,61 +3090,111 @@ impl CertifiedSourceSelection {
         Ok(())
     }
 
-    /// Query the physical receipt's exact resolver choice for one demanded key.
-    /// Explicit issuer roots qualify retained availability; they are never
-    /// reconstructed from a broader inventory or from completeness ranking.
+    /// Resolve bounded availability and its independently issued choice once.
+    /// New products are a separate producer; an input miss cannot enter it.
     pub(crate) fn native_group_candidates(
         &self,
         key: crate::artifact_inventory::NativeGroupKey,
-    ) -> BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
-        use crate::artifact_inventory::ArtifactBindingNode;
-        let qualified = self
-            .native_original_requirements()
-            .flat_map(|proof| {
-                proof
-                    .selection
-                    .snapshot()
-                    .roots
-                    .keys()
-                    .filter_map(move |root| match root {
-                        ArtifactBindingNode::Group(group)
-                            if key.artifact == proof.original
-                                && group.binding.artifact() == key.artifact
-                                && group.original_ordinal == key.original_ordinal =>
-                        {
-                            Some(*group)
-                        }
-                        _ => None,
-                    })
-            })
-            .collect::<BTreeSet<_>>();
-        if !qualified.is_empty() {
-            return qualified;
-        }
-        self.native_selections()
-            .flat_map(|selected| match &selected.availability {
-                ReceiptNativeAvailability::Issued(availability) => availability
-                    .offers()
+    ) -> CertResult<NativeGroupCandidates> {
+        use crate::artifact_inventory::InputNativeDecision;
+        let own = self
+            .native_selections()
+            .find(|native| native.original == key.artifact);
+        if let Some(native) = own {
+            if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
+                let groups = dependencies
                     .iter()
-                    .flat_map(|offer| offer.group_bindings(key))
-                    .collect::<BTreeSet<_>>(),
-                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
-                    .iter()
-                    .flat_map(|proof| {
-                        proof
-                            .selection
-                            .graph_selection()
-                            .native_groups
-                            .iter()
-                            .copied()
-                    })
+                    .filter(|proof| proof.original == key.artifact)
+                    .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
                     .filter(|group| {
                         group.binding.artifact() == key.artifact
                             && group.original_ordinal == key.original_ordinal
                     })
-                    .collect(),
-            })
-            .collect()
+                    .copied()
+                    .collect();
+                return Ok(NativeGroupCandidates::NewProduct(groups));
+            }
+        }
+        let mut candidates = BTreeSet::new();
+        let mut input_owner = None;
+        for row in self.issued_native_availability() {
+            let owner = row.original_owner();
+            if let Some(support) = row.dependency_support(key, owner) {
+                candidates.extend(support.groups());
+                input_owner = Some(owner);
+            }
+        }
+        // A fresh body's immutable child graph grants its exact historical
+        // descendants; it does not make those descendants new products.
+        for native in self.native_selections() {
+            if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
+                candidates.extend(
+                    dependencies
+                        .iter()
+                        .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
+                        .filter(|group| {
+                            group.binding.artifact() == key.artifact
+                                && group.original_ordinal == key.original_ordinal
+                        })
+                        .copied(),
+                );
+            }
+        }
+        if let CertifiedInputOrigin::Continuation(source) = &self.input_origin {
+            // Finished current products retain their producer origin even after
+            // their availability becomes an issued row. They are not old inputs.
+            let own = own.filter(|native| matches!(native.origin, ReceiptNativeOrigin::Input));
+            let input_owner = if self.native_selections().any(|native| {
+                native.original == key.artifact
+                    && matches!(native.origin, ReceiptNativeOrigin::NewProduct)
+            }) {
+                None
+            } else {
+                input_owner
+            };
+            // Even unavailable input must consult its old choice so a miss is
+            // diagnosed rather than treated as an unconstrained fresh policy.
+            let owner = input_owner.or_else(|| own.map(|native| &native.owner));
+            if let Some(owner) = owner {
+                let identity = crate::declaration_join::ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                };
+                let canonical = self
+                    .modules
+                    .get(&(owner.unit.clone(), owner.module.clone()))
+                    .map(ReceiptSourceSelection::interface)
+                    .or_else(|| {
+                        source
+                            .projection()
+                            .snapshot_roles()
+                            .get(&identity)
+                            .map(|role| role.interface())
+                    })
+                    .ok_or(CertificationError::InputDecision {
+                        owner: identity.clone(),
+                        reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                    })?;
+                let decision = source
+                    .checked_native_input_decision(key.artifact, canonical, owner)
+                    .map_err(|reason| CertificationError::InputDecision {
+                        owner: identity.clone(),
+                        reason,
+                    })?;
+                if let InputNativeDecision::IssuedChoices(choices) = decision {
+                    if let Some(chosen) = choices.get(&key.original_ordinal) {
+                        if !candidates.contains(chosen) {
+                            return Err(CertificationError::InputDecision {
+                                owner: identity,
+                                reason: InputDecisionRefusal::UnavailableChosenBinding,
+                            });
+                        }
+                        candidates = BTreeSet::from([*chosen]);
+                    }
+                }
+            }
+        }
+        Ok(NativeGroupCandidates::IssuedAvailability(candidates))
     }
 
     /// A completed fresh product owns its body. Retained request bodies are

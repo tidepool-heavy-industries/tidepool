@@ -18,7 +18,8 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, IssuedInputNativeDecisions, RecordedInputNativeDecision,
+    CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
+    RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -986,10 +987,28 @@ enum ArtifactRootIntent<'a> {
         selected: &'a [IssuedNativeOffer],
         dependencies: &'a NativeDependencyCatalog<'a>,
     },
-    Offered(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
+    Offered(
+        &'a CompilerInputProjection,
+        &'a [IssuedNativeOffer],
+        Option<&'a NativeDependencyCatalog<'a>>,
+    ),
 }
 
 impl ArtifactRootIntent<'_> {
+    fn input_constraints(
+        &self,
+    ) -> Option<(&CompilerInputProjection, &NativeDependencyCatalog<'_>)> {
+        match self {
+            Self::PrivateAvailability {
+                projection,
+                dependencies,
+                ..
+            } => Some((projection, dependencies)),
+            Self::Offered(projection, _, Some(catalog)) => Some((projection, catalog)),
+            _ => None,
+        }
+    }
+
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
@@ -2573,7 +2592,6 @@ pub(crate) struct BoundArtifactSelection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BoundNativeGroup {
-    Retained(BTreeSet<NativeGroupBinding>),
     Issued(NativeGroupBinding),
 }
 
@@ -2786,16 +2804,6 @@ impl ArtifactInventory {
             .collect();
         let parent_ids = artifact_ids(&parent.read_projection(&state).nodes);
         owners.native = SelectedOwners::new(&state, &native_entries, &parent_ids)?.native;
-        let mut groups = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-        for group in &graph.native_groups {
-            groups
-                .entry(NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal,
-                })
-                .or_default()
-                .insert(*group);
-        }
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -2805,10 +2813,7 @@ impl ArtifactInventory {
             owners,
             captured_facts,
             materializations,
-            groups: groups
-                .into_iter()
-                .map(|(key, groups)| (key, BoundNativeGroup::Retained(groups)))
-                .collect(),
+            groups: BTreeMap::new(),
             native_source: selection.clone(),
         })
     }
@@ -2906,22 +2911,13 @@ impl ArtifactInventory {
             if resolved_groups.contains_key(&group) || planned.contains_key(&group) {
                 continue;
             }
-            let explicit_root = selection.native_original_requirements().any(|proof| {
-                proof.selection.snapshot().roots.keys().any(|root| {
-                    matches!(root, ArtifactBindingNode::Group(root)
-                        if root.binding.artifact() == group.artifact
-                            && root.original_ordinal == group.original_ordinal)
-                })
-            });
             if let Some(entry) = fixed.entries.get(&group.artifact) {
                 if let ArtifactPayload::Original(product) = &entry.payload {
-                    if !explicit_root
-                        && !selection.permits_native_group(
-                            group.artifact,
-                            product.owner(),
-                            group.original_ordinal,
-                        )
-                    {
+                    if !selection.permits_native_group(
+                        group.artifact,
+                        product.owner(),
+                        group.original_ordinal,
+                    ) {
                         return Err(admission_failure(
                             ArtifactInventoryFailure::NativeGroupUnavailable {
                                 artifact: group.artifact,
@@ -2933,19 +2929,31 @@ impl ArtifactInventory {
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let candidates = match fixed.groups.get(&group) {
-                Some(BoundNativeGroup::Issued(group)) => BTreeSet::from([*group]),
-                retained => {
-                    let recorded = fixed.native_source.native_group_candidates(group);
-                    if !recorded.is_empty() {
-                        recorded
-                    } else if let Some(BoundNativeGroup::Retained(groups)) = retained {
-                        groups.clone()
-                    } else {
-                        BTreeSet::new()
-                    }
+            let resolution = match fixed.groups.get(&group) {
+                Some(BoundNativeGroup::Issued(binding)) => {
+                    crate::certified_products::NativeGroupCandidates::IssuedAvailability(
+                        BTreeSet::from([*binding]),
+                    )
                 }
+                None => fixed
+                    .native_source
+                    .native_group_candidates(group)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             };
+            let candidates = resolution.bindings().clone();
+            if candidates.is_empty()
+                && matches!(
+                    resolution,
+                    crate::certified_products::NativeGroupCandidates::IssuedAvailability(_)
+                )
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: group.artifact,
+                        original_ordinal: group.original_ordinal,
+                    },
+                ));
+            }
             let issued_nodes = candidates
                 .into_iter()
                 .map(InventoryNodeKey::Group)
@@ -3001,6 +3009,17 @@ impl ArtifactInventory {
                 resolved_groups.insert(group, binding);
                 reused.insert(group);
                 continue;
+            }
+            if matches!(
+                resolution,
+                crate::certified_products::NativeGroupCandidates::IssuedAvailability(_)
+            ) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: group.artifact,
+                        original_ordinal: group.original_ordinal,
+                    },
+                ));
             }
             let entry = fixed.entries.get(&group.artifact).ok_or_else(|| {
                 admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
@@ -3374,6 +3393,7 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
         contributions: &compiler_projection::NativeNamespaceContributions,
+        catalog: Option<&NativeDependencyCatalog<'_>>,
     ) -> Result<ArtifactView, CompileError> {
         let offers = contributions.offers();
         let offered = projection
@@ -3394,7 +3414,7 @@ impl ArtifactInventory {
             parent,
             entries,
             NativeArtifactDemand::ScopeInterfaces,
-            ArtifactRootIntent::Offered(projection, offers),
+            ArtifactRootIntent::Offered(projection, offers, catalog),
         )
         .map(|admission| admission.artifacts)
     }
@@ -3461,30 +3481,6 @@ impl ArtifactInventory {
             }
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn admit_private_complete_products(
-        &self,
-        parent: &ArtifactView,
-        entries: Vec<Arc<ArtifactEntry>>,
-        projection: &CompilerInputProjection,
-        contributions: &compiler_projection::NativeNamespaceContributions,
-        dependencies: &NativeDependencyCatalog<'_>,
-    ) -> Result<ArtifactView, CompileError> {
-        let availability = contributions.offers();
-        self.check_complete_availability_offers(projection, availability)?;
-        self.admit_shared_with_intent(
-            parent,
-            entries,
-            NativeArtifactDemand::AllGroups,
-            ArtifactRootIntent::PrivateAvailability {
-                projection,
-                selected: availability,
-                dependencies,
-            },
-        )
-        .map(|admission| admission.artifacts)
     }
 
     fn admit_shared_with_intent(
@@ -3680,7 +3676,7 @@ impl ArtifactInventory {
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             ),
             ArtifactRootIntent::Projected(projection, _)
-            | ArtifactRootIntent::Offered(projection, _)
+            | ArtifactRootIntent::Offered(projection, _, _)
             | ArtifactRootIntent::PrivateAvailability { projection, .. } => {
                 let namespace = projection.entries_from_artifacts(&selected)?;
                 if matches!(
@@ -3791,13 +3787,19 @@ impl ArtifactInventory {
                 }
             }
         }
-        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
+        if let ArtifactRootIntent::PrivateAvailability {
+            projection,
+            dependencies,
+            ..
+        } = root_intent
+        {
             native_availability::bind_fresh_product_dependencies(
                 &state,
                 parent,
                 consumed_namespace
                     .as_ref()
                     .expect("private compiler namespace"),
+                projection,
                 &selected,
                 &groups,
                 dependencies,
@@ -3805,8 +3807,40 @@ impl ArtifactInventory {
             )?;
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        if let Some((roles, catalog)) = root_intent.input_constraints() {
+            for (owner, role) in roles.snapshot_roles() {
+                let InputNativeDecision::IssuedChoices(choices) = catalog.decision(roles, owner)
+                else {
+                    continue;
+                };
+                for (ordinal, chosen) in choices {
+                    let key = NativeGroupKey {
+                        artifact: chosen.binding.artifact(),
+                        original_ordinal: *ordinal,
+                    };
+                    if role.original() != Some(key.artifact)
+                        || chosen.original_ordinal != *ordinal
+                        || !state.contains_node(&InventoryNodeKey::Group(*chosen))
+                        || admitted_closure(&state, [InventoryNodeKey::Group(*chosen)].into_iter())
+                            .iter()
+                            .any(|node| !parent_nodes.contains(node))
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::NativeGroupSelectionConflict {
+                                artifact: key.artifact,
+                                original_ordinal: key.original_ordinal,
+                            },
+                        ));
+                    }
+                    prebound.insert(key, *chosen);
+                }
+            }
+        }
         let mut historical_groups = BTreeSet::new();
         for (group, issued) in &required_groups {
+            if prebound.contains_key(group) {
+                continue;
+            }
             let choices = required_roots.get(group).unwrap_or(issued);
             if choices.len() != 1 {
                 if !required_roots.contains_key(group) && !groups.contains(group) {
@@ -4181,6 +4215,20 @@ impl ArtifactInventory {
                     parent
                         .roots()
                         .iter()
+                        .filter(|node| match (node, root_intent.input_constraints()) {
+                            (InventoryNodeKey::Group(group), Some((roles, catalog))) => {
+                                let Some(entry) = selected.get(&group.binding.artifact()) else {
+                                    return false;
+                                };
+                                match catalog.decision(roles, &entry.descriptor.owner) {
+                                    InputNativeDecision::UnissuedPolicy => true,
+                                    InputNativeDecision::IssuedChoices(choices) => {
+                                        choices.contains_key(&group.original_ordinal)
+                                    }
+                                }
+                            }
+                            _ => true,
+                        })
                         .map(|key| key.logical())
                         .filter(|key| planned.contains_key(key)),
                 )
