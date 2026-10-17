@@ -907,7 +907,7 @@ def diagnostic_summaries(artifact_root):
                     if fields.get('message') == 'compiler timing' and isinstance(line, str):
                         if line.startswith(('tidepool-compile-summary ', 'tidepool-validation ', 'tidepool-reuse ')):
                             summary_lines += 1
-                        if line.startswith(('tidepool-count ', 'tidepool-timing-detail ', 'tidepool-timing-module-detail ')):
+                        if line.startswith(('tidepool-count ', 'tidepool-timing-detail ', 'tidepool-timing-module-detail ', 'tidepool-module-counts ')):
                             raw_detail_lines += 1
                     if fields.get('phase') == 'compiler_queue':
                         queue_rows += 1

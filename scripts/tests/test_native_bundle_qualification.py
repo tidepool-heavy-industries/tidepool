@@ -285,6 +285,40 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertTrue(physical['request_identities_truncated'])
                     self.assertFalse(physical['request_count_complete'])
 
+    def test_trace_scanner_rejects_module_counts_only_for_minimal_and_requires_summaries(self):
+        runner_path = SCRIPT.parents[1] / 'rust/isolated-libtest.py'
+        spec = importlib.util.spec_from_file_location('qualification_module_counts_scanner', runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        for profile in ('minimal', 'full'):
+            for with_summary in (False, True):
+                with self.subTest(profile=profile, summary=with_summary), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    compiler = root / 'compiler'
+                    compiler.mkdir()
+                    trace = compiler / 'compiler.jsonl'
+                    rows = [
+                        {'fields': {'message': 'compiler trace profile applied', 'profile': profile,
+                                    'raw_detail': 'off' if profile == 'minimal' else 'debug',
+                                    'filter_contract': 1, 'process_id': 42, 'writer': str(trace)}},
+                        {'fields': {'message': 'compiler daemon ready', 'daemon_pid': 42}},
+                        {'fields': {'message': 'compiler request started', 'compile_request': 'logical',
+                                    'physical_execution': 'physical', 'execution_layer': 'physical'}},
+                        {'fields': {'message': 'compiler timing',
+                                    'line': 'tidepool-module-counts name=raw_projection_output owner_unit=main owner_module=Main count_ns=21 successful_groups=1 original_encoding_bytes=70'}},
+                    ]
+                    if with_summary:
+                        rows.append({'fields': {'message': 'compiler timing',
+                                                'line': 'tidepool-compile-summary modules=1'}})
+                    trace.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                    summaries = runner.diagnostic_summaries(root)
+                    capture = summaries['owned_compiler_roots'][0]['trace_capture']
+                    execution = {'artifact_root': str(root), 'diagnostic_summaries': summaries}
+                    self.assertEqual(qualification.compiler_trace_selection(execution, profile),
+                                     profile == 'full' and with_summary)
+                    self.assertEqual(capture['raw_detail_lines'], 1)
+                    self.assertEqual(capture['summary_lines'], int(with_summary))
+
     def test_applied_trace_selection_requires_writer_and_summary_evidence(self):
         import copy
         for profile in ("minimal", "full"):
