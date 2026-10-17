@@ -13,8 +13,8 @@ do
   C.ContextStaged _ <- C.stageContext (C.contextPatch
     [C.replaceText target updated | target <- C.textTargets current,
       let updated = trimResult (C.targetText target), updated /= C.targetText target])
-  C.setNextModel "test-model"
-  C.setNextEffort C.High
+  C.setNextModel (C.CustomModel C.OpenAIPlan "test-model")
+  C.setNextReasoning (C.OpenAIReasoning C.OpenAIHigh)
   Right captured <- checkpoint "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
     ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))

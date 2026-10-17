@@ -6,4 +6,4 @@ import qualified Tidepool.Agent.Context as C
 
 -- The ordinary notebook row cannot emit the synchronous effect.
 invalid :: Eff '[] ()
-invalid = C.setNextEffort C.High
+invalid = C.setNextReasoning (C.DeepSeekReasoning C.DeepSeekHigh)

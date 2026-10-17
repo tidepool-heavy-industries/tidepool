@@ -8,7 +8,7 @@ do
     then error "getContext included its own call" >> pure ()
     else pure ()
   C.ContextStaged _ <- C.stageContext (C.contextPatch [C.appendNote "parent-curated" []])
-  C.setNextModel "parent-curated-model"
+  C.setNextModel (C.CustomModel C.OpenAIPlan "parent-curated-model")
   Right captured <- checkpoint "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
     ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))

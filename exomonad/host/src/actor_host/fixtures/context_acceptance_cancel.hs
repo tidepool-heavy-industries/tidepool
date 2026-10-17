@@ -9,8 +9,8 @@ do
           let updated = trimResult (C.targetText target), updated /= C.targetText target]
   Right _ <- pure (C.previewContext current patch)
   C.ContextStaged _ <- C.stageContext patch
-  C.setNextModel "must-not-publish-model"
-  C.setNextEffort C.High
+  C.setNextModel (C.CustomModel C.OpenAIPlan "must-not-publish-model")
+  C.setNextReasoning (C.OpenAIReasoning C.OpenAIHigh)
   Right captured <- checkpoint "failure snapshot"
   Right worker <- spawnSubagent (ForkCtx captured) SameDir
     ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))

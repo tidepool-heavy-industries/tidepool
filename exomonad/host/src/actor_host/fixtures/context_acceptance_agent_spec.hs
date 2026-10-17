@@ -54,6 +54,6 @@ curateContext _ = do
     [C.replaceText target updated | target <- C.textTargets current,
       let updated = T.replace "parent-original" "compiled-handler-curated" (C.targetText target),
       updated /= C.targetText target])
-  C.setNextModel "executor"
-  C.setNextEffort C.High
+  C.setNextModel (C.CustomModel C.OpenAIPlan "executor")
+  C.setNextReasoning (C.OpenAIReasoning C.OpenAIHigh)
   pure "compiled-handler-committed"

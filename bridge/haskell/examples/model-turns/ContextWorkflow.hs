@@ -67,17 +67,17 @@ curateChild = do
   staged <- stageContext (contextPatch
     (trimToolResults current ++ [appendNote ("Child finding: " <> sharedFinding) []]))
   case staged of
-    ContextStaged _ -> C.setNextEffort C.High
+    ContextStaged _ -> C.setNextReasoning (C.DeepSeekReasoning C.DeepSeekHigh)
     ContextStageRefused _ -> pure ()
   pure staged
 
 -- Model and effort are staged by the same synchronous effect. Use a model
 -- change only for a context/model combination the runtime has qualified;
 -- incompatible opaque history must surface as an explicit refusal.
-stageNextModelAndEffort :: Member ContextReadWrite effects => Text -> Eff effects ()
-stageNextModelAndEffort alias = do
-  setNextModel alias
-  C.setNextEffort C.High
+stageNextModelAndReasoning :: Member ContextReadWrite effects => C.Model -> C.Reasoning -> Eff effects ()
+stageNextModelAndReasoning model reasoning = do
+  setNextModel model
+  C.setNextReasoning reasoning
 
 -- Call after the editing cell has succeeded and its transaction is committed.
 -- The caller supplies the actual installed tool definition. Each refusal keeps
