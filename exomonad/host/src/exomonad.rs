@@ -3729,9 +3729,9 @@ mod tests {
             )
             .unwrap(),
             ExomonadAgentDefaults {
-                model: Model::for_backend(Backend::OpenAIPlan, "override-model"),
-                reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
-                    exomonad_actor::OpenAIReasoning::OpenAIHigh
+                model: Model::for_backend(Backend::DeepSeek, "override-model"),
+                reasoning: exomonad_actor::Reasoning::DeepSeekReasoning(
+                    exomonad_actor::DeepSeekReasoning::DeepSeekHigh
                 ),
             }
         );
