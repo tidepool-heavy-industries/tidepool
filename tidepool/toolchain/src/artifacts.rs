@@ -2546,19 +2546,23 @@ impl SelectedModuleCandidateOffer {
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let exact = segment.product_admission(request, &source_path, &source, &evidence)?;
-        ensure_ready_module_inventory(&receipt.modules, &exact.source.evidence)?;
+        let inventory = validation.inventory.clone();
+        let source_admission = SourceEvidenceAdmission::from_exact(segment.product_admission(
+            request,
+            &source_path,
+            &source,
+            &evidence,
+            &inventory,
+        )?);
+        ensure_ready_module_inventory(&receipt.modules, source_admission.completed())?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
-            &evidence,
-            &source_path,
+            &source_admission,
             root,
-            &source,
             &self.producer,
             &self.include,
             self.selected.as_deref(),
-            &exact,
             &self.selected_session_values,
             Some(produced),
             validation,
@@ -3327,70 +3331,59 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
-    if source_segment.is_none() && offer.exact.is_some() {
-        charge_source_evidence(
-            &validation.inventory,
-            ordinary_inputs.as_ref().expect("ordinary products").1.len(),
-        )?;
-    }
+    let inventory = validation.inventory.clone();
     let exact_source_owned = if source_segment.is_none() {
         offer
             .exact
             .as_ref()
             .map(|request| {
-                request.admit_source_with_validation(
-                    source_path,
-                    source,
-                    &ordinary_inputs.as_ref().expect("ordinary products").1,
-                    validation,
-                )
+                request.admit_source_receipt_with_validation(source_path, source, validation)
             })
             .transpose()?
     } else {
         None
     };
-    let exact = match source_segment {
-        Some(segment) => Some(segment.item_admission(
-            offer.exact.as_ref().expect("segment exact request"),
-            source_path,
-            source,
-        )?),
-        None => offer
-            .exact
-            .as_ref()
-            .zip(exact_source_owned.as_ref())
-            .map(
-                |(request, source)| crate::declaration_context::ExactProductAdmission {
-                    request,
-                    source,
-                },
-            ),
-    };
-    let exact_source = exact.as_ref().map(|admission| admission.source);
-    let evidence_bytes = match exact_source.filter(|_| source_segment.is_some()) {
-        Some(source) => source.evidence_bytes.as_slice(),
-        None => ordinary_inputs
-            .as_ref()
-            .expect("ordinary products")
-            .1
-            .as_slice(),
-    };
-    let ordinary_evidence = if exact_source.is_none() {
-        Some(
-            ParsedSourceEvidence::parse(
-                &validation.inventory,
-                evidence_bytes,
-                SourceEvidenceUse::Compiler,
+    let segment_exact = source_segment
+        .map(|segment| {
+            segment.item_admission(
+                offer.exact.as_ref().expect("segment exact request"),
                 source_path,
-            )?
-            .authenticate(source_path, source)?,
+                source,
+            )
+        })
+        .transpose()?;
+    let source_admission = if source_segment.is_none() {
+        let evidence_bytes = &ordinary_inputs.as_ref().expect("ordinary products").1;
+        Some(
+            match offer.exact.as_ref().zip(exact_source_owned.as_ref()) {
+                Some((request, admitted)) => {
+                    SourceEvidenceAdmission::from_exact(admitted.match_product(
+                        request,
+                        source_path,
+                        source,
+                        evidence_bytes,
+                        &inventory,
+                    )?)
+                }
+                None => admit_compiler_source(&inventory, evidence_bytes, source_path, source)?,
+            },
         )
     } else {
         None
     };
-    let evidence = exact_source
-        .map(|source| source.evidence.as_ref())
-        .or(ordinary_evidence.as_ref());
+    let exact = source_admission
+        .as_ref()
+        .and_then(SourceEvidenceAdmission::exact)
+        .or(segment_exact.as_ref());
+    let exact_source = exact.map(|admission| admission.source);
+    let evidence = source_admission
+        .as_ref()
+        .map(SourceEvidenceAdmission::completed)
+        .or_else(|| {
+            segment_exact
+                .as_ref()
+                .map(|exact| exact.source.evidence.as_ref())
+        });
     let fresh_products = segment_originals
         .map(|originals| originals.raw())
         .or_else(|| ordinary_inputs.as_ref().map(|(products, _)| products))
@@ -3469,14 +3462,12 @@ fn seal_turn_outputs_with_validation(
                 offer.selected.as_deref(),
                 ordinary_receipt.as_ref().expect("ordinary receipt"),
                 fresh_products,
-                evidence_bytes,
-                source_path,
+                source_admission
+                    .as_ref()
+                    .expect("ordinary source admission"),
                 output_dir,
-                valid,
-                source,
                 &offer.producer,
                 &offer.include,
-                exact.as_ref(),
                 authored,
                 &offer.selected_session_values,
                 produced_types,
@@ -3689,8 +3680,9 @@ fn seal_turn_outputs_with_validation(
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
                 &output_dir.join("compiler-inputs.cbor"),
-                &evidence_bytes,
-                valid,
+                source_admission
+                    .as_ref()
+                    .expect("ordinary input source admission"),
             )?;
             input_packages
                 .map(|input_packages| {
@@ -4384,7 +4376,7 @@ fn compile_build_action(
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
 
-fn charge_source_evidence(
+pub(crate) fn charge_source_evidence(
     operation: &tidepool_repr::execution_schema::InventoryOperation,
     bytes: usize,
 ) -> Result<(), CompileError> {
@@ -4403,10 +4395,15 @@ pub(crate) struct SourceEvidenceAdmission<'a> {
     input_path: &'a Path,
     target_source: &'a str,
     inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
-    completed: cache::CompletedSourceEvidence,
+    completion: SourceEvidenceCompletion<'a>,
 }
 
-impl SourceEvidenceAdmission<'_> {
+enum SourceEvidenceCompletion<'a> {
+    Ordinary(cache::CompletedSourceEvidence),
+    Exact(crate::declaration_context::ExactProductAdmission<'a>),
+}
+
+impl<'a> SourceEvidenceAdmission<'a> {
     pub(crate) fn worker_bytes(&self) -> &[u8] {
         self.worker_bytes
     }
@@ -4424,8 +4421,43 @@ impl SourceEvidenceAdmission<'_> {
     }
 
     pub(crate) fn completed(&self) -> &cache::CompletedSourceEvidence {
-        &self.completed
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(completed) => completed,
+            SourceEvidenceCompletion::Exact(exact) => exact.source.evidence.as_ref(),
+        }
     }
+
+    pub(crate) fn exact(&self) -> Option<&crate::declaration_context::ExactProductAdmission<'a>> {
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(_) => None,
+            SourceEvidenceCompletion::Exact(exact) => Some(exact),
+        }
+    }
+
+    pub(crate) fn from_exact(
+        matched: crate::declaration_context::MatchedExactProductAdmission<'a>,
+    ) -> Self {
+        let (exact, worker_bytes, input_path, target_source, inventory) = matched.into_parts();
+        Self {
+            worker_bytes,
+            input_path,
+            target_source,
+            inventory,
+            completion: SourceEvidenceCompletion::Exact(exact),
+        }
+    }
+}
+
+/// Admission of ordinary compiler evidence uses the same parser and physical
+/// source validator as the compile front door, including its accounting owner.
+pub(crate) fn admit_compiler_source<'a>(
+    operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+    bytes: &'a [u8],
+    input: &'a Path,
+    source: &'a str,
+) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+    ParsedSourceEvidence::parse(operation, bytes, SourceEvidenceUse::Compiler, input)?
+        .authenticate_for_certification(input, source)
 }
 
 /// Parsed worker observations, without consumed-byte or import-witness authority.
@@ -4497,7 +4529,24 @@ impl<'a> ParsedSourceEvidence<'a> {
             input_path: input,
             target_source: source,
             inventory: self.2,
-            completed,
+            completion: SourceEvidenceCompletion::Ordinary(completed),
+        })
+    }
+
+    fn admit_build_action_for_certification(
+        self,
+        input: &'a Path,
+        include: &[PathBuf],
+        source: &'a str,
+    ) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+        let (worker_bytes, inventory) = (self.1, self.2);
+        let completed = self.admit_build_action(input, include, source)?;
+        Ok(SourceEvidenceAdmission {
+            worker_bytes,
+            input_path: input,
+            target_source: source,
+            inventory,
+            completion: SourceEvidenceCompletion::Ordinary(completed),
         })
     }
 
@@ -5117,62 +5166,51 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
-        let (parsed_evidence, build_action_evidence) = if exact_request.is_some() {
-            // Exact receipt admission owns its own parser and source proof.
-            charge_source_evidence(&inventory_operation, evidence_bytes.len())?;
-            (None, None)
-        } else {
-            let build_action = matches!(&policy, CompilationPolicy::BuildAction { .. });
-            let parsed = ParsedSourceEvidence::parse(
-                &inventory_operation,
-                &evidence_bytes,
-                if build_action {
-                    SourceEvidenceUse::BuildAction
-                } else {
-                    SourceEvidenceUse::Compiler
-                },
-                &input_path,
-            )?;
-            if build_action {
-                // This adjacent admission owns one completed physical
-                // observation and checks the captured invocation against it.
-                (
-                    None,
-                    Some(parsed.admit_build_action(&input_path, inv.include, inv.source)?),
-                )
-            } else {
-                (Some(parsed), None)
-            }
-        };
         let exact_source = exact_request
             .as_ref()
             .map(|request| {
-                request.admit_source_with_validation(
+                request.admit_source_receipt_with_validation(
                     &input_path,
                     inv.source,
-                    &evidence_bytes,
                     &mut validation,
                 )
             })
             .transpose()?;
-        let exact = exact_request
-            .as_ref()
-            .zip(exact_source.as_ref())
-            .map(
-                |(request, source)| crate::declaration_context::ExactProductAdmission {
+        let source_admission = match exact_request.as_ref().zip(exact_source.as_ref()) {
+            Some((request, admitted)) => {
+                SourceEvidenceAdmission::from_exact(admitted.match_product(
                     request,
-                    source,
-                },
-            );
-        let evidence = match exact_source.as_ref() {
-            Some(source) => Some((*source.evidence).clone()),
-            None => Some(match build_action_evidence {
-                Some(completed) => completed,
-                None => parsed_evidence
-                    .expect("non-exact parsed evidence")
-                    .authenticate(&input_path, inv.source)?,
-            }),
+                    &input_path,
+                    inv.source,
+                    &evidence_bytes,
+                    &inventory_operation,
+                )?)
+            }
+            None => {
+                let build_action = matches!(&policy, CompilationPolicy::BuildAction { .. });
+                let parsed = ParsedSourceEvidence::parse(
+                    &inventory_operation,
+                    &evidence_bytes,
+                    if build_action {
+                        SourceEvidenceUse::BuildAction
+                    } else {
+                        SourceEvidenceUse::Compiler
+                    },
+                    &input_path,
+                )?;
+                if build_action {
+                    parsed.admit_build_action_for_certification(
+                        &input_path,
+                        inv.include,
+                        inv.source,
+                    )?
+                } else {
+                    parsed.authenticate_for_certification(&input_path, inv.source)?
+                }
+            }
         };
+        let exact = source_admission.exact();
+        let evidence = Some(source_admission.completed());
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
@@ -5237,9 +5275,7 @@ fn compile_invocation_inner(
             validation.inventory.clone(),
         )
         .map_err(compiler_evidence_failure)?;
-        let valid_evidence = evidence
-            .as_ref()
-            .filter(|value| value.revalidate(inv.source).is_ok());
+        let valid_evidence = evidence.filter(|value| value.revalidate(inv.source).is_ok());
         let cached_receipts: Vec<_> = receipt
             .modules
             .iter()
@@ -5250,14 +5286,10 @@ fn compile_invocation_inner(
                 candidate_set.as_ref(),
                 &receipt,
                 &fresh_products,
-                &evidence_bytes,
-                &input_path,
+                &source_admission,
                 output_owner.path(),
-                valid,
-                inv.source,
                 &producer,
                 inv.include,
-                exact.as_ref(),
                 authored,
                 &selected_session_values,
                 None,

@@ -278,10 +278,24 @@ impl ValidatedInputPackages {
 
     pub(crate) fn read_supported(
         path: &Path,
+        source: &crate::artifacts::SourceEvidenceAdmission<'_>,
+    ) -> Result<Option<Self>, CompileInputError> {
+        Self::supported(Self::read(path, source))
+    }
+
+    #[cfg(test)]
+    fn read_supported_observations(
+        path: &Path,
         evidence_bytes: &[u8],
         evidence: &DependencyEvidence,
     ) -> Result<Option<Self>, CompileInputError> {
-        match Self::read(path, evidence_bytes, evidence) {
+        Self::supported(Self::read_observations(path, evidence_bytes, evidence))
+    }
+
+    fn supported(
+        result: Result<Self, CompileInputError>,
+    ) -> Result<Option<Self>, CompileInputError> {
+        match result {
             Ok(proof) => Ok(Some(proof)),
             Err(
                 failure @ (CompileInputError::UnsupportedBoot { .. }
@@ -306,6 +320,13 @@ impl ValidatedInputPackages {
     }
 
     pub(crate) fn read(
+        path: &Path,
+        source: &crate::artifacts::SourceEvidenceAdmission<'_>,
+    ) -> Result<Self, CompileInputError> {
+        Self::read_observations(path, source.worker_bytes(), source.completed())
+    }
+
+    fn read_observations(
         path: &Path,
         evidence_bytes: &[u8],
         evidence: &DependencyEvidence,
@@ -1473,7 +1494,11 @@ mod tests {
             Err(CompileInputError::Malformed)
         ));
         assert!(matches!(
-            ValidatedInputPackages::read(&root.path().join("missing"), &raw, &evidence),
+            ValidatedInputPackages::read_observations(
+                &root.path().join("missing"),
+                &raw,
+                &evidence
+            ),
             Err(CompileInputError::Unavailable { .. })
         ));
         let mut source = value.clone();
@@ -1529,11 +1554,11 @@ mod tests {
         let path = root.path().join("compiler-inputs.cbor");
         std::fs::write(&path, packet_bytes(&value)).unwrap();
         assert!(matches!(
-            ValidatedInputPackages::read(&path, &raw, &evidence),
+            ValidatedInputPackages::read_observations(&path, &raw, &evidence),
             Err(CompileInputError::UnsupportedWiredInput { .. })
         ));
         assert!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence)
+            ValidatedInputPackages::read_supported_observations(&path, &raw, &evidence)
                 .unwrap()
                 .is_none()
         );
@@ -1544,14 +1569,14 @@ mod tests {
             .pop();
         std::fs::write(&path, packet_bytes(&bare)).unwrap();
         assert!(matches!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            ValidatedInputPackages::read_supported_observations(&path, &raw, &evidence),
             Err(CompileInputError::Malformed)
         ));
         let mut changed = value.clone();
         changed.as_array_mut().unwrap()[3].as_array_mut().unwrap()[2] = Value::Text("0".repeat(64));
         std::fs::write(&path, packet_bytes(&changed)).unwrap();
         assert!(matches!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            ValidatedInputPackages::read_supported_observations(&path, &raw, &evidence),
             Err(CompileInputError::SourceMismatch { .. })
         ));
         value.as_array_mut().unwrap()[3] = Value::Array(vec![
@@ -1560,7 +1585,7 @@ mod tests {
         ]);
         std::fs::write(&path, packet_bytes(&value)).unwrap();
         assert!(matches!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            ValidatedInputPackages::read_supported_observations(&path, &raw, &evidence),
             Err(CompileInputError::OwnerCoverage)
         ));
         let mut boot = evidence.clone();
@@ -1569,17 +1594,17 @@ mod tests {
         value.as_array_mut().unwrap()[2] = Value::Text(format!("{:x}", Sha256::digest(&boot_raw)));
         std::fs::write(&path, packet_bytes(&value)).unwrap();
         assert!(
-            ValidatedInputPackages::read_supported(&path, &boot_raw, &boot)
+            ValidatedInputPackages::read_supported_observations(&path, &boot_raw, &boot)
                 .unwrap()
                 .is_none()
         );
         assert!(matches!(
-            ValidatedInputPackages::read_supported(&path, b"another offer", &evidence),
+            ValidatedInputPackages::read_supported_observations(&path, b"another offer", &evidence),
             Err(CompileInputError::DependencyMismatch)
         ));
         std::fs::write(&path, b"malformed").unwrap();
         assert!(matches!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            ValidatedInputPackages::read_supported_observations(&path, &raw, &evidence),
             Err(CompileInputError::Malformed)
         ));
     }

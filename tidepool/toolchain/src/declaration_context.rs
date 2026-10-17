@@ -3925,10 +3925,11 @@ impl ExactProgramSegmentAdmission {
     pub(crate) fn product_admission<'a>(
         &'a self,
         request: &ExactCompilationRequest,
-        path: &Path,
-        source: &str,
-        evidence: &[u8],
-    ) -> Result<ExactProductAdmission<'a>, CompileError> {
+        path: &'a Path,
+        source: &'a str,
+        evidence: &'a [u8],
+        inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<MatchedExactProductAdmission<'a>, CompileError> {
         self.validate_request(request)?;
         let matched = self
             .admissions
@@ -3938,6 +3939,7 @@ impl ExactProgramSegmentAdmission {
         let first = matched
             .first()
             .ok_or_else(|| failure("projected item lacks its physical segment source receipt"))?;
+        crate::artifacts::charge_source_evidence(inventory, evidence.len())?;
         for admission in &matched {
             admission.validate_request(request)?;
             admission.validate_ineligible_evidence(evidence)?;
@@ -3962,9 +3964,15 @@ impl ExactProgramSegmentAdmission {
         }) {
             return Err(failure("projected segment source receipts disagree"));
         }
-        Ok(ExactProductAdmission {
-            request: &self.request,
-            source: first,
+        Ok(MatchedExactProductAdmission {
+            exact: ExactProductAdmission {
+                request: &self.request,
+                source: first,
+            },
+            worker_bytes: evidence,
+            input_path: path,
+            target_source: source,
+            inventory,
         })
     }
     pub(crate) fn physical_request(&self) -> &ExactCompilationRequest {
@@ -4022,6 +4030,37 @@ impl ExactProgramSegmentAdmission {
 pub(crate) struct ExactProductAdmission<'a> {
     pub(crate) request: &'a ExactCompilationRequest,
     pub(crate) source: &'a ExactSourceAdmission,
+}
+
+/// Captured product evidence matched by the exact receipt issuer. The source
+/// and request remain those retained by the issuer; input and bytes belong to
+/// the current physical output and its accounting operation.
+pub(crate) struct MatchedExactProductAdmission<'a> {
+    exact: ExactProductAdmission<'a>,
+    worker_bytes: &'a [u8],
+    input_path: &'a Path,
+    target_source: &'a str,
+    inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+}
+
+impl<'a> MatchedExactProductAdmission<'a> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ExactProductAdmission<'a>,
+        &'a [u8],
+        &'a Path,
+        &'a str,
+        &'a tidepool_repr::execution_schema::InventoryOperation,
+    ) {
+        (
+            self.exact,
+            self.worker_bytes,
+            self.input_path,
+            self.target_source,
+            self.inventory,
+        )
+    }
 }
 
 /// Resolve home adjacency from the compiler's complete consumed-source graph.
@@ -4092,6 +4131,34 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn match_product<'a>(
+        &'a self,
+        request: &'a ExactCompilationRequest,
+        input_path: &'a Path,
+        target_source: &'a str,
+        worker_bytes: &'a [u8],
+        inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<MatchedExactProductAdmission<'a>, CompileError> {
+        self.validate_request(request)?;
+        if !self.witness.matches_source(input_path, target_source) {
+            return Err(failure(
+                "product source differs from its exact source receipt",
+            ));
+        }
+        crate::artifacts::charge_source_evidence(inventory, worker_bytes.len())?;
+        self.validate_ineligible_evidence(worker_bytes)?;
+        Ok(MatchedExactProductAdmission {
+            exact: ExactProductAdmission {
+                request,
+                source: self,
+            },
+            worker_bytes,
+            input_path,
+            target_source,
+            inventory,
+        })
+    }
+
     pub(crate) fn validate_request(
         &self,
         request: &ExactCompilationRequest,
@@ -5155,19 +5222,23 @@ impl ExactCompilationRequest {
         source: &str,
         fresh_evidence: &[u8],
     ) -> Result<ExactSourceAdmission, CompileError> {
-        self.admit_source_with_validation(
+        let mut validation = PackageInterfaceValidation::default();
+        let admitted =
+            self.admit_source_receipt_with_validation(source_path, source, &mut validation)?;
+        admitted.match_product(
+            self,
             source_path,
             source,
             fresh_evidence,
-            &mut PackageInterfaceValidation::default(),
-        )
+            &validation.inventory,
+        )?;
+        Ok(admitted)
     }
 
-    pub(crate) fn admit_source_with_validation(
+    pub(crate) fn admit_source_receipt_with_validation(
         &self,
         source_path: &Path,
         source: &str,
-        fresh_evidence: &[u8],
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
@@ -5189,7 +5260,6 @@ impl ExactCompilationRequest {
             .ok_or_else(|| {
                 failure("source and final product evidence lack their exact consumed receipt")
             })?;
-        admitted.validate_ineligible_evidence(fresh_evidence)?;
         Ok(admitted)
     }
     pub(crate) fn validate_outputs(
@@ -11377,6 +11447,15 @@ mod tests {
     }
 
     fn support_admission(root: &Path) -> ExactSourceAdmission {
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(root, context);
+        let receipt = support_receipt(root, &request);
+        request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap()
+    }
+
+    fn support_receipt(root: &Path, request: &ExactCompilationRequest) -> PathBuf {
         let modules = [
             ("InstanceOwner", None),
             ("InstanceRelay", Some("InstanceOwner")),
@@ -11430,22 +11509,37 @@ mod tests {
             packages: vec![],
             modules: nodes,
         };
-        let evidence_bytes = serde_json::to_vec(&evidence).unwrap();
-        let evidence =
-            crate::cache::CompletedSourceEvidence::from_worker_evidence(evidence, &target, source)
-                .unwrap();
-        ExactSourceAdmission {
-            witness: ExactSourceWitness {
-                source_path: target,
-                source_sha256: Sha256::digest(source.as_bytes()).into(),
-            },
-            evidence_bytes,
-            evidence: Arc::new(evidence),
-            exact_imports: BTreeMap::new(),
-            scaffold_roots: BTreeMap::new(),
-            exact_source_imports: BTreeMap::new(),
-            selected_originals: BTreeMap::new(),
-        }
+        let directory = root.join("support-receipt");
+        std::fs::create_dir_all(&directory).unwrap();
+        let snapshot = directory.join("source.hs");
+        std::fs::write(&snapshot, source).unwrap();
+        let receipt = directory.join("receipt.cbor");
+        let edges = evidence
+            .modules
+            .iter()
+            .map(|module| {
+                Value::Array(vec![
+                    text(&module.unit),
+                    text(&module.module),
+                    Value::Bool(module.boot),
+                    Value::Array(vec![]),
+                ])
+            })
+            .collect();
+        let value = Value::Array(vec![
+            text("TPEXACTCOMPILE"),
+            text("3"),
+            text(&request.request_sha256),
+            text(hex(&request.semantic_sha256)),
+            path_value(&target).unwrap(),
+            text(sha256(source.as_bytes())),
+            path_value(&snapshot).unwrap(),
+            text(serde_json::to_string(&evidence).unwrap()),
+            Value::Array(edges),
+            Value::Array(vec![Value::Array(vec![]), Value::Null]),
+        ]);
+        write_receipt(&receipt, &value);
+        receipt
     }
 
     fn edit_lexical(
@@ -15804,11 +15898,16 @@ mod tests {
         let source = RECEIVER_INTERFACE_SOURCE;
         let path = root.join("Ref.hs");
         std::fs::write(&path, source).unwrap();
-        let mut admission = support_admission(root);
-        let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(root, context);
+        let receipt = support_receipt(root, &request);
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
         evidence
             .sources
-            .retain(|source| source.path == Path::new(crate::cache::GENERATED_SOURCE));
+            .retain(|source| source.path == root.join("Target.hs"));
         evidence.sources.push(crate::cache::SourceEvidence {
             path: path.clone(),
             sha256: sha256(source.as_bytes()),
@@ -15822,14 +15921,17 @@ mod tests {
             imports: vec![],
             product: crate::cache::ProductAvailability::InterfaceOnly,
         }];
-        admission.evidence_bytes = serde_json::to_vec(&evidence).unwrap();
-        admission.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
-            evidence,
-            "module Target where\n",
-        )
-        .unwrap()
-        .into();
-        admission
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        fields[8] = Value::Array(vec![Value::Array(vec![
+            text(unit),
+            text("Tidepool.Agent.Ref"),
+            Value::Bool(false),
+            Value::Array(vec![]),
+        ])]);
+        write_receipt(&receipt, &value);
+        request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap()
     }
 
     fn interface_only_agent_ref_offer(producer: [u8; 32], unit: &str) -> CompilerSupportFixture {
@@ -17820,6 +17922,8 @@ mod tests {
     #[test]
     fn program_segment_preserves_physical_source_authority_across_item_outputs() {
         let directory = tempfile::tempdir().unwrap();
+        let inventory =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
         let source = "module Consumer where\n";
@@ -17865,9 +17969,14 @@ mod tests {
             .validate_artifacts(&projected.artifacts)
             .unwrap();
         let admission = segment
-            .product_admission(&projected, &source_path, source, &evidence)
+            .product_admission(&projected, &source_path, source, &evidence, &inventory)
             .unwrap();
-        assert!(admission.request.context().interface_owners().is_empty());
+        assert!(admission
+            .exact
+            .request
+            .context()
+            .interface_owners()
+            .is_empty());
         let repeated = projected
             .admit_fixture_segment_support(context.clone(), &support, &segment, None)
             .unwrap();
@@ -17916,11 +18025,12 @@ mod tests {
                 &projected,
                 &source_path,
                 "module Changed where\n",
-                &evidence
+                &evidence,
+                &inventory
             )
             .is_err());
         assert!(segment
-            .product_admission(&projected, &source_path, source, b"{}")
+            .product_admission(&projected, &source_path, source, b"{}", &inventory)
             .is_err());
         for changed in 0..4 {
             let mut altered: crate::cache::DependencyEvidence =
@@ -17937,6 +18047,7 @@ mod tests {
                     &source_path,
                     source,
                     &serde_json::to_vec(&altered).unwrap(),
+                    &inventory,
                 )
                 .err()
                 .expect("matching source must retain its exact final evidence");
@@ -17953,7 +18064,7 @@ mod tests {
                 _ => foreign.producer_sha256 = [9; 32],
             }
             assert!(segment
-                .product_admission(&foreign, &source_path, source, &evidence)
+                .product_admission(&foreign, &source_path, source, &evidence, &inventory)
                 .is_err());
         }
         assert_eq!(segment.admissions().len(), 2);

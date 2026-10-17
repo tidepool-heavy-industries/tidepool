@@ -347,14 +347,11 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn issue(
         raw: ParsedModuleProducts,
         receipt: CertifiedReceipt,
-        evidence_bytes: &[u8],
-        source_path: &Path,
+        source: &crate::artifacts::SourceEvidenceAdmission<'_>,
         root: &Path,
-        source: &str,
         producer: &[u8],
         include: &[PathBuf],
         candidates: Option<&CandidateSet>,
-        exact: &crate::declaration_context::ExactProductAdmission<'_>,
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
@@ -368,14 +365,10 @@ impl CertifiedSegmentOriginals {
             candidates,
             &receipt,
             &raw,
-            evidence_bytes,
-            source_path,
-            root,
-            &exact.source.evidence,
             source,
+            root,
             producer,
             include,
-            Some(exact),
             None,
             selected_values,
             produced,
@@ -7490,28 +7483,20 @@ pub(crate) fn certify_products(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
     fresh_products: &ParsedModuleProducts,
-    fresh_evidence_bytes: &[u8],
-    fresh_input_path: &Path,
+    source: &crate::artifacts::SourceEvidenceAdmission<'_>,
     captured_payload_root: &Path,
-    final_evidence: &CompletedSourceEvidence,
-    final_target_source: &str,
     endpoint_identity: &[u8],
     include: &[PathBuf],
-    exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> CertResult<CertifiedProducts> {
     certify_products_with_validation(
         candidates,
         receipt,
         fresh_products,
-        fresh_evidence_bytes,
-        fresh_input_path,
+        source,
         captured_payload_root,
-        final_evidence,
-        final_target_source,
         endpoint_identity,
         include,
-        exact,
         authored,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
@@ -7523,53 +7508,31 @@ pub(crate) fn certify_products_with_validation(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
     fresh_products: &ParsedModuleProducts,
-    fresh_evidence_bytes: &[u8],
-    fresh_input_path: &Path,
+    source: &crate::artifacts::SourceEvidenceAdmission<'_>,
     captured_payload_root: &Path,
-    final_evidence: &CompletedSourceEvidence,
-    final_target_source: &str,
     endpoint_identity: &[u8],
     include: &[PathBuf],
-    exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     selected_session_values: &crate::artifacts::SelectedSessionValueOwners,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
-    if !Arc::ptr_eq(&validation.inventory, fresh_products.operation()) {
+    if !Arc::ptr_eq(&validation.inventory, fresh_products.operation())
+        || !std::ptr::eq(source.inventory(), validation.inventory.as_ref())
+    {
         return Err(CertificationError::Mismatch("inventory accounting owner"));
     }
     receipt
         .finalization
         .validate_owners(&receipt.modules, &receipt.packages)?;
     let evidence_start = std::time::Instant::now();
-    let normalized = match exact {
-        None => std::borrow::Cow::Owned(
-            CompletedSourceEvidence::from_worker(
-                fresh_evidence_bytes,
-                fresh_input_path,
-                final_target_source,
-            )
-            .map_err(|failure| CertificationError::CompletedSourceEvidence {
-                input: fresh_input_path.to_path_buf(),
-                failure: Box::new(failure),
-            })?,
-        ),
-        Some(admission) => {
-            admission
-                .source
-                .validate_ineligible_evidence(fresh_evidence_bytes)
-                .map_err(|_| CertificationError::Mismatch("exact fresh evidence"))?;
-            std::borrow::Cow::Borrowed(admission.source.evidence.as_ref())
-        }
-    };
-    if serde_json::to_vec(&normalized)
-        .map_err(|_| CertificationError::Mismatch("fresh evidence encoding"))?
-        != serde_json::to_vec(final_evidence)
-            .map_err(|_| CertificationError::Mismatch("fresh evidence encoding"))?
-    {
-        return Err(CertificationError::Mismatch("fresh evidence bytes"));
-    }
+    let fresh_evidence_bytes = source.worker_bytes();
+    let fresh_input_path = source.input_path();
+    let final_target_source = source.target_source();
+    let final_evidence = source.completed();
+    let exact = source.exact();
+    // This is a fresh physical observation at the publication boundary, not a
+    // reconstruction of correspondence already issued by source admission.
     if final_evidence.revalidate(final_target_source).is_err() {
         return Err(CertificationError::StaleEvidence);
     }
@@ -16047,15 +16010,31 @@ pub(crate) mod tests {
                     None,
                     &fresh_receipt,
                     &parsed,
-                    &evidence_bytes,
-                    &input,
+                    &match Some(exact) {
+                        Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                            exact
+                                .source
+                                .match_product(
+                                    exact.request,
+                                    &input,
+                                    source,
+                                    &evidence_bytes,
+                                    (&parsed).operation(),
+                                )
+                                .unwrap()
+                        ),
+                        None => crate::artifacts::admit_compiler_source(
+                            (&parsed).operation(),
+                            &evidence_bytes,
+                            &input,
+                            source
+                        )
+                        .unwrap(),
+                    },
                     input.parent().unwrap(),
-                    &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-                    source,
                     &producer,
                     &include,
-                    Some(exact),
-                    None
+                    None,
                 ),
                 Err(CertificationError::Mismatch(
                     "source recipe compilation route"
@@ -16104,14 +16083,30 @@ pub(crate) mod tests {
             None,
             &fresh_receipt,
             &parsed,
-            &evidence_bytes,
-            &input,
+            &match exact.as_ref() {
+                Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                    exact
+                        .source
+                        .match_product(
+                            exact.request,
+                            &input,
+                            source,
+                            &evidence_bytes,
+                            (&parsed).operation(),
+                        )
+                        .unwrap(),
+                ),
+                None => crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &evidence_bytes,
+                    &input,
+                    source,
+                )
+                .unwrap(),
+            },
             input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
             &producer,
             &include,
-            exact.as_ref(),
             None,
         )
         .unwrap();
@@ -16157,14 +16152,16 @@ pub(crate) mod tests {
                 Some(&selected),
                 &new_receipt,
                 &parsed,
-                &new_evidence_bytes,
-                &new_input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &new_evidence_bytes,
+                    &new_input,
+                    source,
+                )
+                .unwrap(),
                 new_input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-                source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .unwrap();
@@ -16183,14 +16180,16 @@ pub(crate) mod tests {
                 Some(&selected),
                 &new_receipt,
                 &parsed,
-                &incomplete_bytes,
-                &new_input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &incomplete_bytes,
+                    &new_input,
+                    source,
+                )
+                .unwrap(),
                 new_input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(incomplete.clone(), source).unwrap(),
-                source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .unwrap();
@@ -16210,14 +16209,16 @@ pub(crate) mod tests {
                 Some(&selected),
                 &new_receipt,
                 &parsed,
-                &incomplete_bytes,
-                &new_input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &incomplete_bytes,
+                    &new_input,
+                    source
+                )
+                .unwrap(),
                 new_input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(incomplete.clone(), source).unwrap(),
-                source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .is_err());
@@ -16251,14 +16252,30 @@ pub(crate) mod tests {
             Some(&selected),
             &cached_receipt,
             &empty,
-            &evidence_bytes,
-            &input,
+            &match exact.as_ref() {
+                Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                    exact
+                        .source
+                        .match_product(
+                            exact.request,
+                            &input,
+                            source,
+                            &evidence_bytes,
+                            (&empty).operation(),
+                        )
+                        .unwrap(),
+                ),
+                None => crate::artifacts::admit_compiler_source(
+                    (&empty).operation(),
+                    &evidence_bytes,
+                    &input,
+                    source,
+                )
+                .unwrap(),
+            },
             input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
             &producer,
             &include,
-            exact.as_ref(),
             None,
         )
         .unwrap();
@@ -16268,14 +16285,30 @@ pub(crate) mod tests {
             Some(&selected),
             &stale_cached_receipt,
             &empty,
-            &evidence_bytes,
-            &input,
+            &match exact.as_ref() {
+                Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                    exact
+                        .source
+                        .match_product(
+                            exact.request,
+                            &input,
+                            source,
+                            &evidence_bytes,
+                            (&empty).operation(),
+                        )
+                        .unwrap()
+                ),
+                None => crate::artifacts::admit_compiler_source(
+                    (&empty).operation(),
+                    &evidence_bytes,
+                    &input,
+                    source
+                )
+                .unwrap(),
+            },
             input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
             &producer,
             &include,
-            exact.as_ref(),
             None,
         )
         .is_err());
@@ -16393,14 +16426,16 @@ pub(crate) mod tests {
                 Some(&selected),
                 &mixed,
                 &parsed,
-                &current_bytes,
-                &input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &current_bytes,
+                    &input,
+                    source,
+                )
+                .unwrap(),
                 input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
-                source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .unwrap();
@@ -16413,14 +16448,16 @@ pub(crate) mod tests {
                     Some(&selected),
                     &offered_only,
                     &parsed,
-                    &current_bytes,
-                    &input,
+                    &crate::artifacts::admit_compiler_source(
+                        (&parsed).operation(),
+                        &current_bytes,
+                        &input,
+                        source
+                    )
+                    .unwrap(),
                     input.parent().unwrap(),
-                    &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
-                    source,
                     &producer,
                     &include,
-                    None,
                     None,
                 ),
                 Err(CertificationError::FinalizedInterfaceRequirement {
@@ -16480,14 +16517,16 @@ pub(crate) mod tests {
                 Some(&without_proof),
                 &mixed,
                 &parsed,
-                &current_bytes,
-                &input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &current_bytes,
+                    &input,
+                    source,
+                )
+                .unwrap(),
                 input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
-                source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .unwrap();
@@ -16595,14 +16634,16 @@ pub(crate) mod tests {
             None,
             &packet,
             &parsed,
-            &initial_evidence,
-            &initial_input,
+            &crate::artifacts::admit_compiler_source(
+                (&parsed).operation(),
+                &initial_evidence,
+                &initial_input,
+                source,
+            )
+            .unwrap(),
             root.path(),
-            &normalized,
-            source,
             &producer,
             &include,
-            None,
             None,
         )
         .unwrap();
@@ -16772,19 +16813,20 @@ pub(crate) mod tests {
                 _ => {}
             }
             let issued = certify_products(
-                None,
-                &packet,
-                &parsed,
-                &evidence_bytes,
-                &input,
-                root.path(),
-                &normalized,
-                source,
-                &producer,
-                &include,
-                Some(&exact),
-                None,
-            )
+None,
+&packet,
+&parsed,
+&match Some(&exact) {
+    Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(exact.source.match_product(
+        exact.request, &input, source, &evidence_bytes, (&parsed).operation(),
+    ).unwrap()),
+    None => crate::artifacts::admit_compiler_source((&parsed).operation(), &evidence_bytes, &input, source).unwrap(),
+},
+root.path(),
+&producer,
+&include,
+None,
+)
             .unwrap_or_else(|error| {
                 panic!("retained promotion iteration={index} body_tag={body_tag} operation=certify_products request_groups={}: {error:?}", request.groups.len())
             });
@@ -16908,15 +16950,31 @@ pub(crate) mod tests {
                 None,
                 &duplicate,
                 &parsed,
-                &evidence_bytes,
-                &input,
+                &match Some(&exact) {
+                    Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                        exact
+                            .source
+                            .match_product(
+                                exact.request,
+                                &input,
+                                source,
+                                &evidence_bytes,
+                                (&parsed).operation(),
+                            )
+                            .unwrap()
+                    ),
+                    None => crate::artifacts::admit_compiler_source(
+                        (&parsed).operation(),
+                        &evidence_bytes,
+                        &input,
+                        source
+                    )
+                    .unwrap(),
+                },
                 root.path(),
-                &normalized,
-                source,
                 &producer,
                 &include,
-                Some(&exact),
-                None
+                None,
             )
             .is_err());
             let mut wrong_canonical = packet.clone();
@@ -16925,15 +16983,31 @@ pub(crate) mod tests {
                 None,
                 &wrong_canonical,
                 &parsed,
-                &evidence_bytes,
-                &input,
+                &match Some(&exact) {
+                    Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                        exact
+                            .source
+                            .match_product(
+                                exact.request,
+                                &input,
+                                source,
+                                &evidence_bytes,
+                                (&parsed).operation(),
+                            )
+                            .unwrap()
+                    ),
+                    None => crate::artifacts::admit_compiler_source(
+                        (&parsed).operation(),
+                        &evidence_bytes,
+                        &input,
+                        source
+                    )
+                    .unwrap(),
+                },
                 root.path(),
-                &normalized,
-                source,
                 &producer,
                 &include,
-                Some(&exact),
-                None
+                None,
             )
             .is_err());
             context = context
@@ -17418,14 +17492,16 @@ pub(crate) mod tests {
             None,
             &packet,
             &parsed,
-            &initial_evidence,
-            &initial_input,
+            &crate::artifacts::admit_compiler_source(
+                (&parsed).operation(),
+                &initial_evidence,
+                &initial_input,
+                source,
+            )
+            .unwrap(),
             root.path(),
-            &normalized,
-            source,
             &producer,
             &include,
-            None,
             None,
         )
         .unwrap();
@@ -17487,14 +17563,16 @@ pub(crate) mod tests {
                 None,
                 &marker_packet,
                 &marker_parsed,
-                &marker_worker,
-                &marker_input,
+                &crate::artifacts::admit_compiler_source(
+                    (&marker_parsed).operation(),
+                    &marker_worker,
+                    &marker_input,
+                    &marker_source,
+                )
+                .unwrap(),
                 root.path(),
-                &CompletedSourceEvidence::from_normalized(marker_evidence, &marker_source).unwrap(),
-                &marker_source,
                 &producer,
                 &include,
-                None,
                 None,
             )
             .unwrap();
@@ -17673,14 +17751,30 @@ pub(crate) mod tests {
                 None,
                 &packet,
                 &parsed,
-                &evidence_bytes,
-                &input,
+                &match Some(&exact) {
+                    Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                        exact
+                            .source
+                            .match_product(
+                                exact.request,
+                                &input,
+                                source,
+                                &evidence_bytes,
+                                (&parsed).operation(),
+                            )
+                            .unwrap(),
+                    ),
+                    None => crate::artifacts::admit_compiler_source(
+                        (&parsed).operation(),
+                        &evidence_bytes,
+                        &input,
+                        source,
+                    )
+                    .unwrap(),
+                },
                 root.path(),
-                &normalized,
-                source,
                 &producer,
                 &include,
-                Some(&exact),
                 None,
             )
             .unwrap();
@@ -18015,14 +18109,30 @@ pub(crate) mod tests {
                         Some(&candidate),
                         packet,
                         &empty,
-                        &cached_evidence,
-                        &input,
+                        &match Some(&cached_exact) {
+                            Some(exact) => crate::artifacts::SourceEvidenceAdmission::from_exact(
+                                exact
+                                    .source
+                                    .match_product(
+                                        exact.request,
+                                        &input,
+                                        source,
+                                        &cached_evidence,
+                                        (&empty).operation(),
+                                    )
+                                    .unwrap(),
+                            ),
+                            None => crate::artifacts::admit_compiler_source(
+                                (&empty).operation(),
+                                &cached_evidence,
+                                &input,
+                                source,
+                            )
+                            .unwrap(),
+                        },
                         root.path(),
-                        &complete,
-                        source,
                         &producer,
                         &include,
-                        Some(&cached_exact),
                         None,
                     )
                 };
@@ -18130,14 +18240,16 @@ pub(crate) mod tests {
                 packages: BTreeMap::new(),
             },
             &parsed,
-            &raw_evidence,
-            &input,
+            &crate::artifacts::admit_compiler_source(
+                (&parsed).operation(),
+                &raw_evidence,
+                &input,
+                source,
+            )
+            .unwrap(),
             directory.path(),
-            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
-            source,
             &producer,
             &[directory.path().to_path_buf()],
-            None,
             None,
         )
         .unwrap();
@@ -18312,14 +18424,16 @@ pub(crate) mod tests {
                 None,
                 receipt,
                 &parsed,
-                &raw_evidence,
-                &input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &raw_evidence,
+                    &input,
+                    source,
+                )
+                .unwrap(),
                 input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
-                source,
                 b"producer",
                 &[],
-                None,
                 None,
             )
         };
@@ -18412,14 +18526,16 @@ pub(crate) mod tests {
                 packages: BTreeMap::new(),
             },
             &parsed,
-            &raw_evidence,
-            &input,
+            &crate::artifacts::admit_compiler_source(
+                (&parsed).operation(),
+                &raw_evidence,
+                &input,
+                source,
+            )
+            .unwrap(),
             input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
-            source,
             b"producer",
             &[],
-            None,
             None,
         )
         .unwrap();
@@ -18440,8 +18556,13 @@ pub(crate) mod tests {
             verified.reference().certification_path.extension().unwrap(),
             "owners"
         );
-        let mut substituted = evidence.clone();
+        // Raw evidence and completed facts can no longer be paired by the
+        // caller. Substitute a genuinely admitted raw observation instead;
+        // the product receipt must still reject its different raw digest.
+        let mut substituted: crate::cache::DependencyEvidence =
+            serde_json::from_slice(&raw_evidence).unwrap();
         substituted.packages.push("unrelated selection".into());
+        let substituted_bytes = serde_json::to_vec(&substituted).unwrap();
         assert!(matches!(
             certify_products(
                 None,
@@ -18456,17 +18577,21 @@ pub(crate) mod tests {
                     packages: BTreeMap::new(),
                 },
                 &parsed,
-                &raw_evidence,
-                &input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &substituted_bytes,
+                    &input,
+                    source
+                )
+                .unwrap(),
                 input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(substituted.clone(), source).unwrap(),
-                source,
                 b"producer",
                 &[],
                 None,
-                None,
             ),
-            Err(CertificationError::Mismatch("fresh evidence bytes"))
+            Err(CertificationError::Mismatch(
+                "product/iface/source/evidence digest"
+            ))
         ));
         let mut changed = accepted.clone();
         changed.product_sha256 = [9; 32];
@@ -18484,14 +18609,16 @@ pub(crate) mod tests {
                     packages: BTreeMap::new()
                 },
                 &parsed,
-                &raw_evidence,
-                &input,
+                &crate::artifacts::admit_compiler_source(
+                    (&parsed).operation(),
+                    &raw_evidence,
+                    &input,
+                    source
+                )
+                .unwrap(),
                 input.parent().unwrap(),
-                &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
-                source,
                 b"producer",
                 &[],
-                None,
                 None,
             ),
             Err(CertificationError::Mismatch(
@@ -18510,14 +18637,16 @@ pub(crate) mod tests {
                 packages: BTreeMap::new()
             },
             &parsed,
-            &raw_evidence,
-            &input,
+            &crate::artifacts::admit_compiler_source(
+                (&parsed).operation(),
+                &raw_evidence,
+                &input,
+                source
+            )
+            .unwrap(),
             input.parent().unwrap(),
-            &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
-            source,
             b"producer",
             &[],
-            None,
             None,
         )
         .is_err());
