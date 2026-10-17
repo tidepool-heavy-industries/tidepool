@@ -1264,7 +1264,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             raise ValueError('unsupported trace profile')
         artifact_root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         artifact_root.mkdir(exist_ok=False, mode=0o700)
-        record['artifact_custody'] = disposable_tree_custody(artifact_root)
+        record['artifact_custody'] = disposable_tree_custody(artifact_root, private_parent=True)
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
                            TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
@@ -1402,14 +1402,18 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
 
 
 
-def disposable_tree_custody(path):
+def disposable_tree_custody(path, private_parent=False):
     def identity(metadata):
         return {'device': metadata.st_dev, 'inode': metadata.st_ino, 'uid': metadata.st_uid}
     metadata = path.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
         raise PermissionError(errno.EPERM, 'disposable root must be a private owned directory', str(path))
+    parent = path.parent.lstat()
+    if private_parent and (not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or parent.st_mode & 0o077):
+        raise PermissionError(errno.EPERM, 'case parent must be a private owned directory', str(path.parent))
     return {'path': str(path), 'identity': identity(metadata),
-            'parent_identity': identity(path.parent.lstat())}
+            'parent_identity': identity(parent), 'private_parent': private_parent}
 
 
 def remove_owned_tree(custody):
@@ -1433,6 +1437,8 @@ def remove_owned_tree(custody):
         if any(getattr(parent_stat, {'device': 'st_dev', 'inode': 'st_ino', 'uid': 'st_uid'}[key]) != value
                for key, value in custody['parent_identity'].items()):
             raise PermissionError(errno.EPERM, 'disposable parent identity changed')
+        if custody['private_parent'] and parent_stat.st_mode & 0o077:
+            raise PermissionError(errno.EPERM, 'case parent is no longer private')
         root = os.open(path.name, flags, dir_fd=parent)
         try:
             identity = os.fstat(root)
@@ -1508,10 +1514,12 @@ def _dispose_case(record, passed, stderr):
                     or record.get('compiler_cleanup_status') not in ('confirmed', 'not_observed')):
                 raise PermissionError(errno.EPERM, 'disposal requires issued private-tree custody and confirmed settlement')
             remove_owned_tree(custody)
-        except OSError as error:
+        except RunnerInterrupted:
+            raise
+        except Exception as error:
             disposal.update(status='failed', error={
-                'type': type(error).__name__, 'errno': error.errno,
-                'path': str(error.filename) if error.filename is not None else disposal['path'],
+                'type': type(error).__name__, 'errno': getattr(error, 'errno', None),
+                'path': str(error.filename) if getattr(error, 'filename', None) is not None else disposal['path'],
                 'message': str(error),
             })
             passed = False
@@ -1544,8 +1552,12 @@ def retain_output(directory, name, passed, stdout, stderr, record=None):
     streams = {}
     for label, text in (("stdout", stdout), ("stderr", stderr)):
         data = text.encode()
-        path = directory / f"{key}.{label}.log"
-        _replace_result_file(path, data[:OUTPUT_LIMIT])
+        retained = data[:OUTPUT_LIMIT]
+        # Each JSON generation names immutable bounded stream contents. A failed
+        # later JSON replacement cannot invalidate the already-published receipt.
+        stream_hash = hashlib.sha256(retained).hexdigest()
+        path = directory / f"{key}.{label}.{stream_hash}.log"
+        _replace_result_file(path, retained)
         streams[label] = {
             "path": path.name,
             "bytes": len(data),

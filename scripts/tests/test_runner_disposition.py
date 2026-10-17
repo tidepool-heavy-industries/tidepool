@@ -44,12 +44,21 @@ else:
     (workspace/'external-file').symlink_to(SENTINEL)
     os.link(SENTINEL,workspace/'hardlink')
     root.chmod(0o555) if os.environ.get('TEST_READONLY_SIDECAR') else None
+    if os.environ.get('TEST_DEEP') and sys.argv[2]=='suite::first':
+        deep=workspace
+        for _ in range(200):
+            deep=deep/'d';deep.mkdir()
     workspace.chmod(0o555);deployment.chmod(0o555)
     if os.environ.get('TEST_CONCURRENT') and sys.argv[2] != 'suite::third':
         shared=pathlib.Path(SHARED);(shared/sys.argv[2].split('::')[1]).touch()
         deadline=time.monotonic()+5
         while not all((shared/name).exists() for name in ('first','second')):
             assert time.monotonic()<deadline, 'other process missing'
+            time.sleep(.005)
+    if os.environ.get('TEST_WAIT_FOR_PUBLICATION') and sys.argv[2]=='suite::second':
+        deadline=time.monotonic()+5
+        while not (pathlib.Path(SHARED)/'publication-refused').exists():
+            assert time.monotonic()<deadline, 'first publication refusal missing'
             time.sleep(.005)
     print('body marker: '+sys.argv[2])
     print('test result: ok. 1 passed; 0 failed; 0 ignored;')
@@ -166,17 +175,65 @@ else:
             if path.name == first:
                 writes += 1
                 if writes == 2:
+                    (self.root/'publication-refused').touch()
                     raise OSError(errno.ENOSPC, 'injected final publication failure', str(path))
             return replace(path, data)
         with patch.object(runner, '_replace_result_file', side_effect=fail):
-            code, records, _, stderr = self.run_history(3, 2, TEST_CONCURRENT='1')
+            code, records, _, stderr = self.run_history(3, 2, TEST_CONCURRENT='1', TEST_WAIT_FOR_PUBLICATION='1')
         self.assertEqual(code, 1)
+        self.assertEqual(len(records), 2)
+        self.assertNotIn('suite::third', records)
         self.assertIn('publication failed', stderr)
         self.assertIn('suite::second', records)
         self.assertTrue(records['suite::second']['passed'])
         self.assert_body_preserved(records['suite::first'])
         self.assertFalse(records['suite::first']['passed'])
         self.assertEqual(records['suite::first']['execution']['disposal']['status'], 'pending')
+
+    def test_disposal_and_final_publication_failure_leave_pending_stream_hashes_valid(self):
+        self.remove = runner.remove_owned_tree
+        replace = runner._replace_result_file
+        first = hashlib.sha256(b'suite::first').hexdigest() + '.json'
+        writes = 0
+        def fail(path, data):
+            nonlocal writes
+            if path.name == first:
+                writes += 1
+                if writes == 2:
+                    raise OSError(errno.ENOSPC, 'injected final publication failure', str(path))
+            return replace(path, data)
+        with patch.object(runner, 'remove_owned_tree', side_effect=self.fail_first_disposal), \
+                patch.object(runner, '_replace_result_file', side_effect=fail):
+            code, records, _, _ = self.run_history()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(records), 1)
+        pending = records['suite::first']
+        self.assertFalse(pending['passed'])
+        self.assert_body_preserved(pending)
+        self.assertEqual(pending['execution']['disposal']['status'], 'pending')
+        for stream in pending['streams'].values():
+            data = (self.output / stream['path']).read_bytes()
+            self.assertEqual(len(data), stream['retained_bytes'])
+            self.assertEqual(hashlib.sha256(data).hexdigest(), stream['sha256'])
+
+    def test_deep_tree_failure_is_retained_and_next_case_runs(self):
+        remove = runner.remove_owned_tree
+        def shallow_stack(custody):
+            limit = sys.getrecursionlimit()
+            try:
+                sys.setrecursionlimit(80)
+                return remove(custody)
+            finally:
+                sys.setrecursionlimit(limit)
+        with patch.object(runner, 'remove_owned_tree', side_effect=shallow_stack):
+            code, records, _, _ = self.run_history(TEST_DEEP='1')
+        self.assertEqual(code, 1)
+        self.assertEqual(len(records), 2)
+        first = records['suite::first']
+        self.assert_body_preserved(first)
+        self.assertFalse(first['passed'])
+        self.assertEqual(first['execution']['disposal']['error']['type'], 'RecursionError')
+        self.assertTrue(records['suite::second']['passed'])
 
     def owned_directory(self, name='private'):
         directory = self.root / name
@@ -198,6 +255,15 @@ else:
         custody = runner.disposable_tree_custody(directory)
         parent.rename(self.root / 'original-parent')
         parent.mkdir(mode=0o700); directory.mkdir(mode=0o700)
+        with self.assertRaises(PermissionError):
+            runner.remove_owned_tree(custody)
+        self.assertTrue(directory.is_dir())
+
+    def test_case_parent_permission_loss_refuses_disposal(self):
+        parent = self.root / 'private-parent'; parent.mkdir(mode=0o700)
+        directory = parent / 'private'; directory.mkdir(mode=0o700)
+        custody = runner.disposable_tree_custody(directory, private_parent=True)
+        parent.chmod(0o755)
         with self.assertRaises(PermissionError):
             runner.remove_owned_tree(custody)
         self.assertTrue(directory.is_dir())

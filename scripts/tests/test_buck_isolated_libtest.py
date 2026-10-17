@@ -61,7 +61,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         for diagnostic in (False, True):
             with self.subTest(diagnostic=diagnostic):
                 rendezvous = Path(self.tmp.name) / f'cache-race-{diagnostic}'
-                rendezvous.mkdir()
+                rendezvous.mkdir(mode=0o700)
                 ambient = rendezvous / 'ambient-cache'
                 ambient.mkdir()
                 (ambient / 'candidate').write_text('ambient must remain untouched')
