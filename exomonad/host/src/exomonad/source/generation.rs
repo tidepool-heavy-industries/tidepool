@@ -275,6 +275,14 @@ impl ExomonadSourceReload {
         &self,
         reference: &GenerationArtifactReference,
     ) -> Result<CheckpointSourceLayer> {
+        let source = self.restore_graph_owner(reference)?;
+        Ok(self.source_issuer.issue(Arc::new(source)))
+    }
+
+    fn restore_graph_owner(
+        &self,
+        reference: &GenerationArtifactReference,
+    ) -> Result<RetainedSourceGraph> {
         let graph: SourceGraphReference = serde_json::from_slice(reference.bytes())?;
         if graph.version != 2 || graph.domain != self.frozen.identity() {
             return Err("source graph reference belongs to another run selection".into());
@@ -394,7 +402,7 @@ impl ExomonadSourceReload {
             configuration_digest,
             reference: reference.clone(),
         };
-        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+        Ok(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
             catalog: self.frozen.catalog_selection.clone(),
@@ -403,7 +411,7 @@ impl ExomonadSourceReload {
             manifests,
             entries,
             evidence,
-        })))
+        })
     }
 
     pub(super) fn restore_graph_with_entries(
@@ -411,15 +419,7 @@ impl ExomonadSourceReload {
         reference: &GenerationArtifactReference,
         entries: exomonad_actor::SourceEntryStorage,
     ) -> Result<CheckpointSourceLayer> {
-        let source = self.restore_graph(reference)?;
-        self.reissue_graph_with_entries(&source, entries)
-    }
-
-    fn reissue_graph_with_entries(
-        &self,
-        source: &CheckpointSourceLayer,
-        entries: exomonad_actor::SourceEntryStorage,
-    ) -> Result<CheckpointSourceLayer> {
+        let mut source = self.restore_graph_owner(reference)?;
         if entries.directory() != self.fresh_entry_storage.directory()
             && entries.directory() != self.entry_storage.directory()
         {
@@ -427,22 +427,8 @@ impl ExomonadSourceReload {
         }
         // Installer acquisition is a separate retained fact. Selecting its
         // completed original must not rewrite the committed source capsule.
-        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
-            _root_owner: Arc::clone(&self.source_owner),
-            _prepared_owner: self.frozen.prepared_deployment.clone(),
-            catalog: self.frozen.catalog_selection.clone(),
-            identities: source.identities().to_vec(),
-            include_paths: source.include_paths().to_vec(),
-            manifests: source
-                .source_manifests()
-                .expect("restored source has manifests")
-                .to_vec(),
-            entries,
-            evidence: source
-                .generation_evidence()
-                .expect("restored source has evidence")
-                .clone(),
-        })))
+        source.entries = entries;
+        Ok(self.source_issuer.issue(Arc::new(source)))
     }
 
     pub(super) fn restore_graph_with_acquisition(
@@ -451,10 +437,10 @@ impl ExomonadSourceReload {
         acquisition: &exomonad_actor::ToolsetAcquisition,
     ) -> std::result::Result<CheckpointSourceLayer, SourceInspectionError> {
         let restore = || -> Result<CheckpointSourceLayer> {
-            let source = self.restore_graph(reference)?;
+            let mut source = self.restore_graph_owner(reference)?;
             let (storage, recipe, original) = match acquisition {
                 exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. } => {
-                    return Ok(source);
+                    return Ok(self.source_issuer.issue(Arc::new(source)));
                 }
                 exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } => {
                     (&self.entry_storage, recipe, *original)
@@ -471,13 +457,11 @@ impl ExomonadSourceReload {
                 return Err("source recovery carries an invalid installer recipe selection".into());
             }
             let directory = storage.directory().to_owned();
-            self.reissue_graph_with_entries(
-                &source,
-                exomonad_actor::SourceEntryStorage::CompletedOriginal {
-                    directory,
-                    selections: BTreeMap::from([(recipe.to_owned(), original)]),
-                },
-            )
+            source.entries = exomonad_actor::SourceEntryStorage::CompletedOriginal {
+                directory,
+                selections: BTreeMap::from([(recipe.to_owned(), original)]),
+            };
+            Ok(self.source_issuer.issue(Arc::new(source)))
         };
         restore().map_err(|error| {
             if error
