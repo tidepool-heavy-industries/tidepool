@@ -881,7 +881,7 @@ impl OriginalCompilerInputs {
                 }
             }
         }
-        let mut native_original_requirements =
+        let native_original_requirements =
             capture_native_original_requirements(&projection, inventory, &preferred)?;
         let effective = baseline.merge(&projection)?;
         let mut dependency_offers = Vec::new();
@@ -901,148 +901,20 @@ impl OriginalCompilerInputs {
             entries.clone(),
             &dependency_offers,
         )?;
-        let issued = effective.admit_complete_native_products_with_dependencies(
-            &artifacts,
-            entries.clone(),
-            &dependency_offers,
-            selected_source.map_or(&[], |source| source.native_offers()),
-        )?;
-        for entry in &entries {
-            if entry.native_group_ordinals.is_empty() {
-                continue;
-            }
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                unreachable!()
-            };
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-                .descriptor
-                .id;
-            let proof =
-                crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
-                    entry.descriptor.id,
-                    canonical,
-                    &issued,
-                )?
-                .ok_or_else(|| {
-                    failure("complete private product lacks its issued dependency closure")
-                })?;
-            if !native_original_requirements.contains(&proof) {
-                native_original_requirements.push(proof);
-            }
-        }
-        artifacts = issued.retain_original_custody(&artifacts)?;
-        let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
-        let originals = metadata
-            .retained
-            .artifacts
-            .iter()
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
-        // The baseline exposes its issued selection. Only this private offer
-        // advertises complete native censuses; custody alone exposes no binder.
-        let mut advertised = metadata.retained.selected_native_groups.clone();
-        for role in projection.roles() {
-            let Some(id) = role.original() else { continue };
-            let product = originals
-                .get(&id)
-                .ok_or_else(|| failure("private original is outside retained custody"))?;
-            advertised.extend(
-                crate::certified_products::original_available_groups(product)
-                    .map_err(compiler_evidence_failure)?
-                    .map(|group| crate::artifact_inventory::NativeGroupKey {
-                        artifact: id,
-                        original_ordinal: group.original_ordinal(),
-                    }),
-            );
-        }
-        if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
-        {
-            let missing = advertised.iter().find_map(|key| {
-                let entry = metadata.retained.artifacts.get(&key.artifact)?;
-                entry
-                    .native_requirements
-                    .get(&key.original_ordinal)?
-                    .iter()
-                    .find_map(|(owner, dependency)| {
-                        let crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                            required_ordinal,
-                            ..
-                        } = dependency
-                        else {
-                            return None;
-                        };
-                        let required_owner = entry.native_owners.get(owner)?;
-                        let artifact = originals
-                            .iter()
-                            .find(|(_, product)| {
-                                crate::artifact_inventory::NativeOwnerKey::from_owner(
-                                    product.owner(),
-                                ) == *required_owner
-                            })?
-                            .0;
-                        let required = crate::artifact_inventory::NativeGroupKey {
-                            artifact: *artifact,
-                            original_ordinal: *required_ordinal,
-                        };
-                        (!advertised.contains(&required)).then_some((*key, required))
-                    })
-            });
-            if let Some((consumer, required)) = missing {
-                let recorded = native_original_requirements
-                    .iter()
-                    .map(|proof| {
-                        let graph = proof.selection.graph_selection();
-                        (
-                            proof.original,
-                            graph.native_groups.len(),
-                            graph
-                                .native_groups
-                                .iter()
-                                .filter(|group| {
-                                    group.binding.artifact() == required.artifact
-                                        && group.original_ordinal == required.original_ordinal
-                                })
-                                .copied()
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                tracing::debug!(target: "tidepool::certified_products::source_closure_trace", ?consumer, ?required, ?recorded,
-                    "private availability dependency proof observation");
-            }
-        }
-        let mut private_closures = BTreeMap::new();
-        for requirement in &native_original_requirements {
-            let Some(closure) = requirement.qualify_availability(&artifacts)? else {
-                continue;
-            };
-            if let Some(previous) = private_closures.get(&closure.original()) {
-                if previous != &closure {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: closure.original(),
-                        },
-                    ));
-                }
-            } else {
-                private_closures.insert(closure.original(), closure);
-            }
-        }
-        crate::certified_products::validate_available_originals_with_validation(
-            &originals,
-            &advertised,
-            &private_closures.into_values().collect::<Vec<_>>(),
-            &mut validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let native_offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-            &projection,
-            &artifacts,
-            &native_original_requirements,
-        )?;
+        let native_offers = effective
+            .issue_complete_native_availability(
+                &artifacts,
+                entries,
+                &dependency_offers,
+                selected_source.map_or(&[], |source| source.native_offers()),
+            )?
+            .validate(
+                &artifacts,
+                &selected.retained.selected_native_groups,
+                &native_original_requirements,
+                &mut validation,
+            )?;
+        artifacts = artifacts.retain_issued_offer_custody(native_offers.iter().cloned())?;
         Ok(Self {
             demand: OriginalInputDemand::RolePolicy,
             projection,

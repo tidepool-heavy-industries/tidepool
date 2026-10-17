@@ -398,6 +398,7 @@ pub(crate) struct ArtifactAdmission {
 /// Ownership issued by the admission solver, before deriving a selected view.
 struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
+    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     target_native_selection: Option<IssuedTargetNativeSelection>,
 }
 
@@ -3391,14 +3392,51 @@ impl ArtifactInventory {
     }
     /// Issue complete private products using only the request's exact external
     /// dependency proofs. This temporary view does not publish execution demand.
-    fn admit_private_complete_products(
+    fn issue_private_complete_availability(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
         availability: &[IssuedNativeOffer],
         dependencies: &[IssuedNativeOffer],
-    ) -> Result<ArtifactView, CompileError> {
+    ) -> Result<native_availability::CheckedNativeAvailability, CompileError> {
+        self.check_complete_availability_offers(projection, availability)?;
+        let groups = entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .native_group_ordinals
+                    .iter()
+                    .map(|ordinal| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: *ordinal,
+                    })
+            })
+            .collect();
+        let originals = entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let custody = self.issue_selected_custody(
+            parent,
+            entries,
+            groups,
+            false,
+            ArtifactRootIntent::PrivateAvailability {
+                projection,
+                selected: availability,
+                dependencies,
+            },
+            None,
+        )?;
+        native_availability::CheckedNativeAvailability::from_complete_custody(custody, &originals)
+    }
+
+    fn check_complete_availability_offers(
+        &self,
+        projection: &CompilerInputProjection,
+        availability: &[IssuedNativeOffer],
+    ) -> Result<(), CompileError> {
         let offered = projection
             .roles()
             .iter()
@@ -3418,6 +3456,19 @@ impl ArtifactInventory {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn admit_private_complete_products(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        availability: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
+    ) -> Result<ArtifactView, CompileError> {
+        self.check_complete_availability_offers(projection, availability)?;
         self.admit_shared_with_intent(
             parent,
             entries,
@@ -3538,6 +3589,12 @@ impl ArtifactInventory {
         {
             return Ok(IssuedArtifactCustody {
                 lease: Arc::clone(&parent.lease),
+                entries: parent
+                    .lease
+                    .payloads
+                    .iter()
+                    .map(|(id, entry)| (*id, Arc::clone(entry)))
+                    .collect(),
                 target_native_selection: None,
             });
         }
@@ -4166,6 +4223,7 @@ impl ArtifactInventory {
         );
         Ok(IssuedArtifactCustody {
             lease,
+            entries: selected,
             target_native_selection,
         })
     }

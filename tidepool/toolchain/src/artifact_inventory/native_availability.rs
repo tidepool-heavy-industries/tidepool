@@ -222,7 +222,241 @@ enum NativeOfferBody {
     },
 }
 
+/// The scope solver has checked exact body rows. The product validator must
+/// accept the complete census before these offers can escape this owner.
+pub(crate) struct CheckedNativeAvailability {
+    offers: Vec<IssuedNativeOffer>,
+    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+}
+
+impl CheckedNativeAvailability {
+    pub(super) fn from_complete_custody(
+        admitted: IssuedArtifactCustody,
+        originals: &[ArtifactId],
+    ) -> Result<Self, CompileError> {
+        let entries = admitted.entries.clone();
+        Ok(Self {
+            offers: IssuedNativeOffer::issue_complete_custody(admitted, originals)?,
+            entries,
+        })
+    }
+
+    pub(crate) fn validate(
+        self,
+        baseline: &ArtifactView,
+        baseline_groups: &BTreeSet<NativeGroupKey>,
+        preferred: &[NativeOriginalRequirement],
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+        let originals = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut advertised = baseline_groups.clone();
+        let mut qualifications = BTreeMap::new();
+        for proof in preferred {
+            if let Some(qualification) = proof.qualify_availability(baseline)? {
+                if qualifications
+                    .insert(qualification.original(), qualification.clone())
+                    .is_some_and(|prior| prior != qualification)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: qualification.original(),
+                        },
+                    ));
+                }
+            }
+        }
+        for offer in &self.offers {
+            let product = originals
+                .get(&offer.original())
+                .ok_or_else(|| failure("private original is outside retained custody"))?;
+            advertised.extend(
+                crate::certified_products::original_available_groups(product)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                    .map(|group| NativeGroupKey {
+                        artifact: offer.original(),
+                        original_ordinal: group.original_ordinal(),
+                    }),
+            );
+            if let Some(qualification) = offer.full_qualification() {
+                if qualifications
+                    .insert(qualification.original(), qualification.clone())
+                    .is_some_and(|prior| prior != *qualification)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: qualification.original(),
+                        },
+                    ));
+                }
+            }
+        }
+        crate::certified_products::validate_available_originals_with_validation(
+            &originals,
+            &advertised,
+            &qualifications.into_values().collect::<Vec<_>>(),
+            validation,
+        )
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        Ok(self.offers)
+    }
+}
+
 impl IssuedNativeOffer {
+    /// Complete availability is issued directly by the checked scope solver.
+    /// A complete census in bytes alone cannot enter this constructor.
+    fn issue_complete_custody(
+        admitted: IssuedArtifactCustody,
+        originals: &[ArtifactId],
+    ) -> Result<Vec<Self>, CompileError> {
+        let source = admitted.lease;
+        let mut offers = Vec::new();
+        let state = source.inventory.0.lock().expect("inventory lock");
+        for &original in originals {
+            let entry = source
+                .payloads
+                .get(&original)
+                .ok_or_else(|| failure("complete availability lacks original custody"))?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
+                ));
+            };
+            let interface = ArtifactEntry::canonical(
+                product
+                    .module_interface()
+                    .ok_or_else(|| failure("complete availability lacks canonical interface"))?
+                    .clone(),
+            )
+            .descriptor
+            .id;
+            let carrier = *source
+                .selection
+                .namespace
+                .get(&original)
+                .ok_or_else(|| failure("complete availability lacks exact original carrier"))?;
+            let canonical =
+                *source.selection.namespace.get(&interface).ok_or_else(|| {
+                    failure("complete availability lacks exact canonical carrier")
+                })?;
+            let mut roots = BTreeMap::new();
+            for root in &source.admission_roots {
+                let ArtifactBindingNode::Group(group) = root else {
+                    continue;
+                };
+                if group.binding.artifact() != original {
+                    continue;
+                }
+                if state.outgoing(*root).any(|(target, edge)| {
+                    target == ArtifactBindingNode::Artifact(carrier)
+                        && *edge == ArtifactDependency::Interface
+                }) {
+                    if roots.insert(group.original_ordinal, *group).is_some() {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+                        ));
+                    }
+                }
+            }
+            if !entry
+                .native_group_ordinals
+                .iter()
+                .all(|ordinal| roots.contains_key(ordinal))
+            {
+                return Err(failure(
+                    "complete availability lacks its issued group census",
+                ));
+            }
+            let selected_roots = if roots.is_empty() {
+                vec![ArtifactBindingNode::Artifact(carrier)]
+            } else {
+                roots
+                    .values()
+                    .copied()
+                    .map(ArtifactBindingNode::Group)
+                    .collect()
+            };
+            let selected = selection_snapshot_for_lease(
+                &state,
+                &BTreeMap::from([(original, carrier), (interface, canonical)]),
+                &selected_roots,
+                &[],
+                &[],
+            );
+            // This pass is the acquisition-time complete closure validation;
+            // demand consumers retain the proof and query exact rows by key.
+            let nodes = admitted_closure(&state, selected_roots.iter().copied());
+            let groups = nodes
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group) => Some(*group),
+                    _ => None,
+                })
+                .collect();
+            let mut custody_selection = (*selected).clone();
+            custody_selection.custody_roots = custody_selection.roots.clone();
+            custody_selection.roots.clear();
+            custody_selection.namespace.clear();
+            let payloads = artifact_ids(&nodes)
+                .into_iter()
+                .map(|id| (id, Arc::clone(&source.payloads[&id])))
+                .collect();
+            let lease = Arc::new(ViewLease {
+                admission_roots: Default::default(),
+                selection: Arc::new(custody_selection),
+                payloads,
+                inventory: source.inventory.clone(),
+                materialization_sources: source.materialization_sources.clone(),
+                materialization: source.materialization.clone(),
+            });
+            let body = if roots.is_empty() {
+                NativeOfferBody::Empty
+            } else {
+                NativeOfferBody::Full {
+                    proof: NativeOriginalRequirement {
+                        original,
+                        selection: ExactArtifactSelection::from_snapshot(selected),
+                    },
+                    qualification: QualifiedNativeAvailability {
+                        original,
+                        carrier,
+                        canonical,
+                        groups,
+                    },
+                }
+            };
+            offers.push(Self(Arc::new(NativeOfferFacts {
+                original,
+                interface,
+                owner: entry.descriptor.owner.clone(),
+                body,
+                custody: NativeOfferCustody::from_lease(lease),
+            })));
+        }
+        drop(state);
+        let mut state = source.inventory.0.lock().expect("inventory lock");
+        for offer in &offers {
+            let lease = offer.custody_lease();
+            state
+                .views
+                .push((Arc::downgrade(lease), Arc::clone(&lease.selection)));
+        }
+        Ok(offers)
+    }
+
+    pub(crate) fn full_qualification(&self) -> Option<&QualifiedNativeAvailability> {
+        match &self.0.body {
+            NativeOfferBody::Full { qualification, .. } => Some(qualification),
+            _ => None,
+        }
+    }
+
     /// The same immutable issuance also retains the same acquisition owners.
     /// Semantic offer equality alone does not establish this relationship.
     pub(super) fn same_issuance(&self, other: &Self) -> bool {

@@ -858,6 +858,24 @@ impl CompilerInputProjection {
         self.admit_complete_native_products_with_dependencies(parent, entries, offers, &[])
     }
 
+    pub(crate) fn issue_complete_native_availability(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        offers: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
+    ) -> Result<super::native_availability::CheckedNativeAvailability, CompileError> {
+        let contributions = self.native_offer_contributions(parent, offers)?;
+        parent.inventory().issue_private_complete_availability(
+            parent,
+            entries,
+            self,
+            &contributions,
+            dependencies,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn admit_complete_native_products_with_dependencies(
         &self,
         parent: &ArtifactView,
