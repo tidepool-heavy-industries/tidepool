@@ -10818,6 +10818,65 @@ mod tests {
         );
     }
 
+    fn published_original_choice_history_fixture() -> &'static ExactDeclarationContext {
+        static FIXTURE: std::sync::OnceLock<ExactDeclarationContext> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let producer = [2; 32];
+            let products = ["Alpha", "Beta"].map(|module| {
+                crate::certified_products::fixture_source_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture_with_interface(
+                        module,
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                        format!("{module} interface").into_bytes(),
+                    ),
+                    producer,
+                    vec![],
+                )
+            });
+            let products = crate::certified_products::tests::recovered_witness_fixtures(&products);
+            let target = identity("fixture", "PrivateSourceTarget");
+            let mut entries = products
+                .into_iter()
+                .map(|product| {
+                    Arc::new(ArtifactEntry::original(producer, product.product).unwrap())
+                })
+                .collect::<Vec<_>>();
+            entries.push(Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    &target.unit,
+                    &target.module,
+                    BTreeMap::new(),
+                ),
+            )));
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                projection,
+                vec![
+                    ExactLexicalNode {
+                        owner: target.clone(),
+                        imports: vec![identity("fixture", "Alpha")],
+                    },
+                    ExactLexicalNode {
+                        owner: identity("fixture", "Alpha"),
+                        imports: vec![],
+                    },
+                ],
+                target,
+                &[],
+            )
+            .unwrap()
+        })
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(24))]
         #[test]
@@ -10826,7 +10885,7 @@ mod tests {
         ) {
             use fvm_ipld_blockstore::{Blockstore,MemoryBlockstore};
             use crate::exact_context::{Materializer,hydrate_context};
-            let issued = published_original_history_fixture();
+            let issued = published_original_choice_history_fixture();
             let mut lexical = issued.lexical_graph().to_vec();
             lexical.iter_mut().find(|node| node.owner.module == "PrivateSourceTarget").unwrap().imports.push(identity("fixture","Beta"));
             lexical.push(ExactLexicalNode { owner: identity("fixture","Beta"), imports: vec![] });
@@ -10842,6 +10901,9 @@ mod tests {
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
             assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
                 "published fixture must carry a real issued decision domain");
+            assert!(left.compiler_source_support().recorded_input_decisions().values()
+                .any(|fact| !fact.groups.is_empty()),
+                "withdrawal history starts with an actually chosen native Group");
             let interface_roots = left.compiler_input_projection().roles().into_iter()
                 .map(|role| role.interface()).collect();
             let withdrawn_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
