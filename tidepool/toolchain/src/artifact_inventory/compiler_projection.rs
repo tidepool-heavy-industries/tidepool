@@ -821,19 +821,53 @@ impl CompilerSourceSupport {
     }
 }
 
+/// Only the projection owner can classify offers as namespace contributions.
+/// Private-qualified body custody is deliberately absent from this view.
+pub(super) struct NativeNamespaceContributions(Vec<IssuedNativeOffer>);
+
+impl NativeNamespaceContributions {
+    pub(super) fn offers(&self) -> &[IssuedNativeOffer] {
+        &self.0
+    }
+}
+
 impl CompilerInputProjection {
     /// Retained offers keep their original exact custody. Current admissions
     /// consume only contributions derived from this issued compiler namespace.
-    fn native_offer_contributions(
+    fn native_namespace_contributions(
         &self,
         parent: &ArtifactView,
         offers: &[IssuedNativeOffer],
-    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
-        offers
-            .iter()
-            .map(|offer| offer.within_projection(self, parent))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|offers| offers.into_iter().flatten().collect())
+    ) -> Result<NativeNamespaceContributions, CompileError> {
+        let originals = self
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        let mut contributions = Vec::new();
+        for offer in offers {
+            let Some(consumed) = offer.within_projection(self, parent)? else {
+                continue;
+            };
+            if originals.contains(&consumed.original())
+                || consumed
+                    .issued_group_carriers()?
+                    .keys()
+                    .any(|group| originals.contains(&group.binding.artifact()))
+            {
+                contributions.push(consumed);
+            } else if consumed
+                .qualified_private_availability(self, parent)
+                .is_none()
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: consumed.original(),
+                    },
+                ));
+            }
+        }
+        Ok(NativeNamespaceContributions(contributions))
     }
 
     pub(crate) fn admit_interfaces_with_native_offers(
@@ -842,7 +876,7 @@ impl CompilerInputProjection {
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        let contributions = self.native_offer_contributions(parent, offers)?;
+        let contributions = self.native_namespace_contributions(parent, offers)?;
         parent
             .inventory()
             .admit_projected_with_native_offers(parent, entries, self, &contributions)
@@ -870,7 +904,7 @@ impl CompilerInputProjection {
         offers: &[IssuedNativeOffer],
         dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
-        let contributions = self.native_offer_contributions(parent, offers)?;
+        let contributions = self.native_namespace_contributions(parent, offers)?;
         parent.inventory().admit_private_complete_products(
             parent,
             entries,

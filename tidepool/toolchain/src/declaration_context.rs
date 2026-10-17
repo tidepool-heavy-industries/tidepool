@@ -915,42 +915,22 @@ impl OriginalCompilerInputs {
                 crate::artifact_inventory::NativeDependencyCatalog::from_fixture(&dependency_offers)
             }
         };
-        // Only namespace-contributing offers are roots. Other issued support
-        // remains dependency availability, attached to its actual issuing owner.
-        let namespace_originals = effective
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
-            .collect::<BTreeSet<_>>();
-        let mut namespace_offers = Vec::new();
-        // A physical request already froze its row-level permissions. Its
-        // supporting parent proofs cannot be replayed as namespace grants.
-        // Fresh-body dependencies use the exact request catalog below.
-        if !matches!(source, CompleteAvailabilitySource::Request(_)) {
-            for offer in &dependency_offers {
-                let Some(consumed) = offer.within_projection(&effective, inventory)? else {
-                    continue;
-                };
-                if namespace_originals.contains(&consumed.original())
-                    || consumed
-                        .issued_group_carriers()?
-                        .keys()
-                        .any(|group| namespace_originals.contains(&group.binding.artifact()))
-                {
-                    namespace_offers.push(consumed);
-                }
-            }
-        }
+        // Physical request permissions are already frozen in its row catalog.
+        // Raw parent proofs cannot become namespace grants during reissuance.
+        let namespace_offers = match source {
+            CompleteAvailabilitySource::Request(_) => &[][..],
+            _ => dependency_offers.as_slice(),
+        };
         // Available code retains custody without selecting executable groups.
         let mut artifacts = effective.admit_interfaces_with_native_offers(
             inventory,
             entries.clone(),
-            &namespace_offers,
+            namespace_offers,
         )?;
         let issued = effective.admit_complete_native_products_with_dependencies(
             &artifacts,
             entries.clone(),
-            &namespace_offers,
+            namespace_offers,
             &dependencies,
         )?;
         for entry in &entries {

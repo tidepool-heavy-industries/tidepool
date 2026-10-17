@@ -3347,8 +3347,9 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        offers: &[IssuedNativeOffer],
+        contributions: &compiler_projection::NativeNamespaceContributions,
     ) -> Result<ArtifactView, CompileError> {
+        let offers = contributions.offers();
         let offered = projection
             .roles()
             .iter()
@@ -3383,9 +3384,10 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        availability: &[IssuedNativeOffer],
+        contributions: &compiler_projection::NativeNamespaceContributions,
         dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
+        let availability = contributions.offers();
         let offered = projection
             .roles()
             .iter()

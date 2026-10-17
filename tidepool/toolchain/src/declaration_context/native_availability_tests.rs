@@ -2254,6 +2254,15 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .unwrap()
         .retain_offers([offer.clone(), offer.clone()])
         .unwrap();
+    // Extending value-type visibility uses the same projected admission seam;
+    // an existing private body stays custody, never a namespace contribution.
+    let extended = interfaces.admit_value_interfaces(&[]).unwrap();
+    assert_eq!(extended.projection(), interfaces.projection());
+    assert_eq!(extended.native_offers(), interfaces.native_offers());
+    assert_eq!(
+        extended.artifacts().selected_native_groups(),
+        interfaces.artifacts().selected_native_groups()
+    );
     let context = Arc::new(ExactDeclarationContext::from_facts(
         DeclarationContextFacts {
             producer: producer.sha256(),
