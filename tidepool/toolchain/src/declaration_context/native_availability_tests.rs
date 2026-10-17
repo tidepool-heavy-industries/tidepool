@@ -4730,12 +4730,32 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
     let changed = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
     let competing = CompilerInputProjection::from_issued_entries(&[changed]).unwrap();
     let error = full.within_projection(&competing, &artifacts).unwrap_err();
-    let CompileError::ExtractFailed(message) = error else {
+    let diagnostic = crate::failclass::classify_compile(&error);
+    assert_eq!(
+        diagnostic.class,
+        crate::failclass::FailureClass::VersionSkew
+    );
+    assert_eq!(diagnostic.phase, crate::failclass::Phase::Compile);
+    let CompileError::ArtifactInventory(error) = error else {
         panic!("the native inventory must refuse the competing role: {error:?}");
     };
+    let offered = full.snapshot_facts();
+    let selected = &competing.snapshot_roles()[&offered.owner];
     assert_eq!(
-        message,
-        "artifact inventory: native offer conflicts with selected compiler product or interface"
+        &error.failure,
+        &crate::artifact_inventory::ArtifactInventoryFailure::NativeOfferSelectionConflict {
+            owner: offered.owner,
+            offered_original: offered.original,
+            offered_interface: offered.interface,
+            selected_original: selected.original().unwrap(),
+            selected_interface: selected.interface(),
+        }
+    );
+    assert_eq!(
+        diagnostic.cause,
+        Some(crate::failclass::CompileFailureCause::ArtifactInventory {
+            failure: error.failure,
+        })
     );
 }
 

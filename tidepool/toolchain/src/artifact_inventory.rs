@@ -1096,6 +1096,14 @@ pub enum ArtifactInventoryFailure {
         existing: ArtifactId,
         incoming: ArtifactId,
     },
+    #[error("native offer for {owner:?} conflicts with selected compiler product or interface: offered original {offered_original:?}, interface {offered_interface:?}; selected original {selected_original:?}, interface {selected_interface:?}")]
+    NativeOfferSelectionConflict {
+        owner: ExactModuleIdentity,
+        offered_original: ArtifactId,
+        offered_interface: ArtifactId,
+        selected_original: ArtifactId,
+        selected_interface: ArtifactId,
+    },
     #[error("authored generation {generation} requires one certified native root; found {found}")]
     AuthoredNativeRoot { generation: u64, found: usize },
     #[error("native root {artifact:?} is outside its retained view")]
@@ -1296,6 +1304,14 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
             artifact = ?artifact, refusal_site = %std::panic::Location::caller(),
             "artifact inventory ambiguity refusal site");
+    }
+    if matches!(
+        &failure,
+        ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }
+    ) {
+        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+            ?failure, refusal_site = %std::panic::Location::caller(),
+            "native offer selection refusal site");
     }
     ArtifactInventoryError {
         failure,
