@@ -822,6 +822,19 @@ impl IssuedNativeOffer {
                     .cloned(),
             );
         }
+        {
+            let state = source.lease.inventory.0.lock().expect("inventory lock");
+            let owned = &source.read_projection(&state).nodes;
+            if graph
+                .bindings
+                .iter()
+                .any(|binding| !owned.contains(&ArtifactBindingNode::Artifact(*binding)))
+            {
+                return Err(failure(
+                    "recovered native offer carrier is outside acquisition custody",
+                ));
+            }
+        }
         let entries = graph
             .bindings
             .iter()
