@@ -1474,6 +1474,28 @@ impl Actor for JobActor {
 mod validation_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn invocation_cleanup_observation_preserves_missing_job_refusal() {
+        let jobs = CommandJobs::default();
+        let caller = ActorRef::first(crate::ActorId(1));
+        let observed = jobs
+            .observe_invocation_cleanup(
+                caller,
+                "missing-job",
+                Duration::from_millis(1),
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(matches!(
+            observed,
+            InvocationCommandCleanupObservation::AfterCancellation {
+                cancellation: Err(CommandError::CommandJobNotFound),
+                terminal: None,
+            }
+        ));
+        assert!(jobs.entries.lock().is_empty());
+    }
+
     #[test]
     fn finite_cleanup_wait_never_becomes_unbounded_or_negative() {
         let maximum = i64::MAX as u64;
