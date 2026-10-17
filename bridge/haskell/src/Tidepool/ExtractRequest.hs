@@ -6,6 +6,7 @@ module Tidepool.ExtractRequest
   , RequestField(..)
   , InspectionRequest(..)
   , StructuredInspection(..)
+  , ExactNameInspection(..), LookupNameInspection(..), LookupNameMode(..)
   , StructuredNameScope(..)
   , StructuredNameNamespace(..)
   , InspectionProvenance(..)
@@ -62,6 +63,8 @@ data RequestField
   | DeclarationJoinOut FilePath
   | InspectType String
   | InspectInfo String
+  | InspectLookupName LookupNameInspection
+  | InspectExactName ExactNameInspection
   | InspectBrowse String
   | InspectBrowseExpanded String
   | InspectScopeBrowse
@@ -268,6 +271,8 @@ emptyWorkerRequest = WorkerRequest
 data InspectionRequest
   = InspectTypeOf String
   | InspectNameInfo String
+  | InspectLookupNameOf LookupNameInspection
+  | InspectExactNameOf ExactNameInspection
   | InspectModule String Bool
   | InspectScope
   | InspectTypeSearch String
@@ -285,7 +290,18 @@ data StructuredNameNamespace
   | StructuredValueName
   | StructuredTypeName
   | StructuredConstructorName
+  | StructuredFieldName
   deriving (Eq, Show)
+
+data LookupNameMode = LookupNameOnly | LookupNameOrModule deriving (Eq, Show)
+
+data LookupNameInspection = LookupNameInspection
+  { lookupNameQuery :: String, lookupQualifierModule :: Maybe String, lookupNameMode :: LookupNameMode
+  } deriving (Eq, Show)
+
+data ExactNameInspection = ExactNameInspection
+  { exactNameScope :: StructuredNameScope, exactNameNamespace :: StructuredNameNamespace, exactNameQuery :: String
+  } deriving (Eq, Show)
 
 data InspectionProvenance = InspectionProvenance
   { inspectionGeneration :: Word64,
@@ -346,6 +362,10 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
         { requestInspections = InspectTypeOf expression : requestInspections request }
       InspectInfo name -> request
         { requestInspections = InspectNameInfo name : requestInspections request }
+      InspectLookupName query -> request
+        { requestInspections = InspectLookupNameOf query : requestInspections request }
+      InspectExactName query -> request
+        { requestInspections = InspectExactNameOf query : requestInspections request }
       InspectBrowse name -> request
         { requestInspections = InspectModule name False : requestInspections request }
       InspectBrowseExpanded name -> request
@@ -368,7 +388,7 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       PortableOutput -> request { requestPortableOutput = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v19"
+workerRequestFlag = "--worker-request-v20"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -417,7 +437,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ019"
+  if magic /= "TPREQ020"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -437,7 +457,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ019" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ020" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -466,6 +486,10 @@ encodeField field = case field of
   DeclarationJoinOut value -> taggedText 48 value
   InspectType value -> taggedText 26 value
   InspectInfo value -> taggedText 27 value
+  InspectLookupName query -> BS.singleton 54 <> textFrame (lookupNameQuery query)
+    <> maybe (BS.singleton 0) (\value -> BS.singleton 1 <> textFrame value) (lookupQualifierModule query)
+    <> BS.singleton (case lookupNameMode query of LookupNameOnly -> 0; LookupNameOrModule -> 1)
+  InspectExactName query -> BS.singleton 55 <> encodeExactNameInspection query
   InspectOut value -> taggedText 28 value
   InspectBrowse value -> taggedText 29 value
   InspectBrowseExpanded value -> taggedText 30 value
@@ -499,15 +523,17 @@ encodeMaybeText (Just value) = BS.singleton 1 <> textFrame (T.unpack value)
 
 encodeStructuredInspection :: StructuredInspection -> BS.ByteString
 encodeStructuredInspection query =
-  encodeScope (structuredScope query)
-    <> BS.singleton (case structuredNamespace query of
-      StructuredAnyName -> 0
-      StructuredValueName -> 1
-      StructuredTypeName -> 2
-      StructuredConstructorName -> 3)
-    <> textFrame (structuredName query)
+  encodeExactNameInspection (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
     <> putU64 (inspectionGeneration (structuredProvenance query))
     <> textFrame (inspectionFingerprint (structuredProvenance query))
+
+encodeExactNameInspection :: ExactNameInspection -> BS.ByteString
+encodeExactNameInspection query =
+  encodeScope (exactNameScope query)
+    <> BS.singleton (case exactNameNamespace query of
+      StructuredAnyName -> 0; StructuredValueName -> 1; StructuredTypeName -> 2
+      StructuredConstructorName -> 3; StructuredFieldName -> 4)
+    <> textFrame (exactNameQuery query)
   where
     encodeScope scope = case scope of
       StructuredCurrentScope -> BS.singleton 0
@@ -575,6 +601,8 @@ pField bytes = do
     48 -> mapParser DeclarationJoinOut pText rest
     26 -> mapParser InspectType pText rest
     27 -> mapParser InspectInfo pText rest
+    54 -> mapParser InspectLookupName pLookupNameInspection rest
+    55 -> mapParser InspectExactName pExactNameInspection rest
     28 -> mapParser InspectOut pText rest
     29 -> mapParser InspectBrowse pText rest
     30 -> mapParser InspectBrowseExpanded pText rest
@@ -607,8 +635,25 @@ mapParser f parser bytes = do
   (value, rest) <- parser bytes
   Right (f value, rest)
 
+pLookupNameInspection :: Parser LookupNameInspection
+pLookupNameInspection bytes = do
+  (query, r1) <- pText bytes
+  (qualifier, r2) <- pMaybeText r1
+  (modeTag, rest) <- pWord8 r2
+  mode <- case modeTag of
+    0 -> Right LookupNameOnly; 1 -> Right LookupNameOrModule
+    _ -> Left "worker request: unknown lookup interpretation"
+  Right (LookupNameInspection query qualifier mode, rest)
+
 pStructuredInspection :: Parser StructuredInspection
 pStructuredInspection bytes = do
+  (ExactNameInspection scope namespace name, rest) <- pExactNameInspection bytes
+  (generation, rest') <- pWord64 rest
+  (fingerprint, trailing) <- pText rest'
+  Right (StructuredInspection scope namespace name (InspectionProvenance generation fingerprint), trailing)
+
+pExactNameInspection :: Parser ExactNameInspection
+pExactNameInspection bytes = do
   (scopeTag, rest) <- pWord8 bytes
   (scope, rest') <- case scopeTag of
     0 -> Right (StructuredCurrentScope, rest)
@@ -620,11 +665,10 @@ pStructuredInspection bytes = do
     1 -> Right StructuredValueName
     2 -> Right StructuredTypeName
     3 -> Right StructuredConstructorName
+    4 -> Right StructuredFieldName
     _ -> Left ("worker request: unknown structured inspection namespace " ++ show namespaceTag)
   (name, rest''') <- pText rest''
-  (generation, rest'''') <- pWord64 rest'''
-  (fingerprint, trailing) <- pText rest''''
-  Right (StructuredInspection scope namespace name (InspectionProvenance generation fingerprint), trailing)
+  Right (ExactNameInspection scope namespace name, rest''')
 
 pSymbolIdentity :: Parser SymbolIdentity
 pSymbolIdentity bytes = do

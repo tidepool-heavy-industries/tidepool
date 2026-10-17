@@ -112,7 +112,7 @@ import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
-import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
+import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc, withInspectionWork)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
@@ -373,12 +373,12 @@ runDeclarationOperation bound manifest out = do
 runInspectionMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runInspectionMode bound _path = do
   let args = boundWorkerRequest bound
-  res <- trySynchronous $ do
+  res <- trySynchronous $ withInspectionWork $ \work -> do
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
         compile purpose path = compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
 
-        inspect successful requests = runBoundGhc bound $ runInspectionGhc
+        inspect successful requests = runBoundGhc bound $ runInspectionGhc work
           (crHscEnv successful)
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
