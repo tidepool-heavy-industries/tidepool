@@ -7099,3 +7099,108 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         "only a historical different carrier's offer cannot authorize the current dependency"
     );
 }
+
+#[test]
+fn recovery_interface_materialization_work_is_independent_of_native_body_growth() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let mut observed = Vec::new();
+    let mut native_sizes = Vec::new();
+    for groups in [1u32, 64] {
+        let product = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "InspectionGrowth",
+                (0..groups).map(|ordinal| (ordinal, vec![])).collect(),
+                61,
+                &BTreeMap::new(),
+                b"fixed interface".to_vec(),
+            ),
+            producer,
+        );
+        native_sizes.push(product.product_bytes().len());
+        let payload = ArtifactPayload::Original(product);
+        let directory = tempfile::tempdir().unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let files = recovery_artifacts::materialize_certified_interface(
+            directory.path(),
+            &payload,
+            producer,
+            &mut validation,
+        )
+        .unwrap();
+        let paths = std::fs::read_dir(directory.path().join("artifacts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths.len(),
+            2,
+            "only interface and package witness are materialized"
+        );
+        assert!(paths
+            .iter()
+            .all(|path| path.to_str().unwrap().ends_with(".hi")
+                || path.to_str().unwrap().ends_with(".hi.packages")));
+        assert!(directory.path().join(&files.interface_path).is_file());
+        observed.push(validation.work());
+    }
+    assert!(
+        native_sizes[1] > native_sizes[0],
+        "the control must grow native bytes"
+    );
+    assert_eq!(
+        observed[0], observed[1],
+        "growing authenticated native bodies must add no copied, read, decoded or hashed bytes"
+    );
+}
+
+#[test]
+fn recovery_interface_projection_preserves_native_availability_modes() {
+    let baseline = product("InspectBaseline", 31);
+    let required = product("InspectRequired", 32);
+    let unused = product("InspectUnused", 33);
+    let inventory = ArtifactInventory::default();
+    let entry = Arc::new(
+        ArtifactEntry::original(
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            baseline.clone(),
+        )
+        .unwrap(),
+    );
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let view = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry])
+        .unwrap();
+    let full = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            compiler_support: fixture_compiler_support(projection, view),
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    assert!(full
+        .compiler_source_support()
+        .native_offers()
+        .iter()
+        .any(|offer| offer.is_full()));
+    for context in [
+        type_context(&[baseline.clone(), required.clone(), unused.clone()]),
+        partial_context(&baseline, &required, &unused, None),
+        full,
+    ] {
+        let before = context.snapshot();
+        let inputs = context.recovery_inspection_inputs().unwrap();
+        assert!(!inputs.0.artifacts.is_empty());
+        assert!(inputs
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.product.is_none()));
+        inputs.0.validate().unwrap();
+        assert_eq!(
+            context.snapshot(),
+            before,
+            "interface inspection cannot select groups or issue native availability"
+        );
+    }
+}

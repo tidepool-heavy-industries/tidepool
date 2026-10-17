@@ -734,7 +734,7 @@ fn certify_authored_declaration_inner(
         includes,
         session_root,
         Some(toolchain_identity_sha256),
-        Arc::new(_scratch),
+        _scratch,
         settlement,
     )?;
     let inventories = match outcome.decision {
@@ -1971,7 +1971,7 @@ pub fn inspect_declaration_artifacts(
     )
 }
 
-fn inspect_declaration_artifacts_with_producer(
+pub(crate) fn inspect_declaration_artifacts_with_producer(
     artifacts: &[DeclarationArtifact],
     includes: &[PathBuf],
     session_root: &Path,

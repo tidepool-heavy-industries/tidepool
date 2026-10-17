@@ -43,7 +43,7 @@ pub(super) fn admit_authored_artifact_closure(
     includes: &[PathBuf],
 ) -> Result<
     (
-        tempfile::TempDir,
+        Arc<tempfile::TempDir>,
         Vec<DeclarationArtifact>,
         Vec<ExactInterfaceOwner>,
         Vec<ExactLexicalNode>,
@@ -93,7 +93,7 @@ fn admit_authored_artifact_closure_inner(
     includes: &[PathBuf],
 ) -> Result<
     (
-        tempfile::TempDir,
+        Arc<tempfile::TempDir>,
         Vec<DeclarationArtifact>,
         Vec<ExactInterfaceOwner>,
         Vec<ExactLexicalNode>,
@@ -102,7 +102,7 @@ fn admit_authored_artifact_closure_inner(
     CompileError,
 > {
     let products = originals.products();
-    let scratch = tempfile::tempdir()?;
+    let scratch = Arc::new(tempfile::tempdir()?);
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let references = crate::recovery_artifacts::materialize_certified_products_with_validation(
         scratch.path(),
@@ -402,8 +402,9 @@ fn admit_authored_artifact_closure_inner(
     let joined_interfaces =
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
     if let Some(context) = context {
-        let inherited = context.materialize_scratch(&scratch)?;
-        artifacts.extend(inherited_type_interfaces(inherited.artifacts, products));
+        context
+            .inherited_declaration_interfaces(scratch.clone(), products)?
+            .append_to(&mut artifacts)?;
     }
     Ok((
         scratch,
@@ -412,25 +413,6 @@ fn admit_authored_artifact_closure_inner(
         source_lexical_imports,
         joined_interfaces,
     ))
-}
-
-fn inherited_type_interfaces(
-    artifacts: Vec<DeclarationArtifact>,
-    authored: &[CertifiedRecoveryProduct],
-) -> impl Iterator<Item = DeclarationArtifact> + '_ {
-    artifacts.into_iter().filter_map(move |mut artifact| {
-        if authored.iter().any(|product| {
-            product.owner().unit == artifact.interface.unit
-                && product.owner().module == artifact.interface.module
-        }) {
-            None
-        } else {
-            // Keep the issued canonical interface in the inventory census.
-            // Its inherited native demand remains owned by the retained graph.
-            artifact.product = None;
-            Some(artifact)
-        }
-    })
 }
 
 /// Add only source adjacency authenticated by the completed compilation.
@@ -896,11 +878,14 @@ mod tests {
         )
         .unwrap();
         let before = context.artifact_view().selected_native_groups();
-        let scratch = tempfile::tempdir().unwrap();
-        let inherited = context.materialize_scratch(&scratch).unwrap().artifacts;
-        assert_eq!(inherited.len(), 3);
-        assert!(inherited.iter().all(|artifact| artifact.product.is_some()));
-        let types = inherited_type_interfaces(inherited, &products[..1]).collect::<Vec<_>>();
+        let context = Arc::new(context);
+        let scratch = Arc::new(tempfile::tempdir().unwrap());
+        let mut types = Vec::new();
+        context
+            .inherited_declaration_interfaces(scratch.clone(), &products[..1])
+            .unwrap()
+            .append_to(&mut types)
+            .unwrap();
         assert_eq!(
             types
                 .iter()

@@ -2595,6 +2595,127 @@ pub struct MaterializedExactDeclarationContext {
     pub lexical: Vec<ExactLexicalNode>,
 }
 
+/// An exact context's source-free interface inspection. The owner retains the
+/// selected namespace and private files; no caller can substitute rows or turn
+/// omission of native payloads into an availability claim.
+struct CertifiedInterfaceInputs {
+    context: Arc<ExactDeclarationContext>,
+    metadata: CompilerArtifactMetadata,
+    directory: Arc<tempfile::TempDir>,
+    artifacts: Vec<DeclarationArtifact>,
+}
+
+pub(crate) struct RecoveryInspectionInputs(CertifiedInterfaceInputs);
+
+/// Inherited type inputs are selected by the context owner after the fresh
+/// authored originals have established which owners they replace.
+pub(crate) struct InheritedDeclarationInterfaces(CertifiedInterfaceInputs);
+
+impl InheritedDeclarationInterfaces {
+    pub(crate) fn append_to(
+        self,
+        artifacts: &mut Vec<DeclarationArtifact>,
+    ) -> Result<(), CompileError> {
+        self.0.validate()?;
+        artifacts.extend(self.0.artifacts);
+        Ok(())
+    }
+}
+
+impl RecoveryInspectionInputs {
+    pub(crate) fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
+        self.0.interface(owner)
+    }
+    pub(crate) fn inspect(
+        &self,
+        includes: &[PathBuf],
+        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+    ) -> Result<crate::declaration_join::DeclarationInventoryOutcome, CompileError> {
+        self.0.inspect(includes, settlement)
+    }
+}
+
+impl CertifiedInterfaceInputs {
+    pub(crate) fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
+        self.artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.interface.unit == owner.unit && artifact.interface.module == owner.module
+            })
+            .map(|artifact| &artifact.interface)
+    }
+
+    fn validate(&self) -> Result<(), CompileError> {
+        if self.artifacts.len() != self.metadata.entries.len() {
+            return Err(failure(
+                "recovery inspection interface closure is incomplete",
+            ));
+        }
+        for artifact in &self.artifacts {
+            let exact = &artifact.interface;
+            let owner = identity(&exact.unit, &exact.module);
+            let entry = self
+                .metadata
+                .entries
+                .get(&owner)
+                .ok_or_else(|| failure("recovery inspection interface is outside its owner"))?;
+            let (bytes, packages) = match &entry.payload {
+                ArtifactPayload::Original(product) => {
+                    (product.interface_bytes(), product.package_imports_bytes())
+                }
+                ArtifactPayload::Canonical(interface) => (
+                    interface.interface_bytes(),
+                    interface.package_imports_bytes(),
+                ),
+                ArtifactPayload::Interface(interface, _) => (
+                    interface.interface_bytes(),
+                    interface.package_imports_bytes(),
+                ),
+            };
+            if artifact.product.is_some()
+                || exact.sha256 != hex(&entry.descriptor.interface_sha256)
+                || exact.requirements.iter().cloned().collect::<BTreeSet<_>>()
+                    != entry
+                        .requirements
+                        .iter()
+                        .map(|owner| (owner.unit.clone(), owner.module.clone()))
+                        .collect()
+                || std::fs::read(&exact.path)? != bytes
+            {
+                return Err(failure(
+                    "recovery inspection interface differs from its issuing context",
+                ));
+            }
+            let mut package_path = exact.path.as_os_str().to_os_string();
+            package_path.push(".packages");
+            if std::fs::read(PathBuf::from(package_path))? != packages {
+                return Err(failure(
+                    "recovery inspection package witness differs from owned bytes",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn inspect(
+        &self,
+        includes: &[PathBuf],
+        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+    ) -> Result<crate::declaration_join::DeclarationInventoryOutcome, CompileError> {
+        self.validate()?;
+        let result = crate::declaration_join::inspect_declaration_artifacts_with_producer(
+            &self.artifacts,
+            includes,
+            self.directory.path(),
+            Some(self.context.toolchain_identity_sha256()),
+            self.directory.clone(),
+            settlement,
+        )?;
+        self.validate()?;
+        Ok(result)
+    }
+}
+
 /// Private files and newly certified entries added by one immutable graph view.
 /// Parents retain inherited rows and group payloads; requests assemble borrowed
 /// selections without storing a copy of every ancestor in each descendant.
@@ -7359,6 +7480,78 @@ impl ExactDeclarationContext {
         Ok(())
     }
 
+    pub(crate) fn recovery_inspection_inputs(
+        self: &Arc<Self>,
+    ) -> Result<RecoveryInspectionInputs, CompileError> {
+        let metadata = self.compiler_metadata_snapshot()?;
+        self.materialize_interface_inputs(Arc::new(tempfile::tempdir()?), metadata)
+            .map(RecoveryInspectionInputs)
+    }
+
+    pub(crate) fn inherited_declaration_interfaces(
+        self: &Arc<Self>,
+        directory: Arc<tempfile::TempDir>,
+        authored: &[CertifiedRecoveryProduct],
+    ) -> Result<InheritedDeclarationInterfaces, CompileError> {
+        let mut metadata = self.compiler_metadata_snapshot()?;
+        metadata.entries.retain(|owner, _| {
+            !authored.iter().any(|product| {
+                product.owner().unit == owner.unit && product.owner().module == owner.module
+            })
+        });
+        self.materialize_interface_inputs(directory, metadata)
+            .map(InheritedDeclarationInterfaces)
+    }
+
+    fn materialize_interface_inputs(
+        self: &Arc<Self>,
+        directory: Arc<tempfile::TempDir>,
+        metadata: CompilerArtifactMetadata,
+    ) -> Result<CertifiedInterfaceInputs, CompileError> {
+        let mut validation = PackageInterfaceValidation::default();
+        let mut artifacts = Vec::with_capacity(metadata.entries.len());
+        for (owner, entry) in &metadata.entries {
+            crate::host_work::checkpoint()?;
+            if entry.descriptor.owner != *owner
+                || entry.descriptor.producer_sha256 != self.toolchain_identity_sha256()
+                || entry.descriptor.kind != entry.payload.artifact_kind()
+            {
+                return Err(failure(
+                    "recovery inspection input differs from selected owner or producer",
+                ));
+            }
+            let files = recovery_artifacts::materialize_certified_interface(
+                directory.path(),
+                &entry.payload,
+                self.toolchain_identity_sha256(),
+                &mut validation,
+            )
+            .map_err(materialization_failure)?;
+            artifacts.push(DeclarationArtifact {
+                interface: ExactIfaceArtifact {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    path: directory.path().join(files.interface_path),
+                    sha256: hex(&files.skinny_iface_sha256),
+                    requirements: entry
+                        .requirements
+                        .iter()
+                        .map(|required| (required.unit.clone(), required.module.clone()))
+                        .collect(),
+                },
+                product: None,
+            });
+        }
+        let inputs = CertifiedInterfaceInputs {
+            context: self.clone(),
+            metadata,
+            directory,
+            artifacts,
+        };
+        inputs.validate()?;
+        Ok(inputs)
+    }
+
     pub fn materialize(
         &self,
         root: &Path,
@@ -10388,6 +10581,28 @@ mod tests {
         });
         context.normalize().unwrap();
         (Arc::new(context), producer)
+    }
+
+    #[test]
+    fn recovery_inspection_projection_refuses_interface_and_package_mutation() {
+        let (context, _) = metadata_fixture();
+        let inputs = context.recovery_inspection_inputs().unwrap();
+        assert_eq!(inputs.0.artifacts.len(), 4);
+        assert!(inputs
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.product.is_none()));
+        let artifact = &inputs.0.artifacts[0];
+        let path = &artifact.interface.path;
+        let original = std::fs::read(path).unwrap();
+        std::fs::write(path, b"corrupt interface").unwrap();
+        assert!(inputs.0.validate().is_err());
+        std::fs::write(path, original).unwrap();
+        inputs.0.validate().unwrap();
+        let mut package_path = path.as_os_str().to_os_string();
+        package_path.push(".packages");
+        std::fs::write(PathBuf::from(package_path), b"corrupt package witness").unwrap();
+        assert!(inputs.0.validate().is_err());
     }
 
     #[test]

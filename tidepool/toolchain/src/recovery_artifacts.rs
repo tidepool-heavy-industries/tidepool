@@ -2041,6 +2041,66 @@ pub(crate) fn materialize_joined_interface_with_validation(
     )
 }
 
+/// Interface files carry no native or lexical role authority. Only the caller's
+/// authenticated owner determines which contract consumes them.
+pub(crate) struct MaterializedInterfaceFiles {
+    pub interface_path: PathBuf,
+    pub skinny_iface_sha256: [u8; 32],
+    package_imports_path: PathBuf,
+    package_imports_sha256: [u8; 32],
+}
+
+/// Project only the interface and package witness of an already authenticated
+/// payload. This does not issue, inspect or materialize its native availability.
+pub(crate) fn materialize_certified_interface(
+    root: &Path,
+    payload: &crate::artifact_inventory::ArtifactPayload,
+    producer: [u8; 32],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
+    use crate::artifact_inventory::ArtifactPayload;
+    let (unit, module, bytes, packages) = match payload {
+        ArtifactPayload::Original(product) => (
+            product.owner().unit.as_str(),
+            product.owner().module.as_str(),
+            product.interface_bytes(),
+            product.package_imports_bytes(),
+        ),
+        ArtifactPayload::Canonical(interface) => {
+            if interface.producer_sha256() != producer {
+                return Err(RecoveryArtifactError::InvalidReference);
+            }
+            (
+                interface.unit(),
+                interface.module(),
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            )
+        }
+        ArtifactPayload::Interface(interface, _) => {
+            if interface.toolchain_identity_sha256() != producer {
+                return Err(RecoveryArtifactError::InvalidReference);
+            }
+            (
+                interface.unit(),
+                interface.module(),
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            )
+        }
+    };
+    materialize_owned_interface(
+        root,
+        producer,
+        unit,
+        module,
+        bytes,
+        packages,
+        validation,
+        MaterializationMode::Scratch,
+    )
+}
+
 fn materialize_owned_join(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2051,6 +2111,37 @@ fn materialize_owned_join(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+    let files = materialize_owned_interface(
+        recovery_root,
+        toolchain_identity_sha256,
+        unit,
+        module,
+        bytes,
+        package_imports,
+        validation,
+        mode,
+    )?;
+    Ok(RecoveryJoinRef {
+        toolchain_identity_sha256,
+        unit: unit.to_owned(),
+        module: module.to_owned(),
+        skinny_iface_sha256: files.skinny_iface_sha256,
+        interface_path: files.interface_path,
+        package_imports_path: files.package_imports_path,
+        package_imports_sha256: files.package_imports_sha256,
+    })
+}
+
+fn materialize_owned_interface(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    unit: &str,
+    module: &str,
+    bytes: &[u8],
+    package_imports: &[u8],
+    validation: &mut PackageInterfaceValidation,
+    mode: MaterializationMode,
+) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -2093,10 +2184,7 @@ fn materialize_owned_join(
     if mode == MaterializationMode::Durable {
         File::open(&owned)?.sync_all()?;
     }
-    Ok(RecoveryJoinRef {
-        toolchain_identity_sha256,
-        unit: unit.to_owned(),
-        module: module.to_owned(),
+    Ok(MaterializedInterfaceFiles {
         skinny_iface_sha256,
         interface_path,
         package_imports_path,
