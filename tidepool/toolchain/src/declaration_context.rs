@@ -15418,7 +15418,8 @@ mod tests {
         )])
         .unwrap();
         let mut request = program_request(directory.path(), context.clone())
-            .with_checked_value_imports(inputs.import_authority());
+            .with_checked_value_imports(inputs.import_authority())
+            .with_source_search_context(&[directory.path().to_path_buf()]);
         request.producer_sha256 = [7; 32];
         let evidence = DependencyEvidence {
             version: 4,
