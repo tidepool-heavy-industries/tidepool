@@ -521,6 +521,19 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
 #[tokio::test]
 #[ignore = "requires production hosted compiler, delegated command resources and declared Rust toolchain"]
 async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
+    // A delegated user service may inherit manager environment independently
+    // of the invoking runner. Refuse before constructing any native client.
+    for name in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        assert!(std::env::var_os(name).is_none(),
+            "offline hosted fixture requires absent proxy variable {name} in the actual test process");
+    }
     let rustc = std::env::var("EXOMONAD_OFFLINE_RUSTC").expect("declared pinned rustc resource");
     let cc = std::env::var("EXOMONAD_OFFLINE_CC").expect("declared pinned linker resource");
     assert!(std::path::Path::new(&rustc).is_absolute());
