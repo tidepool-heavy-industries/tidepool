@@ -5862,3 +5862,118 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
         }
     }
 }
+
+#[test]
+fn candidate_native_availability_preserves_unselected_historical_offers() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let historical = product("HistoricalCandidateSupport", 123);
+    let fresh = product("FreshCandidateProduct", 124);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), historical.clone()).unwrap());
+    let fresh_entry = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+    let inventory = ArtifactInventory::default();
+    let issued = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+        .unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &issued)
+        .unwrap()
+        .unwrap();
+    let full = IssuedNativeOffer::issue(entry.descriptor.id, &issued, Some(proof)).unwrap();
+    assert!(full.is_full());
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let partial = full
+        .within_projection(&projection, &inventory.empty_view())
+        .unwrap()
+        .unwrap();
+    assert!(!partial.is_full());
+    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &issued, None).unwrap();
+    let baseline = type_context(&[historical, fresh.clone()]);
+    let candidates = crate::module_candidates::CandidateSet {
+        manifest_path: PathBuf::from("candidate-manifest-not-consumed-by-native-issuance"),
+        by_owner: BTreeMap::new(),
+        native_availability: vec![fresh],
+        catalog_owner: None,
+        input_transport: Vec::new(),
+    };
+    let mut histories = 0;
+    for offers in [
+        vec![],
+        vec![full.clone()],
+        vec![empty],
+        vec![partial],
+        vec![full.clone(), full],
+    ] {
+        let support = baseline
+            .compiler_source_support()
+            .retain_offers(offers)
+            .unwrap();
+        let context = baseline
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support);
+        let expected_offers = context
+            .compiler_source_support()
+            .native_offer_observations()
+            .unwrap();
+        let expected_custody = context.artifact_view().capture_graph_selection();
+        let expected_edges = context.artifact_view().binding_dependencies();
+        assert!(context
+            .compiler_input_projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(context.artifact_view().selected_native_groups().is_empty());
+
+        let inputs = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .expect("historical availability outside current native roles remains custody")
+            .unwrap();
+        assert_eq!(
+            context
+                .compiler_source_support()
+                .native_offer_observations()
+                .unwrap(),
+            expected_offers,
+            "candidate issuance cannot alter the retained offer mode or exact proof",
+        );
+        let retained = inputs.artifacts.capture_graph_selection();
+        assert!(expected_custody
+            .bindings
+            .iter()
+            .all(|binding| retained.bindings.contains(binding)));
+        assert!(expected_edges
+            .iter()
+            .all(|edge| inputs.artifacts.binding_dependencies().contains(edge)));
+        assert!(inputs.artifacts.selected_native_groups().is_empty());
+        assert!(context.lexical_graph().is_empty());
+        assert_eq!(
+            inputs
+                .projection
+                .roles()
+                .iter()
+                .filter_map(CompilerInputRole::original)
+                .collect::<Vec<_>>(),
+            vec![fresh_entry.descriptor.id]
+        );
+        let [offered] = inputs.native_offers.as_slice() else {
+            panic!("one fresh native offer")
+        };
+        assert_eq!(offered.original(), fresh_entry.descriptor.id);
+        assert!(offered.is_full());
+        assert_eq!(
+            offered
+                .issued_group_carriers()
+                .unwrap()
+                .keys()
+                .map(|group| (group.binding.artifact(), group.original_ordinal))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (fresh_entry.descriptor.id, 7),
+                (fresh_entry.descriptor.id, 9001)
+            ]),
+            "the new body earns its own exact groups without promoting historical support",
+        );
+        histories += 1;
+    }
+    assert_eq!(histories, 5);
+}
