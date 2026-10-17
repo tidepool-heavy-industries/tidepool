@@ -78,10 +78,11 @@ lookupNavigationTests = testGroup "retained lookup navigation"
          allowance = budget `mod` (T.length expected + 1)
          (prefix, remaining, unavailable) = renderTree allowance (lookupIndexTree captured)
          suffix = case remaining of Nothing -> ""; Just tree -> let (text, _, _) = renderTree maxBound tree in text
-         retained = retainLookupCapture captured (Just captured)
+         related = captured {lookupIdentity = "related-capture", lookupResults = reverse (lookupResults captured)}
+         retained = retainLookupCapture captured (Just related)
      in renderLookupIndex captured == expected && prefix == T.take allowance expected
        && prefix <> suffix == expected && not unavailable
-       && renderLookupCaptureIndex retained == "PrimaryLookup\n" <> expected <> "\nRelatedLookup\n" <> expected
+       && renderLookupCaptureIndex retained == "PrimaryLookup\n" <> expected <> "\nRelatedLookup\n" <> referenceIndex related
   ,testProperty "numbered display preserves exact lines and every retained prefix" $ \(NonNegative seed) (NonNegative budget) ->
      let rows = take (seed `mod` 12) (cycle ["α\r\n", "\n", "🙂line\n"])
          final = if even seed then "last🙂" else ""
