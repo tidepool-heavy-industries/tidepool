@@ -6802,11 +6802,22 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         .unwrap();
     let full = IssuedNativeOffer::issue(entry.descriptor.id, &issued, Some(proof)).unwrap();
     assert!(full.is_full());
+    assert_eq!(
+        full.issued_group_carriers()
+            .unwrap()
+            .into_keys()
+            .collect::<BTreeSet<_>>(),
+        issued
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .collect(),
+        "checked offer membership must match the independent eager issued view",
+    );
     assert!(full
-        .custody()
-        .capture_graph_selection()
-        .native_groups
-        .iter()
+        .issued_group_carriers()
+        .unwrap()
+        .keys()
         .any(
             |group| group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 3
         ));
@@ -6895,10 +6906,9 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         assert!(!offer.is_full());
         assert_eq!(
             offer
-                .custody()
-                .capture_graph_selection()
-                .native_groups
-                .iter()
+                .issued_group_carriers()
+                .unwrap()
+                .keys()
                 .filter(|group| group.binding.artifact() == entry.descriptor.id)
                 .map(|group| group.original_ordinal)
                 .collect::<BTreeSet<_>>(),
