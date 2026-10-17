@@ -59,8 +59,12 @@ module Tidepool.Actors.Exomonad
   , existingWorktree
   , atRef
   , WorkerLifetime (..)
-  , ForkEffort (..)
+  , Backend (..)
+  , OpenAIModel (..)
   , Model (..)
+  , Reasoning (..)
+  , DeepSeekReasoning (..)
+  , OpenAIReasoning (..)
   , ContextCheckpoint
   , checkpoint
   , releaseCheckpoint
@@ -262,8 +266,12 @@ import Tidepool.Actors.Worktree
 import Tidepool.Effects.Core
   ( ResourceScopes
   , WorkerLifetime (..)
-  , ForkEffort (..)
+  , Backend (..)
+  , OpenAIModel (..)
   , Model (..)
+  , Reasoning (..)
+  , DeepSeekReasoning (..)
+  , OpenAIReasoning (..)
   , CheckpointRefusal (..)
   , ActorContextInfo (..)
   , ActivationKind (..)

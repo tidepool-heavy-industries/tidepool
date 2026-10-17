@@ -138,8 +138,8 @@ noToolsExample = do
             | lookup "provider_requests" usage == Just 1
             , lookup "tool_attempts" usage == Just 0 -> pure ()
           other -> error ("NoTools example lost outcome or receipt: " ++ show other)
-  runExample "Luna" (ModelExample.luna "bounded input")
-  runExample "Sol" (ModelExample.sol "bounded input")
+  runExample "DeepSeekFlash" (ModelExample.flash "bounded input")
+  runExample "DeepSeekPro" (ModelExample.pro "bounded input")
   case ModelExample.report (ModelResult (Left ModelCancelled) Nothing) of
     (Left _, Nothing) -> pure ()
     other -> error ("missing receipt or failure changed: " ++ show other)
@@ -165,13 +165,13 @@ personaNotebook :: Eff (SyncEffects Persona.PersonaEffects)
   (ModelResult Text, ModelResult Text, (Int, Int, Int), (Int, Int, Int))
 personaNotebook = do
   say "before model calls"
-  lunaResult <- ModelExample.synchronousLuna "persona Luna input"
-  lunaPage <- display (ModelExample.report lunaResult)
+  flashResult <- ModelExample.synchronousFlash "persona DeepSeekFlash input"
+  flashPage <- display (ModelExample.report flashResult)
   say "between model calls"
-  solResult <- ModelExample.synchronousSol "persona Sol input"
-  solPage <- display (ModelExample.report solResult)
+  proResult <- ModelExample.synchronousPro "persona DeepSeekPro input"
+  proPage <- display (ModelExample.report proResult)
   say "after model calls"
-  pure (lunaResult, solResult, displayIdentity lunaPage, displayIdentity solPage)
+  pure (flashResult, proResult, displayIdentity flashPage, displayIdentity proPage)
 
 data NotebookEvent
   = ModelRequested Text Text
@@ -209,8 +209,8 @@ runPersonaNotebook = go 1
         , tools == toJSON ([] :: [Value])
         , not hook ->
             let label = case model of
-                  Just Luna -> "Luna"
-                  Just Sol -> "Sol"
+                  Just DeepSeekFlash -> "DeepSeekFlash"
+                  Just DeepSeekPro -> "DeepSeekPro"
                   _ -> error "Persona model example changed its explicit model selector"
             in (Right (toJSON (Control.ModelFinished
                   (Control.ModelReceiptEnvelope ("persona-" <> label) "persona-cell" [label <> "-request"]
@@ -222,12 +222,12 @@ runPersonaNotebook = go 1
 
 personaNotebookExample :: IO ()
 personaNotebookExample = do
-  let ((lunaResult, solResult, lunaPage, solPage), events) = runPersonaNotebook personaNotebook
+  let ((flashResult, proResult, flashPage, proPage), events) = runPersonaNotebook personaNotebook
       require condition detail = unless condition (error detail)
-  require (lunaPage == (17, 3, 1) && solPage == (17, 3, 2))
+  require (flashPage == (17, 3, 1) && proPage == (17, 3, 2))
     "display handles lost the identities returned by the Console owner"
   require ([ (model, input) | ModelRequested model input <- events ] ==
-    [("Luna", "persona Luna input"), ("Sol", "persona Sol input")])
+    [("DeepSeekFlash", "persona DeepSeekFlash input"), ("DeepSeekPro", "persona DeepSeekPro input")])
     "Persona composition changed model choice, explicit input or request multiplicity"
   mapM_ (\(label, result) -> do
     case modelOutcome result of
@@ -236,14 +236,14 @@ personaNotebookExample = do
     require (modelReceipt result == Just (ModelReceipt ("persona-" <> label)
       "persona-cell" [label <> "-request"] (ModelUsage 1 0 9 0)))
       "Persona composition lost receipt identity or bounded usage")
-    [("Luna", lunaResult), ("Sol", solResult)]
+    [("DeepSeekFlash", flashResult), ("DeepSeekPro", proResult)]
   case [text | DisplayPublished text <- events] of
-    [lunaText, solText] -> mapM_ (\(label, text) ->
+    [flashText, proText] -> mapM_ (\(label, text) ->
       mapM_ (\piece -> require (piece `Text.isInfixOf` text)
         "display omitted the actual model answer or receipt evidence")
         ["answer from " <> label, "persona-" <> label, "persona-cell", label <> "-request",
          "provider_requests", "tool_attempts"])
-      [("Luna", lunaText), ("Sol", solText)]
+      [("DeepSeekFlash", flashText), ("DeepSeekPro", proText)]
     _ -> error "Persona composition did not display both retained reports"
   require (map eventKind events ==
     ["say", "model", "allowance", "display", "say", "model", "allowance", "display", "say"])

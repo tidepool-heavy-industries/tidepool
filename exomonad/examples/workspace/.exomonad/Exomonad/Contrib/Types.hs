@@ -22,7 +22,7 @@ import Tidepool.Agent.Reply
   ( Replies, RequestId, Request, ResponseResult (..), ResponseState (..)
   , ResponseFailure, WorktreeEvidence (..), ExecutionReceipt (..), pollResponse, requestId )
 import Tidepool.Actors.Exomonad
-  ( AgentRef, ForkEffort, GitOid, Model
+  ( AgentRef, Reasoning, GitOid, Model
   )
 import Tidepool.Inspection (Display (..), application, displayRecord)
 import Tidepool.Worktree
@@ -291,7 +291,7 @@ data DesignSlot = DesignSlot
   , specialistLabel :: Text
   , specialistWatch :: Text
   , specialistModel :: Model
-  , specialistEffort :: ForkEffort
+  , specialistReasoning :: Reasoning
   }
 
 -- Evidence and questions are independently useful progress payloads. They are

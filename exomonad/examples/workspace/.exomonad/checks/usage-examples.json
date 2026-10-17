@@ -266,7 +266,7 @@
       "prerequisites": [
         "Examples/ModelCallWorkflow.hs"
       ],
-      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+      "requirements": "Requires ModelCall and Console, a configured admitted DeepSeekFlash (or DeepSeekPro) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use flash or pro directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the DeepSeekPro variant is another model request. See doc model-call."
     },
     {
       "module": "Tidepool.Model",
@@ -276,7 +276,7 @@
       "prerequisites": [
         "Examples/ModelCallWorkflow.hs"
       ],
-      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+      "requirements": "Requires ModelCall and Console, a configured admitted DeepSeekFlash (or DeepSeekPro) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use flash or pro directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the DeepSeekPro variant is another model request. See doc model-call."
     },
     {
       "module": "Tidepool.Model",
@@ -286,7 +286,7 @@
       "prerequisites": [
         "Examples/ModelCallWorkflow.hs"
       ],
-      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+      "requirements": "Requires ModelCall and Console, a configured admitted DeepSeekFlash (or DeepSeekPro) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use flash or pro directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the DeepSeekPro variant is another model request. See doc model-call."
     },
     {
       "module": "Tidepool.Model",
@@ -296,7 +296,7 @@
       "prerequisites": [
         "Examples/ModelCallWorkflow.hs"
       ],
-      "requirements": "Requires ModelCall and Console, a configured admitted Luna (or Sol) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use luna or sol directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the Sol variant is another model request. See doc model-call."
+      "requirements": "Requires ModelCall and Console, a configured admitted DeepSeekFlash (or DeepSeekPro) model, and selected Examples.ModelCallWorkflow source. Run the cells in order in a synchronous notebook; asynchronous cells use flash or pro directly. One request, zero tools, explicit input; retain ModelResult and inspect receipt on success and typed failure. Invoking the DeepSeekPro variant is another model request. See doc model-call."
     }
   ]
 }

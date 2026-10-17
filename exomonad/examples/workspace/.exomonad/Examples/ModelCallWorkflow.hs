@@ -19,23 +19,23 @@ noToolsTurn model = Model.withModel model
     (Model.textTurn (defaultSpec { specTools = NoTools })
       "Read only the supplied input. Return one concise conclusion and identify missing evidence. Do not claim to have inspected anything outside this input."))
 
-luna :: (Member Model.ModelCall effects, AsyncEffects effects)
+flash :: (Member Model.ModelCall effects, AsyncEffects effects)
   => Text -> Eff effects (Model.ModelResult Text)
-luna = Model.invokeModel (noToolsTurn Model.Luna)
+flash = Model.invokeModel (noToolsTurn Model.DeepSeekFlash)
 
-sol :: (Member Model.ModelCall effects, AsyncEffects effects)
+pro :: (Member Model.ModelCall effects, AsyncEffects effects)
   => Text -> Eff effects (Model.ModelResult Text)
-sol = Model.invokeModel (noToolsTurn Model.Sol)
+pro = Model.invokeModel (noToolsTurn Model.DeepSeekPro)
 
 -- Reuse an ordinary base-row program inside a synchronous notebook. Callbacks
 -- would still use that base row; this particular turn offers no callbacks.
-synchronousLuna :: (Member Model.ModelCall effects, AsyncEffects effects)
+synchronousFlash :: (Member Model.ModelCall effects, AsyncEffects effects)
   => Text -> Eff (SyncEffects effects) (Model.ModelResult Text)
-synchronousLuna = raiseSync . luna
+synchronousFlash = raiseSync . flash
 
-synchronousSol :: (Member Model.ModelCall effects, AsyncEffects effects)
+synchronousPro :: (Member Model.ModelCall effects, AsyncEffects effects)
   => Text -> Eff (SyncEffects effects) (Model.ModelResult Text)
-synchronousSol = raiseSync . sol
+synchronousPro = raiseSync . pro
 
 -- Keep the original ModelResult bound: this presentation includes the receipt
 -- on both success and failure, without converting a typed failure into success.

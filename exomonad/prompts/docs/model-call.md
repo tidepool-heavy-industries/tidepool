@@ -11,17 +11,18 @@ The complete authored recipe is `Examples.ModelCallWorkflow` and
 `Tidepool.Model.invokeModel`, `textTurn`, `withModel` and `withLimits`. Its
 `noToolsTurn` uses `defaultSpec { specTools = NoTools }` and narrows
 `defaultLimits` to `requestLimit = Just 1` and `toolLimit = Just 0`.
-`luna input` selects typed `Luna` and returns `ModelResult Text`; `sol input`
-supplies the same recipe with typed `Sol`. Model tiers resolve through the
-admitted host policy.
+`flash input` selects `DeepSeekFlash` and returns `ModelResult Text`; `pro input`
+uses the same recipe with `DeepSeekPro`. Explicit model and reasoning choices
+must match the backend fixed when the run starts. Missing choices inherit the
+parent conversation's effective selection.
 
-In an ordinary asynchronous program, call `ModelExample.luna input` or
-`ModelExample.sol input`. In a synchronous notebook, use the corresponding
-`synchronousLuna` or `synchronousSol` helper. They lift the ordinary program
+In an ordinary asynchronous program, call `ModelExample.flash input` or
+`ModelExample.pro input`. In a synchronous notebook, use the corresponding
+`synchronousFlash` or `synchronousPro` helper. They lift the ordinary program
 through `raiseSync` while retaining the caller's ambient effect row.
 The shared source module lists its imports and extensions. Load it from the
 selected source root before running the registered cells. Each invocation is
-fresh model work; changing the tier and invoking again makes another request.
+fresh model work; changing the model and invoking again makes another request.
 
 Retain the original `ModelResult` before presenting a projection. Inspect
 `modelOutcome` as `Either ModelFailure a` and `modelReceipt` separately on both

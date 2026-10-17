@@ -248,7 +248,7 @@ consultDesign slot question = do
   spawned <- spawnSubagent (FreshCtx (designContext slot question))
     (ForkWorktree (atRef (GitRef (renderGitOid (questionSource question)))))
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just (specialistModel slot), spawnEffort = Just (specialistEffort slot)
+      { spawnModel = Just (specialistModel slot), spawnReasoning = Just (specialistReasoning slot)
       , spawnInstructions = Just (projectPrompt "specialist"), spawnLabel = Just (specialistLabel slot) })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))
