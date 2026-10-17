@@ -4,7 +4,7 @@
 -- Readers live only during admission; consumers receive a sealed value and never
 -- fall back to a producer path when a captured input is missing.
 module Tidepool.RequestInputs
-  ( RequestOriginalInputs, RequestInputReader, captureRequestInputs, RequestInputTokenReader, captureRequestInputTokens
+  ( RequestOriginalInputs, RequestInputReader, captureRequestInputs, RequestInputTokenReader, captureRequestInputTokens, withCapturedRequestInputTokens
   , CapturedOriginalContent, emptyCapturedOriginalContent, capturedOriginalContentBytes
   , OriginalInputReference(..), OwnedArenaRange, ownedArenaRange, continueRequestInputs, selectedOriginalContent
   , mergeCapturedOriginalContent, selectCapturedOriginalContent, capturedOriginalContentKeys
@@ -204,7 +204,19 @@ captureRequestInputs previous action = captureRequestInputTokens previous $ \rea
 
 captureRequestInputTokens :: Maybe RequestOriginalInputs -> (RequestInputTokenReader -> IO a)
   -> IO (a, RequestOriginalInputs)
-captureRequestInputTokens previous action = do
+captureRequestInputTokens = withRequestInputTokens CaptureMissingFiles
+
+-- Continued originals supply every selected part. A receiving alias never
+-- authorizes a filesystem read when its captured part is absent.
+withCapturedRequestInputTokens :: RequestOriginalInputs -> (RequestInputTokenReader -> IO a)
+  -> IO (a, RequestOriginalInputs)
+withCapturedRequestInputTokens inputs = withRequestInputTokens CapturedPartsOnly (Just inputs)
+
+data InputAcquisition = CaptureMissingFiles | CapturedPartsOnly
+
+withRequestInputTokens :: InputAcquisition -> Maybe RequestOriginalInputs
+  -> (RequestInputTokenReader -> IO a) -> IO (a, RequestOriginalInputs)
+withRequestInputTokens acquisition previous action = do
   initial <- case previous of
     Just inputs -> pure inputs
     Nothing -> do
@@ -219,6 +231,9 @@ captureRequestInputTokens previous action = do
             when (artifactLength input > bound) (fail "captured request input exceeds its consumer byte bound")
             pure ((open,originals),input)
           Nothing -> do
+            case acquisition of
+              CapturedPartsOnly -> fail "continued original input is absent from its captured owner"
+              CaptureMissingFiles -> pure ()
             let available = min (toInteger (min bound (maxBound - 1))) (limit - used)
             bytes <- readFileAtMost path (fromInteger available + 1)
             when (toInteger (BS.length bytes) > available)

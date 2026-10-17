@@ -299,7 +299,8 @@ fn publish_fixture_candidates(
     );
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let records = publication
-        .records
+        .cohort
+        .into_records()
         .into_iter()
         .filter(|record| requested.contains(&record.module))
         .map(|mut record| {
