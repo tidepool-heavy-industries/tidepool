@@ -463,7 +463,7 @@ impl CertifiedSegmentOriginals {
         }
         crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
             &mut products.source_selection,
-            &exact.request.compiler_inputs().artifacts,
+            exact.request.compiler_inputs().artifacts(),
             artifact_entries
                 .iter()
                 .chain(&value_entries)
@@ -2576,8 +2576,8 @@ impl CertifiedSourceSelection {
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let mut selected =
-            Self::from_compiler_projection(&inputs.projection, &metadata.retained, operation)?;
-        for role in inputs.projection.roles() {
+            Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
+        for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
             };
@@ -2977,6 +2977,63 @@ impl CertifiedSourceSelection {
         Ok(())
     }
 
+    /// Query the physical receipt's exact resolver choice for one demanded key.
+    /// Explicit issuer roots qualify retained availability; they are never
+    /// reconstructed from a broader inventory or from completeness ranking.
+    pub(crate) fn native_group_candidates(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+    ) -> BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
+        use crate::artifact_inventory::ArtifactBindingNode;
+        let qualified = self
+            .native_original_requirements()
+            .flat_map(|proof| {
+                proof
+                    .selection
+                    .snapshot()
+                    .roots
+                    .keys()
+                    .filter_map(move |root| match root {
+                        ArtifactBindingNode::Group(group)
+                            if key.artifact == proof.original
+                                && group.binding.artifact() == key.artifact
+                                && group.original_ordinal == key.original_ordinal =>
+                        {
+                            Some(*group)
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        if !qualified.is_empty() {
+            return qualified;
+        }
+        self.native_selections()
+            .flat_map(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .flat_map(|offer| offer.group_bindings(key))
+                    .collect::<BTreeSet<_>>(),
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
+                    .iter()
+                    .flat_map(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .copied()
+                    })
+                    .filter(|group| {
+                        group.binding.artifact() == key.artifact
+                            && group.original_ordinal == key.original_ordinal
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// A completed fresh product owns its body. Retained request bodies are
     /// limited to their closed availability and exact dependency proofs.
     pub(crate) fn permits_native_group(
@@ -2991,16 +3048,30 @@ impl CertifiedSourceSelection {
         {
             return selected.availability.permits(ordinal);
         }
-        self.native_original_requirements().any(|proof| {
-            proof
-                .selection
-                .graph_selection()
-                .native_groups
-                .iter()
-                .any(|group| {
-                    group.binding.artifact() == original && group.original_ordinal == ordinal
-                })
-        })
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: original,
+            original_ordinal: ordinal,
+        };
+        self.native_selections()
+            .any(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .any(|offer| offer.group_bindings(key).next().is_some()),
+                ReceiptNativeAvailability::NewProduct { dependencies } => {
+                    dependencies.iter().any(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .any(|group| {
+                                group.binding.artifact() == original
+                                    && group.original_ordinal == ordinal
+                            })
+                    })
+                }
+            })
     }
 
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
@@ -12475,12 +12546,12 @@ pub(crate) mod tests {
                     // A separately issued complete carrier is legitimate new custody;
                     // it cannot rewrite this earlier request's availability choice.
                     inventory
-                        .admit_shared(&request.compiler_inputs().artifacts, vec![entry.clone()])
+                        .admit_shared(request.compiler_inputs().artifacts(), vec![entry.clone()])
                         .unwrap()
-                        .retain_original_custody(&request.compiler_inputs().artifacts)
+                        .retain_original_custody(request.compiler_inputs().artifacts())
                         .unwrap()
                 } else {
-                    request.compiler_inputs().artifacts.clone()
+                    request.compiler_inputs().artifacts().clone()
                 };
                 let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
                 let public = Arc::new(
@@ -12572,13 +12643,14 @@ pub(crate) mod tests {
                         };
                         let admitted = inventory
                             .admit_certified_with_demand(
-                                &next.compiler_inputs().artifacts,
+                                next.compiler_inputs().artifacts(),
                                 vec![entry.clone()],
                                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                                 &next_selection,
                             )
                             .unwrap();
-                        let mut groups = next.compiler_inputs().artifacts.selected_native_groups();
+                        let mut groups =
+                            next.compiler_inputs().artifacts().selected_native_groups();
                         groups.insert(NativeGroupKey {
                             artifact: entry.descriptor.id,
                             original_ordinal: ordinal,
@@ -12726,7 +12798,7 @@ pub(crate) mod tests {
         assert!(!inputs
             .artifacts
             .contains_namespace_artifact(future.descriptor.id));
-        assert!(inputs.artifacts.selected_native_groups().is_empty());
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(request.groups.is_empty());
         assert_eq!(
             issued_groups,
@@ -12735,11 +12807,11 @@ pub(crate) mod tests {
                 .iter()
                 .find(|p| p.original == native.descriptor.id)
                 .unwrap()
-                .issued_group_carriers(&inputs.artifacts)
+                .issued_group_carriers(inputs.artifacts())
                 .unwrap()
         );
         let mut fixed = inventory
-            .bind_segment(&inputs.artifacts, entries, &physical)
+            .bind_segment(inputs.artifacts(), entries, &physical)
             .unwrap();
         let source = |ordinal| {
             let definitions = original_native_group_definitions(&product, ordinal).unwrap();
@@ -12922,7 +12994,7 @@ pub(crate) mod tests {
                     &[dependency.clone(), current.clone()],
                     &[],
                     &[],
-                    Some(&request.compiler_inputs().artifacts),
+                    Some(request.compiler_inputs().artifacts()),
                     NativeArtifactDemand::ScopeInterfaces,
                     &mut validation,
                 )
@@ -17683,7 +17755,7 @@ pub(crate) mod tests {
                         &certified.recovery_products,
                         &certified.module_interfaces,
                         &certified.value_interfaces,
-                        Some(&request.compiler_inputs().artifacts),
+                        Some(request.compiler_inputs().artifacts()),
                         crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
                         &mut PackageInterfaceValidation::default(),
                     )
@@ -17918,7 +17990,7 @@ pub(crate) mod tests {
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
                 let inventory = ArtifactInventory::default();
-                let mut private_entries = request.compiler_inputs().artifacts.entries();
+                let mut private_entries = request.compiler_inputs().artifacts().entries();
                 private_entries.extend(context.artifact_view().entries());
                 let private_view = inventory
                     .admit_recovery_selection(

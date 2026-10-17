@@ -397,7 +397,7 @@ mod program_source_support_history {
             let wrong_input =
                 OriginalCompilerInputs::from_selection(&wrong_selection, &wrong_view).unwrap();
             let stable_inputs = Arc::clone(&continued.inputs.compiler);
-            let stable_roles = continued.compiler_inputs().projection.roles();
+            let stable_roles = continued.compiler_inputs().projection().roles();
             assert!(continued
                 .in_program_context_with_private_input(
                     &root.join("wrong-input"),
@@ -408,7 +408,10 @@ mod program_source_support_history {
             assert!(OriginalCompilerInputs::from_selection(&selection, &wrong_view).is_err());
             let without_first = support_view(&selected[1..]);
             assert!(OriginalCompilerInputs::from_selection(&selection, &without_first).is_err());
-            assert_eq!(continued.compiler_inputs().projection.roles(), stable_roles);
+            assert_eq!(
+                continued.compiler_inputs().projection().roles(),
+                stable_roles
+            );
             assert!(std::ptr::eq(
                 stable_inputs.as_ref(),
                 continued.compiler_inputs()

@@ -18,7 +18,9 @@ mod compiler_projection;
 mod native_availability;
 pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
-pub(crate) use native_availability::{validate_consumed_native_namespace, IssuedNativeOffer};
+pub(crate) use native_availability::{
+    validate_consumed_native_namespace, IssuedNativeOffer, NativeOfferContribution,
+};
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
@@ -395,6 +397,22 @@ pub(crate) struct ArtifactAdmission {
     target_native_selection: Option<IssuedTargetNativeSelection>,
 }
 
+/// Ownership issued by the admission solver, before deriving a selected view.
+struct IssuedArtifactCustody {
+    lease: Arc<ViewLease>,
+    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    target_native_selection: Option<IssuedTargetNativeSelection>,
+}
+
+impl IssuedArtifactCustody {
+    fn into_view(self) -> ArtifactAdmission {
+        ArtifactAdmission {
+            artifacts: ArtifactView::from_custody(self.lease),
+            target_native_selection: self.target_native_selection,
+        }
+    }
+}
+
 impl ArtifactAdmission {
     pub(crate) fn into_target(self) -> Result<AdmittedTargetArtifacts, CompileError> {
         Ok(AdmittedTargetArtifacts {
@@ -562,6 +580,16 @@ impl NativeOriginalRequirement {
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let graph = self.selection.graph_selection();
         validate_issued_selection(&state, &view.read_projection(&state).nodes, graph)?;
+        self.qualify_checked_lease(&view.lease, &state, graph, scope)
+    }
+
+    fn qualify_checked_lease(
+        &self,
+        lease: &ViewLease,
+        state: &InventoryState,
+        graph: &ArtifactGraphSelection,
+        scope: NativeAvailabilityQualificationScope,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
         let carrier = if let Some(carrier) = graph
             .namespace
             .iter()
@@ -600,8 +628,7 @@ impl NativeOriginalRequirement {
         if matches!(
             scope,
             NativeAvailabilityQualificationScope::CurrentNamespace
-        ) && view
-            .lease
+        ) && lease
             .selection
             .namespace
             .get(&self.original)
@@ -609,7 +636,7 @@ impl NativeOriginalRequirement {
         {
             return Ok(None);
         }
-        let entry = &view.lease.payloads[&self.original];
+        let entry = &lease.payloads[&self.original];
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeRootNotOriginal {
@@ -627,7 +654,7 @@ impl NativeOriginalRequirement {
         .id;
         let canonical_binding = match scope {
             NativeAvailabilityQualificationScope::CurrentNamespace => {
-                let Some(binding) = view.lease.selection.namespace.get(&canonical).copied() else {
+                let Some(binding) = lease.selection.namespace.get(&canonical).copied() else {
                     return Ok(None);
                 };
                 binding
@@ -680,7 +707,7 @@ impl NativeOriginalRequirement {
                     .map(InventoryNodeKey::Group),
             )
             .collect::<imbl::OrdSet<_>>();
-        let index = NativeSelectionIndex::build(&state, &nodes);
+        let index = NativeSelectionIndex::build(state, &nodes);
         if entry.native_group_ordinals.is_empty()
             || !entry.native_group_ordinals.iter().all(|ordinal| {
                 matches!(
@@ -697,7 +724,7 @@ impl NativeOriginalRequirement {
             .map(|ordinal| index.resolve(carrier, *ordinal))
             .collect::<Result<Vec<_>, _>>()?;
         let (_, groups) =
-            view.native_requirements_for_exact_groups_locked(&state, &nodes, roots)?;
+            native_requirements_for_exact_groups_in_custody(state, &lease.payloads, &nodes, roots)?;
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
@@ -939,18 +966,9 @@ impl ArtifactRootIntent<'_> {
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
-            Self::PrivateAvailability {
-                selected: offers, ..
-            }
-            | Self::Offered(_, offers) => {
-                let mut requirements = Vec::new();
-                for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
-                    if !requirements.contains(proof) {
-                        requirements.push(proof.clone());
-                    }
-                }
-                requirements
-            }
+            // Checked availability is not a selected graph. Its membership
+            // is queried only for certified fresh dependency demand below.
+            Self::PrivateAvailability { .. } | Self::Offered(..) => Vec::new(),
             Self::Certified(selection) => {
                 let mut requirements = Vec::new();
                 for proof in selection.native_original_requirements() {
@@ -2011,7 +2029,7 @@ impl NativeOwnerKey {
 #[derive(Default)]
 struct InventoryState {
     payload_intern: BTreeMap<ArtifactId, Vec<Weak<ArtifactEntry>>>,
-    views: Vec<(Weak<ViewReadCache>, Arc<ExactSelectionSnapshot>)>,
+    views: Vec<(Weak<ViewLease>, Arc<ExactSelectionSnapshot>)>,
     /// Immutable proof evidence lasts for this inventory's lifetime. Releasing
     /// native payload custody does not release proof-only ancestor facts.
     selection_plans: BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>,
@@ -2522,7 +2540,14 @@ pub(crate) struct BoundArtifactSelection {
     owners: SelectedOwners,
     captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
-    groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
+    groups: BTreeMap<NativeGroupKey, BoundNativeGroup>,
+    native_source: crate::certified_products::CertifiedSourceSelection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BoundNativeGroup {
+    Retained(BTreeSet<NativeGroupBinding>),
+    Issued(NativeGroupBinding),
 }
 
 impl BoundArtifactSelection {
@@ -2744,41 +2769,6 @@ impl ArtifactInventory {
                 .or_default()
                 .insert(*group);
         }
-        // Body offers narrow retained custody without choosing among issuers.
-        let mut offered = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-        for proof in selection.native_original_requirements() {
-            for group in &proof.selection.graph_selection().native_groups {
-                offered
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
-            }
-        }
-        groups.extend(offered);
-        // The issuing role may qualify a group among several retained bindings.
-        // Availability by itself leaves ambiguity intact until demand.
-        let mut qualified = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-        for requirement in selection.native_original_requirements() {
-            for root in &requirement.selection.graph_selection().roots {
-                let ArtifactBindingNode::Group(group) = root else {
-                    continue;
-                };
-                if group.binding.artifact() != requirement.original {
-                    continue;
-                }
-                qualified
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
-            }
-        }
-        groups.extend(qualified);
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -2788,7 +2778,11 @@ impl ArtifactInventory {
             owners,
             captured_facts,
             materializations,
-            groups,
+            groups: groups
+                .into_iter()
+                .map(|(key, groups)| (key, BoundNativeGroup::Retained(groups)))
+                .collect(),
+            native_source: selection.clone(),
         })
     }
 
@@ -2886,7 +2880,7 @@ impl ArtifactInventory {
                 continue;
             }
             let explicit_root = selection.native_original_requirements().any(|proof| {
-                proof.selection.graph_selection().roots.iter().any(|root| {
+                proof.selection.snapshot().roots.keys().any(|root| {
                     matches!(root, ArtifactBindingNode::Group(root)
                         if root.binding.artifact() == group.artifact
                             && root.original_ordinal == group.original_ordinal)
@@ -2912,12 +2906,21 @@ impl ArtifactInventory {
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let issued_nodes = fixed
-                .groups
-                .get(&group)
+            let candidates = match fixed.groups.get(&group) {
+                Some(BoundNativeGroup::Issued(group)) => BTreeSet::from([*group]),
+                retained => {
+                    let recorded = fixed.native_source.native_group_candidates(group);
+                    if !recorded.is_empty() {
+                        recorded
+                    } else if let Some(BoundNativeGroup::Retained(groups)) = retained {
+                        groups.clone()
+                    } else {
+                        BTreeSet::new()
+                    }
+                }
+            };
+            let issued_nodes = candidates
                 .into_iter()
-                .flatten()
-                .copied()
                 .map(InventoryNodeKey::Group)
                 .collect::<imbl::OrdSet<_>>();
             let issued = NativeSelectionIndex::build(&state, &issued_nodes);
@@ -3268,13 +3271,11 @@ impl ArtifactInventory {
                 .ok()
                 .expect("fresh availability projection");
             for group in &issued_groups {
-                fixed.groups.insert(
-                    NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    },
-                    BTreeSet::from([*group]),
-                );
+                let key = NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                };
+                fixed.groups.insert(key, BoundNativeGroup::Issued(*group));
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
@@ -3353,12 +3354,7 @@ impl ArtifactInventory {
             .filter_map(CompilerInputRole::original)
             .collect::<BTreeSet<_>>();
         for offer in offers {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
+            if !offered.contains(&offer.original()) && !offer.offers_groups_for(&offered) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: offer.original(),
@@ -3376,6 +3372,69 @@ impl ArtifactInventory {
     }
     /// Issue complete private products using only the request's exact external
     /// dependency proofs. This temporary view does not publish execution demand.
+    fn issue_private_complete_availability(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        availability: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
+    ) -> Result<native_availability::CheckedNativeAvailability, CompileError> {
+        self.check_complete_availability_offers(projection, availability)?;
+        let groups = entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .native_group_ordinals
+                    .iter()
+                    .map(|ordinal| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: *ordinal,
+                    })
+            })
+            .collect();
+        let originals = entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let custody = self.issue_selected_custody(
+            parent,
+            entries,
+            groups,
+            false,
+            ArtifactRootIntent::PrivateAvailability {
+                projection,
+                selected: availability,
+                dependencies,
+            },
+            None,
+        )?;
+        native_availability::CheckedNativeAvailability::from_complete_custody(custody, &originals)
+    }
+
+    fn check_complete_availability_offers(
+        &self,
+        projection: &CompilerInputProjection,
+        availability: &[IssuedNativeOffer],
+    ) -> Result<(), CompileError> {
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        for offer in availability {
+            if !offered.contains(&offer.original()) && !offer.offers_groups_for(&offered) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: offer.original(),
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn admit_private_complete_products(
         &self,
         parent: &ArtifactView,
@@ -3384,25 +3443,7 @@ impl ArtifactInventory {
         availability: &[IssuedNativeOffer],
         dependencies: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
-        let offered = projection
-            .roles()
-            .iter()
-            .filter_map(CompilerInputRole::original)
-            .collect::<BTreeSet<_>>();
-        for offer in availability {
-            if !offered.contains(&offer.original())
-                && !offer
-                    .issued_group_carriers()?
-                    .keys()
-                    .any(|group| offered.contains(&group.binding.artifact()))
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootOutsideView {
-                        artifact: offer.original(),
-                    },
-                ));
-            }
-        }
+        self.check_complete_availability_offers(projection, availability)?;
         self.admit_shared_with_intent(
             parent,
             entries,
@@ -3500,6 +3541,19 @@ impl ArtifactInventory {
         root_intent: ArtifactRootIntent<'_>,
         target_groups: Option<BTreeSet<NativeGroupKey>>,
     ) -> Result<ArtifactAdmission, CompileError> {
+        self.issue_selected_custody(parent, entries, groups, exact, root_intent, target_groups)
+            .map(IssuedArtifactCustody::into_view)
+    }
+
+    fn issue_selected_custody(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        groups: BTreeSet<NativeGroupKey>,
+        exact: bool,
+        root_intent: ArtifactRootIntent<'_>,
+        target_groups: Option<BTreeSet<NativeGroupKey>>,
+    ) -> Result<IssuedArtifactCustody, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
             return Err(failure("view belongs to another inventory"));
         }
@@ -3508,8 +3562,14 @@ impl ArtifactInventory {
             && target_groups.is_none()
             && matches!(root_intent, ArtifactRootIntent::SuppliedArtifacts)
         {
-            return Ok(ArtifactAdmission {
-                artifacts: parent.clone(),
+            return Ok(IssuedArtifactCustody {
+                lease: Arc::clone(&parent.lease),
+                entries: parent
+                    .lease
+                    .payloads
+                    .iter()
+                    .map(|(id, entry)| (*id, Arc::clone(entry)))
+                    .collect(),
                 target_native_selection: None,
             });
         }
@@ -3701,7 +3761,12 @@ impl ArtifactInventory {
                 }
             }
         }
-        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
+        if let ArtifactRootIntent::PrivateAvailability {
+            selected: availability,
+            dependencies,
+            ..
+        } = root_intent
+        {
             native_availability::bind_fresh_product_dependencies(
                 &state,
                 parent,
@@ -3710,7 +3775,7 @@ impl ArtifactInventory {
                     .expect("private compiler namespace"),
                 &selected,
                 &groups,
-                dependencies,
+                availability.iter().chain(dependencies),
                 &mut required_groups,
             )?;
         }
@@ -4115,19 +4180,30 @@ impl ArtifactInventory {
         let snapshot =
             selection_snapshot_for_lease(&state, &namespace, &roots, &custody_roots, &parents);
         drop(state);
-        let view = ArtifactView::new(ViewDraft {
-            roots,
-            selection: snapshot,
+        let introduced = bound
+            .keys()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Artifact(binding) => Some(binding.artifact),
+                ArtifactBindingNode::Group(_) => None,
+            })
+            .collect();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection: snapshot,
 
-            inventory: self.clone(),
+                inventory: self.clone(),
 
-            parents,
-            issuing_payloads,
-            materialization_parents,
-            materialization: Mutex::new(BTreeMap::new()),
-        });
-        Ok(ArtifactAdmission {
-            artifacts: view,
+                parents,
+                issuing_payloads,
+                materialization_parents,
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            introduced,
+        );
+        Ok(IssuedArtifactCustody {
+            lease,
+            entries: selected,
             target_native_selection,
         })
     }
@@ -4142,6 +4218,22 @@ impl ArtifactInventory {
     ) -> Result<ArtifactView, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) || parent.has_retained_nodes() {
             return Err(failure("bound recovery requires an empty owning view"));
+        }
+        self.recover_selected_custody(parent, entries, selection, edges)
+            .map(|custody| custody.into_view().artifacts)
+    }
+
+    /// Authenticate recorded exact rows independently of any broader receiving
+    /// selection, retaining its real payload and acquisition owners.
+    fn recover_selected_custody(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        selection: &ArtifactGraphSelection,
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<IssuedArtifactCustody, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("bound recovery requires its owning inventory"));
         }
         let entries = entries
             .into_iter()
@@ -4256,17 +4348,25 @@ impl ArtifactInventory {
         let snapshot =
             selection_snapshot_for_lease(&state, &namespace, &roots, &selection.custody_roots, &[]);
         drop(state);
-        Ok(ArtifactView::new(ViewDraft {
-            roots: roots,
-            selection: snapshot,
-
-            inventory: self.clone(),
-
-            parents: vec![],
-            issuing_payloads: entries,
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        }))
+        let introduced = entries.keys().copied().collect();
+        let retained_entries = entries.clone();
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots,
+                selection: snapshot,
+                inventory: self.clone(),
+                parents: vec![Arc::clone(&parent.lease)],
+                issuing_payloads: entries,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            introduced,
+        );
+        Ok(IssuedArtifactCustody {
+            lease,
+            entries: retained_entries,
+            target_native_selection: None,
+        })
     }
 
     pub fn metrics(&self) -> ArtifactInventoryMetrics {
@@ -4286,6 +4386,74 @@ impl ArtifactInventory {
     pub fn node_count(&self) -> usize {
         self.0.lock().expect("inventory lock").live_nodes().len()
     }
+}
+
+fn native_requirements_for_exact_groups_in_custody(
+    state: &InventoryState,
+    payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    mut pending: Vec<NativeGroupBinding>,
+) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
+    let mut seen = BTreeSet::new();
+    let mut requirements = BTreeSet::new();
+    let mut packages = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if !seen.insert(key) {
+            continue;
+        }
+        state.graph_visits.fetch_add(1, Ordering::Relaxed);
+        for package in &payloads[&key.binding.artifact()].retained_packages {
+            if key.original_ordinal == package.dependent_ordinal {
+                packages.insert(NativePackageRequirement {
+                    artifact_id: key.binding.artifact(),
+                    identity: package.identity.clone(),
+                    generation: package.generation,
+                    interface_digest: package.interface_digest,
+                });
+            }
+        }
+        for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
+            match label {
+                ArtifactDependency::NativeGroup { .. } => {
+                    let InventoryNodeKey::Group(required) = target else {
+                        return Err(failure("native group edge lacks group target"));
+                    };
+                    if !owned.contains(&target) {
+                        return Err(failure("native dependency outside selected view"));
+                    }
+                    pending.push(required);
+                }
+                ArtifactDependency::NativeBinding {
+                    generation,
+                    namespace,
+                    occurrence,
+                    record_parent,
+                    ..
+                } => {
+                    let descriptor = &payloads[&target.artifact()].descriptor;
+                    requirements.insert(NativeBindingRequirement {
+                        artifact_id: descriptor.id,
+                        identity: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: descriptor.owner.unit.clone(),
+                            module: descriptor.owner.module.clone(),
+                            namespace: namespace.clone(),
+                            occurrence: occurrence.clone(),
+                            record_parent: record_parent.clone(),
+                        },
+                        generation: *generation,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((
+        NativeRequirements {
+            bindings: requirements.into_iter().collect(),
+            packages: packages.into_iter().collect(),
+        },
+        seen,
+    ))
 }
 
 struct ViewLease {
@@ -4515,6 +4683,99 @@ impl ViewReadProjection {
 }
 
 impl ViewLease {
+    /// Retain payload and acquisition owners after the admission solver has
+    /// authenticated these exact bindings. No derived view closure is needed.
+    fn from_issued_draft(lease: ViewDraft, introduced: BTreeSet<ArtifactId>) -> Arc<Self> {
+        let mut payloads = lease
+            .parents
+            .first()
+            .map(|parent| parent.payloads.clone())
+            .unwrap_or_default();
+        for parent in lease.parents.iter().skip(1) {
+            for (id, entry) in &parent.payloads {
+                if !payloads.contains_key(id) {
+                    payloads.insert(*id, Arc::clone(entry));
+                }
+            }
+        }
+        for (id, entry) in &lease.issuing_payloads {
+            if (payloads.contains_key(id) || introduced.contains(id))
+                && payloads
+                    .get(id)
+                    .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
+            {
+                payloads.insert(*id, Arc::clone(entry));
+            }
+        }
+        let mut state = lease.inventory.0.lock().expect("inventory lock");
+        if lease
+            .parents
+            .iter()
+            .any(|parent| !Arc::ptr_eq(&parent.inventory.0, &lease.inventory.0))
+        {
+            let proofs = scope_proof::prepare_install(
+                &state,
+                lease
+                    .selection
+                    .scopes
+                    .iter()
+                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
+                    .map(|(_, proof)| Arc::clone(proof.proof())),
+            )
+            .expect("issued immutable scope owners");
+            scope_proof::install(&mut state, proofs);
+        }
+        for id in &introduced {
+            if !payloads.contains_key(id) {
+                payloads.insert(*id, state.interned(id).expect("issued payload custody"));
+            }
+        }
+        // Shared cache owners retain paths independently of artifact views and
+        // are observed lazily through the existing interruptible lock boundary.
+        let mut materialization_sources = lease
+            .parents
+            .first()
+            .map(|parent| parent.materialization_sources.clone())
+            .unwrap_or_default();
+        for (index, parent) in lease.parents.iter().enumerate() {
+            if index != 0 {
+                for (id, source) in &parent.materialization_sources {
+                    if !materialization_sources.contains_key(id) {
+                        materialization_sources.insert(*id, source.clone());
+                    }
+                }
+            }
+            materialization_sources
+                .insert(parent.materialization.id(), parent.materialization.clone());
+        }
+        let lease = Arc::new(ViewLease {
+            admission_roots: lease.roots.into_iter().collect(),
+            selection: lease.selection,
+            payloads,
+            inventory: lease.inventory.clone(),
+            materialization_sources,
+            materialization: MaterializationSource {
+                cache: Arc::new(lease.materialization),
+                parents: lease
+                    .parents
+                    .iter()
+                    .map(|parent| parent.materialization.id())
+                    .collect::<Vec<_>>()
+                    .into(),
+                fixed: lease.materialization_parents.into(),
+            },
+        });
+        for (id, entry) in &lease.payloads {
+            state.intern(*id, entry);
+        }
+        state.views.retain(|(view, _)| view.strong_count() > 0);
+        state
+            .views
+            .push((Arc::downgrade(&lease), Arc::clone(&lease.selection)));
+        drop(state);
+        lease
+    }
+
     fn lock_materialization(
         &self,
     ) -> std::io::Result<
@@ -4946,95 +5207,14 @@ impl ArtifactView {
                     .map(|parent| parent.selection.as_ref()),
             )
             .expect("issued selection");
-        let mut payloads = lease
-            .parents
-            .first()
-            .map(|parent| parent.payloads.clone())
-            .unwrap_or_default();
-        for parent in lease.parents.iter().skip(1) {
-            for (id, entry) in &parent.payloads {
-                if !payloads.contains_key(id) {
-                    payloads.insert(*id, Arc::clone(entry));
-                }
-            }
+        Self::from_custody(ViewLease::from_issued_draft(lease, introduced))
+    }
+
+    fn from_custody(lease: Arc<ViewLease>) -> Self {
+        Self {
+            lease,
+            reads: Arc::new(ViewReadCache::default()),
         }
-        for (id, entry) in &lease.issuing_payloads {
-            if (payloads.contains_key(id) || introduced.contains(id))
-                && payloads
-                    .get(id)
-                    .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
-            {
-                payloads.insert(*id, Arc::clone(entry));
-            }
-        }
-        let mut state = lease.inventory.0.lock().expect("inventory lock");
-        if lease
-            .parents
-            .iter()
-            .any(|parent| !Arc::ptr_eq(&parent.inventory.0, &lease.inventory.0))
-        {
-            let proofs = scope_proof::prepare_install(
-                &state,
-                lease
-                    .selection
-                    .scopes
-                    .iter()
-                    .filter(|(scope, _)| !state.selection_plans.contains_key(*scope))
-                    .map(|(_, proof)| Arc::clone(proof.proof())),
-            )
-            .expect("issued immutable scope owners");
-            scope_proof::install(&mut state, proofs);
-        }
-        for id in &introduced {
-            if !payloads.contains_key(id) {
-                payloads.insert(*id, state.interned(id).expect("issued payload custody"));
-            }
-        }
-        // Shared cache owners retain paths independently of artifact views and
-        // are observed lazily through the existing interruptible lock boundary.
-        let mut materialization_sources = lease
-            .parents
-            .first()
-            .map(|parent| parent.materialization_sources.clone())
-            .unwrap_or_default();
-        for (index, parent) in lease.parents.iter().enumerate() {
-            if index != 0 {
-                for (id, source) in &parent.materialization_sources {
-                    if !materialization_sources.contains_key(id) {
-                        materialization_sources.insert(*id, source.clone());
-                    }
-                }
-            }
-            materialization_sources
-                .insert(parent.materialization.id(), parent.materialization.clone());
-        }
-        let lease = Arc::new(ViewLease {
-            admission_roots: lease.roots.into_iter().collect(),
-            selection: lease.selection,
-            payloads,
-            inventory: lease.inventory.clone(),
-            materialization_sources,
-            materialization: MaterializationSource {
-                cache: Arc::new(lease.materialization),
-                parents: lease
-                    .parents
-                    .iter()
-                    .map(|parent| parent.materialization.id())
-                    .collect::<Vec<_>>()
-                    .into(),
-                fixed: lease.materialization_parents.into(),
-            },
-        });
-        for (id, entry) in &lease.payloads {
-            state.intern(*id, entry);
-        }
-        state.views.retain(|(view, _)| view.strong_count() > 0);
-        let reads = Arc::new(ViewReadCache::default());
-        state
-            .views
-            .push((Arc::downgrade(&reads), Arc::clone(&lease.selection)));
-        drop(state);
-        Self { lease, reads }
     }
 
     // Closure and dependency initializers receive an already locked inventory. Nothing
@@ -5355,7 +5535,7 @@ impl ArtifactView {
     /// Read-only lifetime requirements for accepted authored owners. Retaining a
     /// full module also retains private helpers that may be called by a later
     /// exported entry; this query grants no executable group selection.
-    pub(crate) fn authored_native_binding_custody_requirements(
+    fn authored_native_binding_custody_requirements(
         &self,
         accepted_owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
@@ -5518,68 +5698,9 @@ impl ArtifactView {
         &self,
         state: &InventoryState,
         owned: &imbl::OrdSet<InventoryNodeKey>,
-        mut pending: Vec<NativeGroupBinding>,
+        pending: Vec<NativeGroupBinding>,
     ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
-        let mut seen = BTreeSet::new();
-        let mut requirements = BTreeSet::new();
-        let mut packages = BTreeSet::new();
-        while let Some(key) = pending.pop() {
-            if !seen.insert(key) {
-                continue;
-            }
-            state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            for package in &self.lease.payloads[&key.binding.artifact()].retained_packages {
-                if key.original_ordinal == package.dependent_ordinal {
-                    packages.insert(NativePackageRequirement {
-                        artifact_id: key.binding.artifact(),
-                        identity: package.identity.clone(),
-                        generation: package.generation,
-                        interface_digest: package.interface_digest,
-                    });
-                }
-            }
-            for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
-                match label {
-                    ArtifactDependency::NativeGroup { .. } => {
-                        let InventoryNodeKey::Group(required) = target else {
-                            return Err(failure("native group edge lacks group target"));
-                        };
-                        if !owned.contains(&target) {
-                            return Err(failure("native dependency outside selected view"));
-                        }
-                        pending.push(required);
-                    }
-                    ArtifactDependency::NativeBinding {
-                        generation,
-                        namespace,
-                        occurrence,
-                        record_parent,
-                        ..
-                    } => {
-                        let descriptor = &self.lease.payloads[&target.artifact()].descriptor;
-                        requirements.insert(NativeBindingRequirement {
-                            artifact_id: descriptor.id,
-                            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                                unit: descriptor.owner.unit.clone(),
-                                module: descriptor.owner.module.clone(),
-                                namespace: namespace.clone(),
-                                occurrence: occurrence.clone(),
-                                record_parent: record_parent.clone(),
-                            },
-                            generation: *generation,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok((
-            NativeRequirements {
-                bindings: requirements.into_iter().collect(),
-                packages: packages.into_iter().collect(),
-            },
-            seen,
-        ))
+        native_requirements_for_exact_groups_in_custody(state, &self.lease.payloads, owned, pending)
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
@@ -6567,7 +6688,7 @@ impl ArtifactView {
                 .collect()
             };
             for requirement in requirements {
-                for root in &requirement.selection.graph_selection().roots {
+                for root in requirement.selection.snapshot().roots.keys() {
                     let ArtifactBindingNode::Group(group) = root else {
                         continue;
                     };
@@ -6766,108 +6887,71 @@ impl ArtifactView {
         &self,
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
-        let mut current = self.clone();
-        let mut deferred = Vec::new();
-        let mut validated = false;
-        let mut ordinary_merges = 0usize;
-        let mut covered_offers = 0usize;
-        for offer in offers {
-            let incoming = offer.custody();
-            if Arc::ptr_eq(&current.lease, &incoming.lease) || !incoming.has_retained_nodes() {
-                continue;
-            }
-            if !current.has_retained_nodes() {
-                current = incoming.clone();
-                validated = false;
-                continue;
-            }
-            if validated && current.covers_issued_custody(incoming) {
-                // Foreign issuers still cross the same authentication boundary.
-                current.validate_issued_merge(incoming)?;
-                deferred.push(Arc::clone(&incoming.lease));
-                covered_offers += 1;
-                continue;
-            }
-            current = current.finish_deferred_custody(std::mem::take(&mut deferred))?;
-            current.validate_issued_merge(incoming)?;
-            current = current.merge_validated_namespace(incoming, current.namespace())?;
-            validated = true;
-            ordinary_merges += 1;
-        }
-        let retained = current.finish_deferred_custody(deferred)?;
-        tracing::debug!(target: "exomonad_harness::timing", ordinary_merges, covered_offers, "issued offer custody retention");
-        Ok(retained)
-    }
-
-    fn covers_issued_custody(&self, incoming: &Self) -> bool {
-        if !incoming.lease.selection.namespace.is_empty()
-            || !incoming.lease.selection.roots.is_empty()
-            || incoming
-                .lease
-                .selection
-                .scopes
-                .iter()
-                .any(|(scope, proof)| self.lease.selection.scopes.get(scope) != Some(proof))
-            || incoming.lease.payloads.iter().any(|(id, entry)| {
-                self.lease
-                    .payloads
-                    .get(id)
-                    .is_none_or(|retained| !Arc::ptr_eq(retained, entry))
-            })
-        {
-            return false;
-        }
+        let mut parents = vec![Arc::clone(&self.lease)];
+        let mut payloads = BTreeMap::new();
+        let mut selection = self.lease.selection.as_ref().clone();
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
-        incoming
-            .lease
-            .selection
-            .custody_roots
-            .keys()
-            .all(|root| owned.contains(root))
-    }
-
-    fn finish_deferred_custody(&self, deferred: Vec<Arc<ViewLease>>) -> Result<Self, CompileError> {
-        if deferred.is_empty() {
+        for offer in offers {
+            let incoming = offer.custody_lease();
+            if parents.iter().any(|parent| Arc::ptr_eq(parent, incoming)) {
+                continue;
+            }
+            if !Arc::ptr_eq(&self.lease.inventory.0, &incoming.inventory.0) {
+                scope_proof::prepare_install(
+                    &state,
+                    incoming
+                        .selection
+                        .scopes
+                        .values()
+                        .map(|proof| Arc::clone(proof.proof())),
+                )?;
+                for entry in incoming.payloads.values() {
+                    state.canonicalize(Arc::clone(entry))?;
+                }
+            }
+            for (id, incoming) in &incoming.payloads {
+                let previous = payloads.get(id).or_else(|| self.lease.payloads.get(id));
+                let retained = match previous {
+                    Some(previous) => {
+                        ArtifactEntry::merge_catalog_input_custody(previous, incoming)?
+                    }
+                    None => Arc::clone(incoming),
+                };
+                payloads.insert(*id, retained);
+            }
+            for (scope, proof) in &incoming.selection.scopes {
+                if !selection.scopes.contains_key(scope) {
+                    selection.scopes.insert(*scope, proof.clone());
+                }
+            }
+            for carrier in offer.artifact_carriers() {
+                selection
+                    .custody_roots
+                    .insert(ArtifactBindingNode::Artifact(*carrier), ());
+            }
+            parents.push(Arc::clone(incoming));
+        }
+        if parents.len() == 1 {
             return Ok(self.clone());
         }
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let projection = self.read_projection(&state);
-        let namespace = self.namespace();
-        let entries = namespace
-            .keys()
-            .map(|id| (*id, Arc::clone(&self.lease.payloads[id])))
-            .collect();
-        SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
-        let reads = ViewReadProjection {
-            nodes: projection.nodes.clone(),
-            entries: projection.entries.clone(),
-            dependencies: OnceLock::new(),
-            native_selection: OnceLock::new(),
-            metadata: OnceLock::new(),
-        };
-        let mut parents = Vec::with_capacity(deferred.len() + 1);
-        parents.push(Arc::clone(&self.lease));
-        parents.extend(deferred);
-        let namespace = self.namespace();
-        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
+        let selection = Arc::new(selection);
         drop(state);
-        let retained = Self::new(ViewDraft {
-            roots: vec![],
-            selection,
-            inventory: self.lease.inventory.clone(),
-            parents,
-            issuing_payloads: BTreeMap::new(),
-            materialization_parents: vec![],
-            materialization: Mutex::new(BTreeMap::new()),
-        });
-        retained
-            .reads
-            .read_projection
-            .set(reads)
-            .ok()
-            .expect("fresh custody projection");
-        Ok(retained)
+        // Artifact carriers retain type facts and exact acquisition handles.
+        // Native Group availability remains in its opaque offer owner instead
+        // of becoming another selected-view closure to expand on every read.
+        let lease = ViewLease::from_issued_draft(
+            ViewDraft {
+                roots: vec![],
+                selection,
+                inventory: self.lease.inventory.clone(),
+                parents,
+                issuing_payloads: payloads,
+                materialization_parents: vec![],
+                materialization: Mutex::new(BTreeMap::new()),
+            },
+            BTreeSet::new(),
+        );
+        Ok(Self::from_custody(lease))
     }
 
     #[cfg(test)]
@@ -8747,6 +8831,103 @@ mod tests {
                 .contains(&consumer_group));
             assert_eq!(next.capture_graph_selection().native_groups.len(), 3);
         }
+    }
+
+    #[test]
+    fn bound_native_demand_repeats_new_carrier_before_recorded_historical_choice() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "CarrierRepeat",
+            vec![(0, vec![]), (1, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let historical = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![native.clone(), Arc::new(entry("HistoricalMarker", &[]))],
+            )
+            .unwrap();
+        let current = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![native.clone(), Arc::new(entry("CurrentMarker", &[]))],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let old_carrier = historical.namespace()[&native.descriptor.id];
+        let current_carrier = current.namespace()[&native.descriptor.id];
+        assert_ne!(old_carrier, current_carrier);
+        let proof =
+            NativeOriginalRequirement::from_selected_view(native.descriptor.id, &historical)
+                .unwrap()
+                .unwrap();
+        let old_groups = proof.selection.graph_selection().native_groups.clone();
+        assert_eq!(old_groups.len(), 2);
+        let available = historical.merge_fixture_selections(&current).unwrap();
+        assert_eq!(
+            available.namespace()[&native.descriptor.id],
+            current_carrier
+        );
+        let mut selected = bound_selection_for_entries(&available, &[native.clone()]);
+        selected
+            .with_new_product_dependencies(&available.metadata_snapshot(), &[proof])
+            .unwrap();
+        let mut fixed = inventory
+            .bind_segment(&available, vec![], &selected)
+            .unwrap();
+        let first_imports = [issued_source(&native, 0)];
+        let first = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&first_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        let first_groups = first.capture_graph_selection().native_groups;
+        assert_eq!(first_groups.len(), 1);
+        assert!(!old_groups.contains(&first_groups[0]));
+        let before_repeat = inventory.metrics();
+        let repeated = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &first,
+                NativeArtifactDemand::CertifiedTargetImports(&first_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        assert_eq!(
+            repeated.capture_graph_selection().native_groups,
+            first_groups
+        );
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes,
+            before_repeat.issued_scope_nodes
+        );
+        let union_imports = [issued_source(&native, 0), issued_source(&native, 1)];
+        let union = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &repeated,
+                NativeArtifactDemand::CertifiedTargetImports(&union_imports),
+                vec![],
+                &selected,
+            )
+            .unwrap()
+            .artifacts;
+        let union_groups = union.capture_graph_selection().native_groups;
+        assert_eq!(union_groups.len(), 2);
+        assert!(union_groups.contains(&first_groups[0]));
+        assert!(union_groups.iter().all(|group| !old_groups.contains(group)));
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes - before_repeat.issued_scope_nodes,
+            1
+        );
     }
 
     #[test]

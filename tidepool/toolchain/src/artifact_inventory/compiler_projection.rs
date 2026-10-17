@@ -443,7 +443,7 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let projection = request
             .compiler_inputs()
-            .projection
+            .projection()
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
         Self::new(
@@ -812,6 +812,23 @@ impl CompilerSourceSupport {
         )
     }
 
+    /// Lifetime custody includes authored private helpers, independently of
+    /// current executable demand and without choosing a historical issuer.
+    pub(crate) fn authored_native_binding_custody_requirements(
+        &self,
+        accepted: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        let mut requirements = self
+            .artifacts
+            .authored_native_binding_custody_requirements(accepted)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for offer in self.native_offers.iter() {
+            requirements.extend(offer.authored_binding_requirements(accepted)?);
+        }
+        Ok(requirements.into_iter().collect())
+    }
+
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
     }
@@ -858,6 +875,24 @@ impl CompilerInputProjection {
         self.admit_complete_native_products_with_dependencies(parent, entries, offers, &[])
     }
 
+    pub(crate) fn issue_complete_native_availability(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        offers: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
+    ) -> Result<super::native_availability::CheckedNativeAvailability, CompileError> {
+        let contributions = self.native_offer_contributions(parent, offers)?;
+        parent.inventory().issue_private_complete_availability(
+            parent,
+            entries,
+            self,
+            &contributions,
+            dependencies,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn admit_complete_native_products_with_dependencies(
         &self,
         parent: &ArtifactView,
