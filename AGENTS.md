@@ -89,6 +89,11 @@ Most changes touch one of three layers, and it helps to know which:
   evidence through exact references rather than embedding complete snapshots
   at every consumer. Preserve typed failure distinctions, including missing
   versus inaccessible storage; a failed observation does not establish absence.
+- Distinguish fresh evidence issuance from continuation of issued state in
+  constructors and tests. Continuation must carry the owning proof/support
+  value, not rebuild it from payload IDs or current inventory contents. Test
+  retained policy, current execution demand and historical custody separately;
+  a broad equality check alone cannot explain which contract changed.
 - Keep a value coupled to the metadata required to interpret it, through return
   values, storage and presentation. Audit downstream consumers when admission
   enriches metadata; correct execution with an older rendering table is still

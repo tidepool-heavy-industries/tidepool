@@ -65,6 +65,19 @@ consumer or construction requirement; do not introduce either preemptively.
 
 ## Later candidates and limits
 
+- Authored compiler certification now distinguishes current namespace roles,
+  complete closure-owned executable demand, and historical custody. Preserve
+  this separation in consumer traits: accept paired `CompilerSourceSupport`
+  and issuer-owned `SelectedOriginalClosure` where those are the contract,
+  rather than parallel raw inventories and inferred role maps. Exercise fresh
+  publication after recovery, published subset policy with complete authored
+  demand, and historical same-role bindings that must remain custody.
+- Publication continuation fixtures must carry exact prior support through the
+  production continuation path. Investigate reopening after an unrelated offer
+  is added before claiming publication identity is independent of ambient
+  availability. If the owner cannot return the original publication facts,
+  propose an immutable issued publication value; do not reconstruct them by
+  filtering the latest inventory or relax the identity assertion.
 - Compiler inventory observations can expose narrow read contracts while exact
   selections remain inventory-issued handles. Do not turn a service trait into
   a universal exemption from recovered-state authentication.
