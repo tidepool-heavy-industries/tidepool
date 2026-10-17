@@ -1187,7 +1187,7 @@ where
         use inspection_wait::{InspectionRequest, InspectionResult};
         let actor = owned.state.effects.context.actor;
         let operation_reader = self.environment.operation_reader.clone();
-        let source_layers = self.environment.source_layers.clone();
+        let source_inspection = self.environment.source_inspection.clone();
         let installed_tools = self.installed_tools.clone();
         let source_observation = self.runtime_observation.clone();
         let issued_source = owned.state.effects.issued_snapshot.clone();
@@ -1217,7 +1217,7 @@ where
                 Box::pin(async move {
                     if view == View::Revisions {
                         source_effect::refresh_source_observation(
-                            source_layers,
+                            source_inspection,
                             installed_tools,
                             source_observation,
                             issued_source,

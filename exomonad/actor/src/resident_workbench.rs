@@ -21,7 +21,6 @@ pub(crate) fn settled_manifest_attempt(
     }
 }
 
-use crate::SourceInspection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

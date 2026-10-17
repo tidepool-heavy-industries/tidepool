@@ -2,7 +2,7 @@
 use super::*;
 use crate::generated::source::SourceError;
 use crate::resident_workbench::{ActorGeneration, ActorGenerationCommit, ActorRequestSnapshot};
-use crate::{HasSourceInspection, SourceInspection};
+use crate::HasSourceInspection;
 use tidepool_bridge_effects::{
     RlPolicy, RlRefusal, RlRefusalCategory, RlSurfaceDiff, SrReloadOutcome,
 };

@@ -3,7 +3,7 @@
 use super::*;
 use crate::generated::source::{SourceError, SourceReq};
 use crate::resident_workbench::ActorRequestSnapshot;
-use crate::{HasSourceInspection, SourceInspection};
+use crate::HasSourceInspection;
 
 /// Explicit inspection uses the active installation, while retaining which
 /// generation the inspecting model request captured. No background polling.
