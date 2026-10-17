@@ -87,6 +87,7 @@ pub(super) fn bind_fresh_product_dependencies(
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<(), CompileError> {
     let namespace = parent.namespace();
+    let projection = parent.read_projection(state);
     let mut wanted = BTreeSet::new();
     for group in fresh {
         let entry = &entries[&group.artifact];
