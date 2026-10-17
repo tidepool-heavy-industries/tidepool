@@ -6672,7 +6672,11 @@ where
                     .resolve_certification_in(scope, code.prepared(), certification)
             })
             .transpose()?;
-        Ok(AdmittedTurnCode { code, scope, resolved })
+        Ok(AdmittedTurnCode {
+            code,
+            scope,
+            resolved,
+        })
     }
 
     fn provenance_for(
@@ -7014,7 +7018,11 @@ where
         // Preview source instances belong to its detached authority, so dropping
         // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
-        let InstalledAdmittedTurn { program, source_keys, _inputs: _installed_inputs } = self.install_admitted_turn(
+        let InstalledAdmittedTurn {
+            program,
+            source_keys,
+            _inputs: _installed_inputs,
+        } = self.install_admitted_turn(
             admission,
             match retained_images {
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
@@ -7084,7 +7092,11 @@ where
         admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
     ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
-        let AdmittedTurnCode { code, scope, resolved } = admission;
+        let AdmittedTurnCode {
+            code,
+            scope,
+            resolved,
+        } = admission;
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
@@ -7167,8 +7179,11 @@ where
         }
         let admission = self.admit_turn_code_in(scope, code)?;
         let provenance = self.provenance_for(&admission)?;
-        let InstalledAdmittedTurn { program, source_keys, _inputs: _installed_inputs } =
-            self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
+        let InstalledAdmittedTurn {
+            program,
+            source_keys,
+            _inputs: _installed_inputs,
+        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -7305,11 +7320,16 @@ where
                     )
                 })?;
         let lexical_scope = self.run_context.lexical_scope;
-        let admission = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
-            .in_scope(|| self.admit_turn_code_in(lexical_scope, code))?;
+        let admission =
+            tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
+                .in_scope(|| self.admit_turn_code_in(lexical_scope, code))?;
         let provenance = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.provenance")
             .in_scope(|| self.provenance_for(&admission))?;
-        let AdmittedTurnCode { code, scope: _, resolved } = admission;
+        let AdmittedTurnCode {
+            code,
+            scope: _,
+            resolved,
+        } = admission;
         let (constructor_table, _sites, prepared, _certification) = code.into_parts();
         if let Some(generation) = mode.generation() {
             // Claim the value-module identity before the turn runs.
@@ -11088,28 +11108,32 @@ mod authored_publication_tests {
             let mut includes = effects.include_paths().to_vec();
             includes.push(root.path().to_path_buf());
             let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
-                run_turn(
-                    TurnRequest {
-                        exact_context: None,
-                        session_id: None,
-                        turn_text: "(42 :: Int)",
-                        templates: &templates,
-                        include: &includes,
-                        session_root: root.path(),
-                        inject_modules: &[],
-                        gen: 1,
-                        verdict: None,
-                        target: None,
-                        retained_imports: &[],
-                    },
-                    settlement,
-                )
-            }).unwrap() else {
+            let TurnResult::Expr { compiled, .. } =
+                tidepool_testing::with_settlement(|settlement| {
+                    run_turn(
+                        TurnRequest {
+                            exact_context: None,
+                            session_id: None,
+                            turn_text: "(42 :: Int)",
+                            templates: &templates,
+                            include: &includes,
+                            session_root: root.path(),
+                            inject_modules: &[],
+                            gen: 1,
+                            verdict: None,
+                            target: None,
+                            retained_imports: &[],
+                        },
+                        settlement,
+                    )
+                })
+                .unwrap()
+            else {
                 panic!("expected the real compiler's expression target");
             };
             let group_count = compiled.certification.as_ref().unwrap().groups.len();
-            let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, None);
+            let mut session =
+                TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, None);
             let before = session.state.certified_resolution_work();
             // No CompiledTurn or borrowed code survives this transfer. The
             // admission and installed custody must retain its original inputs.
@@ -11121,7 +11145,8 @@ mod authored_publication_tests {
                 } else {
                     session.run_with_sites("owned ordinary admission", code, settlement)
                 }
-            }).unwrap();
+            })
+            .unwrap();
             let ResidentOutcome::Completed { result, .. } = outcome else {
                 panic!("the pure ordinary target must complete");
             };
@@ -11199,9 +11224,17 @@ mod authored_publication_tests {
         assert_eq!(resolved.target_owners, oracle.target_owners);
         assert_eq!(resolved.source_evidence, oracle.source_evidence);
         let group_owners = |selection: &crate::session::persistent::ResolvedCertifiedTurn| {
-            selection.groups.iter().map(|group| {
-                (group.original().owner().clone(), group.original().original_ordinal(), group.demand().domain())
-            }).collect::<Vec<_>>()
+            selection
+                .groups
+                .iter()
+                .map(|group| {
+                    (
+                        group.original().owner().clone(),
+                        group.original().original_ordinal(),
+                        group.demand().domain(),
+                    )
+                })
+                .collect::<Vec<_>>()
         };
         assert_eq!(group_owners(resolved), group_owners(&oracle));
         let compiled = pending.compile_off_checkout().unwrap();

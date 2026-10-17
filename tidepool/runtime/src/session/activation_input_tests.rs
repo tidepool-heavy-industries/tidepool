@@ -2154,10 +2154,12 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     );
     let reobserved = outputs
         .iter()
-        .map(|output| source
-            .admit_turn_code_in(source.run_context.lexical_scope, output.code())
-            .and_then(|admission| source.provenance_for(&admission))
-            .unwrap())
+        .map(|output| {
+            source
+                .admit_turn_code_in(source.run_context.lexical_scope, output.code())
+                .and_then(|admission| source.provenance_for(&admission))
+                .unwrap()
+        })
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
         let recomputed = CompiledProvenancePlan::build(&output.code())
