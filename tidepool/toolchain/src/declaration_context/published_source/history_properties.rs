@@ -408,8 +408,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         0 => graph["native_groups"].as_array_mut().unwrap().clear(),
                         1 => {
                             let groups = graph["native_groups"].as_array_mut().unwrap();
-                            let mut unissued: NativeGroupBinding =
-                                serde_json::from_value(groups[0].clone()).unwrap();
+                            let mut unissued = groups.iter()
+                                .map(|group| serde_json::from_value::<NativeGroupBinding>(group.clone()).unwrap())
+                                .find(|group| group.binding.artifact() == root.descriptor.id)
+                                .expect("the exact publication owns its root's issued group");
                             prop_assert_eq!(unissued.original_ordinal, ORDINALS[initial]);
                             unissued.original_ordinal = ORDINALS[(initial + 1) % ORDINALS.len()];
                             groups.push(serde_json::to_value(unissued).unwrap());
