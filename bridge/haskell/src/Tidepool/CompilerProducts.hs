@@ -457,13 +457,18 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner = case exact of
+      acquireOriginal siblings owner producer missing = case exact of
         Nothing -> pure Nothing
         Just scope -> do
           when (any (\original -> (originalUnit original,originalModule original) ==
               (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
             (fail ("required binder is absent from the admitted original native census: "
-              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              ++ "; producing module: "
+              ++ show (unitString (moduleUnit producer),moduleNameString (moduleName producer))
+              ++ "; missing binders: " ++ show (Set.toAscList (Set.filter (\identity ->
+                symbolUnit identity == T.pack (unitString (moduleUnit owner))
+                  && symbolModule identity == T.pack (moduleNameString (moduleName owner))) missing))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -497,8 +502,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modules <- readIORef modulesRef
         attempted <- readIORef attemptedRef
         known <- readIORef knownRef
-        let pending = Set.toAscList (Set.fromList
-              [owner | identity <- Set.toAscList (rawOriginalProductDemands raw `Set.difference` known)
+        let missing = rawOriginalProductDemands raw `Set.difference` known
+            pending = Set.toAscList (Set.fromList
+              [owner | identity <- Set.toAscList missing
                 , let owner = mkModule
                         (stringToUnit (T.unpack (symbolUnit identity)))
                         (mkModuleName (T.unpack (symbolModule identity)))
@@ -508,7 +514,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> do
-          original <- acquireOriginal siblings owner
+          original <- acquireOriginal siblings owner (rawOriginalProductOwner raw) missing
           let version = ownerVersion interfaces owner
           -- A present canonical owner checks the current artifact bytes. A
           -- prepared hit avoids decoding and lowering, not validation work.
