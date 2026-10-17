@@ -9819,6 +9819,43 @@ mod tests {
             )
             .is_err());
         assert_eq!(acquisition.payloads.len(), before);
+        acquisition
+            .capture_bound(
+                std::slice::from_ref(&references[1]),
+                std::slice::from_ref(&interfaces[1]),
+                &[],
+                &[],
+                &views[1].descriptors(),
+                &selections[1].bindings,
+                &views[1].binding_dependencies(),
+            )
+            .unwrap();
+        assert!(acquisition.payloads.len() > before);
+        let all_held = acquisition.work();
+        assert!(acquisition
+            .capture_bound(
+                &references,
+                &interfaces,
+                &[],
+                &[],
+                &descriptors,
+                &bindings,
+                &edges
+            )
+            .is_err());
+        assert_eq!(acquisition.work(), all_held);
+        acquisition
+            .capture_bound(
+                std::slice::from_ref(&references[0]),
+                std::slice::from_ref(&interfaces[0]),
+                &[],
+                &[],
+                &views[0].descriptors(),
+                &selections[0].bindings,
+                &views[0].binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(acquisition.work(), all_held);
     }
 
     #[test]
