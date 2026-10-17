@@ -18,7 +18,8 @@ import Tidepool.Agent.Contract (compileTools, AsServerT)
 import Control.Monad.Freer (Eff, run)
 import Control.Monad.Freer.Internal (handleRelay)
 import Data.List (nubBy)
-import Tidepool.Inspection (displayWith)
+import Tidepool.Inspection (displayWith, displayTree, DisplayTree(..))
+import Tidepool.Inspection.Tree (renderTree)
 import Tidepool.Effects.Core (Lookup(..), Console)
 
 entry :: T.Text -> LookupEntry
@@ -38,6 +39,48 @@ assert label value = unless value (fail label)
 lookupNavigationTests :: TestTree
 lookupNavigationTests = testGroup "retained lookup navigation"
   [lookupPackingTests
+  ,testCase "index display leaves unrequested result and setup tails untouched" $ do
+     let first = (batch "source") {lookupResults =
+           LookupResult "same" (LookupFound [entry "source"] False) : error "unrequested result tail"}
+         complete = (batch "source") {lookupResults = [LookupResult "same" (LookupFound [entry "source"] False)]}
+         (prefix, remaining, _) = renderTree 70 (lookupIndexTree first)
+     assert "prefix agrees with the original complete index" (prefix == T.take 70 (referenceIndex complete))
+     assert "result tail is retained" (case remaining of Just _ -> True; Nothing -> False)
+     let setup = LookupSource "setup.hs" Nothing Nothing (Just "not captured")
+         withSetup sources = (entry "source") {lookupExample = fmap (\example -> example {exampleSetup = sources}) (lookupExample (entry "source"))}
+         single sources = complete {lookupResults = [LookupResult "same" (LookupFound [withSetup sources] False)]}
+         one = referenceIndex (single [setup])
+         allowance = T.length one - 1
+         (setupPrefix, _, _) = renderTree allowance (lookupIndexTree (single (setup : error "unrequested setup tail")))
+     assert "section ordinals stream without counting all setup entries" (setupPrefix == T.take allowance one)
+  ,testProperty "index tree preserves complete text and bounded prefixes" $ \(NonNegative seed) (NonNegative budget) ->
+     let original = batch (T.replicate (seed `mod` 9) "α🙂\r\n")
+         captured = original {lookupResults = take (seed `mod` 12) (cycle (lookupResults original))}
+         expected = referenceIndex captured
+         allowance = budget `mod` (T.length expected + 1)
+         (prefix, remaining, unavailable) = renderTree allowance (lookupIndexTree captured)
+         suffix = case remaining of Nothing -> ""; Just tree -> let (text, _, _) = renderTree maxBound tree in text
+         retained = retainLookupCapture captured (Just captured)
+     in renderLookupIndex captured == expected && prefix == T.take allowance expected
+       && prefix <> suffix == expected && not unavailable
+       && renderLookupCaptureIndex retained == "PrimaryLookup\n" <> expected <> "\nRelatedLookup\n" <> expected
+  ,testProperty "numbered display preserves exact lines and every retained prefix" $ \(NonNegative seed) (NonNegative budget) ->
+     let rows = take (seed `mod` 12) (cycle ["α\r\n", "\n", "🙂line\n"])
+         final = if even seed then "last🙂" else ""
+         source = T.concat rows <> final
+         expected = T.pack (concat [show number ++ ": " ++ T.unpack line
+           | (number, line) <- zip [1 :: Int ..] (rows ++ [final | not (T.null final)])])
+     in case selectLookup (batch source) (LookupSelection (LookupAddress 1 1 Example) Nothing) of
+       Left _ -> False
+       Right excerpt -> case displayTree excerpt of
+         Constructor _ fields -> case lookup "text" fields of
+           Nothing -> False
+           Just tree ->
+             let allowance = budget `mod` (T.length expected + 1)
+                 (prefix, remaining, unavailable) = renderTree allowance tree
+                 suffix = case remaining of Nothing -> ""; Just rest -> let (text, _, _) = renderTree maxBound rest in text
+             in prefix == T.take allowance expected && prefix <> suffix == expected && not unavailable
+         _ -> False
   ,testCase "numbered display preserves captured text and usable continuations" $ do
      let captured = retainLookupCapture (batch "first\r\n\r\nλ\nlast") Nothing
          selection = LookupCaptureSelection PrimaryLookup
@@ -249,6 +292,15 @@ lookupNavigationTests = testGroup "retained lookup navigation"
      in observed == map snd history
        && observed == map (fmap excerptText) (selectLookupMany captured (map fst history))
   ]
+
+-- The original eager formatter is an independent text oracle for the tree.
+referenceIndex :: LookupBatch -> T.Text
+referenceIndex captured = "Capture " <> lookupIdentity captured <> " (view " <> lookupView captured <> ")\n"
+  <> T.intercalate "\n" [T.pack (show (hitResult hit)) <> maybe "" (("." <>) . T.pack . show) (hitEntry hit)
+     <> " " <> hitQuery hit <> maybe "" (" — " <>) (hitName hit)
+     <> maybe "" (\owner -> " (" <> owner <> ")") (hitModule hit)
+     <> " [" <> hitStatus hit <> "] " <> T.pack (show (hitSections hit)) | hit <- lookupIndex captured]
+  <> maybe "" ("\nLookup issue: " <>) (lookupIssue captured)
 
 
 candidate :: Int -> T.Text -> LookupCandidate

@@ -5,4 +5,4 @@ shown <- do
       select payload = case Json.eitherDecode payload of
         Left issue -> TextLeaf (issue)
         Right selections -> displayTree (Nav.selectLookupMany captured selections)
-  displaySelectable (TextLeaf (Nav.renderLookupIndex captured)) select
+  displaySelectable (Nav.lookupIndexTree captured) select

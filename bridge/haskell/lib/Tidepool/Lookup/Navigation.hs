@@ -5,10 +5,10 @@
 module Tidepool.Lookup.Navigation
   ( LookupSection(..), LookupAddress(..), LookupLines(..), LookupSelection(..)
   , LookupHit(..), LookupExcerpt(..), LookupExtent(..), LookupSelectionIssue(..)
-  , lookupIndex, renderLookupIndex, selectLookup, selectLookupMany, lookupSectionText
+  , lookupIndex, lookupIndexTree, renderLookupIndex, selectLookup, selectLookupMany, lookupSectionText
   , RetainedLookupCapture, LookupCapturePart(..), LookupCaptureSelection(..)
   , LookupCaptureExcerpt(..), LookupCaptureIssue(..), retainLookupCapture
-  , lookupCaptureIndex, renderLookupCaptureIndex, lookupCaptureReceipts
+  , lookupCaptureIndex, lookupCaptureIndexTree, renderLookupCaptureIndex, lookupCaptureReceipts
   , selectLookupCapture, selectLookupCaptureMany
   , LookupLiteralQuery(..), LookupLiteralSearch(..), LookupLiteralMatch(..)
   , LookupCaptureTextSelection(..), LookupCaptureText(..)
@@ -180,11 +180,15 @@ lookupCaptureIndex captured = concat
   | part <- [PrimaryLookup, RelatedLookup]]
 
 renderLookupCaptureIndex :: RetainedLookupCapture -> Text
-renderLookupCaptureIndex captured@(RetainedLookupCapture _ related) = T.intercalate "\n"
-  [T.pack (show part) <> "\n" <> either issueText renderLookupIndex (captureBatch captured part)
+renderLookupCaptureIndex = completeIndexText . lookupCaptureIndexTree
+
+lookupCaptureIndexTree :: RetainedLookupCapture -> DisplayTree
+lookupCaptureIndexTree captured@(RetainedLookupCapture _ related) = indexLines
+  [Concat [StringLeaf (show part), LineBreak, either issueTree lookupIndexTree (captureBatch captured part)]
   | part <- PrimaryLookup : maybe [] (const [RelatedLookup]) related]
-  where issueText (CaptureRefused _ _ issue) = "Unavailable; inspect LookupReceipt." <> maybe "" (" " <>) issue
-        issueText issue = T.pack (show issue)
+  where issueTree (CaptureRefused _ _ issue) = Concat
+          [TextLeaf "Unavailable; inspect LookupReceipt.", maybe (Concat []) (\text -> Concat [TextLeaf " ", TextLeaf text]) issue]
+        issueTree issue = StringLeaf (show issue)
 
 selectLookupCapture :: RetainedLookupCapture -> LookupCaptureSelection -> Either LookupCaptureIssue LookupCaptureExcerpt
 selectLookupCapture captured (LookupCaptureSelection part selection) = do
@@ -214,16 +218,37 @@ lookupIndex batch = concatMap index (zip [1..] (lookupResults batch))
     sections entry = [Signature] ++ [Contract | lookupContract entry /= Nothing]
       ++ case lookupExample entry of
         Nothing -> []
-        Just example -> [Example, Requirements, Manifest, Bundle] ++ map Setup [1..length (exampleSetup example)]
+        Just example -> [Example, Requirements, Manifest, Bundle] ++ zipWith (\n _ -> Setup n) [1..] (exampleSetup example)
 
 -- | Compact hit index; detailed source stays in the captured fields.
 renderLookupIndex :: LookupBatch -> Text
-renderLookupIndex batch = "Capture " <> lookupIdentity batch <> " (view " <> lookupView batch <> ")\n"
-  <> T.intercalate "\n" [T.pack (show (hitResult hit)) <> maybe "" (("." <>) . T.pack . show) (hitEntry hit)
-     <> " " <> hitQuery hit <> maybe "" (" — " <>) (hitName hit)
-     <> maybe "" (\owner -> " (" <> owner <> ")") (hitModule hit)
-     <> " [" <> hitStatus hit <> "] " <> T.pack (show (hitSections hit)) | hit <- lookupIndex batch]
-  <> maybe "" ("\nLookup issue: " <>) (lookupIssue batch)
+renderLookupIndex = completeIndexText . lookupIndexTree
+
+-- | The display cursor consumes only the requested prefix. Metadata and source
+-- remain in the original batch; this tree does not flatten later hit rows.
+lookupIndexTree :: LookupBatch -> DisplayTree
+lookupIndexTree batch = Concat
+  [ TextLeaf "Capture ", TextLeaf (lookupIdentity batch), TextLeaf " (view ", TextLeaf (lookupView batch), TextLeaf ")\n"
+  , indexLines (map hitTree (lookupIndex batch))
+  , maybe (Concat []) (\issue -> Concat [TextLeaf "\nLookup issue: ", TextLeaf issue]) (lookupIssue batch)
+  ]
+  where
+    hitTree hit = Concat
+      [ StringLeaf (show (hitResult hit))
+      , maybe (Concat []) (\ordinal -> Concat [TextLeaf ".", StringLeaf (show ordinal)]) (hitEntry hit)
+      , TextLeaf " ", TextLeaf (hitQuery hit)
+      , maybe (Concat []) (\name -> Concat [TextLeaf " — ", TextLeaf name]) (hitName hit)
+      , maybe (Concat []) (\owner -> Concat [TextLeaf " (", TextLeaf owner, TextLeaf ")"]) (hitModule hit)
+      , TextLeaf " [", TextLeaf (hitStatus hit), TextLeaf "] ", StringLeaf (show (hitSections hit))
+      ]
+
+indexLines :: [DisplayTree] -> DisplayTree
+indexLines [] = Concat []
+indexLines (row : rest) = Concat (row : concatMap (\next -> [LineBreak, next]) rest)
+
+-- An explicit Text request consumes the same formatting through to completion.
+completeIndexText :: DisplayTree -> Text
+completeIndexText tree = let (text, _, _) = renderTree maxBound tree in text
 
 selectLookupMany :: LookupBatch -> [LookupSelection] -> [Either LookupSelectionIssue LookupExcerpt]
 selectLookupMany batch = map (selectLookup batch)
@@ -306,12 +331,16 @@ instance Display LookupHit where
     [("result", displayTree (hitResult hit)), ("entry", displayTree (hitEntry hit)),
      ("query", displayTree (hitQuery hit)), ("name", displayTree (hitName hit)),
      ("module", displayTree (hitModule hit)), ("status", TextLeaf (hitStatus hit)),
-     ("sections", TextLeaf (T.pack (show (hitSections hit))))]
-numberedExcerpt :: LookupExcerpt -> Text
-numberedExcerpt excerpt = T.concat
-  [T.pack (show number) <> ": " <> line
-  | (number, line) <- zip [first..] (retainedLines (excerptText excerpt))]
+     ("sections", StringLeaf (show (hitSections hit)))]
+numberedExcerptTree :: LookupExcerpt -> DisplayTree
+numberedExcerptTree excerpt = StringLeaf (rows [first..] (T.unpack (excerptText excerpt)))
   where first = case excerptLines excerpt of Just (LookupLines start _) -> start; Nothing -> 1
+        rows _ [] = []
+        rows [] _ = []
+        rows (number : following) text = show number ++ ": " ++ line following text
+        line _ [] = []
+        line following (character : rest) = character :
+          if character == '\n' then rows following rest else line following rest
 
 instance Display LookupExcerpt where
   displayTree excerpt = Constructor "LookupExcerpt"
@@ -321,7 +350,7 @@ instance Display LookupExcerpt where
      ("availability", TextLeaf (T.pack (show (excerptAvailability excerpt)))), ("quality", TextLeaf (T.pack (show (excerptQuality excerpt)))),
      ("locator", displayTree (excerptLocator excerpt)), ("sourceIdentity", displayTree (excerptSourceIdentity excerpt)),
      ("lines", TextLeaf (T.pack (show (excerptLines excerpt)))), ("extent", TextLeaf (T.pack (show (excerptExtent excerpt)))),
-     ("unavailable", displayTree (excerptUnavailable excerpt)), ("text", TextLeaf (numberedExcerpt excerpt))]
+     ("unavailable", displayTree (excerptUnavailable excerpt)), ("text", numberedExcerptTree excerpt)]
 instance Display LookupSelectionIssue where displayTree = TextLeaf . T.pack . show
 instance Display LookupCaptureExcerpt where
   displayTree excerpt = Constructor "LookupCaptureExcerpt"

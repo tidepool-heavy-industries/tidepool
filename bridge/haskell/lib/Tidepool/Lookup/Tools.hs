@@ -214,7 +214,7 @@ executeRetained discover select arguments = do
   evidence <- captureLookup discover select arguments
   let captured = captureRetained evidence
       original = capturePrimary evidence
-      index = TextLeaf (renderLookupCaptureIndex captured)
+      index = lookupCaptureIndexTree captured
       navigate payload = case eitherDecode payload of
         Left issue -> TextLeaf ("Invalid lookup selection: " <> issue)
         Right LookupIndex -> index
