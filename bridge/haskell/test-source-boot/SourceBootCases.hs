@@ -136,14 +136,14 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedCore, revalidateLocalFinalizedAdmissionWith )
 import Tidepool.BoundedRead (withFileObservations, observeFile)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput, projectedGroupEncodingBytes)
+import Tidepool.ExecutionEncode (encodeModuleProducts, encodeProjectedGroup, moduleProductInput, projectedGroupEncodingInput, projectedGroupEncodingBytes)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, rawOriginalGroupEncodings, preparedModuleProductOmissions)
+import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, preparedModuleProductEncodings, preparedModuleProductOmissions)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
   , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
@@ -2674,7 +2674,8 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   let settled rows withdrawn = fst (settleOriginalHomeModuleProductsWithoutOwners env Set.empty withdrawn (map snd rows))
       coldProducts = settled cold Set.empty
       warmProducts = settled warm Set.empty
-      encoded rows = map (Map.map projectedGroupEncodingBytes . rawOriginalGroupEncodings . snd) rows
+      encoded products = [(owner, fmap (map projectedGroupEncodingBytes) outcome)
+        | (owner, outcome) <- preparedModuleProductEncodings products]
       observations products = (preparedModuleProductOutcomes products,
         preparedModuleProductOmissions products)
       check label products = do
@@ -2688,11 +2689,35 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
         unless (Set.union declared (Set.fromList (map dcmId wired)) == issued) $
           fail (label ++ " metadata omitted an actual executable original constructor")
         pure (cons,rows)
-  unless (all (not . fst) disabled && encoded disabled == encoded cold) $
+  unless (all (not . fst) disabled && encoded (settled disabled Set.empty) == encoded coldProducts) $
     fail "timing changed canonical original group encodings or reused a comparison cache"
   forM_ [Set.empty, Set.singleton requestOwner] $ \withdrawn ->
-    unless (observations (settled disabled withdrawn) == observations (settled cold withdrawn)) $
-      fail "timing changed actual original product outcomes or omissions"
+    unless (observations (settled disabled withdrawn) == observations (settled cold withdrawn)
+        && encoded (settled disabled withdrawn) == encoded (settled cold withdrawn)) $
+      fail "timing changed actual original product outcomes, omissions or retained bytes"
+  let retainedEncodings products =
+        [(owner,groups) | (owner,Right groups) <- preparedModuleProductEncodings products]
+  unless (map (\(owner,groups) -> (owner,map projectedGroupEncodingInput groups))
+      (retainedEncodings coldProducts)
+      == [(owner,groups) | (owner,Right groups) <- preparedModuleProductOutcomes coldProducts]) $
+    fail "settled encoding plans lost their exact semantic groups"
+  forM_ (retainedEncodings coldProducts) $ \(_,groups) -> do
+    let ordinals = map (projectedOriginalOrdinal . projectedGroupEncodingInput) groups
+    unless (ordinals == sort ordinals && length ordinals == Set.size (Set.fromList ordinals)) $
+      fail "original encoding plans lost ascending unique ordinal order"
+    forM_ groups $ \group ->
+      unless (projectedGroupEncodingBytes group == encodeProjectedGroup (projectedGroupEncodingInput group)) $
+        fail "retained original plan changed canonical group bytes"
+  unless (map (\(owner,groups) -> (owner,length groups)) (retainedEncodings coldProducts)
+      == map (\(owner,groups) -> (owner,length groups)) (retainedEncodings warmProducts)) $
+    fail "warm original projection changed retained encoding plan membership"
+  forM_ (zip (retainedEncodings coldProducts) (retainedEncodings warmProducts)) $
+    \((_,coldGroups),(_,warmGroups)) ->
+      forM_ (zip coldGroups warmGroups) $ \(coldGroup,warmGroup) -> do
+        coldBytes <- evaluate (projectedGroupEncodingBytes coldGroup) >>= makeStableName
+        warmBytes <- evaluate (projectedGroupEncodingBytes warmGroup) >>= makeStableName
+        unless (coldBytes == warmBytes) $
+          fail "warm original projection rebuilt an exact group's encoded payload"
   target <- either (fail . show) pure (projectPrepared context (filter ((== entryOwner) . pmModule) modules))
   unless (null (programSites target) && any (\global ->
       globalIdentity global == SymbolIdentity "main" "OriginalTextRequest" "value" "siteRequest" Nothing)
@@ -2819,6 +2844,29 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     Right _ -> fail "constructor identity accepted a name outside its exact parent owner"
   unless (Set.fromList (map dcmId withdrawnRows) `Set.isSubsetOf` Set.fromList (map dcmId coldRows)) $
     fail "withdrawing an original introduced unrelated constructor metadata"
+  capture <- (== Just "1") <$> lookupEnv "TIDEPOOL_TEST_ORIGINAL_CAPTURE"
+  when capture $ do
+    let emit term = putStrLn ("original-comparison-cbor " ++ concatMap
+          (\byte -> let value = showHex byte "" in replicate (2 - length value) '0' ++ value)
+          (BS.unpack (toStrictByteString (encodeTerm term))))
+        ownerTerm owner = [TString (T.pack (unitString (moduleUnit owner))),
+          TString (T.pack (moduleNameString (moduleName owner)))]
+        outcomeTerm (owner,outcome) = TList (ownerTerm owner ++ [case outcome of
+          Left failure -> TList [TString "refused", TString (T.pack (show failure))]
+          Right groups -> TList (TString "available" :
+            map (TInteger . toInteger . projectedOriginalOrdinal) groups)])
+    -- Group observations contain accepted settled encodings, not every raw
+    -- successful projection. Rejected groups must not be forced for diagnostics.
+    forM_ [(owner,encodings) | (owner,Right encodings) <- preparedModuleProductEncodings coldProducts] $
+      \(owner,encodings) -> forM_ encodings $ \encoding ->
+        emit (TList (TString "group" : ownerTerm owner ++
+          [TInteger (toInteger (projectedOriginalOrdinal (projectedGroupEncodingInput encoding))),
+            TBytes (projectedGroupEncodingBytes encoding)]))
+    forM_ [("normal", coldProducts), ("withdrawn", settled cold (Set.singleton requestOwner))] $
+      \(label,products) -> emit (TList [TString "settlement", TString label,
+        TList (map outcomeTerm (preparedModuleProductOutcomes products)),
+        TList [TList (ownerTerm owner ++ [TString (T.pack (show omissions))])
+          | (owner,omissions) <- preparedModuleProductOmissions products]])
 
 originalPackageProjection :: IO ()
 originalPackageProjection = withScratch $ \work -> do

@@ -95,7 +95,12 @@ async fn resident_retirement_source_lifetime_with_preparation(
         .unwrap();
     let installed = Arc::new(crate::resident_workbench::InstalledToolsState::default());
     let lease = crate::InstalledToolLease::new(owner.identity(), source, None);
-    installed.publish(lease.clone());
+    installed
+        .install_bootstrap(
+            crate::resident_workbench::BootstrapExpectation::Empty,
+            lease.clone(),
+        )
+        .unwrap();
     owner.bootstrap_policy_installed(Some(lease));
     let barrier = owner.transaction().await.unwrap();
     drop(barrier);

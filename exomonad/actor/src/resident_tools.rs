@@ -109,7 +109,7 @@ pub struct WorkbenchExecutionControl {
     receipt_owner: std::sync::OnceLock<Arc<dyn WorkbenchReceiptOwner>>,
     context_cancel_requested: std::sync::atomic::AtomicBool,
     cell_terminal: parking_lot::Mutex<Option<crate::CellExit>>,
-    compiler_work: parking_lot::Mutex<Vec<crate::termination::CompilerWorkReceipt>>,
+    compiler_work: parking_lot::Mutex<Vec<crate::termination::CompilerWorkRegistration>>,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -291,7 +291,7 @@ impl WorkbenchExecutionControl {
 
     pub(crate) fn register_compiler_work(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
     ) -> bool {
         // This order matches finish_cell: completion fences future admissions.
         let terminal = self.cell_terminal.lock();
@@ -2217,13 +2217,12 @@ mod tests {
 
     #[test]
     fn pending_compiler_close_blocks_context_commit_without_rewriting_completed_action() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let control = WorkbenchExecutionControl::untracked();
-        let receipt = crate::termination::CompilerWorkReceipt::pending();
-        assert!(control.register_compiler_work(receipt.clone()));
-        let ticket = crate::termination::CompilerWorkTicket::new(
-            receipt,
+        let owner = services.with_compiler_owner(
             crate::resident_workbench::CompilerCloseOwner::Hosted(control.clone()),
         );
+        let ticket = owner.admit_work().unwrap();
         let response = Ok(crate::KernelStep::Continue(WorkbenchResponse {
             publication: None,
             status: WorkbenchRunStatus::Completed,
@@ -2237,16 +2236,15 @@ mod tests {
         assert_eq!(exit.cause, crate::CellExitCause::FullReturn);
         assert!(!exit.cleanup_confirmed);
         assert!(!exit.permits_context_commit());
-        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-            action: (),
-            close: tidepool_runtime::CompilerTransactionClose::Clean,
+        ticket.run(|close| {
+            close(tidepool_runtime::CompilerTransactionClose::Clean);
         });
         assert_eq!(
             control.finish_cell(execution, &response, true),
             exit,
             "late close cannot mutate an already published cell cutoff"
         );
-        assert!(!control.register_compiler_work(crate::termination::CompilerWorkReceipt::pending()));
+        assert!(owner.admit_work().is_err());
     }
 
     #[test]

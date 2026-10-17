@@ -795,8 +795,6 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
     ];
     let mut edges = vec![
         (0, 9, TypeEdge::Body),
-        (1, 2, TypeEdge::BinderKind(0)),
-        (1, 3, TypeEdge::BinderKind(1)),
         (1, 4, TypeEdge::Body),
         (4, 2, TypeEdge::Kind),
         (4, 5, TypeEdge::Body),
@@ -867,7 +865,7 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
 fn codec_rejects_retired_prepared_schema_and_graph_versions() {
     let program = tidepool_repr::execution_schema::testing::wire_program();
     let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&program);
-    for version in [14, 15] {
+    for version in [14, 15, 18] {
         let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
         let Cbor::Array(fields) = &mut value else {
             unreachable!()
@@ -878,6 +876,30 @@ fn codec_rejects_retired_prepared_schema_and_graph_versions() {
             Err(ParseError::UnsupportedVersion(version))
         );
     }
+    let group =
+        tidepool_repr::execution_schema::testing::projected_group(program.clone(), 7).unwrap();
+    let group_bytes = tidepool_test_data::prepared_encode::encode_projected_group(&group);
+    assert_eq!(
+        tidepool_repr::execution_schema::parse_projected_group(
+            &group_bytes,
+            &requirements(),
+            DecodeLimits::default(),
+        ),
+        Ok(group)
+    );
+    let Cbor::Array(mut group_fields) = ciborium::de::from_reader(group_bytes.as_slice()).unwrap()
+    else {
+        unreachable!()
+    };
+    group_fields[4] = int(18);
+    assert_eq!(
+        tidepool_repr::execution_schema::parse_projected_group(
+            &bytes(&Cbor::Array(group_fields)),
+            &requirements(),
+            DecodeLimits::default(),
+        ),
+        Err(ParseError::UnsupportedVersion(18))
+    );
     let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
     let Cbor::Array(fields) = &mut value else {
         unreachable!()

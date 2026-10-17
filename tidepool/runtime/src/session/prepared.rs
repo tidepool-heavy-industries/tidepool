@@ -13432,7 +13432,6 @@ pub(super) mod tests {
             ],
             &[
                 (0, 3, TypeEdge::Body),
-                (0, 5, TypeEdge::BinderKind(0)),
                 (1, 5, TypeEdge::BinderKind(0)),
                 (3, 1, TypeEdge::Head),
                 (3, 4, TypeEdge::Argument(0)),

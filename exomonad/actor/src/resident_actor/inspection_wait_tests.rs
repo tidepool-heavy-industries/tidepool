@@ -149,7 +149,7 @@ async fn compiler_inspection_requires_cleanup_owner_before_checkout() {
 async fn compiler_inspection_without_task_local_owner(
     preparation: crate::CompilerPreparationClient,
 ) {
-    assert!(crate::resident_workbench::CompilerCloseOwner::current().is_err());
+    assert!(crate::capabilities::CompilerOwnerScope::current().is_err());
     let compiler_spawns = tidepool_extract_cmd::extract_spawn_count();
     for request in [InspectionRequest::Recovery, InspectionRequest::Bindings] {
         let (machines, workbench, session, _, _root) = fixture(preparation.clone());

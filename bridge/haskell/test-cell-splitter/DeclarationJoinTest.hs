@@ -16,6 +16,7 @@ tests = testGroup "declaration-join"
   [ testCase "indexed declarations match generated histories" declarationIndexProperty
   , testCase "indexed declarations match exhaustive bounded histories" declarationIndexHistories
   , testCase "current typed declaration request roundtrip" wireRoundTripChecks
+  , testCase "bounded declaration manifest capture" declarationManifestCaptureChecks
   , testCase "original package roots" originalProductRootsProof
   , testCase "evaluated original package roots control" originalProductRootsControl
   , testCase "original interfaces fresh consumers and retained family conflicts" declarationJoinScenario

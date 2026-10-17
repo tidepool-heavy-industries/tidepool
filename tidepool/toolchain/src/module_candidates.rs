@@ -2703,16 +2703,14 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
         None => BTreeSet::new(),
     };
     tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_inventory", owners = validated.len());
-    let mut inventory = inventory::InventoryTables::new(
-        validated
-            .iter()
-            .filter(|(key, _)| !availability.contains(*key))
-            .flat_map(|(_, (_, _, product, _))| product.groups.iter()),
-    )?;
+    let inventory =
+        inventory::PreparedInventory::new(validated.into_iter(), |(key, (_, _, product, _))| {
+            (!availability.contains(key)).then_some(product.groups.as_slice())
+        })
+        .ok()?;
     let mut native_availability = Vec::new();
     let mut by_owner = BTreeMap::new();
-    let mut manifest = Vec::new();
-    for (key, (mut record, origin, product, _)) in validated {
+    let manifest = inventory.try_finish(|(key, (mut record, origin, product, _))| {
         tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_manifest_row", unit = %key.0, module = %key.1);
         crate::host_work::checkpoint().ok()?;
         if availability.contains(&key) {
@@ -2734,19 +2732,21 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 )
                 .ok()?,
             });
-            continue;
+            return Some(inventory::ManifestDisposition::AvailabilityOnly);
         }
         let product_sha = record.original_owner.product_sha256;
-        let Some(evidence_sha) = record.evidence.json_sha256().map(|digest| hex(&digest)) else {
-            continue;
-        };
-        let Some(module_evidence) = record.evidence.modules.iter().find(|module| {
-            module.unit == record.unit
-                && module.module == record.module
-                && !module.boot
-                && absolute(&module.source).as_ref() == Some(&record.source)
-        }) else {
-            continue;
+        let Some((evidence_sha, module_evidence)) = inventory::manifest_source_evidence(
+            record.evidence.json_sha256().map(|digest| hex(&digest)),
+            || record.evidence.modules.iter().find(|module| {
+                module.unit == record.unit
+                    && module.module == record.module
+                    && !module.boot
+                    && absolute(&module.source).as_ref() == Some(&record.source)
+            }),
+        ) else {
+            // These records already contributed tables, but the existing policy
+            // omits their manifest row. Availability-only input is distinct.
+            return Some(inventory::ManifestDisposition::Omit);
         };
         let imports = module_evidence
             .imports
@@ -2841,28 +2841,27 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 path
             }
         };
-        manifest.push(candidate_manifest_row(CandidateManifestRow {
-            unit: &owner.unit,
-            module: &owner.module,
-            source: &record.source,
-            source_sha256: &record.data.source_sha256,
-            interface: &iface_path,
-            interface_sha256: &sha(&record.interface),
-            module_version: &hex(&owner.module_version.0),
-            product_sha256: &hex(&product_sha),
-            evidence_sha256: &evidence_sha,
+        Some(inventory::ManifestDisposition::Emit(inventory::CandidateManifestMetadata {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            source: record.source.clone(),
+            source_sha256: record.data.source_sha256.clone(),
+            interface: iface_path,
+            interface_sha256: sha(&record.interface),
+            module_version: hex(&owner.module_version.0),
+            product_sha256: hex(&product_sha),
+            evidence_sha256: evidence_sha,
             imports,
-            groups: inventory.groups(&selected.product.groups)?,
-            packages: &package_imports_path,
-            packages_sha256: &sha(&selected.package_imports_bytes),
-            product: &product_path,
-            canonical_requirements: canonical.requirements(),
-            certificate: &canonical_root.join(&canonical_reference.certificate_path),
-            certificate_sha256: &canonical_reference.certificate_sha256,
-            core: &canonical_root.join(&core_reference.path),
-            core_sha256: &core_reference.sha256,
-        }));
-    }
+            packages: package_imports_path,
+            packages_sha256: sha(&selected.package_imports_bytes),
+            product: product_path,
+            canonical_requirements: canonical.requirements().clone(),
+            certificate: canonical_root.join(&canonical_reference.certificate_path),
+            certificate_sha256: canonical_reference.certificate_sha256,
+            core: canonical_root.join(&core_reference.path),
+            core_sha256: core_reference.sha256,
+        }))
+    }).ok()?;
     let originals = context
         .into_iter()
         .flat_map(|context| context.originals.iter())
@@ -2883,11 +2882,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             graph_bytes, limit = crate::execution_source::GRAPH_BYTES_LIMIT, "candidate offer omitted because its execution provenance exceeds the retained graph bound");
         return None;
     }
-    let (symbols, globals) = inventory.into_wire_tables();
-    let value = candidate_manifest_value(
-        symbols,
-        globals,
-        manifest,
+    let value = manifest.into_manifest(
         by_owner
             .values()
             .filter(|bundle| bundle.execution_admitted)
@@ -2937,26 +2932,22 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
         )
         .hex(),
     );
-    let (acquisition, input_transport) = match transport {
+    let (encoded, input_transport) = value.encode_with_acquisition(|value| {
+        (match transport {
         #[cfg(test)]
-        CandidateInputTransport::DurableFiles => (
+        CandidateInputTransport::DurableFiles => Some((
             Value::Array(vec![Value::Text("fresh-files".into())]),
             Vec::new(),
-        ),
+        )),
         CandidateInputTransport::OwnedArena => {
             tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_owned_acquisition", owners = by_owner.len());
-            candidate_owned_acquisition(&value, &by_owner, endpoint_identity).or_else(|| {
+            candidate_owned_acquisition(value, &by_owner, endpoint_identity).or_else(|| {
                 tracing::warn!(target: "tidepool_toolchain::module_candidates", "candidate owned acquisition refused");
                 None
-            })?
+            })
         }
-    };
-    let Value::Array(mut fields) = value else {
-        return None;
-    };
-    fields[7] = acquisition;
-    let value = Value::Array(fields);
-    let encoded = encode_candidate_manifest(&value)?;
+        }).ok_or(inventory::InventoryEncodingError::Acquisition)
+    }).ok()?;
     crate::host_work::checkpoint().ok()?;
     let manifest_path = scratch.join("module-candidates.cbor");
     tidepool_atomic_write::write_best_effort(&manifest_path, &encoded).ok()?;
@@ -2969,6 +2960,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     })
 }
 
+#[cfg(test)]
 fn encode_candidate_manifest(value: &Value) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(value, &mut encoded).ok()?;
@@ -3166,6 +3158,7 @@ fn candidate_owned_acquisition(
 }
 
 /// Encoding data is separate from the retained executable candidate set.
+#[cfg(test)]
 struct CandidateManifestRow<'a> {
     unit: &'a str,
     module: &'a str,
@@ -3188,6 +3181,7 @@ struct CandidateManifestRow<'a> {
     core_sha256: &'a [u8; 32],
 }
 
+#[cfg(test)]
 fn candidate_manifest_row(row: CandidateManifestRow<'_>) -> Value {
     let path = |path: &Path| Value::Text(path.to_string_lossy().into_owned());
     Value::Array(vec![
@@ -3223,6 +3217,7 @@ fn candidate_manifest_row(row: CandidateManifestRow<'_>) -> Value {
     ])
 }
 
+#[cfg(test)]
 fn candidate_manifest_value(
     symbols: Value,
     globals: Value,

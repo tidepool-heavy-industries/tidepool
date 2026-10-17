@@ -498,6 +498,7 @@ struct ResidentEnvironment<H, O> {
     /// Installed by a host that keeps a source layer per checkout. Without
     /// one every actor compiles against exactly the deployment-wide roots.
     source_layers: Option<crate::ActorSourceLayerResolver>,
+    source_inspection: Option<crate::SourceInspectionServices>,
     jev: crate::JevBackendHandle,
     cell_model_factory: Option<Arc<dyn crate::CellModelFactory>>,
     form_host: Option<Arc<dyn crate::FormHost>>,
@@ -514,6 +515,15 @@ struct ResidentEnvironment<H, O> {
 }
 
 impl<H, O> ResidentEnvironment<H, O> {
+    fn compiler_lifecycle_scope(
+        &self,
+        kernel: &KernelContext,
+    ) -> crate::capabilities::CompilerOwnerScope {
+        self.runner.compiler_scope(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit()),
+        )
+    }
+
     fn new(
         runner: ResidentActorRunner<H, O>,
         deployments: mpsc::Sender<LocalResidentDeployment>,
@@ -529,6 +539,7 @@ impl<H, O> ResidentEnvironment<H, O> {
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
             source_layers: None,
+            source_inspection: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
             form_host: None,
@@ -2337,6 +2348,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
             source_layers: self.source_layers.clone(),
+            source_inspection: self.source_inspection.clone(),
             jev: Arc::clone(&self.jev),
             cell_model_factory: self.cell_model_factory.clone(),
             form_host: self.form_host.clone(),
@@ -4127,7 +4139,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .and_then(|snapshot| snapshot.generation())
             .map_or_else(
                 || self.descriptor.session_context(actor),
-                |generation| generation.context.clone(),
+                |generation| generation.context().clone(),
             )
     }
 
@@ -4177,7 +4189,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => None,
         };
         if let Some(generation) = &issued_generation {
-            context = generation.context.clone();
+            context = generation.context().clone();
         }
         if initial_context_invocation {
             let initial_context = installed_tools
@@ -4359,7 +4371,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(authority)
         };
         let public_owner = if let Some(generation) = &issued_generation {
-            generation.public_owner.clone()
+            generation.public_owner().clone()
         } else {
             let snapshot = self
                 .lifecycle
@@ -6114,7 +6126,7 @@ where
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
         let interaction_control = effect_owner.interaction_control();
-        let lookup_source = environment.source_layers.clone().zip(
+        let lookup_source = environment.source_inspection.clone().zip(
             effect_owner
                 .issued_snapshot()
                 .map(|issued| issued.installation().source().clone()),
@@ -8282,17 +8294,18 @@ where
         };
         // Input preparation precedes the request's invocation owner. Retain
         // its compiler transaction under the recipient actor's retained lifetime.
-        let mounted =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit())
-                .scope(workbench.mount_activation_input(
-                    compile_context,
-                    input,
-                    presentation.origin.as_ref(),
-                    request.response.expected_type().to_owned(),
-                    request.response.declaration.clone(),
-                    request.response.declaration_modules.clone(),
-                ))
-                .await;
+        let mounted = self
+            .environment
+            .compiler_lifecycle_scope(kernel)
+            .scope(workbench.mount_activation_input(
+                compile_context,
+                input,
+                presentation.origin.as_ref(),
+                request.response.expected_type().to_owned(),
+                request.response.declaration.clone(),
+                request.response.declaration_modules.clone(),
+            ))
+            .await;
         if let Some(terminal) = kernel.requested_shutdown() {
             return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(
                 terminal,
@@ -8328,16 +8341,16 @@ where
                             .await?,
                     )
                 };
-                let tools = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                    kernel.retained_exit(),
-                )
-                .scope(workbench.prepare_reply_tools(
-                    private_context.clone(),
-                    request.request,
-                    installer,
-                    definition.installation.clone(),
-                ))
-                .await?;
+                let tools = self
+                    .environment
+                    .compiler_lifecycle_scope(kernel)
+                    .scope(workbench.prepare_reply_tools(
+                        private_context.clone(),
+                        request.request,
+                        installer,
+                        definition.installation.clone(),
+                    ))
+                    .await?;
                 let lease = crate::InstalledToolLease::new(
                     context.actor,
                     activation_source.clone(),
@@ -8363,7 +8376,7 @@ where
             };
             let request_message =
                 contract.message(request.request, request.initial_user_message.as_deref());
-            let installation = match prepared_installation {
+            let mut installation = match prepared_installation {
                 Some(mut installation) => {
                     installation.initial_user_message =
                         Some(match installation.initial_user_message.take() {
@@ -8413,14 +8426,18 @@ where
                     ));
                 }
             };
-            if let Some(installation) = &installation {
+            if let Some(installation) = &mut installation {
                 self.bind_initial_generation(context, installation).await?;
             }
             self.check_application_readiness(kernel, context).await?;
+            let mut installation_error = None;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
                     if let Some(installation) = installation {
-                        self.publish_interactive_installation(installation);
+                        if let Err(error) = self.publish_interactive_installation(installation) {
+                            installation_error = Some(error);
+                            return false;
+                        }
                     }
                     self.installed_tools.publish_reply(reply_activation);
                     self.assignment_base = assignment_base;
@@ -8476,6 +8493,9 @@ where
             match publication {
                 Ok(claim) => {
                     claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                    if let Some(error) = installation_error {
+                        return Err(error);
+                    }
                     Ok(InteractivePark::Parked)
                 }
                 Err(crate::ReplyError::CancellationRequested) => {
@@ -8613,19 +8633,19 @@ where
             .as_ref()
             .and_then(|snapshot| snapshot.generation())
             .cloned()
-            .filter(|generation| generation.public_owner.matches_context(context))
+            .filter(|generation| generation.public_owner().matches_context(context))
             .or_else(|| {
                 self.installed_tools
                     .current_generation()
-                    .filter(|generation| generation.public_owner.matches_context(context))
+                    .filter(|generation| generation.public_owner().matches_context(context))
             });
         if let Some(generation) = retained {
-            if !generation.public_owner.is_current() {
+            if !generation.public_owner().is_current() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "retained generation native ownership is unavailable".into(),
                 ));
             }
-            return Ok(generation.public_owner.clone());
+            return Ok(generation.public_owner().clone());
         }
         let lifecycle = self
             .lifecycle
@@ -8643,9 +8663,10 @@ where
     async fn bind_initial_generation(
         &self,
         context: &ActorSessionContext,
-        installation: &LocalResidentInstallation,
+        installation: &mut LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if self.installed_tools.current_generation().is_some() {
+            installation.prepared_tools.take();
             return Ok(());
         }
         let (Some(tools), Some(prompts)) =
@@ -8653,41 +8674,27 @@ where
         else {
             return Ok(());
         };
-        let Some(evidence) = tools.source().generation_evidence() else {
+        let Some(_) = tools.source().generation_evidence() else {
             return Ok(());
         };
-        let expected = self.installed_tools.snapshot().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "initial generation lost bootstrap source custody".into(),
-            )
-        })?;
-        let references = tools
-            .generation_references(evidence.reference.clone(), prompts.clone())
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let context = self
             .descriptor
             .session_context(context.actor)
             .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
+        let publisher = workbench.generation_publisher(self.installed_tools.clone());
         let prepared = workbench
-            .prepare_actor_generation(
-                context.clone(),
-                self.descriptor.clone(),
-                None,
-                references,
-                tools.clone(),
-            )
-            .await?;
-        match workbench
-            .commit_actor_generation(
+            .prepare_initial_generation(
+                self.installed_tools.clone(),
                 context,
                 self.descriptor.clone(),
-                self.installed_tools.clone(),
-                expected,
-                prepared,
                 tools.clone(),
                 prompts.clone(),
-                evidence.configuration_digest,
+            )
+            .await?;
+        match publisher
+            .publish(
+                prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
@@ -8697,6 +8704,7 @@ where
                 if let Some(lifecycle) = &self.lifecycle {
                     lifecycle.generation_published(generation);
                 }
+                installation.prepared_tools.take();
                 Ok(())
             }
             crate::resident_workbench::ActorGenerationCommit::Refused(detail)
@@ -8710,27 +8718,49 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        installation: LocalResidentInstallation,
+        mut installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.bind_initial_generation(context, &installation).await?;
+        self.bind_initial_generation(context, &mut installation)
+            .await?;
         self.check_application_readiness(kernel, context).await?;
+        let mut installation_error = None;
         kernel
             .retained_exit()
-            .claim_before_shutdown(|| {
-                self.publish_interactive_installation(installation);
-                true
-            })
+            .claim_before_shutdown(
+                || match self.publish_interactive_installation(installation) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        installation_error = Some(error);
+                        false
+                    }
+                },
+            )
             .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+        if let Some(error) = installation_error {
+            return Err(error);
+        }
         #[cfg(test)]
         capture_workspace_tests::installation_gate(context.placement.session, kernel, true).await;
         Ok(())
     }
 
-    fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
+    fn publish_interactive_installation(
+        &mut self,
+        mut installation: LocalResidentInstallation,
+    ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(tools) = installation.prepared_tools.take() {
-            if self.installed_tools.current_generation().is_none() {
-                self.installed_tools.publish(tools);
-            }
+            let expected = self
+                .actor_program_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    crate::resident_workbench::BootstrapExpectation::Available(
+                        snapshot.installation(),
+                    )
+                })
+                .unwrap_or(crate::resident_workbench::BootstrapExpectation::Empty);
+            self.installed_tools
+                .install_bootstrap(expected, tools)
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         }
         self.publish_installation(installation);
         self.policy_installed = true;
@@ -8745,6 +8775,7 @@ where
                 .try_send(LocalResidentDeployment::ChildExited { notice })
                 .ok();
         }
+        Ok(())
     }
 
     async fn settle_interactive_publication(
@@ -8872,8 +8903,7 @@ where
                 .application_workbench()
                 .with_compilation_authority(authority),
         );
-        let compiler_owner =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit());
+        let compiler_owner = self.environment.compiler_lifecycle_scope(kernel);
         if self.explicit_installer.is_some()
             && matches!(
                 self.initial_configuration,
@@ -9025,7 +9055,12 @@ where
         if self.actor_program_snapshot.is_none() {
             let source = self.freeze_installed_source(context.actor)?;
             let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);
-            self.installed_tools.publish(bootstrap.clone());
+            self.installed_tools
+                .install_bootstrap(
+                    crate::resident_workbench::BootstrapExpectation::Empty,
+                    bootstrap.clone(),
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.actor_program_snapshot = Some(
                 crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap),
             );
@@ -9033,11 +9068,7 @@ where
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench
             .actor_initialization_cleanup(context.clone())
-            .with_compiler_owner(
-                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                    kernel.retained_exit(),
-                ),
-            );
+            .with_compiler_owner(self.environment.compiler_lifecycle_scope(kernel));
         let registration = guard.registration();
         // Keep initialization state out of the enclosing task-local scope future.
         let result = registration
@@ -9137,11 +9168,21 @@ where
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
-            self.installed_tools.publish(crate::InstalledToolLease::new(
-                context.actor,
-                source,
-                None,
-            ));
+            let expected = self
+                .actor_program_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    crate::resident_workbench::BootstrapExpectation::Available(
+                        snapshot.installation(),
+                    )
+                })
+                .unwrap_or(crate::resident_workbench::BootstrapExpectation::Empty);
+            self.installed_tools
+                .install_bootstrap(
+                    expected,
+                    crate::InstalledToolLease::new(context.actor, source, None),
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));
@@ -10685,7 +10726,7 @@ where
                     }
                     crate::status_tool::StatusView::Revisions => {
                         source_effect::refresh_source_observation(
-                            self.environment.source_layers.clone(),
+                            self.environment.source_inspection.clone(),
                             self.installed_tools.clone(),
                             self.runtime_observation.clone(),
                             effects.issued_snapshot.clone(),
@@ -11871,11 +11912,15 @@ where
         kernel: &'a KernelContext,
         definition: crate::ActorReplacementDefinition,
     ) -> futures_util::future::BoxFuture<'a, Result<LocalActorRef, KernelBehaviorError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            self.prepare_successor(kernel, definition)
-                .await
-                .map_err(Self::workbench_failure)
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    self.prepare_successor(kernel, definition)
+                        .await
+                        .map_err(Self::workbench_failure)
+                }),
+        )
     }
 
     fn commit_replacement(
@@ -11903,54 +11948,58 @@ where
         kernel: &'a KernelContext,
         delivery: crate::SourceDelivery,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            use crate::request::sources::{RequestSourceKind, SourceTarget};
-            self.input_origin = match delivery.target {
-                SourceTarget::Request(request, RequestSourceKind::Progress) => {
-                    ActorInputOrigin::ActorProgressFrom(request.0 as i64)
-                }
-                SourceTarget::Request(request, RequestSourceKind::Settlement) => {
-                    ActorInputOrigin::ActorSettlementFrom(request.0 as i64)
-                }
-                SourceTarget::Command(key) => {
-                    ActorInputOrigin::ActorCommandFrom(uuid::Uuid::from_u128(key).to_string())
-                }
-                SourceTarget::Lifecycle(actor) => {
-                    ActorInputOrigin::ActorLifecycleFrom(actor_address(actor))
-                }
-            };
-            let source = self
-                .sources
-                .get(delivery.slot)
-                .filter(|source| source.target == delivery.target)
-                .ok_or_else(|| KernelBehaviorError {
-                    detail: "source delivery does not match an installed connection".into(),
-                    diagnostic: None,
-                })?;
-            let context = source.execution.context.clone();
-            self.actor_callback_execution = Some(source.execution.clone());
-            let delivery = self.environment.requests.accept_source_delivery(delivery);
-            if let Some(committed) = &mut self.committed {
-                committed.input = Some(RetainedActorInput::Source(delivery.clone()));
-            }
-            let message = self
-                .environment
-                .runner
-                .map_source(context.clone(), Arc::clone(&source.entry), delivery.event)
-                .await
-                .map_err(Self::workbench_failure)?;
-            let (_, step) = self
-                .run_receiver(
-                    kernel,
-                    &context,
-                    None,
-                    &crate::CallAncestry::begin(context.actor),
-                    message,
-                )
-                .await
-                .map_err(Self::workbench_failure)?;
-            Ok(step)
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    use crate::request::sources::{RequestSourceKind, SourceTarget};
+                    self.input_origin = match delivery.target {
+                        SourceTarget::Request(request, RequestSourceKind::Progress) => {
+                            ActorInputOrigin::ActorProgressFrom(request.0 as i64)
+                        }
+                        SourceTarget::Request(request, RequestSourceKind::Settlement) => {
+                            ActorInputOrigin::ActorSettlementFrom(request.0 as i64)
+                        }
+                        SourceTarget::Command(key) => ActorInputOrigin::ActorCommandFrom(
+                            uuid::Uuid::from_u128(key).to_string(),
+                        ),
+                        SourceTarget::Lifecycle(actor) => {
+                            ActorInputOrigin::ActorLifecycleFrom(actor_address(actor))
+                        }
+                    };
+                    let source = self
+                        .sources
+                        .get(delivery.slot)
+                        .filter(|source| source.target == delivery.target)
+                        .ok_or_else(|| KernelBehaviorError {
+                            detail: "source delivery does not match an installed connection".into(),
+                            diagnostic: None,
+                        })?;
+                    let context = source.execution.context.clone();
+                    self.actor_callback_execution = Some(source.execution.clone());
+                    let delivery = self.environment.requests.accept_source_delivery(delivery);
+                    if let Some(committed) = &mut self.committed {
+                        committed.input = Some(RetainedActorInput::Source(delivery.clone()));
+                    }
+                    let message = self
+                        .environment
+                        .runner
+                        .map_source(context.clone(), Arc::clone(&source.entry), delivery.event)
+                        .await
+                        .map_err(Self::workbench_failure)?;
+                    let (_, step) = self
+                        .run_receiver(
+                            kernel,
+                            &context,
+                            None,
+                            &crate::CallAncestry::begin(context.actor),
+                            message,
+                        )
+                        .await
+                        .map_err(Self::workbench_failure)?;
+                    Ok(step)
+                }),
+        )
     }
 
     fn accepts_mailbox(&self) -> bool {
@@ -11981,32 +12030,36 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            let ResidentStanding::Receiving(receiver) =
-                std::mem::replace(&mut self.standing, ResidentStanding::Boot)
-            else {
-                return Err(KernelBehaviorError {
-                    detail: "drain reached an actor without its receiver".into(),
-                    diagnostic: None,
-                });
-            };
-            let context = self.context(kernel.identity());
-            let outcome = self
-                .environment
-                .runner
-                .resume_value(context.clone(), receiver.continuation, None::<()>)
-                .await
-                .map_err(Self::workbench_failure)?;
-            self.stabilize_program(
-                kernel,
-                &context,
-                &crate::CallAncestry::begin(context.actor),
-                outcome,
-                None,
-            )
-            .await
-            .map_err(Self::workbench_failure)
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    let ResidentStanding::Receiving(receiver) =
+                        std::mem::replace(&mut self.standing, ResidentStanding::Boot)
+                    else {
+                        return Err(KernelBehaviorError {
+                            detail: "drain reached an actor without its receiver".into(),
+                            diagnostic: None,
+                        });
+                    };
+                    let context = self.context(kernel.identity());
+                    let outcome = self
+                        .environment
+                        .runner
+                        .resume_value(context.clone(), receiver.continuation, None::<()>)
+                        .await
+                        .map_err(Self::workbench_failure)?;
+                    self.stabilize_program(
+                        kernel,
+                        &context,
+                        &crate::CallAncestry::begin(context.actor),
+                        outcome,
+                        None,
+                    )
+                    .await
+                    .map_err(Self::workbench_failure)
+                }),
+        )
     }
 
     fn pause_failed_handler<'a>(
@@ -12085,157 +12138,167 @@ where
                 lease.admitted();
             }
         }
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            placement_transfer.map_err(Self::failure)?;
-            let context = self.context(kernel.identity());
-            if let Some(intent) = &self.root_startup {
-                let Some(ResidentBoot::Startup(entry)) = &self.boot else {
-                    return Err(Self::failure(
-                        "pending root lost its original unexecuted startup entry",
-                    ));
-                };
-                if entry.compile_input_identity() != Some(intent.bootstrap_identity.as_str()) {
-                    return Err(Self::failure(
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    placement_transfer.map_err(Self::failure)?;
+                    let context = self.context(kernel.identity());
+                    if let Some(intent) = &self.root_startup {
+                        let Some(ResidentBoot::Startup(entry)) = &self.boot else {
+                            return Err(Self::failure(
+                                "pending root lost its original unexecuted startup entry",
+                            ));
+                        };
+                        if entry.compile_input_identity()
+                            != Some(intent.bootstrap_identity.as_str())
+                        {
+                            return Err(Self::failure(
                         "startup intent differs from its original compiler-issued input identity",
                     ));
-                }
-            }
-            if let Some(recovery) = &self.environment.recovery {
-                recovery
-                    .admit_with_startup(
+                        }
+                    }
+                    if let Some(recovery) = &self.environment.recovery {
+                        recovery
+                            .admit_with_startup(
+                                context.actor,
+                                &self.descriptor,
+                                &self.launch_worktrees,
+                                self.root_startup.clone(),
+                                self.root_startup_admission.as_ref(),
+                            )
+                            .await
+                            .map_err(|error| Self::failure(error.to_string()))?;
+                    }
+                    // Configure the lifecycle before exposing either directory fact.
+                    // Startup refusal retires through this behavior's retained descriptor;
+                    // it does not require a registered directory session or authority.
+                    let lifecycle = kernel.lifecycle().clone();
+                    lifecycle
+                        .configure_resident(
+                            context.clone(),
+                            self.descriptor.clone(),
+                            self.environment.recovery.clone(),
+                            Arc::new(self.environment.runner.clone()),
+                            self.root_startup.clone(),
+                            self.fresh_context_seed.clone(),
+                        )
+                        .await
+                        .map_err(Self::failure)?;
+                    self.lifecycle = Some(lifecycle.clone());
+                    kernel
+                        .register_resident(
+                            context.clone(),
+                            self.descriptor.clone(),
+                            self.forest_control,
+                        )
+                        .await
+                        .map_err(|error| Self::failure(error.to_string()))?;
+                    self.environment.actors.lock().insert(
                         context.actor,
-                        &self.descriptor,
-                        &self.launch_worktrees,
-                        self.root_startup.clone(),
-                        self.root_startup_admission.as_ref(),
-                    )
-                    .await
-                    .map_err(|error| Self::failure(error.to_string()))?;
-            }
-            // Configure the lifecycle before exposing either directory fact.
-            // Startup refusal retires through this behavior's retained descriptor;
-            // it does not require a registered directory session or authority.
-            let lifecycle = kernel.lifecycle().clone();
-            lifecycle
-                .configure_resident(
-                    context.clone(),
-                    self.descriptor.clone(),
-                    self.environment.recovery.clone(),
-                    Arc::new(self.environment.runner.clone()),
-                    self.root_startup.clone(),
-                    self.fresh_context_seed.clone(),
-                )
-                .await
-                .map_err(Self::failure)?;
-            self.lifecycle = Some(lifecycle.clone());
-            kernel
-                .register_resident(
-                    context.clone(),
-                    self.descriptor.clone(),
-                    self.forest_control,
-                )
-                .await
-                .map_err(|error| Self::failure(error.to_string()))?;
-            self.environment.actors.lock().insert(
-                context.actor,
-                ResidentActorRecord {
-                    installed_tools: self.installed_tools.clone(),
-                    lifecycle: lifecycle.clone(),
-                    fresh_context_seed: self.fresh_context_seed.clone(),
-                    workbench_executions: self.workbench_executions.clone(),
-                    interactive_policy_installed: false,
-                    descriptor: self.descriptor.clone(),
-                    bound_worktree: self.launch_worktrees.first().cloned(),
-                    terminal: None,
-                    runtime_observation: self.runtime_observation.clone(),
-                    scheduler_root: kernel.spawn_ownership().is_independent(),
-                    displays: Default::default(),
-                },
-            );
-            if let Some(admission) = &self.spawn_admission {
-                admission
-                    .bind(
-                        self.descriptor
-                            .creator()
-                            .ok_or_else(|| Self::failure("spawn has no creating actor"))?,
-                        context.actor,
-                    )
-                    .map_err(Self::failure)?;
-                if let Some(layers) = &self.environment.source_layers {
-                    let source = self
-                        .admitted_checkpoint
-                        .as_ref()
-                        .map(|(lease, _)| &lease.issuer_source_layer)
-                        .or(self.spawn_source.as_ref());
-                    if let Some(source) = source {
-                        layers
-                            .bind_checkpoint_for(
-                                context.actor.into(),
-                                self.spawn_helper_branch.as_deref().unwrap_or_default(),
-                                source,
+                        ResidentActorRecord {
+                            installed_tools: self.installed_tools.clone(),
+                            lifecycle: lifecycle.clone(),
+                            fresh_context_seed: self.fresh_context_seed.clone(),
+                            workbench_executions: self.workbench_executions.clone(),
+                            interactive_policy_installed: false,
+                            descriptor: self.descriptor.clone(),
+                            bound_worktree: self.launch_worktrees.first().cloned(),
+                            terminal: None,
+                            runtime_observation: self.runtime_observation.clone(),
+                            scheduler_root: kernel.spawn_ownership().is_independent(),
+                            displays: Default::default(),
+                        },
+                    );
+                    if let Some(admission) = &self.spawn_admission {
+                        admission
+                            .bind(
+                                self.descriptor
+                                    .creator()
+                                    .ok_or_else(|| Self::failure("spawn has no creating actor"))?,
+                                context.actor,
                             )
                             .map_err(Self::failure)?;
-                    } else {
-                        layers.bind_for(context.actor.into(), "");
+                        if let Some(layers) = &self.environment.source_layers {
+                            let source = self
+                                .admitted_checkpoint
+                                .as_ref()
+                                .map(|(lease, _)| &lease.issuer_source_layer)
+                                .or(self.spawn_source.as_ref());
+                            if let Some(source) = source {
+                                layers
+                                    .bind_checkpoint_for(
+                                        context.actor.into(),
+                                        self.spawn_helper_branch.as_deref().unwrap_or_default(),
+                                        source,
+                                    )
+                                    .map_err(Self::failure)?;
+                            } else {
+                                layers.bind_for(context.actor.into(), "");
+                            }
+                        }
                     }
-                }
-            }
-            if self.root_startup.is_some() {
-                // The original boot stays resident and opaque until durable application binding.
-                return Ok(KernelStep::Continue(()));
-            }
+                    if self.root_startup.is_some() {
+                        // The original boot stays resident and opaque until durable application binding.
+                        return Ok(KernelStep::Continue(()));
+                    }
 
-            if self.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
-                && (self.spawn_admission.is_some()
-                    || (self.descriptor.creator().is_none()
-                        && self.descriptor.supervisor_parent().is_none()
-                        && self.descriptor.context_parent().is_none()
-                        && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
-            {
-                let outcome = lifecycle
-                    .publish_public_owner(None)
-                    .await
-                    .map_err(Self::failure)?;
-                match outcome {
-                    tidepool_runtime::session::PublicManifestCommit::Durable => {}
-                    tidepool_runtime::session::PublicManifestCommit::Refused { error }
-                    | tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { error } =>
+                    if self.descriptor.persistence_policy()
+                        == crate::ActorPersistencePolicy::Durable
+                        && (self.spawn_admission.is_some()
+                            || (self.descriptor.creator().is_none()
+                                && self.descriptor.supervisor_parent().is_none()
+                                && self.descriptor.context_parent().is_none()
+                                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
                     {
-                        return Err(Self::workbench_failure(
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(*error)),
-                        ));
+                        let outcome = lifecycle
+                            .publish_public_owner(None)
+                            .await
+                            .map_err(Self::failure)?;
+                        match outcome {
+                            tidepool_runtime::session::PublicManifestCommit::Durable => {}
+                            tidepool_runtime::session::PublicManifestCommit::Refused { error }
+                            | tidepool_runtime::session::PublicManifestCommit::RecoveryRequired {
+                                error,
+                            } => {
+                                return Err(Self::workbench_failure(
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        *error,
+                                    )),
+                                ));
+                            }
+                            other => {
+                                return Err(Self::failure(format!(
+                                    "durable actor public owner was not published: {other:?}",
+                                )));
+                            }
+                        }
                     }
-                    other => {
-                        return Err(Self::failure(format!(
-                            "durable actor public owner was not published: {other:?}",
-                        )));
+                    if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+                        || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
+                            && self.explicit_installer.is_some())
+                    {
+                        // Resume is queued before executor_started acknowledges readiness.
+                        // Only then may bootstrap publish a provider-consumable installation.
+                        // Prepared effects retain their original custody until that turn.
+                        #[cfg(test)]
+                        capture_workspace_tests::installation_gate(
+                            context.placement.session,
+                            kernel,
+                            false,
+                        )
+                        .await;
+                        return Ok(KernelStep::ContinueLater(()));
                     }
-                }
-            }
-            if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
-                || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
-                    && self.explicit_installer.is_some())
-            {
-                // Resume is queued before executor_started acknowledges readiness.
-                // Only then may bootstrap publish a provider-consumable installation.
-                // Prepared effects retain their original custody until that turn.
-                #[cfg(test)]
-                capture_workspace_tests::installation_gate(
-                    context.placement.session,
-                    kernel,
-                    false,
-                )
-                .await;
-                return Ok(KernelStep::ContinueLater(()));
-            }
-            let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
-                detail: "resident actor boot was consumed twice".into(),
-                diagnostic: None,
-            })?;
-            self.initialize(kernel, &context, boot)
-                .await
-                .map_err(Self::workbench_failure)
-        }))
+                    let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
+                        detail: "resident actor boot was consumed twice".into(),
+                        diagnostic: None,
+                    })?;
+                    self.initialize(kernel, &context, boot)
+                        .await
+                        .map_err(Self::workbench_failure)
+                }),
+        )
     }
 
     fn reconcile_workbench_boundary<'a>(
@@ -12349,22 +12412,26 @@ where
         sender: ActorRef,
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            self.checkpoint_publication = CheckpointPublication::Resident;
-            let context = self.context(kernel.identity());
-            self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
-            let (_, step) = self
-                .run_receiver(
-                    kernel,
-                    &context,
-                    None,
-                    &crate::CallAncestry::begin(context.actor),
-                    request,
-                )
-                .await
-                .map_err(Self::workbench_failure)?;
-            Ok(step)
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    self.checkpoint_publication = CheckpointPublication::Resident;
+                    let context = self.context(kernel.identity());
+                    self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
+                    let (_, step) = self
+                        .run_receiver(
+                            kernel,
+                            &context,
+                            None,
+                            &crate::CallAncestry::begin(context.actor),
+                            request,
+                        )
+                        .await
+                        .map_err(Self::workbench_failure)?;
+                    Ok(step)
+                }),
+        )
     }
 
     fn call<'a>(
@@ -12375,27 +12442,31 @@ where
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>
     {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            self.checkpoint_publication = CheckpointPublication::Resident;
-            let context = self.context(kernel.identity());
-            self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
-            let (reply, step) = self
-                .run_receiver(kernel, &context, Some(caller), &ancestry, request)
-                .await
-                .map_err(Self::workbench_failure)?;
-            let reply = reply.ok_or_else(|| KernelBehaviorError {
-                detail: "synchronous mailbox handler produced no reply".into(),
-                diagnostic: None,
-            })?;
-            Ok(match step {
-                KernelStep::Continue(()) => KernelStep::Continue(reply),
-                KernelStep::ContinueLater(()) => KernelStep::ContinueLater(reply),
-                KernelStep::Stop { terminal, .. } => KernelStep::Stop {
-                    output: reply,
-                    terminal,
-                },
-            })
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    self.checkpoint_publication = CheckpointPublication::Resident;
+                    let context = self.context(kernel.identity());
+                    self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
+                    let (reply, step) = self
+                        .run_receiver(kernel, &context, Some(caller), &ancestry, request)
+                        .await
+                        .map_err(Self::workbench_failure)?;
+                    let reply = reply.ok_or_else(|| KernelBehaviorError {
+                        detail: "synchronous mailbox handler produced no reply".into(),
+                        diagnostic: None,
+                    })?;
+                    Ok(match step {
+                        KernelStep::Continue(()) => KernelStep::Continue(reply),
+                        KernelStep::ContinueLater(()) => KernelStep::ContinueLater(reply),
+                        KernelStep::Stop { terminal, .. } => KernelStep::Stop {
+                            output: reply,
+                            terminal,
+                        },
+                    })
+                }),
+        )
     }
 
     fn dispatch_tool(
@@ -12509,12 +12580,12 @@ where
                         context.clone(),
                         "tool invocation abandoned before standing custody".into(),
                     )
-                    .with_compiler_owner(
+                    .with_compiler_owner(workbench.compiler_scope(
                         crate::resident_workbench::CompilerCloseOwner::Invocation {
                             work: work.clone(),
                             control: Some(control.clone()),
                         },
-                    );
+                    ));
                 let registration = guard.registration();
                 let mut result = registration
                     .scope(crate::resident_workbench::with_execution_control(
@@ -12830,25 +12901,29 @@ where
         kernel: &'a KernelContext,
         definition: crate::SpecReplacementDefinition,
     ) -> futures_util::future::BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
-            let target = kernel.identity();
-            let authorized = kernel
-                .authorize_control_as(definition.caller, target)
-                .await
-                .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
-            if !authorized {
-                return Err(crate::SpecReplacementError::Unauthorized);
-            }
-            let outcome = install_explicit_replacement(
-                self.environment.clone(),
-                self.context(target),
-                self.installed_tools.clone(),
-                self.descriptor.capabilities().effect_keys().to_vec(),
-                definition,
-            )
-            .await;
-            outcome
-        }))
+        Box::pin(
+            self.environment
+                .compiler_lifecycle_scope(kernel)
+                .scope(async move {
+                    let target = kernel.identity();
+                    let authorized = kernel
+                        .authorize_control_as(definition.caller, target)
+                        .await
+                        .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
+                    if !authorized {
+                        return Err(crate::SpecReplacementError::Unauthorized);
+                    }
+                    let outcome = install_explicit_replacement(
+                        self.environment.clone(),
+                        self.context(target),
+                        self.installed_tools.clone(),
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                        definition,
+                    )
+                    .await;
+                    outcome
+                }),
+        )
     }
 
     fn allows_independent_workbench_admission(&self) -> bool {
@@ -12907,7 +12982,15 @@ where
             );
             let output = match control {
                 Some(control) => {
-                    crate::resident_workbench::with_execution_control(control, expansion).await
+                    self.environment
+                        .runner
+                        .compiler_scope(crate::resident_workbench::CompilerCloseOwner::Hosted(
+                            control.clone(),
+                        ))
+                        .scope(crate::resident_workbench::with_execution_control(
+                            control, expansion,
+                        ))
+                        .await
                 }
                 None => expansion.await,
             }
@@ -12979,10 +13062,12 @@ where
                 .workbench_executions
                 .lock()
                 .callback_root(context.actor, reservation_owner.clone());
-            let compiler_owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
-                work: route_work.clone(),
-                control: None,
-            };
+            let compiler_owner = self.environment.runner.compiler_scope(
+                crate::resident_workbench::CompilerCloseOwner::Invocation {
+                    work: route_work.clone(),
+                    control: None,
+                },
+            );
             compiler_owner
                 .scope(async {
                     let previous_reservation_owner = self
@@ -13171,7 +13256,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(kernel.compiler_lifecycle_scope(async move {
+        Box::pin(self.environment.compiler_lifecycle_scope(kernel).scope(async move {
             if matches!(self.standing, ResidentStanding::Paused(_)) {
                 return Ok(KernelStep::Continue(()));
             }
@@ -13457,14 +13542,18 @@ where
             let hook = if let Some(hook) = self.shutdown_hook.take() {
                 let result = match kernel.retained_exit().begin_compiler_finalization() {
                     Ok(finalization) => {
-                        finalization
-                            .scope(self.environment.runner.run_shutdown(
-                                context.clone(),
-                                hook,
-                                context.placement.resource_scope,
-                                terminal.kind,
-                                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                            ))
+                        self.environment
+                            .runner
+                            .compiler_finalization_scope(
+                                &finalization,
+                                self.environment.runner.run_shutdown(
+                                    context.clone(),
+                                    hook,
+                                    context.placement.resource_scope,
+                                    terminal.kind,
+                                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                                ),
+                            )
                             .await
                     }
                     Err(error) => Err(error),
@@ -13820,6 +13909,9 @@ where
     /// from the checkout it is launched with. Without this every actor
     /// compiles against the deployment-wide include roots and nothing else.
     pub fn set_source_layers(&mut self, layers: crate::ActorSourceLayerResolver) {
+        self.environment.source_inspection = Some(
+            crate::SourceInspectionServices::from_source_layers(layers.clone()),
+        );
         self.environment.source_layers = Some(layers);
     }
 
@@ -17413,7 +17505,10 @@ mod tests {
             crate::ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
                 changes: Vec::new(),
             }),
-            crate::ContextReq::SetNextModelWith(crate::Model::CustomModel(crate::Backend::OpenAIPlan, "next-model".into())),
+            crate::ContextReq::SetNextModelWith(crate::Model::CustomModel(
+                crate::Backend::OpenAIPlan,
+                "next-model".into(),
+            )),
             crate::ContextReq::SetNextReasoningWith(crate::Reasoning::OpenAIReasoning(
                 crate::OpenAIReasoning::OpenAIHigh,
             )),

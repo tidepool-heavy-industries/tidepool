@@ -88,6 +88,7 @@ import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
 import TypeEvidenceChecks
   ( runTypeEvidenceChecks, runTypeIdentityParityChecks, runNestedTypeSiteIdentityCheck )
+import SiteComponentHistoryChecks (verifySiteComponentHistories)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 import Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..), resolveHostBindingAuthorities
@@ -873,6 +874,8 @@ tests = testGroup "prepared-stg-pipeline"
       withCaseScratch "prepared-cache-lifetime" verifyTypedPreparationCacheLifetime
   , testCase "site dependency histories refuse changed and newly available authority" $
       withCaseScratch "prepared-site-dependencies" verifySiteDependencyHistories
+  , testCase "site private components preserve completed units across growth and authority replacement" $
+      withCaseScratch "site-component-history" verifySiteComponentHistories
   , testCase "JSON authority refuses dependency shadows" $
       withCaseScratch "json-authority" verifyJsonDependencyAuthority
   , testCase "original prepared pipeline and compiler authority" fullMain

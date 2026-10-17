@@ -30,11 +30,11 @@ family symbols. Regenerate internal artifacts from an authorized producer.
 
 | Producer / consumer | Current format | Migration and admission |
 | --- | --- | --- |
-| Haskell `ExecutionEncode` / repr prepared codec | TPSTG 18, execution ABI 10 | Previously 17 / 9; constructor declaration is eight fields with complete identity, algebraic cases retain versioned types |
+| Haskell `ExecutionEncode` / repr prepared codec | TPSTG 19, execution ABI 10 | Previously 18 / 10; constructor-scheme roots retain their complete telescope and body without root binder-kind annotations; declaration and explicit forall kinds remain |
 | Haskell `CborEncode` / repr `serial::{read,write}` | TPLR 6.0 | Previously 5.0; tenth field now carries complete constructor identity; old headers refuse |
 | Haskell `ExecutionEncode` / repr projected-group codec | TPGRP 2 | Previously 1; embedded declaration and type grammar changes; old group headers refuse |
 | Haskell `ExecutionEncode` / repr finite type-graph codec | TypeGraph 2 | Previously 1; declaration identities retain versions; old graph headers refuse |
-| Haskell `ExecutionEncode` / repr module-product reader | TPMOD 1 | Outer grammar contains opaque group bytes; inner TPGRP 2 and TPSTG 18 admission rejects obsolete groups |
+| Haskell `ExecutionEncode` / repr module-product reader | TPMOD 1 | Outer grammar contains opaque group bytes; inner TPGRP 2 and prepared schema 19 admission rejects obsolete groups |
 | Repr type graph / enclosing commitment owners | Evidence/content domain v2 | Previously v1; explicit framing includes version tag, ABI bytes and constructor family identity |
 | `NativeOriginalCensus` / native original reader | TPHOMEOWNERS 5 unchanged | Binder/global identities are term-only SymbolIdentity; embedded prepared/metadata bytes retain strict inner admission |
 | Module candidates / candidate reader | TPMCAN 10 unchanged | Candidate binders/global identities are term-only; execution graph descriptors are opaque |

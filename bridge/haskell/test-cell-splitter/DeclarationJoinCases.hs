@@ -54,6 +54,7 @@ import System.Directory
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import System.IO.Error (isDoesNotExistError, isPermissionError, isUserError)
 import System.Process (callProcess, readProcess)
 import Tidepool.DeclarationJoin
 import Tidepool.ExactHydration
@@ -582,6 +583,48 @@ wireRoundTripChecks = bracket temporary removeDirectoryRecursive $ \root -> do
   BS.writeFile (root </> "inventory.cbor") (encodeDeclarationInventory [])
   inventory <- readDeclarationOperation (root </> "inventory.cbor")
   unless (inventory == InspectInventory []) (fail "typed empty inventory did not roundtrip")
+
+declarationManifestCaptureChecks :: IO ()
+declarationManifestCaptureChecks = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "manifest.cbor"
+      bytes = encodeDeclarationJoin typedWireInput
+      readers =
+        [ ("declaration join", void (readDeclarationJoin path))
+        , ("declaration operation", void (readDeclarationOperation path)) ]
+      refuse label expected action = do
+        result <- try action :: IO (Either IOException ())
+        case result of
+          Left failure | expected failure -> pure ()
+                       | otherwise -> fail (label ++ " failed with another error: " ++ show failure)
+          Right () -> fail (label ++ " admitted a refused declaration manifest")
+  BS.writeFile path bytes
+  direct <- readDeclarationJoin path
+  dispatched <- readDeclarationOperation path
+  unless (direct == typedWireInput && dispatched == ValidateJoin direct)
+    (fail "direct and dispatched declaration readers changed the same captured body")
+  forM_ [ BS.empty, BS.init bytes, bytes <> BS.singleton 0
+        , BS.pack [0x98, 12] <> BS.tail bytes
+        , toStrictByteString (encodeTerm (TList [TString "unknown-operation"])) ] $ \malformed -> do
+    BS.writeFile path malformed
+    forM_ readers $ \(label,readManifest) ->
+      refuse (label ++ " malformed body") isUserError readManifest
+  let limit = 4 * 1024 * 1024
+  BS.writeFile path (BS.replicate limit 0)
+  forM_ readers $ \(label,readManifest) ->
+    refuse (label ++ " exact size boundary")
+      (\failure -> isUserError failure && not ("exceeds four MiB" `isInfixOf` show failure)) readManifest
+  BS.writeFile path (BS.replicate (limit + 1) 0)
+  forM_ readers $ \(label,readManifest) ->
+    refuse (label ++ " oversized body")
+      (\failure -> (label ++ " exceeds four MiB") `isInfixOf` show failure) readManifest
+  removeFile path
+  forM_ readers $ \(label,readManifest) ->
+    refuse (label ++ " missing file") isDoesNotExistError readManifest
+  BS.writeFile path bytes
+  bracket (getPermissions path) (setPermissions path) $ \permissions -> do
+    setPermissions path (setOwnerReadable False permissions)
+    forM_ readers $ \(label,readManifest) ->
+      refuse (label ++ " inaccessible file") isPermissionError readManifest
 
 -- This oracle retains the old exhaustive census and all-class pair traversal.
 -- Its decisions and inventory construction do not consume the production index.

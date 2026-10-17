@@ -825,7 +825,12 @@ impl crate::RetainedSourceLayer for EmptyRetainedSource {
 }
 
 struct EmptySourceAuthority;
+impl crate::SourceInspection for EmptySourceAuthority {}
+
 impl crate::ActorSourceLayers for EmptySourceAuthority {
+    fn inspection_services(self: std::sync::Arc<Self>) -> crate::SourceInspectionServices {
+        crate::SourceInspectionServices::new(self)
+    }
     fn stage_reload(
         self: Arc<Self>,
         _: tidepool_repr::PrincipalId,

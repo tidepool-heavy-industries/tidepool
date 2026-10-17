@@ -11,12 +11,14 @@ import Data.Text qualified as Text
 import GHC.Builtin.Types (boolTy, tupleTyCon)
 import GHC.Types.Basic (Boxity(Boxed))
 import GHC.Core.Coercion (mkNomReflCo)
-import GHC.Core.Type (typeKind, mkNumLitTy, splitTyConApp_maybe)
+import GHC.Core.Type (typeKind, mkNumLitTy, splitTyConApp_maybe, splitFunTys)
 import GHC.Core.TyCo.Rep (Type(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
-import GHC.Core.DataCon (dataConName)
+import GHC.Core.DataCon (dataConName, dataConUserTyVarBinders)
 import GHC.Core.TyCon (tyConDataCons, tyConName)
-import GHC.Types.Id (idType, idName)
+import GHC.Types.Id (idType, idName, setIdType)
+import GHC.Stg.Syntax qualified as Stg
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.TypeEnv (typeEnvTyCons, typeEnvIds)
@@ -31,13 +33,14 @@ import Tidepool.CompilerProducts (prepareCompilerProjectionContext)
 import Tidepool.ConstructorIdentity (captureIdentityResolver, resolveTypeIdentity)
 import Tidepool.EffectSchema (ysSite)
 import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
-import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
+import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget, projectPreparedModuleGroupsSelected, topBinders)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules, pprFinalizedModules
   , prHscEnv, finalizedHomeModInfo, runPipelineSelected )
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
-import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph)
+import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph, pmBindings, preparedBindingGroups)
+import Tidepool.PreparedStg.Internal (PreparedModule(preparedBindings))
 import Tidepool.TypePolicy qualified as Policy
 import Tidepool.TypeSyntaxIdentity (encodeTypeSyntaxIdentity)
 
@@ -198,6 +201,61 @@ runTypeEvidenceChecks directory = do
   auxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootDecode"])
   assert (all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity) (programConstructors auxiliary)) ["Left", "Right"])
     "auxiliary root lost its own result constructors"
+  repeatedAuxiliary <- requireRight (project context original "unrelated"
+    ["auxiliaryRootDecode", "auxiliaryRootDecode"])
+  assert (auxiliary == repeatedAuxiliary)
+    "repeating an admitted auxiliary root changed its complete output"
+  polymorphicAuxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootPolymorphic"])
+  assert (any (\node -> case node of TypeForAll{} -> True; _ -> False)
+      (IntMap.elems (typeGraphNodes (programTypes polymorphicAuxiliary))))
+    "a closed polymorphic auxiliary answer lost its scoped type evidence"
+  polymorphicBinder <- case [binder | value <- pprModules original,
+      (binding, _) <- pmBindings value, binder <- topBinders binding,
+      occNameString (nameOccName (idName binder)) == "auxiliaryRootPolymorphic"] of
+    [binder] -> pure binder
+    _ -> fail "auxiliary evidence fixture has no unique polymorphic binder"
+  let (_, _, openType) = tcSplitSigmaTy (idType polymorphicBinder)
+      openAnswer = snd (splitFunTys openType)
+  assert (case runStateT (Policy.internType openAnswer) Policy.emptyTypeGraphBuilder of
+      Left Policy.TypeGraphFreeVariable -> True; _ -> False)
+    "open auxiliary control does not contain a free answer variable"
+  -- Change raw projection input, without reissuing a completed compiler result.
+  -- A closed forall is representable; its open body must take the skip path.
+  let openBinder binder
+        | idName binder == idName polymorphicBinder = setIdType binder openType
+        | otherwise = binder
+      openTop (Stg.StgTopLifted (Stg.StgNonRec binder rhs)) =
+        Stg.StgTopLifted (Stg.StgNonRec (openBinder binder) rhs)
+      openTop (Stg.StgTopLifted (Stg.StgRec pairs)) =
+        Stg.StgTopLifted (Stg.StgRec [(openBinder binder, rhs) | (binder, rhs) <- pairs])
+      openTop binding = binding
+      openModule value = value { preparedBindings =
+        [(openTop binding, dependencies) | (binding, dependencies) <- pmBindings value] }
+      openContext = context
+        { projectionEntry = (projectionEntry context) { symbolOccurrence = "unrelated" }
+        , projectionAuxiliaryRoots = [(projectionEntry context)
+            { symbolOccurrence = "auxiliaryRootPolymorphic" }] }
+  openAuxiliary <- requireRight (projectPreparedTarget openContext (map openModule (pprModules original)))
+  assert (IntMap.null (typeGraphNodes (programTypes openAuxiliary)))
+    "an open auxiliary answer acquired concrete evidence"
+  prepared <- case [value | value <- pprModules original,
+      moduleNameString (moduleName (pmModule value)) == "TypeEvidence"] of
+    [value] -> pure value
+    _ -> fail "auxiliary evidence fixture has no unique prepared source module"
+  ordinal <- case [index | (index, group) <- preparedBindingGroups prepared,
+      (binding, _) <- pmBindings group, binder <- topBinders binding,
+      occNameString (nameOccName (idName binder)) == "auxiliaryRootDecode"] of
+    [value] -> pure value
+    _ -> fail "auxiliary evidence fixture has no unique original group"
+  let auxiliaryContext = context { projectionAuxiliaryRoots =
+        [(projectionEntry context) { symbolOccurrence = "auxiliaryRootDecode" }] }
+  auxiliaryGroups <- requireRight (projectPreparedModuleGroupsSelected auxiliaryContext prepared
+    (Just (Set.singleton ordinal)))
+  assert (case auxiliaryGroups of
+      [group] -> all (`elem` map (symbolOccurrence . constructorSymbol . constructorIdentity)
+        (projectedConstructors (projectedBody group))) ["Left", "Right"]
+      _ -> False)
+    "independent original group lost its auxiliary answer constructors"
   verifyOriginalScopes original alpha
   let cast = CastTy boolTy (mkNomReflCo (typeKind boolTy))
       coercion = CoercionTy (mkNomReflCo boolTy)
@@ -430,11 +488,28 @@ verifyOriginalScopes original alpha = do
     (mapM (\constructor -> maybe (lift (Left Policy.TypeGraphOriginalDeclarationMismatch))
       (Policy.internConstructorType constructor) (requestReplyIndex constructor)) scoped) shared)
   assert (length roots == 9 && roots !! 0 /= roots !! 1 && roots !! 2 /= roots !! 3
-      && roots !! 4 == roots !! 5 && roots !! 6 /= roots !! 7 && roots !! 6 /= roots !! 8)
-    "shared graph conflated alpha, binder position, repetition, unused binders or kinds"
+      && roots !! 4 == roots !! 5 && roots !! 6 /= roots !! 7 && roots !! 6 == roots !! 8)
+    "reply graph changed alpha, binder position, repetition, telescope count or unused-kind equivalence"
+  scopedGraph <- requireRight (Policy.finishTypeGraph scopedBuilder)
+  assert (all (\root -> map fst (outgoing scopedGraph root) == [TypeBody]) roots)
+    "constructor reply roots retained binder-kind annotations"
+  poly <- select "PolyKindScope" originalConstructors
+  renamedPoly <- select "PolyKindRenamed" originalConstructors
+  (polyRoot, polyBuilder) <- capture poly scopedBuilder
+  (renamedRoot, completePoly) <- capture renamedPoly polyBuilder
+  assert (polyRoot == renamedRoot) "dependent kind binders lost alpha-stable scope"
+  polyGraph <- requireRight (Policy.finishTypeGraph completePoly)
+  let (_, _, arguments) = nominal polyGraph (rootBody polyGraph polyRoot)
+  assert (length (dataConUserTyVarBinders poly) == 2
+      && case nodeAt polyGraph polyRoot of
+        TypeRoot ConstructorSchemeRoot flags _ -> length flags == 2
+        _ -> False)
+    "reply root dropped an original kind binder from its telescope"
+  assert (map (nodeAt polyGraph) arguments == [TypeBound 1, TypeBound 0])
+    "reply body lost its invisible kind argument or reversed dependent binder scope"
   intConstructor <- select "OnlyInt" originalConstructors
   intReply <- maybe (fail "OnlyInt lacks its reply") pure (requestReplyIndex intConstructor)
-  (closed, closedBuilder) <- requireRight (runStateT (Policy.internType intReply) scopedBuilder)
+  (closed, closedBuilder) <- requireRight (runStateT (Policy.internType intReply) completePoly)
   (schematic, schemeBuilder) <- capture intConstructor closedBuilder
   assert (closed /= schematic) "closed activation and constructor-scheme domains were conflated"
   isolated <- freshExactState (prHscEnv (pprPipelineResult original))
@@ -470,23 +545,23 @@ assert :: Bool -> String -> IO ()
 assert condition message = unless condition (fail message)
 requireRight :: Show e => Either e a -> IO a
 requireRight = either (fail . show) pure
-nodeAt :: TypeGraph -> TypeNodeId -> TypeNode
+nodeAt :: TypeGraphF constructor identity rep -> TypeNodeId -> TypeNodeF constructor identity rep
 nodeAt graph (TypeNodeId index) = maybe (error "missing finite graph node") id
   (IntMap.lookup (fromIntegral index) (typeGraphNodes graph))
-outgoing :: TypeGraph -> TypeNodeId -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]
+outgoing :: TypeGraphF constructor identity rep -> TypeNodeId -> [(TypeEdgeRoleF rep, TypeNodeId)]
 outgoing graph (TypeNodeId index) = IntMap.findWithDefault [] (fromIntegral index) (typeGraphEdges graph)
-edge :: TypeGraph -> TypeNodeId -> TypeEdgeRoleF RuntimeRep -> TypeNodeId
+edge :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> TypeEdgeRoleF rep -> TypeNodeId
 edge graph root role = case [target | (actual, target) <- outgoing graph root, actual == role] of
   [target] -> target
-  _ -> error ("missing/duplicate finite graph edge " ++ show role)
-rootBody :: TypeGraph -> TypeNodeId -> TypeNodeId
+  _ -> error "missing/duplicate finite graph edge"
+rootBody :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> TypeNodeId
 rootBody graph root = case nodeAt graph root of TypeRoot{} -> edge graph root TypeBody; _ -> error "reply is not a scoped root"
-nominal :: TypeGraph -> TypeNodeId -> (TypeIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
+nominal :: Eq rep => TypeGraphF constructor identity rep -> TypeNodeId -> (identity, DeclarationFormF rep, [TypeNodeId])
 nominal graph expression = case nodeAt graph expression of
   TypeNominalApplication -> case nodeAt graph (edge graph expression TypeHead) of
     TypeDeclaration identity _ form _ -> (identity, form, [target | (TypeArgument _, target) <- outgoing graph expression])
     _ -> error "nominal expression has no declaration"
-  other -> error ("expected nominal expression, got " ++ show other)
+  _ -> error "expected nominal expression"
 headName :: TypeGraph -> TypeNodeId -> Text.Text
 headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence (typeSymbol identity)
 -- The two captures also change SameLayout Int to SameLayout Bool, which

@@ -650,21 +650,12 @@ fn certify_authored_declaration_inner(
         )
         .map_err(|error| contract(&format!("authored original closure: {error}")))?;
     let products = originals.products();
-    let matches = products
-        .iter()
-        .filter(|product| {
-            product.owner().unit == candidates[0].unit && product.owner().module == module_name
-        })
-        .count();
-    if matches != 1 {
+    let mut matches = products.iter().filter(|product| {
+        product.owner().unit == candidates[0].unit && product.owner().module == module_name
+    });
+    let (Some(selected), None) = (matches.next(), matches.next()) else {
         return Err(contract("authored module has no unique certified product"));
-    }
-    let selected = products
-        .iter()
-        .find(|product| {
-            product.owner().unit == candidates[0].unit && product.owner().module == module_name
-        })
-        .expect("count checked");
+    };
     if selected.source_sha256() != Some(source_sha256) {
         return Err(contract("certified authored source digest differs"));
     }

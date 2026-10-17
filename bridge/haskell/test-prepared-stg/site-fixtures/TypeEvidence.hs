@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes, FlexibleContexts #-}
 {-# LANGUAGE GADTs, UnboxedTuples #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -11,6 +12,7 @@ import Control.Monad.Freer (Eff, Member, send)
 import Tidepool.Internal.RequestSite (RequestSite)
 import Data.Text (Text)
 import Data.Kind (Type)
+import Data.Proxy (Proxy)
 import Numeric.Natural (Natural)
 import Tidepool.Effects.Core
   ( AgentSession (AgentAttachWith), AgentTools (AgentToolsInstallWith) )
@@ -38,8 +40,8 @@ data Progress progress
   | ProgressUpdate progress
   | ProgressClosed
 
--- Source telescope positions, unused binders and kinds remain semantic even
--- when variables have identical diagnostic spelling.
+-- Runtime replies retain source telescope positions and body arguments even
+-- when variables have identical diagnostic spelling or unused kinds differ.
 data ScopeReply answer where
   FirstScope :: forall a b. a -> b -> ScopeReply a
   SecondScope :: forall b a. a -> b -> ScopeReply a
@@ -50,6 +52,8 @@ data ScopeReply answer where
   UnusedScope :: forall (ignored :: Type) a. a -> ScopeReply a
   NoUnusedScope :: forall a. a -> ScopeReply a
   HigherKindScope :: forall (ignored :: Type -> Type) a. a -> ScopeReply a
+  PolyKindScope :: forall kind (a :: kind). ScopeReply (Proxy a)
+  PolyKindRenamed :: forall k (value :: k). ScopeReply (Proxy value)
 
 data Alts f xs where
   (:|) :: Alts f a -> Alts f rest -> Alts f (Either a rest)
@@ -206,6 +210,9 @@ auxiliaryRootDecodeHelper _ = Left "unused"
 
 auxiliaryRootDecode :: Text -> Either Text Int
 auxiliaryRootDecode = auxiliaryRootDecodeHelper
+
+auxiliaryRootPolymorphic :: a -> a
+auxiliaryRootPolymorphic value = value
 
 provenLeading :: RequestSite '[Int] Int -> Console Int
 provenLeading = ProvenLeading

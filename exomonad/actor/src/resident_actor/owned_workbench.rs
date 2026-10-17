@@ -32,7 +32,7 @@ impl WorkbenchCompilationAuthority {
             .1
     }
 
-    pub(super) fn admit(
+    pub(crate) fn admit(
         context: ActorSessionContext,
         source: crate::CheckpointSourceLayer,
         installed_tools: Option<crate::InstalledToolLease>,
@@ -1020,10 +1020,12 @@ where
                 "hosted execution abandoned before exact continuation settlement".into(),
                 resources.clone(),
             )
-            .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
-                work: invocation_work.clone(),
-                control: control.clone(),
-            });
+            .with_compiler_owner(workbench.compiler_scope(
+                crate::resident_workbench::CompilerCloseOwner::Invocation {
+                    work: invocation_work.clone(),
+                    control: control.clone(),
+                },
+            ));
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),
@@ -1187,7 +1189,7 @@ where
         use inspection_wait::{InspectionRequest, InspectionResult};
         let actor = owned.state.effects.context.actor;
         let operation_reader = self.environment.operation_reader.clone();
-        let source_layers = self.environment.source_layers.clone();
+        let source_inspection = self.environment.source_inspection.clone();
         let installed_tools = self.installed_tools.clone();
         let source_observation = self.runtime_observation.clone();
         let issued_source = owned.state.effects.issued_snapshot.clone();
@@ -1217,7 +1219,7 @@ where
                 Box::pin(async move {
                     if view == View::Revisions {
                         source_effect::refresh_source_observation(
-                            source_layers,
+                            source_inspection,
                             installed_tools,
                             source_observation,
                             issued_source,
@@ -3022,7 +3024,12 @@ mod authority_tests {
 
     struct SourceService(crate::SourceLayerIssuer);
 
+    impl crate::SourceInspection for SourceService {}
+
     impl crate::ActorSourceLayers for SourceService {
+        fn inspection_services(self: std::sync::Arc<Self>) -> crate::SourceInspectionServices {
+            crate::SourceInspectionServices::new(self)
+        }
         fn stage_reload(
             self: Arc<Self>,
             _: tidepool_repr::PrincipalId,

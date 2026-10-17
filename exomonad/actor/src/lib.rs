@@ -19,6 +19,7 @@
 pub(crate) mod after_tool;
 pub mod agent_spec;
 mod call_timing;
+mod capabilities;
 mod cell_context;
 mod cell_model;
 pub use cell_context::{CellExit, CellExitCause, ContextReq, HostedContextBinding};
@@ -141,8 +142,9 @@ pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, ActorSourceRoots,
-    CheckpointSourceLayer, RetainedSourceLayer, SourceEntryStorage, SourceGenerationEvidence,
-    SourceInspectionError, SourceLayerIssuer, SourceLayerReload, StagedActorSourceReload,
+    CheckpointSourceLayer, HasSourceInspection, RetainedSourceLayer, SourceEntryStorage,
+    SourceGenerationEvidence, SourceInspection, SourceInspectionError, SourceInspectionServices,
+    SourceLayerIssuer, SourceLayerReload, StagedActorSourceReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,

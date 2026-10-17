@@ -450,24 +450,6 @@ impl TypeGraph {
         if first_domain != second_domain || first_binders != second_binders {
             return Ok(false);
         }
-        let mut first_kinds = self
-            .ordered_edges(first.root)
-            .filter(|edge| matches!(edge.weight(), TypeEdge::BinderKind(_)));
-        let mut second_kinds = other
-            .ordered_edges(second.root)
-            .filter(|edge| matches!(edge.weight(), TypeEdge::BinderKind(_)));
-        loop {
-            budget.charge(1)?;
-            match (first_kinds.next(), second_kinds.next()) {
-                (None, None) => break,
-                (Some(first), Some(second)) if first.weight() == second.weight() => {
-                    if !self.node_identity_eq(first.target(), other, second.target(), budget)? {
-                        return Ok(false);
-                    }
-                }
-                _ => return Ok(false),
-            }
-        }
         compatible(self, first.closure, other, second.closure, budget)
     }
 }
@@ -1108,16 +1090,65 @@ mod tests {
             rendered: "original reply".into(),
         });
         graph.add_edge(root, expression, TypeEdge::Body);
-        if binders > 0 {
-            let kind = graph.add_node(TypeNode::Literal(TypeLiteral::Symbol("Type".into())));
-            for index in 0..binders {
-                graph.add_edge(root, kind, TypeEdge::BinderKind(index as u32));
-            }
-        }
         WireTypeNodeId(root.index() as u32)
     }
     fn publish(graph: GraphStorage, inventory: &[ConstructorDecl]) -> Arc<TypeGraph> {
         Arc::new(TypeGraph::validate(graph, inventory, GraphLimits::default()).unwrap())
+    }
+
+    #[test]
+    fn constructor_scheme_compatibility_retains_explicit_arguments_and_telescope() {
+        let mut storage = GraphStorage::new();
+        let proxy = declaration(
+            &mut storage,
+            "Proxy",
+            2,
+            DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "argument identity control".into(),
+            },
+        );
+        let first = storage.add_node(TypeNode::Bound(1));
+        let second = storage.add_node(TypeNode::Bound(0));
+        let kind = storage.add_node(TypeNode::Literal(TypeLiteral::Symbol("Type".into())));
+        let other_kind = storage.add_node(TypeNode::Literal(TypeLiteral::Symbol(
+            "Type -> Type".into(),
+        )));
+        let original = application(&mut storage, proxy, &[first, second]);
+        let swapped = application(&mut storage, proxy, &[second, first]);
+        let explicit = application(&mut storage, proxy, &[kind, second]);
+        let changed = application(&mut storage, proxy, &[other_kind, second]);
+        let original = root(&mut storage, original, 2);
+        let swapped = root(&mut storage, swapped, 2);
+        let unused_binder = root(&mut storage, explicit, 2);
+        let explicit = root(&mut storage, explicit, 1);
+        let changed = root(&mut storage, changed, 1);
+        let closed_body = application(&mut storage, proxy, &[kind, kind]);
+        let closed = root(&mut storage, closed_body, 1);
+        let same_closed = root(&mut storage, closed_body, 1);
+        let unused_closed_binder = root(&mut storage, closed_body, 2);
+        let graph = publish(storage, &[]);
+        for (left, right) in [
+            (original, swapped),
+            (explicit, changed),
+            (explicit, unused_binder),
+            (closed, unused_closed_binder),
+        ] {
+            assert!(!graph
+                .rooted_compatible(left, &graph, right, &mut TypeWorkBudget::new(20_000))
+                .unwrap());
+        }
+        assert!(graph
+            .rooted_compatible(original, &graph, original, &mut TypeWorkBudget::new(20_000))
+            .unwrap());
+        assert!(graph
+            .rooted_compatible(
+                closed,
+                &graph,
+                same_closed,
+                &mut TypeWorkBudget::new(20_000)
+            )
+            .unwrap());
     }
     fn template(
         graph: &mut GraphStorage,
@@ -1375,13 +1406,18 @@ mod tests {
         graph.add_edge(forall, eff, TypeEdge::Kind);
         graph.add_edge(forall, bound, TypeEdge::Body);
         let explicit_kind = root(&mut graph, forall, 0);
-        let metadata = graph.add_node(TypeNode::Root {
-            domain: RootDomain::ConstructorScheme,
-            binders: vec![SourceBinderFlag::Specified],
-            rendered: "a".into(),
+        let metadata = graph.add_node(TypeNode::Declaration {
+            identity: crate::execution_schema::testing::type_identity(identity("Metadata", "type")),
+            parameters: vec![ParameterFlag::NamedRequired],
+            form: DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "unsupported".into(),
+            },
+            restriction: SyntaxRestriction::None,
         });
         graph.add_edge(metadata, eff, TypeEdge::BinderKind(0));
-        graph.add_edge(metadata, bound, TypeEdge::Body);
+        let metadata_body = application(&mut graph, metadata, &[bound]);
+        let metadata_root = root(&mut graph, metadata_body, 1);
         let graph = publish(graph, &inventory);
         let mut budget = TypeWorkBudget::new(20_000);
         let data = data(
@@ -1403,11 +1439,11 @@ mod tests {
         ));
         assert!(matches!(
             graph
-                .open_root(WireTypeNodeId(metadata.index() as u32), &mut budget)
+                .open_root(metadata_root, &mut budget)
                 .unwrap()
                 .view(&mut budget)
                 .unwrap(),
-            TypeView::Unconstructible(ConstructionRefusal::Polymorphic)
+            TypeView::Unconstructible(ConstructionRefusal::Declared { .. })
         ));
     }
 

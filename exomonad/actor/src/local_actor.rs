@@ -592,20 +592,6 @@ impl KernelContext {
         self.terminal.clone()
     }
 
-    /// Autonomous resident turns retain compiler obligations on the recipient's
-    /// existing lifetime, independently of the sender or a completed startup.
-    pub(crate) fn compiler_lifecycle_scope<F: std::future::Future>(
-        &self,
-        operation: F,
-    ) -> impl std::future::Future<Output = F::Output> {
-        let owner =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained_exit());
-        // The scope owns only a pinned pointer, rather than capturing the
-        // complete resident operation again in its task-local future.
-        let operation = Box::pin(operation);
-        async move { owner.scope(operation).await }
-    }
-
     pub(crate) fn retain_child_startup_cleanup(&self, outcome: crate::CleanupComponentOutcome) {
         self.directory.retain_child_cleanup(self.identity, outcome);
     }
@@ -7254,6 +7240,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_scope_keeps_large_operation_out_of_wrapper_and_drops_it_once() {
+        let services = crate::capabilities::WorkbenchServices::new();
         struct PendingOperation {
             payload: [u8; 128 * 1024],
             drops: Arc<AtomicUsize>,
@@ -7284,10 +7271,16 @@ mod tests {
             .unwrap();
         let context = observations.lock()[0].0.clone();
         let drops = Arc::new(AtomicUsize::new(0));
-        let operation = context.compiler_lifecycle_scope(PendingOperation {
-            payload: [42; 128 * 1024],
-            drops: drops.clone(),
-        });
+        let operation = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    context.retained_exit(),
+                ),
+            )
+            .scope(PendingOperation {
+                payload: [42; 128 * 1024],
+                drops: drops.clone(),
+            });
         assert!(std::mem::size_of_val(&operation) < 1024);
         let mut operation = Box::pin(operation);
         assert!(futures_util::poll!(operation.as_mut()).is_pending());
@@ -7318,6 +7311,7 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_lifecycle_owns_compilation_after_sender_retirement() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let observations = Arc::new(Mutex::new(Vec::new()));
         let (sender, sender_task) = spawn_local_actor(None, observed_probe(&observations))
             .await
@@ -7327,25 +7321,35 @@ mod tests {
             .unwrap();
         let sender_context = observations.lock()[0].0.clone();
         let recipient_context = observations.lock()[1].0.clone();
-        let original = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-            sender_context.retained_exit(),
+        let original = services.with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                sender_context.retained_exit(),
+            ),
         );
         original
-            .scope(recipient_context.compiler_lifecycle_scope(async {
-                crate::ActorCompilerCloseOwner::current()
-                    .unwrap()
-                    .run(|settlement| {
-                        tidepool_runtime::compile_haskell(
-                            "module RecipientFirst where\nvalue = (42 :: Int)\n",
-                            "value",
-                            &[],
-                            settlement,
-                        )
-                    })
-                    .unwrap()
-                    .action
-                    .unwrap();
-            }))
+            .scope(
+                services
+                    .with_compiler_owner(
+                        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                            recipient_context.retained_exit(),
+                        ),
+                    )
+                    .scope(async {
+                        crate::ActorCompilerCloseOwner::current()
+                            .unwrap()
+                            .run(|settlement| {
+                                tidepool_runtime::compile_haskell(
+                                    "module RecipientFirst where\nvalue = (42 :: Int)\n",
+                                    "value",
+                                    &[],
+                                    settlement,
+                                )
+                            })
+                            .unwrap()
+                            .action
+                            .unwrap();
+                    }),
+            )
             .await;
         assert!(sender.terminal().compiler_close_observations().is_empty());
         assert!(crate::ActorCompilerCloseOwner::current().is_err());
@@ -7357,8 +7361,13 @@ mod tests {
             .await
             .unwrap();
         sender_task.await.unwrap();
-        recipient_context
-            .compiler_lifecycle_scope(async {
+        services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    recipient_context.retained_exit(),
+                ),
+            )
+            .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()
                     .run(|settlement| {
@@ -7391,8 +7400,13 @@ mod tests {
             .unwrap();
         recipient_task.await.unwrap();
         let mut entered = false;
-        let refused = recipient_context
-            .compiler_lifecycle_scope(async {
+        let refused = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    recipient_context.retained_exit(),
+                ),
+            )
+            .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()
                     .run(|_| entered = true)
@@ -7410,13 +7424,19 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_retirement_cancels_native_work_after_waiter_drop() {
+        let services = crate::capabilities::WorkbenchServices::new();
         let observations = Arc::new(Mutex::new(Vec::new()));
         let (recipient, recipient_task) = spawn_local_actor(None, observed_probe(&observations))
             .await
             .unwrap();
         let context = observations.lock()[0].0.clone();
-        let owner = context
-            .compiler_lifecycle_scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+        let owner = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    context.retained_exit(),
+                ),
+            )
+            .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
             .await;
         let (entered, observed) = oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
@@ -7451,8 +7471,13 @@ mod tests {
         let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "retire recipient");
         recipient.terminal().request_shutdown(terminal.clone());
         let mut entered_late = false;
-        let refused = context
-            .compiler_lifecycle_scope(async {
+        let refused = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    context.retained_exit(),
+                ),
+            )
+            .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()
                     .run(|_| entered_late = true)

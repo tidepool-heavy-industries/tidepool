@@ -28,7 +28,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 18
+schemaVersion = 19
 executionAbiVersion = 10
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)

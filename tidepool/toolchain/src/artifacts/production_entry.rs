@@ -724,7 +724,7 @@ pub fn load_selected_production_entry_with_catalog(
         planned_cell: None,
         checked_values: None,
         checked_projections: Vec::new(),
-        checked: None,
+        activation_preview: None,
     };
     let offer = SelectedModuleCandidateOffer {
         offer,

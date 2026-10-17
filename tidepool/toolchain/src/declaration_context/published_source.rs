@@ -43,8 +43,13 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Vec<ArtifactId>, CompileError> {
-        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
-        let roles = self.facts.compiler_support.projection().roles();
+        let metadata = self
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        let roles = self.owner.facts.compiler_support.projection().roles();
         let issued = roles
             .iter()
             .find_map(|role| match role {
@@ -57,10 +62,11 @@ impl ExactDeclarationContext {
             })
             .unwrap_or_else(|| {
                 crate::artifact_inventory::ExactArtifactSelection::capture(
-                    &self.facts.compiler_support.artifacts(),
+                    &self.owner.facts.compiler_support.artifacts(),
                 )
             });
         let issuer = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -95,6 +101,7 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
     ) -> Result<Vec<ExactLexicalNode>, CompileError> {
         let graph = self
+            .owner
             .facts
             .lexical
             .iter()
@@ -138,6 +145,7 @@ impl ExactDeclarationContext {
             ));
         }
         let closure = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -180,7 +188,7 @@ impl ExactDeclarationContext {
         }
         let bytes = serde_json::to_vec(&(
             "published-source-original3",
-            self.facts.producer,
+            self.owner.facts.producer,
             root,
             interface,
             original,
@@ -197,6 +205,7 @@ impl ExactDeclarationContext {
 
     pub(super) fn validate_published_source_originals(&self) -> Result<(), CompileError> {
         let roles = self
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -207,7 +216,12 @@ impl ExactDeclarationContext {
         if roles.is_empty() {
             return Ok(());
         }
-        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
+        let metadata = self
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
         for role in roles {
             if let CompilerInputRole::PublishedSourceOriginal {
                 interface,
@@ -235,6 +249,7 @@ impl ExactDeclarationContext {
         &self,
     ) -> Result<Vec<Arc<PublishedSourceOriginalSelection>>, CompileError> {
         if !self
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -245,8 +260,14 @@ impl ExactDeclarationContext {
             return Ok(Vec::new());
         }
         self.normalize()?;
-        let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
-        self.facts
+        let metadata = self
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        self.owner
+            .facts
             .compiler_support
             .projection()
             .roles()
@@ -354,13 +375,15 @@ impl ExactDeclarationContext {
         let lexical = self.published_lexical_closure(root)?;
         let owners = lexical.iter().map(|node| node.owner.clone()).collect();
         let compiler_support = self
+            .owner
             .facts
             .compiler_support
             .select_publication_graph(root, roots, &owners)?;
         Self::from_facts(DeclarationContextFacts {
-            producer: self.facts.producer,
+            producer: self.owner.facts.producer,
             compiler_support,
             lexical: self
+                .owner
                 .facts
                 .lexical
                 .replace(self.published_lexical_closure(root)?)?,
@@ -380,6 +403,7 @@ impl ExactDeclarationContext {
     ) -> Result<Arc<PublishedSourceOriginalSelection>, CompileError> {
         let target = self.original_instance_target()?;
         if !self
+            .owner
             .facts
             .lexical
             .iter()
@@ -399,6 +423,7 @@ impl ExactDeclarationContext {
         }
         let mut context = self.published_context_for_root(root, entry.descriptor.id)?;
         let interface = context
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -413,7 +438,7 @@ impl ExactDeclarationContext {
             source_revision: revision.into(),
             original_input_identity: input_identity.into(),
             selection: crate::artifact_inventory::ExactArtifactSelection::capture(
-                &context.facts.compiler_support.artifacts(),
+                &context.owner.facts.compiler_support.artifacts(),
             ),
             selection_sha256: [0; 32],
         };
@@ -428,10 +453,12 @@ impl ExactDeclarationContext {
             owner: root.clone(),
             role,
         };
-        context.facts.compiler_support = context
+        let updated = context
+            .owner
             .facts
             .compiler_support
             .publish_original(&endorsement)?;
+        context = context.rebuild(|facts| facts.compiler_support = updated);
 
         Ok(Arc::new(PublishedSourceOriginalSelection {
             context: Arc::new(context.finish()?),
@@ -447,19 +474,22 @@ impl ExactDeclarationContext {
         selection: &PublishedSourceOriginalSelection,
     ) -> Result<Self, CompileError> {
         let incoming = selection.context();
-        self = self.admit_producer(incoming.facts.producer)?;
+        self = self.admit_producer(incoming.owner.facts.producer)?;
         let lexical = compose_lexical_nodes(
-            self.facts
+            self.owner
+                .facts
                 .lexical
                 .iter()
-                .chain(incoming.facts.lexical.iter()),
+                .chain(incoming.owner.facts.lexical.iter()),
         )?;
-        self.facts.compiler_support = self
+        let updated = self
+            .owner
             .facts
             .compiler_support
-            .merge(&incoming.facts.compiler_support)?;
+            .merge(&incoming.owner.facts.compiler_support)?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         {
-            let updated = self.facts.lexical.replace(lexical)?;
+            let updated = self.owner.facts.lexical.replace(lexical)?;
             self = self.rebuild(|facts| facts.lexical = updated);
         }
         self.finish()
@@ -467,6 +497,7 @@ impl ExactDeclarationContext {
 
     pub(super) fn published_scope_value(&self) -> Result<Value, CompileError> {
         if !self
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -479,7 +510,8 @@ impl ExactDeclarationContext {
         self.validate_published_source_originals()?;
         let metadata = self.compiler_metadata_snapshot()?;
         Ok(Value::Array(
-            self.facts
+            self.owner
+                .facts
                 .compiler_support
                 .projection()
                 .roles()
@@ -514,6 +546,7 @@ impl ExactDeclarationContext {
                     let context = self.published_context_for_root(owner, original)?;
                     let selected = context.compiler_metadata_snapshot()?;
                     let dependencies = context
+                        .owner
                         .facts
                         .compiler_support
                         .projection()
@@ -1629,8 +1662,8 @@ mod tests {
             let continued = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &admitted,
-                published.facts.compiler_support.projection().clone(),
-                published.facts.lexical.to_vec(),
+                published.owner.facts.compiler_support.projection().clone(),
+                published.owner.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
             )
@@ -1651,8 +1684,8 @@ mod tests {
             let with_ambient = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &ambient,
-                published.facts.compiler_support.projection().clone(),
-                published.facts.lexical.to_vec(),
+                published.owner.facts.compiler_support.projection().clone(),
+                published.owner.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
             )
@@ -1683,7 +1716,7 @@ mod tests {
                         producer,
                         &ambient,
                         projection,
-                        published.facts.lexical.to_vec(),
+                        published.owner.facts.lexical.to_vec(),
                         root.descriptor.owner.clone(),
                         &[root.descriptor.owner.clone()],
                     )
@@ -1743,7 +1776,7 @@ mod tests {
                             .into_iter()
                             .collect::<Vec<_>>(),
                         &published.compiler_input_roles(),
-                        published.facts.lexical.to_vec(),
+                        published.owner.facts.lexical.to_vec(),
                     )
                     .is_err(),
                 "flat recovery cannot recreate an issuer's exact bound selection"
@@ -1752,7 +1785,7 @@ mod tests {
                 .context_with_graph_selection(
                     &selection,
                     &published.compiler_input_roles(),
-                    published.facts.lexical.to_vec(),
+                    published.owner.facts.lexical.to_vec(),
                 )
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
@@ -1817,7 +1850,7 @@ mod tests {
                 .context_with_graph_selection(
                     &snapshot_selection,
                     &roles,
-                    snapshot.facts.lexical.to_vec(),
+                    snapshot.owner.facts.lexical.to_vec(),
                 )
                 .unwrap();
                 assert_eq!(durable.artifact_view(), snapshot.artifact_view());
@@ -1846,7 +1879,7 @@ mod tests {
                     .context_with_graph_selection(
                         &selection,
                         &published.compiler_input_roles(),
-                        published.facts.lexical.to_vec(),
+                        published.owner.facts.lexical.to_vec(),
                     )
                     .is_err(),
                 "recovery cannot replace missing exact child custody with its canonical interface"

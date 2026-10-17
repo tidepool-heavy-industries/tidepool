@@ -401,6 +401,7 @@ pub(super) enum PreparationMessage {
 pub(super) struct PreparationSupervisor;
 pub(super) struct PreparationState {
     control: RactorRef<RunControlMessage>,
+    compiler_services: crate::capabilities::WorkbenchServices,
     workers: HashMap<ractor::ActorId, TrackedWorker>,
 }
 enum WorkerKind {
@@ -455,6 +456,7 @@ impl Actor for PreparationSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(PreparationState {
             control,
+            compiler_services: crate::capabilities::WorkbenchServices::new(),
             workers: HashMap::new(),
         })
     }
@@ -512,7 +514,10 @@ impl Actor for PreparationSupervisor {
                 }
             }
             PreparationMessage::Start { id, operation, compiler, reply } => {
-                let arguments = RootWorkerArguments { id, operation: Some(operation), compiler: compiler.clone(), reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
+                let compiler_scope = state.compiler_services.with_compiler_owner(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(compiler.clone()),
+                );
+                let arguments = RootWorkerArguments { id, operation: Some(operation), compiler: compiler.clone(), compiler_scope, reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, RootWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
                         state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Root { id, compiler, produced: None, native: None }, terminal: false, reported: false });
@@ -625,6 +630,7 @@ struct RootWorkerArguments {
     id: u64,
     operation: Option<RootOperation>,
     compiler: RetainedActorExit,
+    compiler_scope: crate::capabilities::CompilerOwnerScope,
     reply: Option<oneshot::Sender<RootDelivery>>,
     control: RactorRef<RunControlMessage>,
     supervisor: RactorRef<PreparationMessage>,
@@ -654,10 +660,9 @@ impl Actor for RootWorker {
             owner: state.control.clone(),
             supervisor: state.supervisor.clone(),
         };
-        let owner =
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(state.compiler.clone());
         let mut reply = state.reply.take().expect("root result has one recipient");
-        let operation = std::panic::AssertUnwindSafe(owner.scope(operation(ticket))).catch_unwind();
+        let operation = std::panic::AssertUnwindSafe(state.compiler_scope.scope(operation(ticket)))
+            .catch_unwind();
         tokio::pin!(operation);
         let completed = tokio::select! {
             completed = &mut operation => completed,

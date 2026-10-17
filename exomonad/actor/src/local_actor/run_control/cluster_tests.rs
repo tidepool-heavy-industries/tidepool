@@ -45,14 +45,18 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
         .is_none());
     assert!(
         matches!(
-            control.settle_root_preparations(Duration::from_millis(20)).await,
+            control
+                .settle_root_preparations(Duration::from_millis(20))
+                .await,
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ),
         "an outstanding prepared reservation still owns unsettled custody"
     );
     drop(reservation);
     assert!(matches!(
-        control.settle_root_preparations(Duration::from_secs(2)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(2))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -68,7 +72,9 @@ async fn finalizing_run_refuses_late_prepared_submission_without_running_produce
     let (control, task) = RunControlClient::start().await.unwrap();
     control.seal().await.unwrap();
     assert!(matches!(
-        control.settle_root_preparations(Duration::from_secs(2)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(2))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     ));
     assert!(matches!(
@@ -216,28 +222,32 @@ proptest::proptest! {
 async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     let (control, task) = RunControlClient::start().await.unwrap();
     let (other_control, other_task) = RunControlClient::start().await.unwrap();
-    let other_ticket = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-        other_control.preparation_client().producer(),
-    )
-    .register_work()
-    .unwrap();
-    let other_cancellation = other_ticket.cancellation().host_admission_cancellation();
+    let services = crate::capabilities::WorkbenchServices::new();
+    let other_ticket = services
+        .with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                other_control.preparation_client().producer(),
+            ),
+        )
+        .admit_work()
+        .unwrap();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
         .shared_preparation(client.producer());
-    let ticket = owner.register_work().unwrap();
-    let cancellation = ticket.cancellation().host_admission_cancellation();
-    let observed_cancellation = cancellation.clone();
+    let ticket = services.with_compiler_owner(owner).admit_work().unwrap();
+    let observed_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let physical_cancellation = observed_cancellation.clone();
     let (started, entered) = tokio::sync::oneshot::channel();
     let (cancelled, stopped) = tokio::sync::oneshot::channel();
     let (release, finish) = std::sync::mpsc::channel();
     let physical = tokio::task::spawn_blocking(move || {
         ticket.run(|_| {
             started.send(()).unwrap();
-            while cancellation.checkpoint().is_ok() {
+            while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
                 std::thread::yield_now();
             }
+            physical_cancellation.store(true, std::sync::atomic::Ordering::SeqCst);
             cancelled.send(()).unwrap();
             finish.recv_timeout(Duration::from_secs(10)).unwrap();
         })
@@ -249,19 +259,20 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         "waiter stopped",
     ));
     assert!(client.claim(|| ()).is_ok());
-    observed_cancellation.checkpoint().unwrap();
+    assert!(!observed_cancellation.load(std::sync::atomic::Ordering::SeqCst));
     control.seal().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), stopped)
         .await
         .unwrap()
         .unwrap();
-    other_cancellation.checkpoint().unwrap();
+    assert!(other_control.preparation_client().claim(|| ()).is_ok());
     assert!(client.claim(|| ()).is_err());
-    assert!(
-        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
-            .register_work()
-            .is_err()
-    );
+    assert!(services
+        .with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
+        )
+        .admit_work()
+        .is_err());
     assert!(!control.shared_cleanup.observation().is_confirmed());
     assert!(matches!(
         control
@@ -285,7 +296,9 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
             .await,
         crate::CleanupComponentOutcome::Confirmed
     );
-    other_ticket.run(|_| ());
+    other_ticket
+        .run(|_| tidepool_extract_cmd::compiler_host_checkpoint())
+        .unwrap();
     other_control.seal().await.unwrap();
     assert_eq!(
         other_control
@@ -303,7 +316,9 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
 async fn observing_root_preparations_preserves_open_shared_admission() {
     let (control, task) = RunControlClient::start().await.unwrap();
     assert_eq!(
-        control.settle_root_preparations(Duration::from_secs(1)).await,
+        control
+            .settle_root_preparations(Duration::from_secs(1))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     );
     assert!(control.preparation_client().claim(|| ()).is_ok());

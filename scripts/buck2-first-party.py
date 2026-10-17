@@ -1310,6 +1310,14 @@ def facade_test_cases(binary):
             "actor_host::cell_model::tests::cell_model_policy_resolves_only_the_fixed_backend_before_provider_work",
             "actor_host::run_auth::tests::injected_contract_refuses_backend_and_limits_before_startup_work",
         ], {}, {}, ["toolchains//:exomonad_runtime_tools"], False, False, 30),
+        ("facade_source_inspection_tests", [
+            "exomonad::source::tests::inspection_service_retains_exact_owner_and_refuses_foreign_source",
+            "exomonad::source::tests::source_graph_keeps_workspace_resource_once_through_live_updates",
+            "exomonad::source::tests::coherent_source_generation_retains_reads_prompts_and_recovers_without_links",
+            "exomonad::source::tests::source_reference_refuses_incomplete_graph_aliases_and_raw_file_drift",
+            "exomonad::source::tests::source_generation_history_support_reaches_delayed_reads_and_refusals",
+            "exomonad::source::tests::source_generation_histories_preserve_issued_reads_and_exact_recovery",
+        ], {}, {}, [], False, False, 60),
         ("facade_source_revision_tests", [
             "exomonad::source::tests::missing_active_record_is_reconciled_from_the_published_link",
             "exomonad::source::tests::corrupt_published_root_indexes_remain_visibly_unavailable",

@@ -214,14 +214,14 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         self.issued_tools
             .as_ref()?
             .generation()
-            .map(|generation| generation.prompts.instructions())
+            .map(|generation| generation.prompts().instructions())
     }
 
     fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
         self.issued_tools
             .as_ref()?
             .generation()
-            .map(|generation| generation.id)
+            .map(|generation| generation.id())
     }
 
     fn retained_operation(

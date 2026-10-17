@@ -96,7 +96,7 @@ import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmIdentityResolver, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
   , newPreparedBodyCache, prepareModule, acquirePreparedModule, runPreparedModuleTask
-  , prepareRecoveredBodies, newPreparedComponentTaskPreparer, runPreparedBodyTask
+  , prepareRecoveredBodies, newPreparedComponentUnitsPreparer, runPreparedComponentTask, preparedComponentModules
   , preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.Timing (timeSection)
@@ -1097,11 +1097,11 @@ scenario = do
       selection <- lookupFatIfaceComponents hsc cache owner [varName identifier] >>= \case
         FatIfaceComponents selected -> pure selected
         _ -> fail "Typeable constructor entry has no genuine original component"
-      acquire <- newPreparedComponentTaskPreparer hsc owners bodies
-      task <- acquire selection >>= either (fail . show) pure
-      prepared <- runPreparedBodyTask task >>= either (fail . show) pure
-      let canonical = [original | (binding,_) <- pmBindings prepared, binder <- topBinders binding
-            , varName binder == varName identifier, Just original <- [preparedExpectedEntry prepared binder]]
+      acquire <- newPreparedComponentUnitsPreparer hsc owners bodies
+      task <- acquire Nothing selection >>= either (fail . show) pure
+      prepared <- preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
+      let canonical = [original | unit <- prepared, (binding,_) <- pmBindings unit, binder <- topBinders binding
+            , varName binder == varName identifier, Just original <- [preparedExpectedEntry unit binder]]
           canonicalConstructor = case canonical of
             [original] -> case importedIdLFInfo original of
               LFCon{} -> True
@@ -1109,7 +1109,7 @@ scenario = do
             _ -> False
       assert canonicalConstructor
         "Typeable regression lacks a canonical evaluated constructor entry"
-      program <- either (fail . show) pure (projectPreparedTarget selectedContext [prepared])
+      program <- either (fail . show) pure (projectPreparedTarget selectedContext prepared)
       let constructors = [identity | group <- programBindings program
             , TopBinding identity (HeapBinding _ Constructor{}) <- case group of
                 NonRecursive top -> [top]; Recursive tops -> tops]
@@ -1135,25 +1135,25 @@ scenario = do
       cache <- newFatIfaceCache
       owners <- newOwnerInterfaceCache
       bodies <- newPreparedBodyCache
-      acquire <- newPreparedComponentTaskPreparer hsc owners bodies
+      acquire <- newPreparedComponentUnitsPreparer hsc owners bodies
       let prepare roots = do
             selection <- lookupFatIfaceComponents hsc cache owner (map varName roots) >>= \case
               FatIfaceComponents selected -> pure selected
               _ -> fail "real FTCQueue component selection failed"
-            task <- acquire selection >>= either (fail . show) pure
-            prepared <- runPreparedBodyTask task >>= either (fail . show) pure
+            task <- acquire Nothing selection >>= either (fail . show) pure
+            prepared <- preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
             pure (selection, prepared)
-          bindings prepared = fmap Map.fromList $ fmap concat $ forM (pmBindings prepared) $ \(binding, _) -> do
+          bindings prepared = fmap Map.fromList $ fmap concat $ forM (concatMap pmBindings prepared) $ \(binding, _) -> do
             physical <- evaluate binding >>= makeStableName
             pure [(varName binder, physical) | binder <- topBinders binding]
-          workerNames prepared = [varName binder | (binding, _) <- pmBindings prepared
+          workerNames prepared = [varName binder | (binding, _) <- concatMap pmBindings prepared
             , binder <- topBinders binding, isJust (isDataConWorkId_maybe binder)]
       (_, first) <- prepare (take 1 identifiers)
       firstBindings <- bindings first
       (selection, grown) <- prepare identifiers
       assert (length (fatSelectionComponents selection) > 1)
         "queue regression did not select independent components sharing a datatype"
-      let names = map varName (topBindersOfModule grown)
+      let names = map varName (concatMap topBindersOfModule grown)
           workers = workerNames grown
       assert (length names == Set.size (Set.fromList names)) "queue assembly duplicated a top"
       assert (not (null workers) && length workers == Set.size (Set.fromList workers))
@@ -1164,8 +1164,8 @@ scenario = do
       (_, repeated) <- prepare (reverse identifiers ++ identifiers)
       repeatedBindings <- bindings repeated
       assert (grownBindings == repeatedBindings) "queue root permutation re-lowered completed units"
-      projected <- either (fail . show) pure (projectPreparedTarget packageContext [grown])
-      repeatedProgram <- either (fail . show) pure (projectPreparedTarget packageContext [repeated])
+      projected <- either (fail . show) pure (projectPreparedTarget packageContext grown)
+      repeatedProgram <- either (fail . show) pure (projectPreparedTarget packageContext repeated)
       assert (projected == repeatedProgram) "queue root permutation changed executable identities"
       let defined = Set.fromList [identity | group <- programBindings projected
             , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]

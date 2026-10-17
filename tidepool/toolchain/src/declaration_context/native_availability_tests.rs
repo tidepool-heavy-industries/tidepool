@@ -1237,6 +1237,7 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
                                 .retained
                                 .selected_native_groups,
                             before
+                                .owner
                                 .facts
                                 .compiler_support
                                 .artifacts()
@@ -1672,7 +1673,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         .map(|binder| {
             Arc::new(ArtifactEntry::canonical(
                 crate::certified_products::fixture_module_interface(
-                    context.facts.producer,
+                    context.owner.facts.producer,
                     &binder.unit,
                     &binder.module,
                     BTreeMap::new(),
@@ -1681,6 +1682,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         })
         .collect::<Vec<_>>();
     let projection = context
+        .owner
         .facts
         .compiler_support
         .projection()
@@ -1976,6 +1978,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         .unwrap();
     let canonical = context
+        .owner
         .facts
         .compiler_support
         .projection()
@@ -2229,6 +2232,7 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
             .retained
             .selected_native_groups,
         before
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -2345,6 +2349,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     ));
     let before = context.as_ref().clone();
     assert!(context
+        .owner
         .facts
         .compiler_support
         .artifacts()
@@ -2529,7 +2534,7 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
         .iter()
         .all(|role| role.original().is_none()));
     assert_eq!(
-        context.facts.original_instance_environment,
+        context.owner.facts.original_instance_environment,
         OriginalInstanceEnvironment::Unknown
     );
     let baseline_scope = scope(&baseline);
@@ -2629,12 +2634,13 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     let mut ambiguous = context.as_ref().clone();
     {
         let updated = ambiguous
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .inventory()
             .admit_shared(
-                &ambiguous.facts.compiler_support.artifacts(),
+                &ambiguous.owner.facts.compiler_support.artifacts(),
                 entries.clone(),
             )
             .unwrap();
@@ -2651,6 +2657,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
     }
     assert!(ambiguous
+        .owner
         .facts
         .compiler_support
         .artifacts()
@@ -2871,12 +2878,13 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         let mut context = type_context(std::slice::from_ref(current)).as_ref().clone();
         {
             let updated = context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
                 .inventory()
                 .admit_shared_with_demand(
-                    &context.facts.compiler_support.artifacts(),
+                    &context.owner.facts.compiler_support.artifacts(),
                     entries.clone(),
                     crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
                 )
@@ -2895,6 +2903,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         }
         context.compiler_metadata_snapshot().unwrap();
         let custody = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -3019,11 +3028,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         // the compiler issuer still names exactly one of those native bodies.
         {
             let updated = context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
                 .inventory()
-                .admit_shared(&context.facts.compiler_support.artifacts(), entries)
+                .admit_shared(&context.owner.facts.compiler_support.artifacts(), entries)
                 .unwrap();
             let support = recover_fixture_compiler_support(
                 context.compiler_input_projection().clone(),
@@ -3039,12 +3049,18 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         }
         context.compiler_metadata_snapshot().unwrap();
         let groups = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .selected_native_groups();
         assert_eq!(groups.len(), products.len() * 2);
-        let dependencies = context.facts.compiler_support.artifacts().dependencies();
+        let dependencies = context
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .dependencies();
         let without_offers = recover_fixture_compiler_support(
             context.compiler_input_projection().clone(),
             context.artifact_view().clone(),
@@ -3100,6 +3116,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         );
         assert_eq!(
             context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -3107,7 +3124,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             groups
         );
         assert_eq!(
-            context.facts.compiler_support.artifacts().dependencies(),
+            context
+                .owner
+                .facts
+                .compiler_support
+                .artifacts()
+                .dependencies(),
             dependencies
         );
         let mut canonical_only = context.clone();
@@ -3159,10 +3181,11 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             if reverse {
                 offers.reverse();
             }
-            historical.facts.compiler_support = historical
+            let updated = historical
                 .compiler_source_support()
                 .retain_offers(offers)
                 .unwrap();
+            historical = historical.rebuild(|facts| facts.compiler_support = updated);
             assert!(
                 before.is_empty(),
                 "the selected authored owner has explicit zero demand"
@@ -3224,10 +3247,11 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 offers.reverse();
             }
             let mut competing = canonical_only.clone();
-            competing.facts.compiler_support = competing
+            let updated = competing
                 .compiler_source_support()
                 .retain_offers(offers)
                 .unwrap();
+            competing = competing.rebuild(|facts| facts.compiler_support = updated);
             let error = OriginalCompilerInputs::from_selected_authored_declarations(
                 &competing,
                 producer,
@@ -3257,12 +3281,13 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         assert_ne!(different.module_interface(), current.module_interface());
         let different = Arc::new(ArtifactEntry::original(producer.sha256(), different).unwrap());
         let error = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .inventory()
             .admit_shared_with_demand(
-                &context.facts.compiler_support.artifacts(),
+                &context.owner.facts.compiler_support.artifacts(),
                 vec![different],
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )
@@ -3282,6 +3307,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         );
         assert_eq!(
             context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -3289,7 +3315,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             groups
         );
         assert_eq!(
-            context.facts.compiler_support.artifacts().dependencies(),
+            context
+                .owner
+                .facts
+                .compiler_support
+                .artifacts()
+                .dependencies(),
             dependencies
         );
     }
@@ -3371,12 +3402,14 @@ pub(crate) fn assert_selected_authored_private_inputs(
     let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
     let authored_root = native_context.authored_native_root(generation).unwrap();
     let selected_before = native_context
+        .owner
         .facts
         .compiler_support
         .artifacts()
         .selected_native_groups();
     let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
         let before = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -3423,6 +3456,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         }
         assert_eq!(
             context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -3503,6 +3537,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .unwrap();
     captured = captured.rebuild(|facts| facts.compiler_support = support);
     assert!(captured
+        .owner
         .facts
         .compiler_support
         .artifacts()
@@ -3546,6 +3581,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .extend_interface_context(&native_context)
         .unwrap();
     assert!(fresh
+        .owner
         .facts
         .compiler_support
         .artifacts()
@@ -3574,18 +3610,20 @@ pub(crate) fn assert_selected_authored_private_inputs(
         };
         let mut partial = native_context.clone();
         let view = partial
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .inventory()
             .admit_recovery_selection(
                 &partial
+                    .owner
                     .facts
                     .compiler_support
                     .artifacts()
                     .inventory()
                     .empty_view(),
-                partial.facts.compiler_support.artifacts().entries(),
+                partial.owner.facts.compiler_support.artifacts().entries(),
                 &selected,
             );
         let Ok(view) = view else {
@@ -3607,6 +3645,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         }
         assert_eq!(
             partial
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -3628,6 +3667,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         );
         if omitted.is_some()
             && partial
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -4967,7 +5007,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         };
         let mut restored = recovered.context_with_snapshot(snapshot).unwrap();
         restored.bind_snapshot_baseline(&receipt).unwrap();
-        let restored_offer = &restored.facts.compiler_support.native_offers()[0];
+        let restored_offer = &restored.owner.facts.compiler_support.native_offers()[0];
         assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
         assert_eq!(restored_offer.is_full(), index == 0);
         assert!(proof
@@ -5126,6 +5166,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         .map(|fact| (fact.identity().unwrap(), fact))
         .collect::<BTreeMap<_, _>>();
     let actual = restored
+        .owner
         .facts
         .compiler_support
         .native_offers()
@@ -5200,9 +5241,9 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let issued = captured
         .context_all_groups(&initial.artifact_view().artifact_ids(), Vec::new())
         .unwrap();
-    assert!(issued.facts.compiler_support.native_offers()[0].is_full());
+    assert!(issued.owner.facts.compiler_support.native_offers()[0].is_full());
     assert_eq!(issued.artifact_view().selected_native_groups().len(), 2);
-    let projection = issued.facts.compiler_support.projection().clone();
+    let projection = issued.owner.facts.compiler_support.projection().clone();
     let canonical = projection
         .snapshot_roles()
         .get(&entry.descriptor.owner)
@@ -5217,7 +5258,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     assert_eq!(support.projection(), &projection);
     let artifacts = support.artifacts().clone();
     assert!(artifacts.selected_native_groups().is_empty());
-    let full = issued.facts.compiler_support.native_offers()[0].clone();
+    let full = issued.owner.facts.compiler_support.native_offers()[0].clone();
     let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
     for (index, offer) in [full, empty].into_iter().enumerate() {
         let support = recover_fixture_compiler_support(
@@ -5250,7 +5291,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
         let mut restored = recovered.context_with_snapshot(receipt.snapshot()).unwrap();
         restored.bind_snapshot_baseline(&receipt).unwrap();
         assert_eq!(
-            restored.facts.compiler_support.native_offers()[0].snapshot_facts(),
+            restored.owner.facts.compiler_support.native_offers()[0].snapshot_facts(),
             offer.snapshot_facts()
         );
         assert!(restored.artifact_view().selected_native_groups().is_empty());
@@ -5495,6 +5536,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         let restored = recovered.context_with_snapshot(receipt.snapshot()).unwrap();
                         assert_eq!(
                             restored
+                                .owner
                                 .facts
                                 .compiler_support
                                 .native_offer_observations()

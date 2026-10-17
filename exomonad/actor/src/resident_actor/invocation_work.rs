@@ -1,10 +1,10 @@
 //! Resource cleanup membership borrows resources from their lifecycle owners.
 
 use super::*;
-use crate::command_jobs::{CommandControl, CommandJobs};
+use crate::command_jobs::{CommandJobs, InvocationCommandCleanupObservation};
 use crate::request::ResourceCleanupOwner;
 use std::sync::Weak;
-use tidepool_bridge_effects::{CommandCleanup, CommandError, CommandResult, CommandStatus};
+use tidepool_bridge_effects::{CommandCleanup, CommandError, CommandResult};
 
 pub(crate) struct InvocationWork {
     owner: ActorRef,
@@ -30,7 +30,7 @@ enum InvocationWorkPhase {
 struct InvocationWorkState {
     phase: InvocationWorkPhase,
     scopes: Vec<Arc<InvocationWork>>,
-    compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    compilers: Vec<crate::termination::CompilerWorkRegistration>,
     launch_revision: u64,
     launch_placements: Vec<(
         tidepool_repr::SessionId,
@@ -93,7 +93,7 @@ impl InvocationWorkState {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct InvocationCleanup {
-    compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    compilers: Vec<crate::termination::CompilerWorkObservation>,
     commands: Vec<InvocationCommandCleanup>,
     workers: Vec<InvocationWorkerCleanup>,
     requests: Vec<InvocationRequestCleanup>,
@@ -107,6 +107,29 @@ struct InvocationCommandCleanup {
     job: String,
     result: Option<CommandResult>,
     failure: Option<CommandError>,
+}
+
+impl InvocationCommandCleanup {
+    fn from_observation(job: String, observation: InvocationCommandCleanupObservation) -> Self {
+        let (result, failure) = match observation {
+            InvocationCommandCleanupObservation::CleanAtEntry(result) => (Some(result), None),
+            InvocationCommandCleanupObservation::AfterCancellation {
+                cancellation,
+                terminal,
+            } => (terminal, cancellation.err()),
+            InvocationCommandCleanupObservation::ObservationTimedOut => (
+                None,
+                Some(CommandError::CommandUnavailable(
+                    "invocation cleanup observation timed out".into(),
+                )),
+            ),
+        };
+        Self {
+            job,
+            result,
+            failure,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -394,7 +417,7 @@ impl InvocationWork {
 
     pub(crate) fn register_compiler_work(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
     ) -> bool {
         self.with_admission_state(|state| state.compilers.push(receipt))
             .is_ok()
@@ -407,7 +430,7 @@ impl InvocationWork {
 
     pub(crate) fn register_publication_compiler_work(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
     ) -> bool {
         self.with_phase_state(InvocationWorkPhase::Publishing, |state| {
             state.compilers.push(receipt)
@@ -1044,7 +1067,13 @@ impl InvocationWork {
         )
         .await;
         let mut cleanup = InvocationCleanup {
-            compilers: self.state.lock().compilers.clone(),
+            compilers: self
+                .state
+                .lock()
+                .compilers
+                .iter()
+                .map(|work| work.observer())
+                .collect(),
             ..InvocationCleanup::default()
         };
         for form in self.state.lock().forms.clone() {
@@ -1231,46 +1260,16 @@ impl InvocationWork {
         }
         let command_cleanup =
             futures_util::future::join_all(commands.into_iter().map(|job| async move {
-                let fallback_job = job.clone();
-                let finish = async move {
-                    let initial = environment.commands.status(self.owner, &job).await;
-                    if let Ok(CommandStatus::CommandFinished(result)) = &initial {
-                        if result.cleanup == CommandCleanup::CommandClean {
-                            return InvocationCommandCleanup {
-                                job,
-                                result: Some(result.clone()),
-                                failure: None,
-                            };
-                        }
-                    }
-                    let failure = environment
-                        .commands
-                        .control(self.owner, &job, CommandControl::Cancel)
-                        .await
-                        .err();
-                    let status = environment
-                        .commands
-                        .wait(self.owner, &job, RELEASE_WAIT.as_millis() as i64)
-                        .await;
-                    let result = match status {
-                        Ok(CommandStatus::CommandFinished(result)) => Some(result),
-                        _ => None,
-                    };
-                    InvocationCommandCleanup {
-                        job: job.clone(),
-                        result,
-                        failure,
-                    }
-                };
-                tokio::time::timeout(RELEASE_WAIT + RELEASE_WAIT, finish)
-                    .await
-                    .unwrap_or_else(|_| InvocationCommandCleanup {
-                        job: fallback_job,
-                        result: None,
-                        failure: Some(CommandError::CommandUnavailable(
-                            "invocation cleanup observation timed out".into(),
-                        )),
-                    })
+                let observation = environment
+                    .commands
+                    .observe_invocation_cleanup(
+                        self.owner,
+                        &job,
+                        RELEASE_WAIT,
+                        RELEASE_WAIT + RELEASE_WAIT,
+                    )
+                    .await;
+                InvocationCommandCleanup::from_observation(job, observation)
             }));
         let terminal_summary = if self.scope_id.is_some() {
             "owning resource scope ended"

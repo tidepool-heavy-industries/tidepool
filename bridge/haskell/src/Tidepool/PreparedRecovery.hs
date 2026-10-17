@@ -41,10 +41,10 @@ import Tidepool.FatIface
   ( FatIfaceCache, FatIfaceMissing, FatIfaceComponentLookup(..), OwnerInterfaceCache
   , lookupFatIfaceComponents )
 import Tidepool.PreparedStg
-  ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
-  , PreparedComponents, PreparedComponentTask, PreparedUnitKey, PreparedUnitTask
+  ( PreparedBodyCache, PreparedModule, pmModule, RecoveredModuleFailure(..)
+  , PreparedComponents, PreparedComponentTask, PreparedUnitKey, PreparedUnitTask, PreparedUnit
   , newPreparedComponentUnitsPreparer, preparedComponentTaskKnown, preparedComponentTaskPending
-  , preparedUnitTaskKey, preparedUnitIsSite, runPreparedUnitTaskWithTiming, finishPreparedComponentTask
+  , preparedUnitTaskKey, preparedUnitModule, samePreparedUnit, runPreparedUnitTaskWithTiming, finishPreparedComponentTask
   , preparedComponentModules, preparedComponentUnitRows, validatePreparedComponents )
 import Tidepool.CompilerExecution (CompilerExecutor, runCompilerWorklistWithAttempt)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
@@ -250,16 +250,15 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
             , recoveryReferences = emptyPreparedReferenceWorklist
             , recoveryLiveUnits = Map.empty
             , recoverySelections = Map.empty
-            , recoverySiteEpochs = Map.empty
             }
-          let factsFor prepared = do
+          let factsFor key unit = do
                 memo <- readIORef factsMemo
-                case Map.lookup (preparedBodyKey prepared) memo of
-                  Just hit -> pure (hit, True)
-                  Nothing -> do
-                    let fresh = factsOf prepared
+                case Map.lookup key memo of
+                  Just (previous,hit) | samePreparedUnit previous unit -> pure (hit, True)
+                  _ -> do
+                    let fresh = factsOf (preparedUnitModule unit)
                     atomicModifyIORef' factsMemo (\known ->
-                      (Map.insert (preparedBodyKey prepared) fresh known, ()))
+                      (Map.insert key (unit,fresh) known, ()))
                     pure (fresh, False)
               includeRoots selectedRoots reach references = Map.elems (Map.fromList
                 [(varName binder, binder)
@@ -313,7 +312,9 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
                 selectedRoots <- readIORef rootState
                 let context = contextFor selectedRoots
                     seedList = seedsFor selectedRoots
-                    entries = homeFacts ++ concatMap Map.elems (Map.elems (recoveryLiveUnits current))
+                    entries = homeFacts ++
+                      [(preparedUnitModule unit,facts) | units <- Map.elems (recoveryLiveUnits current)
+                        , (unit,facts) <- Map.elems units]
                     additions = if recoveryRebuild current then entries else recoveryNewUnits current
                     modules = map fst entries
                 (advance, reachMs) <- timeSection $ do
@@ -387,28 +388,25 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
                   emitCount timing "prepared_recover_package_root_additions"
                     (fromIntegral (Map.size extended - Map.size rootsByName))
                   expand
-              admitUnit owner key prepared = do
+              admitUnit owner key unit = do
                 current <- readIORef state
                 let previous = Map.findWithDefault Map.empty owner (recoveryLiveUnits current)
-                when (Map.notMember key previous) $ do
+                    unchanged = maybe False (samePreparedUnit unit . fst) (Map.lookup key previous)
+                unless unchanged $ do
                   ((facts,hit),factsMs) <- timeSection $ do
-                    result@(facts,_) <- factsFor prepared
+                    result@(facts,_) <- factsFor key unit
                     _ <- evaluate (sum (map length (Map.elems (fst facts))))
                     _ <- evaluate (sum (map (length . snd) (snd facts)))
                     pure result
                   when hit (modifyIORef' factHits (+ 1))
                   charge (\cost -> cost { spentFacts = spentFacts cost + factsMs })
                   emitCount timing "prepared_recover_unit_fact_admissions" 1
-                  let replaced = preparedUnitIsSite key && any preparedUnitIsSite (Map.keys previous)
-                      retained = if preparedUnitIsSite key
-                        then Map.filterWithKey (\old _ -> not (preparedUnitIsSite old)) previous else previous
-                      unit = (prepared,facts)
+                  let replaced = Map.member key previous
+                  when replaced (emitCount timing "prepared_recover_unit_replacements" 1)
                   modifyIORef' state $ \latest -> latest
-                    { recoveryLiveUnits = Map.insert owner (Map.insert key unit retained) (recoveryLiveUnits latest)
-                    , recoveryNewUnits = unit : recoveryNewUnits latest
-                    , recoveryRebuild = recoveryRebuild latest || replaced
-                    , recoverySiteEpochs = if preparedUnitIsSite key
-                        then Map.insertWith (+) owner 1 (recoverySiteEpochs latest) else recoverySiteEpochs latest }
+                    { recoveryLiveUnits = Map.insert owner (Map.insert key (unit,facts) previous) (recoveryLiveUnits latest)
+                    , recoveryNewUnits = (preparedUnitModule unit,facts) : recoveryNewUnits latest
+                    , recoveryRebuild = recoveryRebuild latest || replaced }
               enqueueSelection (owner,version,acquired) = case acquired of
                 Left failure -> do
                   modifyIORef' state (\current -> current
@@ -492,7 +490,6 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
           emitDetailPhase timing "prepared_recover" "prepared_recover_prepare_service" prepareTotal
           emitCount timing "prepared_recover_rounds" rounds
           emitCount timing "prepared_recover_unit_preparations" preparations
-          emitCount timing "prepared_recover_site_epochs" (fromIntegral (sum (Map.elems (recoverySiteEpochs settled))))
           hits <- readIORef factHits
           finalRoots <- readIORef rootState
           pure (PreparedRecovery (closureOf settled hits)
@@ -505,6 +502,7 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
 -- Only the coordinator mutates demand, reachability and incorporation. Exact
 -- versions fence late completions when another task grows an owner's body set.
 type RecoveryUnitFacts = (PreparedModule, (Map.Map Word64 [ReferenceFact], [(Id,[Unique])]))
+type LiveRecoveryUnit = (PreparedUnit, (Map.Map Word64 [ReferenceFact], [(Id,[Unique])]))
 
 data RecoveryState = RecoveryState
   { recoveryAttempted :: Set.Set Name
@@ -518,9 +516,8 @@ data RecoveryState = RecoveryState
   , recoveryNewUnits :: [RecoveryUnitFacts]
   , recoveryRebuild :: Bool
   , recoveryReferences :: PreparedReferenceWorklist
-  , recoveryLiveUnits :: Map.Map Module (Map.Map PreparedUnitKey RecoveryUnitFacts)
+  , recoveryLiveUnits :: Map.Map Module (Map.Map PreparedUnitKey LiveRecoveryUnit)
   , recoverySelections :: Map.Map Module SelectionProgress
-  , recoverySiteEpochs :: Map.Map Module Int
   }
 
 data UnitPhase = UnitQueued | UnitRunning | UnitCompleted | UnitFailed
@@ -528,20 +525,9 @@ data UnitPhase = UnitQueued | UnitRunning | UnitCompleted | UnitFailed
 data SelectionProgress = SelectionProgress
   { selectionPlan :: PreparedComponentTask
   , selectionVersion :: Int
-  , selectionCompleted :: Map.Map PreparedUnitKey PreparedModule
+  , selectionCompleted :: Map.Map PreparedUnitKey PreparedUnit
   , selectionPhases :: Map.Map PreparedUnitKey UnitPhase
   }
-
--- | The recovered-body cache's exact group identity.  It is deliberately more
--- specific than the owner: recovery can prepare the same owner repeatedly as
--- its exact body set grows, and facts from one such set cannot describe the
--- next one.
-preparedBodyKey :: PreparedModule -> (Module, [[Word64]])
-preparedBodyKey prepared =
-  (pmModule prepared,
-    [ map (getKey . varUnique) (topBinders binding)
-    | (binding, _) <- pmBindings prepared
-    ])
 
 preparationFailureFor :: Module -> RecoveryFailure -> Bool
 preparationFailureFor owner (DefiningPreparationFailure failure) =

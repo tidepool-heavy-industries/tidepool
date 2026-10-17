@@ -608,32 +608,36 @@ fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     assert!(!route_work.matches(owner, &reservation));
 }
 
-fn compiler_owner(work: &Arc<InvocationWork>) -> crate::resident_workbench::CompilerCloseOwner {
-    crate::resident_workbench::CompilerCloseOwner::Invocation {
+fn compiler_owner(
+    services: &crate::capabilities::WorkbenchServices,
+    work: &Arc<InvocationWork>,
+) -> crate::capabilities::CompilerOwnerScope {
+    services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
         work: work.clone(),
         control: Some(crate::WorkbenchExecutionControl::untracked()),
-    }
+    })
 }
 
 #[test]
 fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
+    let services = crate::capabilities::WorkbenchServices::new();
     use crate::local_actor::WorkerStartupAdmission;
     let actor = ActorRef::first(crate::ActorId(1));
     let work = InvocationWork::new(actor, reservation());
-    let owner = compiler_owner(&work);
-    assert!(owner.register_publication_work().is_err());
+    let owner = compiler_owner(&services, &work);
+    assert!(owner.admit_publication().is_err());
     assert!(work.begin_publication());
     assert!(!work.is_closed(), "publication precedes cleanup");
     assert!(!work.begin_publication(), "phase cannot restart");
 
     for generation in 0..2 {
-        assert!(owner.register_work().is_err());
+        assert!(owner.admit_work().is_err());
         assert!(work.register_command("late-command".into()).is_err());
         assert!(work.register_transient_watch(crate::WatchId(7)).is_err());
         assert!(work.reserve(ActorRef::first(crate::ActorId(2))).is_err());
         // A restaged generation owns its own close receipt. These lifecycle
         // controls perform no compiler command, so actual close is NotStarted.
-        let ticket = owner.register_publication_work().unwrap();
+        let ticket = owner.admit_publication().unwrap();
         assert_eq!(work.state.lock().compilers.len(), generation + 1);
         let action = ticket.run(|_settlement| generation);
         assert_eq!(action, generation);
@@ -651,21 +655,63 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
     drop(state);
     work.close();
     assert!(work.is_closed());
-    assert!(owner.register_publication_work().is_err());
+    assert!(owner.admit_publication().is_err());
     assert!(!work.begin_publication(), "closing never reopens admission");
+}
+
+#[test]
+fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
+    let services = crate::capabilities::WorkbenchServices::new();
+    let work = InvocationWork::new(ActorRef::first(crate::ActorId(1)), reservation());
+    let control = crate::WorkbenchExecutionControl::untracked();
+    let response = Ok(crate::KernelStep::Continue(
+        tidepool_runtime::session::WorkbenchResponse {
+            publication: None,
+            status: tidepool_runtime::session::WorkbenchRunStatus::Completed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        },
+    ));
+    control.finish_cell(
+        tidepool_runtime::session::WorkbenchExecutionId::from_digest([43; 16]),
+        &response,
+        true,
+    );
+    let owner =
+        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: work.clone(),
+            control: Some(control.clone()),
+        });
+    assert!(matches!(
+        owner.admit_work(),
+        Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+    ));
+    let state = work.state.lock();
+    assert_eq!(state.compilers.len(), 1);
+    assert_eq!(
+        state.compilers[0].observation(),
+        crate::termination::CompilerWorkClose::Settled(
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        )
+    );
+    assert!(control.compiler_close_observations().is_empty());
 }
 
 #[tokio::test]
 async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_cancellation() {
+    let services = crate::capabilities::WorkbenchServices::new();
     let fixture = Fixture::start().await;
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
     let control = crate::WorkbenchExecutionControl::untracked();
-    let owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
-        work: work.clone(),
-        control: Some(control.clone()),
-    };
+    let owner =
+        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: work.clone(),
+            control: Some(control.clone()),
+        });
     assert!(work.begin_publication());
-    let ticket = owner.register_publication_work().unwrap();
+    let ticket = owner.admit_publication().unwrap();
     control.request_cancellation();
     let cleanup = work.cleanup(&fixture.environment, &fixture.kernel).await;
     assert!(work.is_closed());
@@ -674,8 +720,8 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
         control.compiler_close_observations().as_slice(),
         [crate::termination::CompilerWorkClose::Pending]
     ));
-    assert!(owner.register_publication_work().is_err());
-    assert!(owner.register_work().is_err());
+    assert!(owner.admit_publication().is_err());
+    assert!(owner.admit_work().is_err());
     assert!(!work.begin_publication());
     // Closing fences new work but never erases the already admitted ticket.
     let action = ticket.run(|_settlement| Err::<(), _>("original publication refusal"));
@@ -687,13 +733,14 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
 
 #[tokio::test]
 async fn publication_failure_before_first_stage_closes_without_pending_obligation() {
+    let services = crate::capabilities::WorkbenchServices::new();
     let fixture = Fixture::start().await;
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    let owner = compiler_owner(&work);
+    let owner = compiler_owner(&services, &work);
     assert!(work.begin_publication());
     work.close();
     assert!(work.state.lock().compilers.is_empty());
-    assert!(owner.register_publication_work().is_err());
+    assert!(owner.admit_publication().is_err());
     fixture.cleanup(&work).await;
     fixture.finish().await;
 }
@@ -1229,6 +1276,7 @@ struct PendingBackend {
     finish: tokio::sync::Semaphore,
     cancel_entered: tokio::sync::Semaphore,
     cancel_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    cancel_answer: Mutex<Result<(), CommandError>>,
 }
 
 impl Default for PendingBackend {
@@ -1244,6 +1292,7 @@ impl Default for PendingBackend {
             finish: tokio::sync::Semaphore::new(0),
             cancel_entered: tokio::sync::Semaphore::new(0),
             cancel_gate: Mutex::new(None),
+            cancel_answer: Mutex::new(Ok(())),
         }
     }
 }
@@ -1274,8 +1323,11 @@ impl CommandBackend for PendingBackend {
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
             }
-            self.finish.add_permits(1);
-            Ok(())
+            let answer = self.cancel_answer.lock().clone();
+            if answer.is_ok() {
+                self.finish.add_permits(1);
+            }
+            answer
         })
     }
 
@@ -1302,6 +1354,173 @@ impl CommandBackend for PendingBackend {
             self.cleanup_answer.lock().clone()
         })
     }
+}
+
+#[tokio::test]
+async fn invocation_cleanup_observation_owner_probe_can_avoid_cancellation() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    backend.result.lock().cleanup = CommandCleanup::CommandRetained;
+    let unconfirmed = CommandCleanup::CommandCleanupUnknown("external cleanup pending".into());
+    *backend.cleanup_answer.lock() = unconfirmed.clone();
+    backend.finish.add_permits(1);
+    let observer = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(jobs.status(observer, &job).await.unwrap(),
+                CommandStatus::CommandFinished(result) if result.cleanup == unconfirmed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resource cleanup publishes its first probe");
+    let probes = backend.cleanup_probes.load(Ordering::SeqCst);
+    *backend.cleanup_answer.lock() = CommandCleanup::CommandClean;
+
+    let observed = jobs
+        .observe_invocation_cleanup(owner, &job, Duration::from_secs(1), Duration::from_secs(2))
+        .await;
+
+    assert!(matches!(observed,
+        InvocationCommandCleanupObservation::CleanAtEntry(result)
+            if result.cleanup == CommandCleanup::CommandClean));
+    assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), probes + 1);
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn invocation_cleanup_observation_preserves_foreign_control_refusal() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let foreign = ActorRef {
+        incarnation: crate::Incarnation(owner.incarnation.0 + 1),
+        ..owner
+    };
+
+    let observed = jobs
+        .observe_invocation_cleanup(
+            foreign,
+            &job,
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+        )
+        .await;
+
+    assert!(matches!(
+        observed,
+        InvocationCommandCleanupObservation::AfterCancellation {
+            cancellation: Err(CommandError::CommandUnauthorized),
+            terminal: None,
+        }
+    ));
+    assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    backend.finish.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invocation_cleanup_keeps_cancellation_failure_beside_clean_result() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(&fixture.environment.commands, &job)
+        .unwrap();
+    let refusal = CommandError::CommandUnavailable("controlled cancellation refusal".into());
+    *backend.cancel_answer.lock() = Err(refusal.clone());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+
+    let (cleanup, ()) = tokio::join!(work.cleanup(&fixture.environment, &fixture.kernel), async {
+        backend.cancel_entered.acquire().await.unwrap().forget();
+        backend.finish.add_permits(1);
+        gate.add_permits(1);
+    },);
+
+    assert_eq!(cleanup.commands.len(), 1);
+    assert_eq!(cleanup.commands[0].failure, Some(refusal));
+    assert_eq!(
+        cleanup.commands[0].result.as_ref().unwrap().cleanup,
+        CommandCleanup::CommandClean
+    );
+    assert!(cleanup.uncertainty().is_some());
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn invocation_cleanup_observation_timeout_retains_admitted_cancellation_for_retry() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+
+    let (observed, ()) = tokio::join!(
+        jobs.observe_invocation_cleanup(
+            owner,
+            &job,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        ),
+        async {
+            backend.cancel_entered.acquire().await.unwrap().forget();
+            tokio::time::advance(Duration::from_millis(10)).await;
+        },
+    );
+
+    assert!(matches!(
+        observed,
+        InvocationCommandCleanupObservation::ObservationTimedOut
+    ));
+    assert!(work.state.lock().commands.contains(&job));
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    gate.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn dropped_invocation_cleanup_waiter_retains_admitted_cancellation_for_retry() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+    {
+        let cleanup = work.cleanup(&fixture.environment, &fixture.kernel);
+        tokio::pin!(cleanup);
+        tokio::select! {
+            entered = backend.cancel_entered.acquire() => entered.unwrap().forget(),
+            _ = &mut cleanup => panic!("cleanup must await the admitted cancellation"),
+        }
+    }
+
+    assert!(work.cleanup_observation().is_none());
+    assert!(work.state.lock().commands.contains(&job));
+    gate.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
 }
 
 #[tokio::test]

@@ -32,7 +32,20 @@ mod published_source;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 
+// Count actual cold semantic encodings on this test thread across owner clones.
+// Per-owner counters alone cannot detect a second independently encoded owner.
+#[cfg(test)]
+thread_local! {
+    static CONTEXT_OBSERVATION_WORK: std::cell::Cell<(usize, usize)> = const {
+        std::cell::Cell::new((0, 0))
+    };
+}
+
 pub struct ExactDeclarationContext {
+    owner: Arc<DeclarationContextOwner>,
+}
+
+struct DeclarationContextOwner {
     facts: DeclarationContextFacts,
     observations: OnceLock<ContextObservation>,
     #[cfg(test)]
@@ -72,17 +85,17 @@ impl std::fmt::Debug for ExactDeclarationContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ExactDeclarationContext")
-            .field("producer", &self.facts.producer)
-            .field("inventory", &self.facts.compiler_support.artifacts())
+            .field("producer", &self.owner.facts.producer)
+            .field("inventory", &self.owner.facts.compiler_support.artifacts())
             .field(
                 "compiler_projection",
-                &self.facts.compiler_support.projection(),
+                &self.owner.facts.compiler_support.projection(),
             )
-            .field("lexical", &self.facts.lexical)
-            .field("template_imports", &self.facts.template_imports)
+            .field("lexical", &self.owner.facts.lexical)
+            .field("template_imports", &self.owner.facts.template_imports)
             .field(
                 "original_instance_environment",
-                &self.facts.original_instance_environment,
+                &self.owner.facts.original_instance_environment,
             )
             .finish()
     }
@@ -90,13 +103,15 @@ impl std::fmt::Debug for ExactDeclarationContext {
 
 impl Clone for ExactDeclarationContext {
     fn clone(&self) -> Self {
-        Self::from_facts(self.facts.clone())
+        Self {
+            owner: Arc::clone(&self.owner),
+        }
     }
 }
 
 impl PartialEq for ExactDeclarationContext {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other) || self.facts == other.facts
+        std::ptr::eq(self, other) || self.owner.facts == other.owner.facts
     }
 }
 impl Eq for ExactDeclarationContext {}
@@ -129,6 +144,7 @@ impl PreparedValueSourceSupport {
     ) -> Result<Self, CompileError> {
         let imports = compose_lexical_nodes(
             context
+                .owner
                 .facts
                 .lexical
                 .iter()
@@ -217,6 +233,7 @@ impl PreparedValueSourceSupport {
             .collect();
         let support = self
             .context
+            .owner
             .facts
             .compiler_support
             .source_support(&source_owners)?;
@@ -513,7 +530,7 @@ impl OriginalCompilerInputs {
     pub(crate) fn reuse_selected_authored(
         context: &ExactDeclarationContext,
     ) -> Result<Option<Self>, CompileError> {
-        let interfaces = context.facts.compiler_support.selected_interfaces()?;
+        let interfaces = context.owner.facts.compiler_support.selected_interfaces()?;
         let authored = interfaces
             .entries()
             .values()
@@ -593,7 +610,7 @@ impl OriginalCompilerInputs {
         if selected.is_empty() {
             return Ok(carried);
         }
-        let source = &context.facts.compiler_support;
+        let source = &context.owner.facts.compiler_support;
         let selected = Self {
             demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -641,7 +658,7 @@ impl OriginalCompilerInputs {
             }
         }
         if !reused.is_empty() {
-            let source = &context.facts.compiler_support;
+            let source = &context.owner.facts.compiler_support;
             let projection = source.projection().for_source_owners(&reused);
             let reused = Self {
                 demand: OriginalInputDemand::SelectedSource(source.artifacts().clone()),
@@ -658,12 +675,12 @@ impl OriginalCompilerInputs {
             return Ok(carried);
         }
         let configured = Self::issue_complete_native_availability_with_source(
-            context.facts.compiler_support.artifacts(),
-            context.facts.compiler_support.projection(),
+            context.owner.facts.compiler_support.artifacts(),
+            context.owner.facts.compiler_support.projection(),
             producer.sha256(),
             &fresh,
             &[],
-            Some(&context.facts.compiler_support),
+            Some(&context.owner.facts.compiler_support),
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -762,8 +779,8 @@ impl OriginalCompilerInputs {
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
     ) -> Result<Self, CompileError> {
         Self::issue_complete_native_availability(
-            &context.facts.compiler_support.artifacts(),
-            &context.facts.compiler_support.projection(),
+            &context.owner.facts.compiler_support.artifacts(),
+            &context.owner.facts.compiler_support.projection(),
             producer.sha256(),
             products,
             availability,
@@ -1498,7 +1515,7 @@ impl ExactCompileContext {
         let Some(certificate) = certificate else {
             return Ok(self);
         };
-        if certificate.toolchain_identity_sha256() != self.declarations.facts.producer {
+        if certificate.toolchain_identity_sha256() != self.declarations.owner.facts.producer {
             return Err(failure(
                 "checked recipe original differs from its admitted certificate",
             ));
@@ -1557,6 +1574,7 @@ impl ExactCompileContext {
         let protected_projection = self.protected_scaffold.projection.merge(&projection)?;
         let effective = self
             .declarations
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -2198,10 +2216,12 @@ impl RecoveredArtifactInventory {
             &snapshot.compiler_roles(),
             snapshot.lexical(),
         )?;
-        context.facts.compiler_support = context
+        let updated = context
+            .owner
             .facts
             .compiler_support
             .restore_snapshot_offers(snapshot)?;
+        context = context.rebuild(|facts| facts.compiler_support = updated);
         Ok(context)
     }
 
@@ -2323,7 +2343,7 @@ impl RecoveredArtifactInventory {
                 return Err(failure("recovered original owner differs").into());
             }
             let entry = ArtifactEntry::original_with_validation(
-                context.facts.producer,
+                context.owner.facts.producer,
                 product,
                 &mut validation,
             )?;
@@ -2407,7 +2427,7 @@ impl RecoveredArtifactInventory {
             .map(|entry| (entry.descriptor.id, Arc::new(entry)))
             .collect::<BTreeMap<_, _>>();
         Ok(Self {
-            producer: context.facts.producer,
+            producer: context.owner.facts.producer,
             entries,
             recorded_inventory: inventory.is_some(),
             bindings: BTreeSet::new(),
@@ -3145,7 +3165,7 @@ impl RetainedTemplateImports {
             return Ok(None);
         }
         if !matches!(
-            original.facts.original_instance_environment,
+            original.owner.facts.original_instance_environment,
             OriginalInstanceEnvironment::Complete { .. }
         ) {
             return Err(failure(
@@ -3183,12 +3203,12 @@ impl RetainedTemplateImports {
         }
         let compiler_support = interfaces.support_for_owners(graph.keys().cloned().collect())?;
         let retained = Arc::new(Self {
-            producer: original.facts.producer,
+            producer: original.owner.facts.producer,
             roots,
             graph,
             compiler_support,
         });
-        retained.validate(original.facts.producer, original.artifact_view())?;
+        retained.validate(original.owner.facts.producer, original.artifact_view())?;
         Ok(Some(retained))
     }
 
@@ -3325,7 +3345,7 @@ impl GeneratedScaffoldImportAuthority {
                 if target != module_source
                     || boot
                     || qualifier != "none"
-                    || *producer != context.facts.producer
+                    || *producer != context.owner.facts.producer
                 {
                     return false;
                 }
@@ -3388,7 +3408,7 @@ impl GeneratedScaffoldImportAuthority {
         context.artifact_view().entries().iter().any(|entry| {
             matches!(&entry.payload, ArtifactPayload::Original(product)
                 if product == certificate.product()
-                    && certificate.toolchain_identity_sha256() == context.facts.producer)
+                    && certificate.toolchain_identity_sha256() == context.owner.facts.producer)
         })
     }
 }
@@ -4064,7 +4084,7 @@ impl ExactCompilationRequest {
             .unwrap_or_default();
         let checked_value_imports = self.checked_value_imports.owners().collect::<Vec<_>>();
         if self.artifacts.len() > EXACT_SCOPE_GRAPHS_LIMIT
-            || self.context().facts.lexical.len() > EXACT_SCOPE_GRAPHS_LIMIT
+            || self.context().owner.facts.lexical.len() > EXACT_SCOPE_GRAPHS_LIMIT
             || support.len() > EXACT_SCOPE_GRAPHS_LIMIT
             || checked_value_imports.len() > EXACT_SCOPE_GRAPHS_LIMIT
         {
@@ -4082,7 +4102,7 @@ impl ExactCompilationRequest {
             request_sha256: &self.request_sha256,
             semantic_sha256: hex(&self.semantic_sha256),
             producer_sha256: hex(&self.producer_sha256),
-            selected_lexical_graph: &self.context().facts.lexical,
+            selected_lexical_graph: &self.context().owner.facts.lexical,
             retained_interfaces: &self.artifacts,
             source_selected_support: support
                 .iter()
@@ -4166,7 +4186,7 @@ impl ExactCompilationRequest {
         if selected.roots.is_empty() {
             return Ok(self);
         }
-        if initial.facts.producer != self.producer_sha256 {
+        if initial.owner.facts.producer != self.producer_sha256 {
             return Err(failure("checked template interface producer differs"));
         }
         let entries = self.context().artifact_view().entries();
@@ -4185,6 +4205,7 @@ impl ExactCompilationRequest {
                 ));
             }
             if initial
+                .owner
                 .facts
                 .template_imports
                 .as_ref()
@@ -4203,7 +4224,7 @@ impl ExactCompilationRequest {
         self.generated_scaffold_imports
             .push(GeneratedScaffoldImportAuthority {
                 role: GeneratedScaffoldRole::InitialTemplateInterfaces {
-                    producer: initial.facts.producer,
+                    producer: initial.owner.facts.producer,
                     roots: selected.roots,
                     graph: Arc::new(selected.graph),
                 },
@@ -4262,11 +4283,12 @@ impl ExactCompilationRequest {
         }
         if self
             .context()
+            .owner
             .facts
             .compiler_support
             .projection()
-            .merge(&context.facts.compiler_support.projection())?
-            != *context.facts.compiler_support.projection()
+            .merge(&context.owner.facts.compiler_support.projection())?
+            != *context.owner.facts.compiler_support.projection()
         {
             return Err(failure("program context removed an issued compiler role"));
         }
@@ -4562,10 +4584,12 @@ impl ExactCompilationRequest {
         for descriptor in support.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
-        context.facts.compiler_support = context
+        let updated = context
+            .owner
             .facts
             .compiler_support
             .extend_program_source(selection, support, admissions)?;
+        context = context.rebuild(|facts| facts.compiler_support = updated);
         let context = Arc::new(context.finish()?);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -4641,7 +4665,7 @@ impl ExactCompilationRequest {
             .collect::<BTreeSet<_>>();
         let program_support = ProgramSourceSupport::extend(
             self.program_support.as_ref(),
-            context.facts.compiler_support.select_support_roots(
+            context.owner.facts.compiler_support.select_support_roots(
                 entries.values().map(|entry| entry.descriptor.id).collect(),
             )?,
             imports
@@ -4925,6 +4949,7 @@ impl ExactCompilationRequest {
             return Err(failure("fresh module replaced an admitted exact owner"));
         }
         let mut selected: BTreeSet<_> = context
+            .owner
             .facts
             .lexical
             .iter()
@@ -5530,19 +5555,21 @@ enum RequestInputTransport {
 impl ExactDeclarationContext {
     fn from_facts(facts: DeclarationContextFacts) -> Self {
         Self {
-            facts,
-            observations: OnceLock::new(),
-            #[cfg(test)]
-            semantic_issuances: Default::default(),
-            #[cfg(test)]
-            display_issuances: Default::default(),
+            owner: Arc::new(DeclarationContextOwner {
+                facts,
+                observations: OnceLock::new(),
+                #[cfg(test)]
+                semantic_issuances: Default::default(),
+                #[cfg(test)]
+                display_issuances: Default::default(),
+            }),
         }
     }
 
     /// Publish a fresh owner after editing facts; derived observations never
     /// survive a change to their authenticated inputs.
     fn rebuild(self, update: impl FnOnce(&mut DeclarationContextFacts)) -> Self {
-        let mut facts = self.facts;
+        let mut facts = self.owner.facts.clone();
         update(&mut facts);
         Self::from_facts(facts)
     }
@@ -5680,7 +5707,7 @@ impl ExactDeclarationContext {
                 lexical.iter().chain(
                     retained_publications
                         .iter()
-                        .flat_map(|selection| selection.context().facts.lexical.iter()),
+                        .flat_map(|selection| selection.context().owner.facts.lexical.iter()),
                 ),
             )?
         };
@@ -5693,17 +5720,19 @@ impl ExactDeclarationContext {
             let incoming = certificate
                 .compiler_source_support()
                 .for_source_owners(&selected_sources)?;
-            self.facts.compiler_support = self.facts.compiler_support.merge(&incoming)?;
+            let updated = self.owner.facts.compiler_support.merge(&incoming)?;
+            self = self.rebuild(|facts| facts.compiler_support = updated);
         }
         for join in joins {
             self = self.admit_producer(join.toolchain_identity_sha256())?;
             let incoming = join
                 .compiler_source_support()
                 .for_source_owners(&selected_sources)?;
-            self.facts.compiler_support = self.facts.compiler_support.merge(&incoming)?;
+            let updated = self.owner.facts.compiler_support.merge(&incoming)?;
+            self = self.rebuild(|facts| facts.compiler_support = updated);
         }
         {
-            let updated = self.facts.lexical.replace(lexical)?;
+            let updated = self.owner.facts.lexical.replace(lexical)?;
             self = self.rebuild(|facts| facts.lexical = updated);
         }
         {
@@ -5722,7 +5751,7 @@ impl ExactDeclarationContext {
         joins: &[Arc<AcceptedJoin>],
         lexical: &[ExactLexicalNode],
     ) -> Result<Self, CompileError> {
-        let lexical = compose_lexical_nodes(self.facts.lexical.iter().chain(lexical))?;
+        let lexical = compose_lexical_nodes(self.owner.facts.lexical.iter().chain(lexical))?;
         self.extend(&[], joins, lexical)
     }
 
@@ -5735,18 +5764,20 @@ impl ExactDeclarationContext {
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
         self = self.admit_producer(producer_sha256)?;
-        self.facts.compiler_support = self
+        let updated = self
+            .owner
             .facts
             .compiler_support
             .admit_checked_products(producer_sha256, products)?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }
 
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
-        self.facts.producer
+        self.owner.facts.producer
     }
     pub fn artifact_view(&self) -> &ArtifactView {
-        &self.facts.compiler_support.artifacts()
+        &self.owner.facts.compiler_support.artifacts()
     }
     pub(crate) fn compiler_original_products(
         &self,
@@ -5764,27 +5795,28 @@ impl ExactDeclarationContext {
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
-        &self.facts.compiler_support
+        &self.owner.facts.compiler_support
     }
     pub(crate) fn retain_issued_native_offers(
         mut self,
         offers: impl IntoIterator<Item = crate::artifact_inventory::IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
-        self.facts.compiler_support = self.facts.compiler_support.retain_offers(offers)?;
+        let updated = self.owner.facts.compiler_support.retain_offers(offers)?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }
     pub fn compiler_input_projection(&self) -> &CompilerInputProjection {
-        &self.facts.compiler_support.projection()
+        &self.owner.facts.compiler_support.projection()
     }
     pub fn compiler_input_roles(&self) -> Vec<CompilerInputRole> {
-        self.facts.compiler_support.projection().roles()
+        self.owner.facts.compiler_support.projection().roles()
     }
     #[cfg(test)]
     pub(crate) fn recover_fixture_projection(
         mut self,
         projection: CompilerInputProjection,
     ) -> Result<Self, CompileError> {
-        self.facts.compiler_support = recover_fixture_compiler_support(
+        let updated = recover_fixture_compiler_support(
             projection,
             self.artifact_view().clone(),
             self.compiler_source_support()
@@ -5792,15 +5824,23 @@ impl ExactDeclarationContext {
                 .iter()
                 .cloned(),
         )?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }
     pub(crate) fn compiler_metadata_snapshot(
         &self,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .projection()
-            .project_metadata(self.facts.compiler_support.artifacts().metadata_snapshot())
+            .project_metadata(
+                self.owner
+                    .facts
+                    .compiler_support
+                    .artifacts()
+                    .metadata_snapshot(),
+            )
     }
     /// Carry a compiler issuer's exact role selection without deriving roles
     /// from the broader artifact custody retained by its view.
@@ -5812,7 +5852,7 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             self = self.admit_producer(descriptor.producer_sha256)?;
         }
-        let support = self.facts.compiler_support.merge(support)?;
+        let support = self.owner.facts.compiler_support.merge(support)?;
         self = self.rebuild(|facts| facts.compiler_support = support);
         self.finish()
     }
@@ -5821,6 +5861,7 @@ impl ExactDeclarationContext {
     /// Only compiler-owned issuers may supply the producer identity.
     pub(crate) fn original_interface_context(&self) -> Result<Self, CompileError> {
         let support = self
+            .owner
             .facts
             .compiler_support
             .selected_interfaces()?
@@ -5833,7 +5874,7 @@ impl ExactDeclarationContext {
             )?;
         Ok(Self::from_facts(DeclarationContextFacts {
             compiler_support: support,
-            producer: self.facts.producer,
+            producer: self.owner.facts.producer,
             lexical: Default::default(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
@@ -5860,8 +5901,8 @@ impl ExactDeclarationContext {
         for descriptor in interfaces.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
-        context.facts.compiler_support =
-            recover_fixture_compiler_support(projection, interfaces, [])?;
+        let updated = recover_fixture_compiler_support(projection, interfaces, [])?;
+        context = context.rebuild(|facts| facts.compiler_support = updated);
         context.finish()
     }
 
@@ -5920,12 +5961,13 @@ impl ExactDeclarationContext {
         }
         context = context.rebuild(|facts| facts.compiler_support = support);
         context
+            .owner
             .facts
             .compiler_support
             .projection()
-            .validate(&context.facts.compiler_support.artifacts())?;
+            .validate(&context.owner.facts.compiler_support.artifacts())?;
         {
-            let updated = context.facts.lexical.replace(lexical)?;
+            let updated = context.owner.facts.lexical.replace(lexical)?;
             context = context.rebuild(|facts| facts.lexical = updated);
         }
         let selected_metadata = context.compiler_metadata_snapshot()?;
@@ -5935,6 +5977,7 @@ impl ExactDeclarationContext {
             .cloned()
             .collect::<BTreeSet<_>>();
         let selected = context
+            .owner
             .facts
             .lexical
             .iter()
@@ -5952,7 +5995,7 @@ impl ExactDeclarationContext {
             .filter(|owner| !interfaces.contains(*owner) || !selected.contains(owner))
             .cloned()
             .chain((!canonical_target).then_some(target.clone()))
-            .chain(context.facts.lexical.iter().flat_map(|node| {
+            .chain(context.owner.facts.lexical.iter().flat_map(|node| {
                 std::iter::once(&node.owner)
                     .chain(node.imports.iter())
                     .filter(|owner| !interfaces.contains(*owner) || !selected.contains(owner))
@@ -5964,7 +6007,7 @@ impl ExactDeclarationContext {
         // A consumed owner without a retained interface is explicit missing
         // evidence, not a selected lexical interface or a negative instance
         // result. Retain only the usable graph and commit the missing census.
-        let mut lexical = context.facts.lexical.to_vec();
+        let mut lexical = context.owner.facts.lexical.to_vec();
         lexical.retain(|node| interfaces.contains(&node.owner));
         let retained = lexical
             .iter()
@@ -5974,7 +6017,7 @@ impl ExactDeclarationContext {
             node.imports.retain(|owner| retained.contains(owner));
         }
         {
-            let updated = context.facts.lexical.replace(lexical)?;
+            let updated = context.owner.facts.lexical.replace(lexical)?;
             context = context.rebuild(|facts| facts.lexical = updated);
         }
         {
@@ -5989,13 +6032,13 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn original_instance_environment(&self) -> &OriginalInstanceEnvironment {
-        &self.facts.original_instance_environment
+        &self.owner.facts.original_instance_environment
     }
 
     /// The original compiler target owns the orphan import census in its
     /// authenticated canonical interface. Retention alone does not grant it.
     pub(crate) fn original_instance_target(&self) -> Result<&ExactModuleIdentity, CompileError> {
-        match &self.facts.original_instance_environment {
+        match &self.owner.facts.original_instance_environment {
             OriginalInstanceEnvironment::Complete { target } => Ok(target),
             _ => Err(failure(
                 "activation preview lacks its original target interface",
@@ -6012,8 +6055,8 @@ impl ExactDeclarationContext {
         signatures: &[&crate::checked_cell::ExactCheckedSignature],
     ) -> Result<Self, CompileError> {
         Self::type_interfaces_from_support(
-            &self.facts.compiler_support,
-            self.facts.producer,
+            &self.owner.facts.compiler_support,
+            self.owner.facts.producer,
             witnesses,
             signatures,
         )
@@ -6118,12 +6161,16 @@ impl ExactDeclarationContext {
     /// Merge original type-interface evidence without granting lexical imports.
     /// Even an empty home closure must agree on its compiler producer.
     pub fn extend_interface_context(mut self, context: &Self) -> Result<Self, CompileError> {
-        if context.facts.producer != [0; 32] {
-            self = self.admit_producer(context.facts.producer)?;
+        if context.owner.facts.producer != [0; 32] {
+            self = self.admit_producer(context.owner.facts.producer)?;
         }
         let support = context.compiler_source_support();
         let interfaces = support.selected_interfaces()?;
-        let selected = self.facts.compiler_support.extend_interfaces(&interfaces)?;
+        let selected = self
+            .owner
+            .facts
+            .compiler_support
+            .extend_interfaces(&interfaces)?;
         self = self.rebuild(|facts| facts.compiler_support = selected);
         self.finish()
     }
@@ -6150,8 +6197,8 @@ impl ExactDeclarationContext {
             .map(|node| node.owner.clone())
             .collect::<BTreeSet<_>>();
         let mut graph = self.interface_graph_for_roots(roots.iter().cloned().collect())?;
-        if let Some(retained) = &self.facts.template_imports {
-            retained.validate(self.facts.producer, self.artifact_view())?;
+        if let Some(retained) = &self.owner.facts.template_imports {
+            retained.validate(self.owner.facts.producer, self.artifact_view())?;
             let selected = retained
                 .roots
                 .iter()
@@ -6220,31 +6267,34 @@ impl ExactDeclarationContext {
         let graph = self.original_preview_interface_graph()?;
         let mut context = self.clone().extend_interface_context(input)?;
         let input_ids = input.artifact_view().artifact_ids();
-        let excluded_value_roots = context
-            .facts
-            .compiler_support
-            .artifacts()
-            .entries()
-            .into_iter()
-            .filter_map(|entry| {
-                let value_interface = matches!(
-                    &entry.payload,
-                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
-                );
-                let retained = graph.contains_key(&entry.descriptor.owner)
-                    || input_ids.contains(&entry.descriptor.id)
-                    || context
-                        .facts
-                        .template_imports
-                        .as_ref()
-                        .is_some_and(|imports| imports.graph.contains_key(&entry.descriptor.owner));
-                (value_interface && !retained).then_some(entry.descriptor.id)
-            })
-            .collect::<BTreeSet<_>>();
-        context.facts.compiler_support = context
+        let excluded_value_roots =
+            context
+                .owner
+                .facts
+                .compiler_support
+                .artifacts()
+                .entries()
+                .into_iter()
+                .filter_map(|entry| {
+                    let value_interface = matches!(
+                        &entry.payload,
+                        ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                    );
+                    let retained =
+                        graph.contains_key(&entry.descriptor.owner)
+                            || input_ids.contains(&entry.descriptor.id)
+                            || context.owner.facts.template_imports.as_ref().is_some_and(
+                                |imports| imports.graph.contains_key(&entry.descriptor.owner),
+                            );
+                    (value_interface && !retained).then_some(entry.descriptor.id)
+                })
+                .collect::<BTreeSet<_>>();
+        let updated = context
+            .owner
             .facts
             .compiler_support
             .without_value_roots(&excluded_value_roots)?;
+        context = context.rebuild(|facts| facts.compiler_support = updated);
         let context = context.finish()?;
         if context.original_preview_interface_graph()? != graph {
             return Err(failure(
@@ -6288,12 +6338,17 @@ impl ExactDeclarationContext {
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
-        self.facts.compiler_support.artifacts().interface_owners()
+        self.owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .interface_owners()
     }
     pub(crate) fn module_interfaces(
         &self,
     ) -> Vec<crate::certified_products::CertifiedModuleInterface> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .entries()
@@ -6336,7 +6391,10 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        self.materialize_recovery_entries(root, &self.facts.compiler_support.artifacts().entries())
+        self.materialize_recovery_entries(
+            root,
+            &self.owner.facts.compiler_support.artifacts().entries(),
+        )
     }
 
     /// Materialize only newly referenced immutable payloads from this exact view.
@@ -6358,6 +6416,7 @@ impl ExactDeclarationContext {
         self.materialize_recovery_entries(
             root,
             &self
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -6441,6 +6500,7 @@ impl ExactDeclarationContext {
             return Ok((Vec::new(), Vec::new()));
         }
         let entries = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -6480,7 +6540,7 @@ impl ExactDeclarationContext {
         generation: u64,
     ) -> Result<crate::artifact_inventory::ArtifactId, CompileError> {
         use crate::certified_products::CanonicalOrigin;
-        let entries = self.facts.compiler_support.artifacts().entries();
+        let entries = self.owner.facts.compiler_support.artifacts().entries();
         let roots = entries
             .iter()
             .filter(|entry| match &entry.payload {
@@ -6511,14 +6571,16 @@ impl ExactDeclarationContext {
         &self,
         owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Vec<crate::artifact_inventory::NativeBindingRequirement>, CompileError> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .authored_native_binding_custody_requirements(owners)
     }
 
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .entries()
@@ -6530,7 +6592,8 @@ impl ExactDeclarationContext {
             .collect()
     }
     pub fn joined_interfaces(&self) -> Vec<CertifiedJoinedInterface> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .entries()
@@ -6547,20 +6610,23 @@ impl ExactDeclarationContext {
     }
     pub fn snapshot(&self) -> crate::exact_context::ExactContextSnapshot {
         crate::exact_context::ExactContextSnapshot {
-            producer: self.facts.producer,
+            producer: self.owner.facts.producer,
             selection: self
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
                 .selection_snapshot()
                 .clone(),
             roles: self
+                .owner
                 .facts
                 .compiler_support
                 .projection()
                 .snapshot_roles()
                 .clone(),
             offers: self
+                .owner
                 .facts
                 .compiler_support
                 .native_offers()
@@ -6570,7 +6636,7 @@ impl ExactDeclarationContext {
                     (facts.identity().expect("issued offer identity"), facts)
                 })
                 .collect(),
-            lexical: self.facts.lexical.clone(),
+            lexical: self.owner.facts.lexical.clone(),
         }
     }
 
@@ -6581,7 +6647,9 @@ impl ExactDeclarationContext {
         baseline: &crate::exact_context::MaterializedContext,
     ) -> Result<(), CompileError> {
         let snapshot = baseline.snapshot();
-        if self.facts.producer != snapshot.producer || self.facts.lexical != snapshot.lexical {
+        if self.owner.facts.producer != snapshot.producer
+            || self.owner.facts.lexical != snapshot.lexical
+        {
             return Err(failure(
                 "restored compiler context differs from exact snapshot",
             ));
@@ -6591,7 +6659,7 @@ impl ExactDeclarationContext {
                 "restored compiler availability differs from exact snapshot",
             ));
         }
-        let mut facts = self.facts.clone();
+        let mut facts = self.owner.facts.clone();
         facts.compiler_support = facts.compiler_support.bind_snapshot_baseline(snapshot)?;
         facts.lexical = snapshot.lexical.clone();
         *self = Self::from_facts(facts);
@@ -6599,11 +6667,12 @@ impl ExactDeclarationContext {
     }
 
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
-        &self.facts.lexical
+        &self.owner.facts.lexical
     }
 
     pub fn value_interfaces(&self) -> Vec<CertifiedValueInterface> {
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .entries()
@@ -6629,9 +6698,14 @@ impl ExactDeclarationContext {
         for value in values {
             self = self.admit_producer(value.interface().toolchain_identity_sha256())?;
         }
-        self.facts.compiler_support = self.facts.compiler_support.admit_value_interfaces(values)?;
+        let updated = self
+            .owner
+            .facts
+            .compiler_support
+            .admit_value_interfaces(values)?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         {
-            let updated = self.facts.lexical.replace(lexical)?;
+            let updated = self.owner.facts.lexical.replace(lexical)?;
             self = self.rebuild(|facts| facts.lexical = updated);
         }
         {
@@ -6645,23 +6719,26 @@ impl ExactDeclarationContext {
         mut self,
         values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
-        let mut lexical = self.facts.lexical.to_vec();
+        let mut lexical = self.owner.facts.lexical.to_vec();
         for value in values {
             let interface = value.certified_interface();
             lexical.extend_from_slice(value.source_lexical());
             self = self.admit_producer(interface.interface().toolchain_identity_sha256())?;
             let support = self
+                .owner
                 .facts
                 .compiler_support
                 .merge(value.compiler_source_support())?;
             self = self.rebuild(|facts| facts.compiler_support = support);
             if let Some(retained) = value.template_imports() {
-                self.facts.compiler_support = self
+                let updated = self
+                    .owner
                     .facts
                     .compiler_support
                     .retain_custody(retained.compiler_support.artifacts())?;
+                self = self.rebuild(|facts| facts.compiler_support = updated);
                 {
-                    let updated = Some(match &self.facts.template_imports {
+                    let updated = Some(match &self.owner.facts.template_imports {
                         Some(existing) => RetainedTemplateImports::merge(existing, retained)?,
                         None => retained.clone(),
                     });
@@ -6671,6 +6748,7 @@ impl ExactDeclarationContext {
         }
         {
             let updated = self
+                .owner
                 .facts
                 .lexical
                 .replace(compose_lexical_nodes(&lexical)?)?;
@@ -6698,12 +6776,13 @@ impl ExactDeclarationContext {
         value: Arc<CertifiedValueInterface>,
     ) -> Result<Self, CompileError> {
         let selected = self
+            .owner
             .facts
             .lexical
             .iter()
             .map(|node| node.owner.clone())
             .collect::<BTreeSet<_>>();
-        let mut lexical = self.facts.lexical.to_vec();
+        let mut lexical = self.owner.facts.lexical.to_vec();
         lexical.push(ExactLexicalNode {
             owner: identity(value.interface().unit(), value.interface().module()),
             // Type-owner evidence retains hydration dependencies without
@@ -6725,13 +6804,24 @@ impl ExactDeclarationContext {
     }
 
     fn observation(&self) -> &ContextObservation {
-        self.observations.get_or_init(|| {
+        self.owner.observations.get_or_init(|| {
             #[cfg(test)]
-            self.semantic_issuances
+            self.owner
+                .semantic_issuances
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             use sha2::Digest;
-            let metadata = self.facts.compiler_support.artifacts().metadata_snapshot();
+            let metadata = self
+                .owner
+                .facts
+                .compiler_support
+                .artifacts()
+                .metadata_snapshot();
             let semantics: Arc<[u8]> = self.semantic_bytes_from_metadata(&metadata).into();
+            #[cfg(test)]
+            CONTEXT_OBSERVATION_WORK.with(|work| {
+                let (encodings, bytes) = work.get();
+                work.set((encodings + 1, bytes + semantics.len()));
+            });
             let digest = sha2::Sha256::digest(&semantics).into();
             ContextObservation {
                 metadata,
@@ -6748,12 +6838,14 @@ impl ExactDeclarationContext {
         std::ptr::eq(self, other)
             || (self == other
                 && self
+                    .owner
                     .facts
                     .compiler_support
                     .artifacts()
                     .metadata_snapshot()
                     .dependencies()
                     == other
+                        .owner
                         .facts
                         .compiler_support
                         .artifacts()
@@ -6768,7 +6860,8 @@ impl ExactDeclarationContext {
             .display_prefix
             .get_or_init(|| {
                 #[cfg(test)]
-                self.display_issuances
+                self.owner
+                    .display_issuances
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let metadata = &observation.metadata;
                 let wire = OriginalDisplayObservations {
@@ -6807,7 +6900,7 @@ impl ExactDeclarationContext {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Vec<u8> {
         use sha2::Digest;
-        let mut lexical = self.facts.lexical.iter().collect::<Vec<_>>();
+        let mut lexical = self.owner.facts.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
         let mut native = metadata
             .artifacts
@@ -6822,7 +6915,7 @@ impl ExactDeclarationContext {
             text("TPEXACTCONTEXT"),
             text(
                 if matches!(
-                    self.facts.original_instance_environment,
+                    self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
                     "8"
@@ -6835,12 +6928,14 @@ impl ExactDeclarationContext {
                     metadata.descriptors(),
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
-                    self.facts
+                    self.owner
+                        .facts
                         .compiler_support
                         .projection()
                         .semantic_observations()
                         .expect("issued role observation"),
-                    self.facts
+                    self.owner
+                        .facts
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
@@ -6848,7 +6943,7 @@ impl ExactDeclarationContext {
                 .expect("inventory encoding"),
             )
             .into())),
-            text(hex(&self.facts.producer)),
+            text(hex(&self.owner.facts.producer)),
             Value::Array(
                 native
                     .into_iter()
@@ -6904,7 +6999,7 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
         ];
-        match &self.facts.original_instance_environment {
+        match &self.owner.facts.original_instance_environment {
             OriginalInstanceEnvironment::Unknown => {}
             OriginalInstanceEnvironment::Complete { target } => fields.push(Value::Array(vec![
                 text("original-instances-complete"),
@@ -6917,7 +7012,7 @@ impl ExactDeclarationContext {
                 ]))
             }
         }
-        if let Some(retained) = &self.facts.template_imports {
+        if let Some(retained) = &self.owner.facts.template_imports {
             fields.push(Value::Array(vec![
                 text("retained-template-imports1"),
                 Value::Array(retained.roots.iter().map(module_value).collect()),
@@ -6950,7 +7045,7 @@ impl ExactDeclarationContext {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> Vec<u8> {
         use sha2::Digest;
-        let mut lexical = self.facts.lexical.iter().collect::<Vec<_>>();
+        let mut lexical = self.owner.facts.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
         let mut native = metadata
             .artifacts
@@ -6965,7 +7060,7 @@ impl ExactDeclarationContext {
             text("TPEXACTCONTEXT"),
             text(
                 if matches!(
-                    self.facts.original_instance_environment,
+                    self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
                     "8"
@@ -6978,12 +7073,14 @@ impl ExactDeclarationContext {
                     metadata.descriptors(),
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
-                    self.facts
+                    self.owner
+                        .facts
                         .compiler_support
                         .projection()
                         .semantic_observations()
                         .expect("issued role observation"),
-                    self.facts
+                    self.owner
+                        .facts
                         .compiler_support
                         .native_offer_observations()
                         .expect("issued native offer observation"),
@@ -6991,7 +7088,7 @@ impl ExactDeclarationContext {
                 .expect("inventory encoding"),
             )
             .into())),
-            text(hex(&self.facts.producer)),
+            text(hex(&self.owner.facts.producer)),
             Value::Array(
                 native
                     .into_iter()
@@ -7047,7 +7144,7 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
         ];
-        match &self.facts.original_instance_environment {
+        match &self.owner.facts.original_instance_environment {
             OriginalInstanceEnvironment::Unknown => {}
             OriginalInstanceEnvironment::Complete { target } => fields.push(Value::Array(vec![
                 text("original-instances-complete"),
@@ -7060,7 +7157,7 @@ impl ExactDeclarationContext {
                 ]))
             }
         }
-        if let Some(retained) = &self.facts.template_imports {
+        if let Some(retained) = &self.owner.facts.template_imports {
             fields.push(Value::Array(vec![
                 text("retained-template-imports1"),
                 Value::Array(retained.roots.iter().map(module_value).collect()),
@@ -7101,6 +7198,7 @@ impl ExactDeclarationContext {
         metadata: &CompilerArtifactMetadata,
     ) -> Result<(), CompileError> {
         let retained = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -7195,13 +7293,12 @@ impl ExactDeclarationContext {
 
     pub(crate) fn admit_producer(mut self, producer: [u8; 32]) -> Result<Self, CompileError> {
         if producer == [0; 32]
-            || (self.facts.producer != [0; 32] && producer != self.facts.producer)
+            || (self.owner.facts.producer != [0; 32] && producer != self.owner.facts.producer)
         {
             return Err(failure("producer identity differs"));
         }
-        {
-            let updated = producer;
-            self = self.rebuild(|facts| facts.producer = updated);
+        if self.owner.facts.producer != producer {
+            self = self.rebuild(|facts| facts.producer = producer);
         }
         Ok(self)
     }
@@ -7209,7 +7306,8 @@ impl ExactDeclarationContext {
     /// Finalize a context at its issuing boundary. Historical custody remains
     /// complete; the compiler namespace contains exactly the issued roles.
     fn finish(mut self) -> Result<Self, CompileError> {
-        self.facts.compiler_support = self.facts.compiler_support.finalize_namespace()?;
+        let updated = self.owner.facts.compiler_support.finalize_namespace()?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
         self.normalize()?;
         Ok(self)
     }
@@ -7217,18 +7315,19 @@ impl ExactDeclarationContext {
     fn normalize(&self) -> Result<(), CompileError> {
         let metadata = self.compiler_metadata_snapshot()?;
         self.validate_published_source_originals()?;
-        if let Some(retained) = &self.facts.template_imports {
-            retained.validate(self.facts.producer, self.artifact_view())?;
+        if let Some(retained) = &self.owner.facts.template_imports {
+            retained.validate(self.owner.facts.producer, self.artifact_view())?;
         }
         let owners = metadata.entries.keys().collect::<BTreeSet<_>>();
         let lexical_owners = self
+            .owner
             .facts
             .lexical
             .iter()
             .map(|node| &node.owner)
             .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
-        for node in &self.facts.lexical {
+        for node in &self.owner.facts.lexical {
             if !seen.insert(&node.owner) {
                 return Err(failure(format!(
                     "duplicate selected lexical owner {}:{}",
@@ -7352,7 +7451,7 @@ impl ExactDeclarationContext {
         } else {
             recovery_artifacts::materialize_certified_products_with_validation(
                 root,
-                self.facts.producer,
+                self.owner.facts.producer,
                 &products,
                 validation,
                 mode,
@@ -7436,7 +7535,7 @@ impl ExactDeclarationContext {
         Ok((
             MaterializedExactDeclarationContext {
                 artifacts,
-                lexical: self.facts.lexical.to_vec(),
+                lexical: self.owner.facts.lexical.to_vec(),
             },
             references,
         ))
@@ -7464,12 +7563,13 @@ impl ExactDeclarationContext {
         let metadata = &inputs.metadata;
         if !root.is_absolute()
             || self
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
                 .retained_materialization(&metadata)?
                 .is_some()
-            || self.facts.producer
+            || self.owner.facts.producer
                 != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     producer,
                 )
@@ -7481,7 +7581,8 @@ impl ExactDeclarationContext {
         }
         std::fs::create_dir_all(root)?;
 
-        self.facts
+        self.owner
+            .facts
             .compiler_support
             .artifacts()
             .retain_materialization(&metadata, |parents| {
@@ -7856,13 +7957,13 @@ impl ExactDeclarationContext {
         let compiler_metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
         let admitted_empty = authorization.is_some()
-            && self.facts.producer == [0; 32]
+            && self.owner.facts.producer == [0; 32]
             && metadata.entries.is_empty()
-            && self.facts.lexical.is_empty();
+            && self.owner.facts.lexical.is_empty();
         if !root.is_absolute()
             || (!admitted_empty
-                && (self.facts.producer == [0; 32]
-                    || self.facts.producer != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer).sha256()))
+                && (self.owner.facts.producer == [0; 32]
+                    || self.owner.facts.producer != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer).sha256()))
         {
             return Err(failure(
                 "compile request has a different producer or invalid root",
@@ -7870,12 +7971,14 @@ impl ExactDeclarationContext {
         }
         std::fs::create_dir_all(root)?;
         let reused = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .retained_materialization(metadata)?
             .is_some();
         let retained = self
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -7974,7 +8077,8 @@ impl ExactDeclarationContext {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
             Value::Array(
-                self.facts
+                self.owner
+                    .facts
                     .lexical
                     .iter()
                     .map(|node| {
@@ -8351,6 +8455,28 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
         .admit_bound_target(bound, cursor, demand, visible, selection)
 }
 
+/// Check the inventory's selected dependency closure without issuing group rows.
+pub(crate) fn validate_artifact_view_groups_with_validation(
+    view: &ArtifactView,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<(), CompileError> {
+    let metadata = view.metadata_snapshot();
+    let available = metadata
+        .artifacts
+        .iter()
+        .filter_map(|(id, entry)| match &entry.payload {
+            ArtifactPayload::Original(product) => Some((*id, product)),
+            _ => None,
+        })
+        .collect();
+    crate::certified_products::validate_selected_owned_products_in_context_with_validation(
+        &available,
+        &metadata.selected_native_groups,
+        validation,
+    )
+    .map_err(failure)
+}
+
 /// Admit only the inventory's selected dependency closure. Original byte custody
 /// remains complete; previously admitted groups must survive unchanged.
 pub(crate) fn certify_artifact_view_groups_with_validation(
@@ -8636,26 +8762,37 @@ mod tests {
     }
 
     #[test]
-    fn immutable_context_observations_issue_once_and_raw_clones_start_fresh() {
+    fn immutable_context_clones_share_one_semantic_and_display_encoding() {
         use std::sync::atomic::Ordering;
         let context = Arc::new(published_original_fixture());
         let same = Arc::clone(&context);
         let raw = context.as_ref().clone();
         assert_eq!(context.as_ref(), &raw);
-        assert!(context.observations.get().is_none());
+        assert!(context.owner.observations.get().is_none());
         assert_context_observation_wire(&context);
         assert_context_observation_wire(&same);
         assert_eq!(context.as_ref(), &raw);
-        assert!(raw.observations.get().is_none());
-        assert_eq!(context.semantic_issuances.load(Ordering::Relaxed), 1);
-        assert_eq!(context.display_issuances.load(Ordering::Relaxed), 1);
+        assert!(raw.owner.observations.get().is_some());
+        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+        assert_eq!(context.owner.display_issuances.load(Ordering::Relaxed), 1);
         assert!(std::ptr::eq(context.observation(), same.observation()));
         assert_context_observation_wire(&raw);
-        assert_eq!(raw.semantic_issuances.load(Ordering::Relaxed), 1);
-        assert_eq!(raw.display_issuances.load(Ordering::Relaxed), 1);
-        assert!(!std::ptr::eq(context.observation(), raw.observation()));
+        assert_eq!(raw.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+        assert_eq!(raw.owner.display_issuances.load(Ordering::Relaxed), 1);
+        assert!(std::ptr::eq(context.observation(), raw.observation()));
         assert!(context.same_authenticated_context(&raw));
         assert!(context.same_display_observations(&raw));
+        for _ in 0..8 {
+            let clone = context
+                .as_ref()
+                .clone()
+                .admit_producer(context.toolchain_identity_sha256())
+                .unwrap();
+            assert_context_observation_wire(&clone);
+            assert_eq!(clone.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+            assert_eq!(clone.owner.display_issuances.load(Ordering::Relaxed), 1);
+            assert!(Arc::ptr_eq(&context.owner, &clone.owner));
+        }
     }
 
     #[test]
@@ -8668,7 +8805,7 @@ mod tests {
             facts.original_instance_environment =
                 OriginalInstanceEnvironment::MissingOriginalOwners(vec![identity("u", "Missing")])
         });
-        assert!(context.observations.get().is_none());
+        assert!(context.owner.observations.get().is_none());
         assert_ne!(context, before);
         assert_ne!(context.semantic_sha256(), digest);
         assert!(!context.same_authenticated_context(&before));
@@ -8913,6 +9050,26 @@ mod tests {
         };
         let old = restore(&selections[0]).unwrap();
         let new = restore(&selections[1]).unwrap();
+        assert_context_observation_wire(&old);
+        assert_context_observation_wire(&new);
+        assert_ne!(old.semantic_sha256(), new.semantic_sha256());
+        let before_clones = CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get);
+        for context in [&old, &new] {
+            let cloned = context.clone();
+            assert_context_observation_wire(&cloned);
+        }
+        assert_eq!(
+            CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get),
+            before_clones
+        );
+        // Reopening is a new authenticated owner, even for the same wire facts.
+        let reopened = restore(&selections[0]).unwrap();
+        assert_context_observation_wire(&reopened);
+        assert_eq!(reopened.semantic_sha256(), old.semantic_sha256());
+        assert_eq!(
+            CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get).0,
+            before_clones.0 + 1
+        );
         for _ in 0..4 {
             assert_eq!(
                 old.artifact_view()
@@ -9608,20 +9765,30 @@ mod tests {
     // Retain the old identity encoder to prove selection-aware keys invalidate it.
     fn legacy_semantic_sha256(context: &ExactDeclarationContext) -> [u8; 32] {
         use sha2::Digest;
-        let mut lexical = context.facts.lexical.iter().collect::<Vec<_>>();
+        let mut lexical = context.owner.facts.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
         let value = Value::Array(vec![
             text("TPEXACTCONTEXT"),
             text("2"),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
-                    context.facts.compiler_support.artifacts().descriptors(),
-                    context.facts.compiler_support.artifacts().dependencies(),
+                    context
+                        .owner
+                        .facts
+                        .compiler_support
+                        .artifacts()
+                        .descriptors(),
+                    context
+                        .owner
+                        .facts
+                        .compiler_support
+                        .artifacts()
+                        .dependencies(),
                 ))
                 .expect("inventory encoding"),
             )
             .into())),
-            text(hex(&context.facts.producer)),
+            text(hex(&context.owner.facts.producer)),
             Value::Array(
                 context
                     .recovery_products()
@@ -9688,10 +9855,10 @@ mod tests {
             .as_ref()
             .clone()
             .extend_checked_original_products(
-                context.facts.producer,
+                context.owner.facts.producer,
                 &[crate::certified_products::fixture_finalized_product(
                     support_product("Later"),
-                    context.facts.producer,
+                    context.owner.facts.producer,
                 )],
             )
             .unwrap();
@@ -9921,7 +10088,7 @@ mod tests {
                 &selection(&support_offer(&[generated.clone()])),
             )
             .unwrap();
-        assert_eq!(omitted.facts.producer, request.producer_sha256);
+        assert_eq!(omitted.owner.facts.producer, request.producer_sha256);
         assert!(omitted.artifact_view().is_empty());
         assert!(omitted.compiler_original_products().unwrap().is_empty());
         assert_eq!(empty.semantic_sha256(), before);
@@ -10129,10 +10296,10 @@ mod tests {
         context: &mut ExactDeclarationContext,
         edit: impl FnOnce(&mut Vec<ExactLexicalNode>),
     ) {
-        let mut nodes = context.facts.lexical.to_vec();
+        let mut nodes = context.owner.facts.lexical.to_vec();
         edit(&mut nodes);
         {
-            let updated = context.facts.lexical.replace(nodes).unwrap();
+            let updated = context.owner.facts.lexical.replace(nodes).unwrap();
             *context = context.clone().rebuild(|facts| facts.lexical = updated);
         }
     }
@@ -10312,12 +10479,13 @@ mod tests {
         let target = identity("fixture", "PrivateSourceTarget");
         let canonical =
             ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
-                base.facts.producer,
+                base.owner.facts.producer,
                 &target.unit,
                 &target.module,
                 BTreeMap::new(),
             ));
         let view = base
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -10326,7 +10494,7 @@ mod tests {
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
         ExactDeclarationContext::from_authenticated_execution(
-            base.facts.producer,
+            base.owner.facts.producer,
             &view,
             projection,
             vec![
@@ -10372,6 +10540,7 @@ mod tests {
             panic!("issuer must retain published policy")
         };
         let observations = context
+            .owner
             .facts
             .compiler_support
             .projection()
@@ -10400,6 +10569,7 @@ mod tests {
             compact,
             serde_json::to_vec(
                 &context
+                    .owner
                     .facts
                     .compiler_support
                     .projection()
@@ -10419,7 +10589,12 @@ mod tests {
             .as_ref()
             .clone()
             .recover_fixture_projection(
-                context.facts.compiler_support.projection().interface_only(),
+                context
+                    .owner
+                    .facts
+                    .compiler_support
+                    .projection()
+                    .interface_only(),
             )
             .unwrap();
         assert_ne!(interface_only.semantic_sha256(), digest);
@@ -10708,7 +10883,7 @@ mod tests {
             lexical.iter_mut().find(|node| node.owner.module == "PrivateSourceTarget").unwrap().imports.push(identity("fixture","Beta"));
             lexical.push(ExactLexicalNode { owner: identity("fixture","Beta"), imports: vec![] });
             let source = ExactDeclarationContext::from_authenticated_execution(
-                issued.facts.producer, issued.artifact_view(), issued.facts.compiler_support.projection().clone(), lexical,
+                issued.owner.facts.producer, issued.artifact_view(), issued.owner.facts.compiler_support.projection().clone(), lexical,
                 identity("fixture","PrivateSourceTarget"), &[identity("fixture","PrivateSourceTarget"),identity("fixture","Alpha"),identity("fixture","Beta")],
             ).unwrap();
             let alpha = source.issue_published_source_original("revision","input",&identity("fixture","Alpha")).unwrap();
@@ -10917,7 +11092,7 @@ mod tests {
         );
         let mut changed = context.clone();
         {
-            let updated = changed.facts.lexical.replace(vec![]).unwrap();
+            let updated = changed.owner.facts.lexical.replace(vec![]).unwrap();
             changed = changed.rebuild(|facts| facts.lexical = updated);
         }
         let mut materializer = Materializer::new(&store);
@@ -10964,14 +11139,19 @@ mod tests {
                 }
                 issued.normalize().unwrap();
                 let before = issued.semantic_sha256();
-                let custody = issued.facts.compiler_support.artifacts().descriptors();
-                let retained = issued.facts.template_imports.clone();
+                let custody = issued
+                    .owner
+                    .facts
+                    .compiler_support
+                    .artifacts()
+                    .descriptors();
+                let retained = issued.owner.facts.template_imports.clone();
                 let selection = issued
                     .issue_published_source_original("revision", "input", &owners[root_index])
                     .unwrap();
                 let selected = selection.context();
                 selected.normalize().unwrap();
-                assert!(selected.facts.template_imports.is_none());
+                assert!(selected.owner.facts.template_imports.is_none());
                 assert_eq!(
                     selected.lexical_graph(),
                     &[ExactLexicalNode {
@@ -10980,6 +11160,7 @@ mod tests {
                     }]
                 );
                 assert!(selected
+                    .owner
                     .facts
                     .compiler_support
                     .artifacts()
@@ -11001,7 +11182,7 @@ mod tests {
                     .with_published_source_originals(&selection)
                     .unwrap();
                 parent = parent.extend(&[], &[], vec![]).unwrap();
-                assert_eq!(parent.facts.template_imports, retained);
+                assert_eq!(parent.owner.facts.template_imports, retained);
                 assert_eq!(
                     parent
                         .selected_template_imports(&[template.clone()])
@@ -11037,17 +11218,22 @@ mod tests {
                         facts.compiler_support = selected.compiler_source_support().clone()
                     });
                     {
-                        let updated = selected.facts.lexical.clone();
+                        let updated = selected.owner.facts.lexical.clone();
                         missing = missing.rebuild(|facts| facts.lexical = updated);
                     }
                     assert!(missing.normalize().is_err());
                 }
                 assert_eq!(issued.semantic_sha256(), before);
                 assert_eq!(
-                    issued.facts.compiler_support.artifacts().descriptors(),
+                    issued
+                        .owner
+                        .facts
+                        .compiler_support
+                        .artifacts()
+                        .descriptors(),
                     custody
                 );
-                assert_eq!(issued.facts.template_imports, retained);
+                assert_eq!(issued.owner.facts.template_imports, retained);
                 issued.normalize().unwrap();
             }
         }
@@ -11143,7 +11329,7 @@ mod tests {
         let view = selection.context().artifact_view();
         let graph = view.capture_graph_selection();
         let inventory = RecoveredArtifactInventory {
-            producer: issued.facts.producer,
+            producer: issued.owner.facts.producer,
             entries: view
                 .entries()
                 .into_iter()
@@ -11163,7 +11349,7 @@ mod tests {
                         .into_iter()
                         .collect::<Vec<_>>(),
                     &selection.context().compiler_input_roles(),
-                    selection.context().facts.lexical.to_vec(),
+                    selection.context().owner.facts.lexical.to_vec(),
                 )
                 .is_err(),
             "flat custody cannot restore exact publication policy"
@@ -11182,7 +11368,7 @@ mod tests {
                 .context_with_graph_selection(
                     &graph,
                     &changed,
-                    selection.context().facts.lexical.to_vec()
+                    selection.context().owner.facts.lexical.to_vec()
                 )
                 .is_err(),
             "a valid inventory cannot repair changed publication facts"
@@ -11191,7 +11377,7 @@ mod tests {
             .context_with_graph_selection(
                 &graph,
                 &selection.context().compiler_input_roles(),
-                selection.context().facts.lexical.to_vec()
+                selection.context().owner.facts.lexical.to_vec()
             )
             .is_ok());
     }
@@ -11212,11 +11398,14 @@ mod tests {
             let product = if native_authored {
                 crate::certified_products::fixture_native_declaration_product(
                     product,
-                    issuer.facts.producer,
+                    issuer.owner.facts.producer,
                     11,
                 )
             } else {
-                crate::certified_products::fixture_finalized_product(product, issuer.facts.producer)
+                crate::certified_products::fixture_finalized_product(
+                    product,
+                    issuer.owner.facts.producer,
+                )
             };
             let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
                 .remove(0)
@@ -11233,7 +11422,7 @@ mod tests {
                         }
                         context = context
                             .extend_checked_original_products(
-                                issuer.facts.producer,
+                                issuer.owner.facts.producer,
                                 std::slice::from_ref(&product),
                             )
                             .unwrap();
@@ -11323,7 +11512,7 @@ mod tests {
         );
         let consumer = crate::certified_products::fixture_source_finalized_product(
             consumer,
-            issuer.facts.producer,
+            issuer.owner.facts.producer,
             vec![crate::certified_products::CanonicalSourceImport {
                 qualifier: crate::cache::ImportQualifier::Unqualified,
                 module: root.module.clone(),
@@ -11345,7 +11534,7 @@ mod tests {
             .context()
             .as_ref()
             .clone()
-            .extend_checked_original_products(issuer.facts.producer, &[consumer])
+            .extend_checked_original_products(issuer.owner.facts.producer, &[consumer])
             .unwrap();
         edit_lexical(&mut context, |nodes| {
             nodes.push(ExactLexicalNode {
@@ -11468,6 +11657,7 @@ mod tests {
         assert_eq!(variant.module_interface(), original.module_interface());
         assert_ne!(variant.owner(), original.owner());
         let mut entries = issued
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11479,7 +11669,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         entries.push(Arc::new(
-            ArtifactEntry::original(issued.facts.producer, variant).unwrap(),
+            ArtifactEntry::original(issued.owner.facts.producer, variant).unwrap(),
         ));
         let inventory = ArtifactInventory::default();
         let view = inventory
@@ -11520,7 +11710,7 @@ mod tests {
                         let view = context.artifact_view();
                         let graph = view.capture_graph_selection();
                         let inventory = RecoveredArtifactInventory {
-                            producer: context.facts.producer,
+                            producer: context.owner.facts.producer,
                             entries: view.entries().into_iter().map(|entry| (entry.descriptor.id, entry)).collect(),
                             recorded_inventory: true,
             bindings: graph.bindings.iter().copied().collect(), binding_edges: view.binding_dependencies(), interfaces: view.interface_dependencies(),
@@ -11528,7 +11718,7 @@ mod tests {
                         let ids = view.descriptors().into_iter().map(|row| row.id).collect::<Vec<_>>();
                         let groups = view.selected_native_groups().into_iter().collect::<Vec<_>>();
                         let roles = context.compiler_input_roles();
-                        proptest::prop_assert!(inventory.context_with_roles(&ids, &groups, &roles, context.facts.lexical.to_vec()).is_err());
+                        proptest::prop_assert!(inventory.context_with_roles(&ids, &groups, &roles, context.owner.facts.lexical.to_vec()).is_err());
                         context = inventory.context_with_snapshot(&context.snapshot()).unwrap();
                         let reopened = context.published_source_original_selections().unwrap();
                         proptest::prop_assert_eq!(reopened.len(), 1);
@@ -11698,9 +11888,14 @@ mod tests {
         // A constructor still requires one row per owner; only explicit
         // composition may combine equal selections from independent receipts.
         let malformed = initial.as_ref().clone();
-        let mut duplicate = malformed.facts.lexical.to_vec();
+        let mut duplicate = malformed.owner.facts.lexical.to_vec();
         duplicate.push(shared);
-        let error = malformed.facts.lexical.replace(duplicate).unwrap_err();
+        let error = malformed
+            .owner
+            .facts
+            .lexical
+            .replace(duplicate)
+            .unwrap_err();
         assert!(matches!(error, CompileError::ExtractFailed(detail)
             if detail == "duplicate selected lexical owner fixture:Alpha"));
     }
@@ -11709,6 +11904,7 @@ mod tests {
     fn unselected_native_versions_preserve_issued_roles_and_refuse_conflicting_offers() {
         let (initial, producer) = metadata_fixture();
         let existing = initial
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11738,7 +11934,8 @@ mod tests {
         )
         .with_module_interface(interface)
         .unwrap();
-        let variant = Arc::new(ArtifactEntry::original(initial.facts.producer, variant).unwrap());
+        let variant =
+            Arc::new(ArtifactEntry::original(initial.owner.facts.producer, variant).unwrap());
         assert!(matches!(
             CompilerInputProjection::from_issued_entries(&[
                 Arc::clone(&existing[&identity("fixture", "Alpha")]), Arc::clone(&variant),
@@ -11805,6 +12002,7 @@ mod tests {
         let (context, _) = metadata_fixture();
         let root = tempfile::tempdir().unwrap();
         let metadata = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11873,6 +12071,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let artifacts = context.materialize_scratch(&directory).unwrap().artifacts;
         let before = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11880,6 +12079,7 @@ mod tests {
             .metrics();
         context.validate_artifacts(&artifacts).unwrap();
         let after = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11956,6 +12156,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let expected = context.semantic_sha256();
         let before = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -11971,6 +12172,7 @@ mod tests {
             })
             .unwrap();
         let after = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -12052,6 +12254,7 @@ mod tests {
             |_| {},
             || {
                 context
+                    .owner
                     .facts
                     .compiler_support
                     .artifacts()
@@ -12072,6 +12275,7 @@ mod tests {
         assert!(Arc::ptr_eq(
             &retained,
             &context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -12283,19 +12487,20 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
-            ancestor.facts.producer,
+            ancestor.owner.facts.producer,
         );
         let descendant = Arc::new(
             ancestor
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(ancestor.facts.producer, &[gamma])
+                .extend_checked_original_products(ancestor.owner.facts.producer, &[gamma])
                 .unwrap(),
         );
         let completed = descendant
             .prepare_compilation(&scratch.path().join("descendant"), &producer)
             .unwrap();
-        let delta = scaffold_native_fixture(ancestor.facts.producer, "fixture", "LatePrivate", 1);
+        let delta =
+            scaffold_native_fixture(ancestor.owner.facts.producer, "fixture", "LatePrivate", 1);
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(&producer);
         let private = OriginalCompilerInputs::from_native_availability(
             &ancestor,
@@ -12321,13 +12526,13 @@ mod tests {
             .clone();
         let epsilon = crate::certified_products::fixture_finalized_product(
             support_product("Epsilon"),
-            descendant.facts.producer,
+            descendant.owner.facts.producer,
         );
         let next = Arc::new(
             descendant
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(descendant.facts.producer, &[epsilon])
+                .extend_checked_original_products(descendant.owner.facts.producer, &[epsilon])
                 .unwrap(),
         );
         let private =
@@ -12387,6 +12592,7 @@ mod tests {
         );
         let proof = Arc::clone(
             captured
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -12427,13 +12633,13 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
-            ancestor.facts.producer,
+            ancestor.owner.facts.producer,
         );
         let descendant = Arc::new(
             ancestor
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(ancestor.facts.producer, &[gamma])
+                .extend_checked_original_products(ancestor.owner.facts.producer, &[gamma])
                 .unwrap(),
         );
         let completed = descendant
@@ -12446,13 +12652,13 @@ mod tests {
             .unwrap();
         let delta = crate::certified_products::fixture_finalized_product(
             support_product("Delta"),
-            descendant.facts.producer,
+            descendant.owner.facts.producer,
         );
         let next = Arc::new(
             descendant
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(descendant.facts.producer, &[delta])
+                .extend_checked_original_products(descendant.owner.facts.producer, &[delta])
                 .unwrap(),
         );
         let request = next
@@ -12481,12 +12687,12 @@ mod tests {
             .unwrap();
         let gamma = crate::certified_products::fixture_finalized_product(
             support_product("Gamma"),
-            a.facts.producer,
+            a.owner.facts.producer,
         );
         let b = Arc::new(
             a.as_ref()
                 .clone()
-                .extend_checked_original_products(a.facts.producer, &[gamma])
+                .extend_checked_original_products(a.owner.facts.producer, &[gamma])
                 .unwrap(),
         );
         let second = b
@@ -12553,7 +12759,7 @@ mod tests {
                     version,
                     &BTreeMap::new(),
                 ),
-                initial.facts.producer,
+                initial.owner.facts.producer,
             );
             crate::certified_products::tests::recovered_witness_fixtures(&[original])
                 .remove(0)
@@ -12564,7 +12770,7 @@ mod tests {
                 context
                     .as_ref()
                     .clone()
-                    .extend_checked_original_products(context.facts.producer, &[product])
+                    .extend_checked_original_products(context.owner.facts.producer, &[product])
                     .unwrap(),
             )
         };
@@ -12679,6 +12885,7 @@ mod tests {
         let selected = RetainedArtifactMaterialization::selected_group_refs(
             [joined_owner.as_ref(), replacement_owner.as_ref()],
             &replacement
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -12705,18 +12912,18 @@ mod tests {
         let epoch = |version: u8| {
             crate::certified_products::fixture_finalized_product(
                 support_product_with_interface("fixture", "Epoch", vec![version; 16]),
-                initial.facts.producer,
+                initial.owner.facts.producer,
             )
         };
         let old = initial
             .as_ref()
             .clone()
-            .extend_checked_original_products(initial.facts.producer, &[epoch(old_epoch)])
+            .extend_checked_original_products(initial.owner.facts.producer, &[epoch(old_epoch)])
             .unwrap();
         let child = initial
             .as_ref()
             .clone()
-            .extend_checked_original_products(initial.facts.producer, &[epoch(new_epoch)])
+            .extend_checked_original_products(initial.owner.facts.producer, &[epoch(new_epoch)])
             .unwrap();
         let selected = old
             .artifact_view()
@@ -12789,7 +12996,7 @@ mod tests {
                 7,
                 &BTreeMap::new(),
             ),
-            initial.facts.producer,
+            initial.owner.facts.producer,
         );
         let native = crate::certified_products::tests::recovered_witness_fixtures(&[native])
             .remove(0)
@@ -12798,7 +13005,7 @@ mod tests {
             initial
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(initial.facts.producer, &[native])
+                .extend_checked_original_products(initial.owner.facts.producer, &[native])
                 .unwrap(),
         );
         let scratch = tempfile::tempdir().unwrap();
@@ -12887,7 +13094,7 @@ mod tests {
             .filter(|binding| graph.bindings.contains(binding))
             .collect();
         let inventory = RecoveredArtifactInventory {
-            producer: context.facts.producer,
+            producer: context.owner.facts.producer,
             entries: retained
                 .entries()
                 .into_iter()
@@ -12993,13 +13200,13 @@ mod tests {
             for index in 0..descendants {
                 let product = crate::certified_products::fixture_finalized_product(
                     support_product(&format!("Growing{index}")),
-                    context.facts.producer,
+                    context.owner.facts.producer,
                 );
                 context = Arc::new(
                     context
                         .as_ref()
                         .clone()
-                        .extend_checked_original_products(context.facts.producer, &[product])
+                        .extend_checked_original_products(context.owner.facts.producer, &[product])
                         .unwrap(),
                 );
                 let request = context
@@ -13043,6 +13250,7 @@ mod tests {
                 descendants * 4 + descendants * (descendants - 1) / 2
             );
             let retained = context
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -13070,6 +13278,7 @@ mod tests {
         let (context, _) = metadata_fixture();
         let expected = context.semantic_sha256();
         let before = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -13077,6 +13286,7 @@ mod tests {
             .metrics();
         assert_eq!(context.semantic_sha256(), expected);
         let after = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -13109,10 +13319,10 @@ mod tests {
             .as_ref()
             .clone()
             .extend_checked_original_products(
-                context.facts.producer,
+                context.owner.facts.producer,
                 &[crate::certified_products::fixture_finalized_product(
                     support_product("Later"),
-                    context.facts.producer,
+                    context.owner.facts.producer,
                 )],
             )
             .unwrap();
@@ -13153,7 +13363,7 @@ mod tests {
             .iter()
             .all(|role| role.original().is_none()));
         assert_eq!(type_only.interface_owners(), context.interface_owners());
-        assert_eq!(type_only.facts.lexical, context.facts.lexical);
+        assert_eq!(type_only.owner.facts.lexical, context.owner.facts.lexical);
         assert!(type_only.recovery_products().is_empty());
         assert!(!context.recovery_products().is_empty());
         assert_ne!(type_only.semantic_sha256(), expected);
@@ -14820,6 +15030,7 @@ mod tests {
                     if states != [2, 2] {
                         assert!(
                             parent
+                                .owner
                                 .facts
                                 .compiler_support
                                 .projection()
@@ -14862,7 +15073,8 @@ mod tests {
                 )
                 .remove(0)
                 .product;
-                let recovered = ArtifactEntry::original(issued.facts.producer, recovered).unwrap();
+                let recovered =
+                    ArtifactEntry::original(issued.owner.facts.producer, recovered).unwrap();
                 assert_eq!(recovered.descriptor, entry.descriptor);
                 Arc::new(recovered)
             })
@@ -14891,11 +15103,12 @@ mod tests {
         let before = baseline.semantic_sha256();
         let roles = baseline.compiler_input_roles();
         let custody = baseline.artifact_view().artifact_ids();
-        let products = ["InstanceOwner", "InstanceRelay"]
-            .map(|module| scaffold_native_fixture(baseline.facts.producer, "fixture", module, 1));
+        let products = ["InstanceOwner", "InstanceRelay"].map(|module| {
+            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1)
+        });
         let offer = support_offer(&products);
         let mut request = program_request(directory.path(), baseline.clone());
-        request.producer_sha256 = baseline.facts.producer;
+        request.producer_sha256 = baseline.owner.facts.producer;
         let context = request
             .admit_fixture_support(
                 baseline.clone(),
@@ -14933,7 +15146,8 @@ mod tests {
         let admission = effective
             .validate_receipt(&receipt, None, effective.context())
             .unwrap();
-        let consumer = scaffold_native_fixture(baseline.facts.producer, "fixture", "Consumer", 1);
+        let consumer =
+            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
         let artifacts = effective
             .context()
             .artifact_view()
@@ -15418,7 +15632,12 @@ mod tests {
         );
         let mut following = (*context).clone();
         {
-            let updated = following.facts.lexical.replace(lexical.clone()).unwrap();
+            let updated = following
+                .owner
+                .facts
+                .lexical
+                .replace(lexical.clone())
+                .unwrap();
             following = following.rebuild(|facts| facts.lexical = updated);
         }
         following.normalize().unwrap();
@@ -16657,6 +16876,7 @@ mod tests {
             .unwrap();
         {
             let updated = public
+                .owner
                 .facts
                 .compiler_support
                 .artifacts()
@@ -16878,6 +17098,7 @@ mod tests {
         )
         .unwrap();
         assert!(dependent_context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -16919,6 +17140,7 @@ mod tests {
             vec![changed.product().owner().clone()]
         );
         let inventory = dependent_context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -16926,6 +17148,7 @@ mod tests {
         let type_only = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             compiler_support: recover_fixture_compiler_support(
                 dependent_context
+                    .owner
                     .facts
                     .compiler_support
                     .projection()
@@ -16934,6 +17157,7 @@ mod tests {
                     .admit_recovery_selection(
                         &inventory.empty_view(),
                         dependent_context
+                            .owner
                             .facts
                             .compiler_support
                             .artifacts()
@@ -16945,16 +17169,18 @@ mod tests {
             )
             .unwrap(),
 
-            producer: dependent_context.facts.producer,
+            producer: dependent_context.owner.facts.producer,
 
-            lexical: dependent_context.facts.lexical.clone(),
-            template_imports: dependent_context.facts.template_imports.clone(),
+            lexical: dependent_context.owner.facts.lexical.clone(),
+            template_imports: dependent_context.owner.facts.template_imports.clone(),
             original_instance_environment: dependent_context
+                .owner
                 .facts
                 .original_instance_environment
                 .clone(),
         });
         assert!(type_only
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -17076,7 +17302,7 @@ mod tests {
             ExactDeclarationContext::new(std::slice::from_ref(&certificate), &[], Vec::new())
                 .unwrap();
         let original_id =
-            ArtifactEntry::original_artifact_id(issued.facts.producer, certificate.product());
+            ArtifactEntry::original_artifact_id(issued.owner.facts.producer, certificate.product());
         let projection = issued.compiler_input_projection().interface_only();
         let context = Arc::new(issued.recover_fixture_projection(projection).unwrap());
         assert_ne!(
@@ -17339,7 +17565,7 @@ mod tests {
         }
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
-                producer: initial.facts.producer,
+                producer: initial.owner.facts.producer,
                 roots: BTreeSet::from([identity("fixture", "Joined")]),
                 graph: Arc::new(graph.clone()),
             },
@@ -17441,9 +17667,9 @@ mod tests {
         let changed = make_context(b"changed interface", false);
         assert!(initial.original_preview_interface_graph().is_err());
         let joined_target = ExactDeclarationContext::from_authenticated_execution(
-            initial.facts.producer,
+            initial.owner.facts.producer,
             initial.artifact_view(),
-            initial.facts.compiler_support.projection().clone(),
+            initial.owner.facts.compiler_support.projection().clone(),
             initial.lexical_graph().to_vec(),
             identity("main", "CapturedInterface"),
             &[identity("main", "CapturedInterface")],
@@ -17456,12 +17682,12 @@ mod tests {
         assert!(joined_target.original_preview_interface_graph().is_err());
         let canonical_target =
             ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
-                initial.facts.producer,
+                initial.owner.facts.producer,
                 "main",
                 "OriginalTarget",
                 BTreeMap::new(),
             ));
-        let inventory = initial.facts.compiler_support.artifacts().inventory();
+        let inventory = initial.owner.facts.compiler_support.artifacts().inventory();
         let retained = inventory
             .admit(initial.artifact_view(), vec![canonical_target.clone()])
             .unwrap();
@@ -17471,7 +17697,7 @@ mod tests {
             imports: vec![],
         });
         let original = ExactDeclarationContext::from_authenticated_execution(
-            initial.facts.producer,
+            initial.owner.facts.producer,
             &retained,
             initial
                 .compiler_input_projection()
@@ -17523,7 +17749,7 @@ mod tests {
         let source = "module Expr where\nimport CapturedInterface\n";
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
-                producer: initial.facts.producer,
+                producer: initial.owner.facts.producer,
                 roots: BTreeSet::from([identity("main", "CapturedInterface")]),
                 graph: Arc::new(
                     initial
@@ -17609,7 +17835,7 @@ mod tests {
         );
         let no_initial_selection = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
-                producer: current.facts.producer,
+                producer: current.owner.facts.producer,
                 roots: BTreeSet::new(),
                 graph: Arc::new(
                     current
@@ -17631,7 +17857,7 @@ mod tests {
         ));
         let no_protected_import = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
-                producer: initial.facts.producer,
+                producer: initial.owner.facts.producer,
                 roots: BTreeSet::new(),
                 graph: Arc::new(
                     initial

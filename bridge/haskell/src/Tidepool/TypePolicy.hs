@@ -17,6 +17,7 @@ module Tidepool.TypePolicy
   , stabilizeEffectRows
   ) where
 
+import Control.Monad (unless)
 import Control.Monad.State.Strict
 import Control.Exception (Exception)
 import qualified Data.ByteString as BS
@@ -95,7 +96,7 @@ data ExpressionKey
   | ApplicationKey TypeNodeId TypeNodeId
   | FunctionKey W.FunctionFlag TypeNodeId TypeNodeId TypeNodeId
   | ForAllKey W.ForAllFlag TypeNodeId TypeNodeId | LiteralKey W.TypeLiteral
-  | RootKey W.RootDomain [W.SourceBinderFlag] [TypeNodeId] TypeNodeId
+  | RootKey W.RootDomain [W.SourceBinderFlag] TypeNodeId
   | TemplateKey (NominalHead, Bool) (NominalHead, Bool) Int Int
       [Maybe [PrimRep]] [Bool] (Maybe [PrimRep]) [Bool] [(TypeNodeId, PrimRep)]
   deriving (Eq, Ord)
@@ -143,13 +144,15 @@ internConstructorType constructor = internRoot W.ConstructorSchemeRoot
 
 internRoot :: W.RootDomain -> [(TyVar, W.SourceBinderFlag)] -> Type -> GraphBuild TypeNodeId
 internRoot domain binders original = do
-  (bound, kinds) <- binderKinds (map fst binders)
-  body <- internExpression bound original
+  -- Reply construction needs the complete lexical telescope, not annotations
+  -- of its unknowns. Kind arguments in the body remain ordinary expressions.
+  let variables = map fst binders
+  unless (all isTyVar variables) (lift (Left TypeGraphCoercionBinder))
+  body <- internExpression (reverse variables) original
   let flags = map snd binders
-      key = RootKey domain flags kinds body
+      key = RootKey domain flags body
   internExpressionNode key (W.TypeRoot domain flags (renderType original))
-    ([(W.TypeBinderKind (fromIntegral index), kind) | (index, kind) <- zip [0 :: Int ..] kinds]
-      ++ [(W.TypeBody, body)])
+    [(W.TypeBody, body)]
 
 binderKinds :: [TyVar] -> GraphBuild ([TyVar], [TypeNodeId])
 binderKinds = go [] []

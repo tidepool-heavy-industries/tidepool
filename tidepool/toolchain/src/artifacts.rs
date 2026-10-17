@@ -616,7 +616,7 @@ pub struct ModuleCandidateOffer {
     planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
-    checked: Option<NativeCheckedOffer>,
+    activation_preview: Option<crate::activation_preview::ActivationPreviewOffer>,
 }
 
 /// Required complete session-value selection for output certification.
@@ -956,11 +956,6 @@ impl ItemAdmission<'_> {
         self.cursor.next += 1;
         Ok(output)
     }
-}
-
-enum NativeCheckedOffer {
-    Item(crate::checked_cell::CheckedItemOffer),
-    ActivationPreview(crate::activation_preview::ActivationPreviewOffer),
 }
 
 // Protected compilation manifests bind the actual worker search order as well
@@ -1349,7 +1344,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked: None,
+            activation_preview: None,
         })
     }
 
@@ -1420,7 +1415,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked: None,
+            activation_preview: None,
         })
     }
 
@@ -1569,7 +1564,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: Some(inputs),
             checked_projections: Vec::new(),
-            checked: None,
+            activation_preview: None,
         })
     }
 
@@ -1649,7 +1644,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: Some(checked_values),
             checked_projections,
-            checked: None,
+            activation_preview: None,
         })
     }
 
@@ -1769,111 +1764,7 @@ impl ModuleCandidateOffer {
             planned_cell: Some(planned),
             checked_values: Some(inputs),
             checked_projections,
-            checked: None,
-        })
-    }
-
-    pub fn select_checked_item(
-        producer: &[u8],
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        item: crate::checked_cell::ExactCheckedItem,
-        prefix: crate::checked_cell::ExactCompiledPrefix,
-        runtime_prefix_digest: [u8; 32],
-        generation: u64,
-        observation_name: Option<&str>,
-        templates: &[(String, String)],
-        settled_bindings: Vec<(
-            String,
-            tidepool_repr::execution_schema::SymbolIdentity,
-            u64,
-            u64,
-        )>,
-    ) -> Result<Self, CompileError> {
-        let compile_context = context;
-        let context = prefix.with_value_context(checked_offer_context(
-            compile_context
-                .as_ref()
-                .map(|context| context.declarations().clone()),
-        )?)?;
-        let settled_values = prefix.select_settled_values(settled_bindings)?;
-        let checked_item = crate::checked_cell::CheckedItemOffer {
-            item,
-            prefix,
-            runtime_prefix_digest,
-            generation,
-            observation_name: observation_name.map(str::to_owned),
-            is_program: false,
-            settled_values,
-        };
-        checked_item.validate_templates(templates)?;
-        checked_item.validate_include(include)?;
-        let mut selected = None;
-        let exact = compile_context_with_declarations(compile_context, context.clone())
-            .with_generated_planned_imports(
-                checked_item
-                    .prefix
-                    .planned_declaration_proof()
-                    .map(|proof| &proof.certificate),
-                checked_item
-                    .item
-                    .turn_templates()
-                    .iter()
-                    .map(|(_, source)| source.as_str()),
-            )?
-            .prepare_compilation_authorizing_with_private_input(
-                &scratch.join("exact-scope"),
-                producer,
-                |semantic_sha256| {
-                    let authorization = checked_search_authorization(
-                        checked_item.authorization(producer, semantic_sha256)?,
-                        include,
-                    )?;
-                    let mut reserved = checked_item
-                        .prefix
-                        .injected_modules()
-                        .into_iter()
-                        .collect::<BTreeSet<_>>();
-                    reserved.extend(
-                        checked_item
-                            .item
-                            .reserved_declaration_modules()
-                            .iter()
-                            .cloned(),
-                    );
-                    reserved.insert(
-                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                            checked_item.generation,
-                        ))
-                        .module_name(),
-                    );
-                    selected = immutable_candidates_in_context(
-                        &context, producer, include, scratch, reserved,
-                    )?;
-                    let private =
-                        private_native_availability(&context, producer, selected.as_deref())?;
-                    Ok((authorization, private))
-                },
-            )?;
-        Ok(Self {
-            selected,
-            producer: producer.to_vec(),
-            include: include.to_vec(),
-            exact: Some(
-                exact
-                    .with_source_search_context(include)
-                    .with_checked_value_imports(checked_item.prefix.import_authority()?)
-                    .with_initial_template_interfaces(
-                        checked_item.item.template_context(),
-                        &checked_item.item.template_sources(),
-                    )?,
-            ),
-            checked_cell: None,
-            planned_cell: None,
-            checked_values: None,
-            checked_projections: Vec::new(),
-            checked: Some(NativeCheckedOffer::Item(checked_item)),
+            activation_preview: None,
         })
     }
 
@@ -1969,15 +1860,15 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
+            activation_preview: Some(offer),
         })
     }
 
     /// Read the compiler's distinct no-program result after a successful
     /// preview request. Missing native display evidence cannot become Opaque.
     pub fn activation_preview_unavailable(&self, root: &Path) -> Result<bool, CompileError> {
-        match &self.checked {
-            Some(NativeCheckedOffer::ActivationPreview(preview)) => {
+        match &self.activation_preview {
+            Some(preview) => {
                 let exact = self.exact.as_ref().expect("preview has exact offer");
                 exact.validate_artifacts()?;
                 preview.unavailable(root, &exact.request_sha256)
@@ -1996,13 +1887,7 @@ impl ModuleCandidateOffer {
     /// Retained checked-cell artifact root. Only the sealed request manifest
     /// authorizes inputs from this directory; new directory members do not.
     pub fn checked_value_root(&self) -> Option<&Path> {
-        self.checked_values
-            .as_ref()
-            .map(|inputs| inputs.root())
-            .or_else(|| match self.checked.as_ref()? {
-                NativeCheckedOffer::Item(offer) => Some(offer.item.value_input_root()),
-                NativeCheckedOffer::ActivationPreview(_) => None,
-            })
+        self.checked_values.as_ref().map(|inputs| inputs.root())
     }
 
     /// Retain this request and its selected checked inputs for diagnosis.
@@ -2031,15 +1916,9 @@ impl ModuleCandidateOffer {
 
     fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
         if let Some(inputs) = &self.checked_values {
-            inputs.retain_diagnostics(None, destination)
+            inputs.retain_diagnostics(destination)
         } else {
-            match &self.checked {
-                Some(NativeCheckedOffer::Item(offer)) => offer
-                    .item
-                    .retain_input_diagnostics(&offer.prefix, destination),
-                Some(NativeCheckedOffer::ActivationPreview(_)) => Ok(()),
-                None => Ok(()),
-            }
+            Ok(())
         }
     }
 
@@ -2053,9 +1932,10 @@ impl ModuleCandidateOffer {
         let capture = CompilerDiagnosticCapture::preparing(preparation_directory, &command);
         let result = (|| {
             if let Some(exact) = &self.exact {
-                let retained_policy = match &self.checked {
-                    Some(NativeCheckedOffer::ActivationPreview(_)) => crate::declaration_context::RetainedGenerationPolicy::PureActivationPreview,
-                    _ => crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,
+                let retained_policy = if self.activation_preview.is_some() {
+                    crate::declaration_context::RetainedGenerationPolicy::PureActivationPreview
+                } else {
+                    crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand
                 };
                 exact.apply_to(&mut command, retained_policy)?;
             }
@@ -2619,7 +2499,7 @@ impl SelectedModuleCandidateOffer {
                 planned_cell: None,
                 checked_values: None,
                 checked_projections: Vec::new(),
-                checked: None,
+                activation_preview: None,
             },
             selected_session_values: self.selected_session_values.clone(),
         }
@@ -3839,11 +3719,10 @@ fn seal_turn_outputs_with_validation(
             .map(|proof| SealedOriginalEvidence::Ordinary(proof.issued_original_execution()))
             .unwrap_or(SealedOriginalEvidence::Absent),
     };
-    let original_execution = original.execution().cloned();
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
-    let checked = if let Some(checked) = &offer.checked {
-        let (context, lexical) = checked_output_context(
+    let checked = if let Some(preview) = &offer.activation_preview {
+        let context = activation_preview_output_context(
             offer,
             &artifact_view,
             exact_source
@@ -3852,47 +3731,19 @@ fn seal_turn_outputs_with_validation(
             produced_types,
             &certified.source_selection,
         )?;
-        Some(match checked {
-            NativeCheckedOffer::ActivationPreview(preview) => {
-                CheckedNativeProof::ActivationPreview(
-                    preview.seal(
-                        output_dir,
-                        &offer
-                            .exact
-                            .as_ref()
-                            .expect("preview has exact scope")
-                            .request_sha256,
-                        source,
-                        prepared,
-                        &context,
-                    )?,
-                )
-            }
-            NativeCheckedOffer::Item(item) => {
-                let request_sha256 = &offer
+        Some(CheckedNativeProof::ActivationPreview(
+            preview.seal(
+                output_dir,
+                &offer
                     .exact
                     .as_ref()
-                    .expect("checked offer has exact scope")
-                    .request_sha256;
-                CheckedNativeProof::Execution(
-                    item.seal(
-                        output_dir,
-                        request_sha256,
-                        source,
-                        prepared,
-                        &context,
-                        &lexical,
-                        original_execution
-                            .clone()
-                            .expect("checked output has full original execution evidence"),
-                        None,
-                        &pending_imports,
-                        &target_native_selection,
-                        None,
-                    )?,
-                )
-            }
-        })
+                    .expect("preview has exact scope")
+                    .request_sha256,
+                source,
+                prepared,
+                &context,
+            )?,
+        ))
     } else {
         None
     };
@@ -3965,19 +3816,13 @@ fn program_support_artifacts(
     Ok(support)
 }
 
-fn checked_output_context(
+fn activation_preview_output_context(
     offer: &SelectedModuleCandidateOffer,
     artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     selection: &certified_products::CertifiedSourceSelection,
-) -> Result<
-    (
-        Arc<crate::declaration_join::ExactDeclarationContext>,
-        Vec<crate::declaration_join::ExactLexicalNode>,
-    ),
-    CompileError,
-> {
+) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
     let exact = offer.exact.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
@@ -3991,7 +3836,7 @@ fn checked_output_context(
         produced_types,
         selection,
     )?;
-    Ok((context, request.program_source_lexical().to_vec()))
+    Ok(context)
 }
 
 struct PackageInterfaceCatalog<'a> {

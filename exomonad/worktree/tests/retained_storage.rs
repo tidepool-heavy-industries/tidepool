@@ -206,3 +206,74 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
         ))
         .exists());
 }
+
+#[test]
+fn failed_manifest_presence_never_becomes_missing_descriptor() {
+    use exomonad_worktree::WorktreeError;
+    use std::os::unix::fs::symlink;
+
+    for status in [
+        WorktreeRecordStatus::Mounted,
+        WorktreeRecordStatus::Retained,
+    ] {
+        let storage = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let registry = WorktreeRegistry::open(&anchor, "registry").unwrap();
+        let layer = storage
+            .path()
+            .join("worktrees/.resources/run/child/source/upper");
+        fs::create_dir_all(&layer).unwrap();
+        fs::write(layer.join("dirty"), b"retained source").unwrap();
+        let id = WorktreeId::from_raw("wt-presence");
+        let receipt = WorktreeReceipt {
+            worktree_id: id.clone(),
+            cwd: storage.path().join("worktrees/wt-presence"),
+            branch: None,
+            source_head: GitOid::from_raw("a".repeat(40)),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            source_repository: storage.path().to_owned(),
+            created_at_ms: 1,
+            status,
+        };
+        registry
+            .put_retained_manifest(&receipt, vec![layer.clone()])
+            .unwrap();
+        registry.put(&receipt).unwrap();
+        assert_eq!(
+            registry.source_layer_references().unwrap().unwrap(),
+            [layer.clone()].into()
+        );
+        // Deliberate storage corruption after genuine manifest publication.
+        // ELOOP is observable even under root; directory admission stays valid.
+        let manifest = registry
+            .root()
+            .join("retained-views")
+            .join(format!("{}.json", id.as_str()));
+        fs::remove_file(&manifest).unwrap();
+        symlink(manifest.file_name().unwrap(), &manifest).unwrap();
+        let fault = fs::metadata(&manifest).unwrap_err();
+        assert_ne!(fault.kind(), std::io::ErrorKind::NotFound);
+        assert!(matches!(registry.source_layer_references(),
+            Err(WorktreeError::StorageFailure {path, ..}) if path == manifest));
+        fs::remove_file(&manifest).unwrap();
+        registry
+            .put_retained_manifest(&receipt, vec![layer.clone()])
+            .unwrap();
+        assert_eq!(
+            registry.source_layer_references().unwrap().unwrap(),
+            [layer].into()
+        );
+        fs::remove_file(&manifest).unwrap();
+        match status {
+            WorktreeRecordStatus::Mounted => {
+                assert!(registry.source_layer_references().unwrap().is_none())
+            }
+            WorktreeRecordStatus::Retained => assert!(matches!(
+                registry.source_layer_references(),
+                Err(WorktreeError::StorageFailure { .. })
+            )),
+            _ => unreachable!(),
+        }
+    }
+}

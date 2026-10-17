@@ -16,9 +16,8 @@ module Tidepool.ExecutionProjection
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
-  , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
-  , preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
+  , preparedModuleProductOutcomes, preparedModuleProductEncodings, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
   , prepareProjection
@@ -120,7 +119,7 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.Timing (readTimingEnabled, timeModuleDetailPhase, emitModuleCounts)
 import Tidepool.ExecutionEncode
-  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes, encodeTypeIdentity)
+  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingInput, projectedGroupEncodingBytes, encodeTypeIdentity)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -194,6 +193,17 @@ data ProjectionPurpose
 
 data EntryContractAdmission = FinalEntryContracts | DeferredEntryContracts
 
+-- Import classification applies only after resolving a symbol through topSymbols.
+-- Whole-program projection retains its selected current originals; an original
+-- group keeps its complete local binder set and imports other resolved tops.
+data PreparedTopScope
+  = WholeProgramScope (Set SymbolIdentity)
+  | OriginalGroupScope (Set SymbolIdentity)
+
+importsResolvedTop :: PreparedTopScope -> SymbolIdentity -> Bool
+importsResolvedTop (WholeProgramScope originals) symbol = symbol `Set.member` originals
+importsResolvedTop (OriginalGroupScope local) symbol = symbol `Set.notMember` local
+
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv (JoinId, [RuntimeRep])
@@ -222,8 +232,7 @@ data PState = PState
   , timeAuthority :: Maybe TimeAuthority
   , jsonAuthority :: Maybe JsonAuthority
   , textUnit :: Maybe TextUnitAuthority
-  -- Tops outside the group currently being projected become explicit imports.
-  , externalizedTops :: Set SymbolIdentity
+  , topScope :: PreparedTopScope
   , projectionPurpose :: ProjectionPurpose
   , entryContractAdmission :: EntryContractAdmission
   , entryContractFailures :: [ProjectionError]
@@ -269,7 +278,7 @@ projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionErr
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
   (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
     0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers []) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
-    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget FinalEntryContracts [])
+    machine Map.empty Set.empty Nothing Nothing Nothing Nothing (WholeProgramScope Set.empty) ExecutableTarget FinalEntryContracts [])
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -300,10 +309,13 @@ data OriginalGroupOmission = OriginalGroupOmission
 -- The wire arena and its compiler provenance are one lowering result. Neither
 -- caching nor dependency settlement can retain one without the other.
 data ProjectedGroupEvidence = ProjectedGroupEvidence
-  { projectedGroupWire :: ProjectedGroup
+  { projectedGroupEncoding :: ProjectedGroupEncoding
   , projectedGroupConstructors :: [IssuedConstructor]
   , projectedGroupYieldSites :: [Effect.YieldSite]
   }
+
+projectedGroupWire :: ProjectedGroupEvidence -> ProjectedGroup
+projectedGroupWire = projectedGroupEncodingInput . projectedGroupEncoding
 
 newtype PreparedModuleProducts = PreparedModuleProducts
   [(Module, Either ProjectionError [ProjectedGroupEvidence], [OriginalGroupOmission])]
@@ -338,7 +350,6 @@ data RawModuleProducts = RawModuleProducts
   { rawOriginalProductOwner :: Module
   , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
   , rawExecutableProduct :: Either ProjectionError [ProjectedGroupEvidence]
-  , rawOriginalGroupEncodings :: Map Word32 ProjectedGroupEncoding
   }
 
 -- Raw facts retain exact prepared compiler objects and projection authority.
@@ -430,7 +441,7 @@ projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
 projectRawOriginalHomeModuleProducts env interfaces context prepared =
-  RawModuleProducts owner original executable encodings
+  RawModuleProducts owner original executable
   where
     owner = pmModule prepared
     isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
@@ -441,8 +452,6 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
       _ -> Nothing
     executable = traverse (\(_,_,result) -> result)
       (projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing)
-    encodings = Map.fromList [(ordinal,prepareProjectedGroupEncoding (projectedGroupWire group))
-      | outcomes <- maybe [] pure original, (ordinal,_,Right group) <- outcomes]
 
 -- Force the local lowering on its executor worker, before incorporation.
 -- Failed groups remain values; only infrastructure exceptions abort the batch.
@@ -462,6 +471,8 @@ forceRawModuleProducts raw = do
           either (const True) (const True) result])
         pure ()
       else pure ()
+      -- preparedBindingGroups issues ascending original ordinals. Force
+      -- successful payloads in that order, before retaining compiler identities.
       pure [group | (_,_,Right group) <- outcomes]
     Nothing -> do
       outcome <- evaluate (rawExecutableProduct raw)
@@ -472,8 +483,7 @@ forceRawModuleProducts raw = do
     Just _ -> do
       _ <- evaluate (Set.size (rawOriginalProductDemands raw)
         + Set.size (rawOriginalProductBinders raw)
-        + sum (map (BS.length . projectedGroupEncodingBytes)
-            (Map.elems (rawOriginalGroupEncodings raw))))
+        + sum (map (BS.length . projectedGroupEncodingBytes . projectedGroupEncoding) selected))
       pure ()
     Nothing -> pure ()
   -- Consume the census spine and exact compiler identities on the worker,
@@ -514,9 +524,10 @@ forceRawModuleProducts raw = do
           , ("operations", total (length . projectedOperations))
           , ("type_nodes", total (IntMap.size . typeGraphNodes . projectedTypes))
           , ("type_edges", total (sum . map length . IntMap.elems . typeGraphEdges . projectedTypes))
-          , ("original_encoding_bytes", toInteger (sum (map
-              (BS.length . projectedGroupEncodingBytes)
-              (Map.elems (rawOriginalGroupEncodings raw)))))
+          , ("original_encoding_bytes", case rawOriginalProductGroups raw of
+              Nothing -> 0
+              Just _ -> toInteger (sum (map
+                (BS.length . projectedGroupEncodingBytes . projectedGroupEncoding) selected)))
           ] ++ case rawOriginalProductGroups raw of
             Nothing -> []
             Just outcomes -> [("original_groups", toInteger (length outcomes)),
@@ -621,6 +632,13 @@ preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
 preparedModuleProductOutcomes (PreparedModuleProducts outcomes) =
   [(owner, map projectedGroupWire <$> outcome) | (owner, outcome, _) <- outcomes]
+
+-- The exact encoding plan follows its semantic group through settlement. No
+-- caller reconstructs the pairing from owner names or original ordinals.
+preparedModuleProductEncodings :: PreparedModuleProducts
+  -> [(Module, Either ProjectionError [ProjectedGroupEncoding])]
+preparedModuleProductEncodings (PreparedModuleProducts outcomes) =
+  [(owner, map projectedGroupEncoding <$> outcome) | (owner, outcome, _) <- outcomes]
 
 preparedModuleProductOmissions :: PreparedModuleProducts
   -> [(Module, [OriginalGroupOmission])]
@@ -745,7 +763,6 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
   | (ordinal, item, onlyGroup) <- surviving]
   where
     identities = buildTopIdentityMap [prepared]
-    originals = pmBindings prepared
     evidenceIndex = indexPreparedEvidence prepared
     surviving =
       [ (ordinal, item, onlyGroup)
@@ -754,10 +771,6 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
       , not (null (topBinders binding))
       , keepPreparedTop context binding
       , maybe True (Set.member ordinal) selection ]
-    allSymbols = Set.fromList
-      [ symbol
-      | (binding, _) <- originals, binder <- topBinders binding
-      , Just symbol <- [lookupVarEnv identities binder] ]
     groupBinderSymbols (binding, _) =
       mapMaybe (lookupVarEnv identities) (topBinders binding)
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
@@ -773,23 +786,26 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
       binders <- traverse (\binder -> maybe
         (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
         (lookupVarEnv identities binder)) (topBinders binding)
-      let outside = allSymbols `Set.difference` Set.fromList binders
+      -- identities contains exactly this module's topBinders, including
+      -- introduced tops and constructor workers. Every resolved symbol outside
+      -- this complete local binder set therefore belongs to another group.
+      let scope = OriginalGroupScope (Set.fromList binders)
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
             Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty (pmIdentityResolver prepared) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
-            (projectionJsonAuthority context) (projectionTextUnit context) outside purpose FinalEntryContracts []
+            (projectionJsonAuthority context) (projectionTextUnit context) scope purpose FinalEntryContracts []
       evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
-        (do validatePreparedEvidence context [onlyGroup] [evidence] []
+        (do auxiliary <- validatePreparedEvidence context [onlyGroup] [evidence] []
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
-            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
+            (types, sites, verbSites) <- lowerPreparedEvidence [onlyGroup] [evidence] auxiliary
             jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
-      pure (ProjectedGroupEvidence (ProjectedGroup
+      pure (ProjectedGroupEvidence (prepareProjectedGroupEncoding (ProjectedGroup
         { projectedOriginalOrdinal = ordinal
         , projectedBinders = binders
         , projectedBody = ProjectedGroupBody
@@ -806,7 +822,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             , projectedConstructorReplies = verbSites
             , projectedJsonLayout = jsonLayout
             }
-        }) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
+        })) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.
@@ -872,7 +888,7 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         boundJsonAuthority
         (projectionTextUnit context)
-        (Set.fromList (Map.elems (projectionCurrentOriginals context)))
+        (WholeProgramScope (Set.fromList (Map.elems (projectionCurrentOriginals context))))
         ExecutableTarget DeferredEntryContracts []
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
@@ -882,11 +898,11 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
   refuseUnelaboratedIntrinsics modules projectable
   ((bindingGroups, programTypes, programSites, programConstructorReplies, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
-        validatePreparedEvidence context projectable evidence
+        auxiliary <- validatePreparedEvidence context projectable evidence
           (concatMap hostBindingRepresentationConstructors hostBindings)
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
+        (types, sites, verbSites) <- lowerPreparedEvidence projectable evidence auxiliary
         hostJsonLayout <- lowerHostBindings hostBindings
         jsonLayout <- case hostJsonLayout of
           Just layout -> pure (Just layout)
@@ -1366,8 +1382,8 @@ advanceReachFacts delta seeds admitted carried = PreparedReachAdvance reach (del
       | otherwise = close (addOneToUniqSet visited unique) (unique:freshUniques)
           (fromMaybe [] (lookupUFM dependencies unique) <> pending)
 
--- Site arenas are replaceable; pure component facts are only admitted.
--- A replacement closes from actual roots against the current complete facts.
+-- Immutable unit additions retain prior facts. Replacing an actual unit
+-- variant closes from roots against the current complete facts.
 data PreparedReachUpdate
   = AdmitPreparedFacts [[(Id,[Unique])]]
   | ReplacePreparedFacts [[(Id,[Unique])]]
@@ -1711,11 +1727,11 @@ preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepar
 -- nodes in module/original order and rebases every edge into one program table.
 -- An admitted auxiliary root's own result type follows the module evidence
 -- ('lowerAuxiliaryRootEvidence'); intrinsic constructor reply graphs follow.
-lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> P (TypeGraph, [SiteRow], [(ConstructorId, ConstructorReply)])
-lowerPreparedEvidence context modules evidence = do
+lowerPreparedEvidence :: [PreparedModule] -> [SelectedPreparedEvidence]
+  -> [AuxiliaryRootEvidence] -> P (TypeGraph, [SiteRow], [(ConstructorId, ConstructorReply)])
+lowerPreparedEvidence modules evidence auxiliary = do
   (moduleNodes, moduleSites) <- foldM lowerOne (emptyProjectedTypeGraph, []) evidence
-  auxNodes <- lowerAuxiliaryRootEvidence context modules (graphNodeCount moduleNodes)
+  auxNodes <- lowerAuxiliaryRootEvidence auxiliary (graphNodeCount moduleNodes)
   carriers <- fmap concat $ forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $
     traverse resolveProjectedTypeIdentity (maybe [] pure (pmRequestSiteTyCon prepared))
   (verbNodes, verbSites) <-
@@ -1761,20 +1777,27 @@ lowerPreparedEvidence context modules evidence = do
               }) selected
     pure (unionTypeGraphs priorNodes lowered, priorSites <> rows)
 
+-- The captured resolver stays paired with the validated auxiliary graph through
+-- subsequent lowering. Only the early validator issues this private evidence.
+data AuxiliaryRootEvidence = AuxiliaryRootEvidence IdentityResolver
+  TypePolicy.TypeGraph [TypePolicy.TypeNodeId]
+
 -- Compare all reachable constructor evidence before projecting bindings or
 -- lowering any one graph. Representation recovery may roll one graph's local
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
 validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> [DataCon] -> P ()
+  -> [SelectedPreparedEvidence] -> [DataCon] -> P [AuxiliaryRootEvidence]
 validatePreparedEvidence context modules evidence hostConstructors = do
   forM_ evidence $ \selected -> withIdentityResolver (selectedIdentityResolver selected) $
     validateConstructorEvidence (constructorsForSelectedTypeGraph (selectedEvidenceGraph selected))
-  forM_ modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
-    (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context [prepared]
+  auxiliary <- forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
+    (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context prepared
     auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
     validateConstructorEvidence auxiliaryEvidence
+    pure (AuxiliaryRootEvidence (pmIdentityResolver prepared) auxiliaryNodes auxiliaryRoots)
   validateConstructorEvidence hostConstructors
+  pure auxiliary
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -1798,23 +1821,21 @@ validatePreparedEvidence context modules evidence hostConstructors = do
 -- variable, so interning one would fail the whole projection rather than
 -- leaving the root's own evidence merely absent. Concrete auxiliary roots
 -- are unaffected by this filter.
-lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P TypeGraph
-lowerAuxiliaryRootEvidence context modules base = foldM lowerOne emptyProjectedTypeGraph modules
+lowerAuxiliaryRootEvidence :: [AuxiliaryRootEvidence] -> Int -> P TypeGraph
+lowerAuxiliaryRootEvidence auxiliary base = foldM lowerOne emptyProjectedTypeGraph auxiliary
  where
-  lowerOne prior prepared = withIdentityResolver (pmIdentityResolver prepared) $ do
-    (nodes, graphRoots) <- auxiliaryRootTypeGraph context [prepared]
+  lowerOne prior (AuxiliaryRootEvidence resolver nodes graphRoots) = withIdentityResolver resolver $ do
     (lowered, _rebase) <- lowerTypeGraph (base + graphNodeCount prior) nodes graphRoots
     pure (unionTypeGraphs prior lowered)
 
-auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
+auxiliaryRootTypeGraph :: ProjectionContext -> PreparedModule
   -> P (TypePolicy.TypeGraph, [TypePolicy.TypeNodeId])
-auxiliaryRootTypeGraph context modules = do
+auxiliaryRootTypeGraph context prepared = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
   let answerTypes =
         [ answerType
-        | prepared <- modules
-        , (binding, _) <- pmBindings prepared
+        | (binding, _) <- pmBindings prepared
         , binder <- topBinders binding
         , Just symbol <- [lookupVarEnv topSymbolMap binder]
         , symbol `Set.member` roots
@@ -2809,12 +2830,12 @@ projectReference binder = do
         else do
           topNames <- gets topSymbols
           tops <- gets topValues
-          offGroup <- gets externalizedTops
+          scope <- gets topScope
           let symbol = lookupVarEnv topNames binder
           case symbol of
             Just home -> case Map.lookup home tops of
               Just identity -> pure (Local identity)
-              Nothing | home `Set.member` offGroup -> Global <$> internGlobal binder
+              Nothing | importsResolvedTop scope home -> Global <$> internGlobal binder
               Nothing -> lift (Left (MissingPreparedTop home))
             Nothing -> case nullaryWorkerConstructor binder of
               Just con -> Local <$> internNullaryWorker binder con
@@ -2824,11 +2845,11 @@ deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
 deferredFunctionReference binder deferred = do
   topNames <- gets topSymbols
   tops <- gets topValues
-  offGroup <- gets externalizedTops
+  scope <- gets topScope
   case lookupVarEnv topNames binder of
     Just symbol -> case Map.lookup symbol tops of
       Just identity -> pure identity
-      Nothing | symbol `Set.member` offGroup -> internDeferredFunction binder deferred
+      Nothing | importsResolvedTop scope symbol -> internDeferredFunction binder deferred
       Nothing -> lift (Left (MissingPreparedTop symbol))
     Nothing -> internDeferredFunction binder deferred
 
@@ -3012,10 +3033,10 @@ withScope action = do
 internGlobal :: Id -> P GlobalId
 internGlobal binder = do
   names <- gets topSymbols
-  offGroup <- gets externalizedTops
+  scope <- gets topScope
   let mapped = lookupVarEnv names binder
-      groupImport = maybe False (`Set.member` offGroup) mapped
-  if groupImport then internExternalGlobal binder
+      explicitImport = maybe False (importsResolvedTop scope) mapped
+  if explicitImport then internExternalGlobal binder
   else if not (isExternalName (varName binder)) then
     lift (Left (UnboundPreparedInternal
       (Text.pack (occNameString (nameOccName (varName binder))))))

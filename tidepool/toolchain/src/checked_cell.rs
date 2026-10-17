@@ -1969,19 +1969,12 @@ impl CheckedValueInputs {
         )
     }
 
-    pub(crate) fn retain_diagnostics(
-        &self,
-        prefix: Option<&ExactCompiledPrefix>,
-        destination: &Path,
-    ) -> std::io::Result<()> {
-        let inputs = match prefix {
-            Some(prefix) => prefix.value_artifacts().map_err(std::io::Error::other)?,
-            None => self
-                .baseline
-                .iter()
-                .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
-                .collect(),
-        };
+    pub(crate) fn retain_diagnostics(&self, destination: &Path) -> std::io::Result<()> {
+        let inputs = self
+            .baseline
+            .iter()
+            .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
+            .collect::<BTreeMap<_, _>>();
         let destination = destination.join("checked-value-inputs");
         std::fs::create_dir(&destination)?;
         let mut captured = Vec::with_capacity(inputs.len());
@@ -2313,15 +2306,6 @@ pub enum CheckedExpressionLift {
 pub struct ExactCompiledPrefix {
     cell: Arc<ExactCheckedCell>,
     completed: CheckedPrefixSequence<CompletedCheckedItem>,
-    declaration_projection: PrefixDeclarationProjection,
-}
-
-/// Native program sealing and settled compilation have distinct authority.
-#[derive(Clone, Debug)]
-enum PrefixDeclarationProjection {
-    Initial,
-    ProgramOriginal,
-    Certified(Arc<crate::declaration_context::ExactDeclarationContext>),
 }
 
 /// Immutable ordered proof links. Appending shares the historical leaves and
@@ -3094,73 +3078,6 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
-    // Compiler-visible values carry their original certification and selected closure.
-    // Native binding selection remains checked independently against settlement.
-    pub(crate) fn with_value_context(
-        &self,
-        current: Arc<crate::declaration_context::ExactDeclarationContext>,
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        Ok(Arc::new(
-            (*current)
-                .clone()
-                .extend_retained_value_artifacts(&self.certified_value_artifacts())?,
-        ))
-    }
-
-    fn certified_value_artifacts(&self) -> Vec<Arc<CheckedValueArtifact>> {
-        self.cell
-            .value_inputs
-            .certified_artifacts()
-            .into_iter()
-            .chain(
-                self.completed
-                    .iter()
-                    .filter_map(CompletedCheckedItem::native)
-                    .filter_map(|item| item.value_interface_certificate()),
-            )
-            .collect()
-    }
-
-    pub(crate) fn planned_declaration_proof(&self) -> Option<&PlannedCheckedDeclaration> {
-        self.completed_declaration(0).and_then(|item| {
-            item.cell
-                .planned_declarations
-                .get(&item.index)
-                .or(item.cell.planned_declaration.as_ref())
-        })
-    }
-
-    fn planned_authorization(&self) -> Value {
-        self.planned_declaration_proof()
-            .map_or(Value::Null, |planned| {
-                array([
-                    text(&planned.certificate.product().owner().unit),
-                    text(&planned.certificate.product().owner().module),
-                    text(&planned.interface_fingerprint),
-                ])
-            })
-    }
-    fn revalidate_context(&self, producer: &[u8], context: &[u8; 32]) -> Result<(), CompileError> {
-        self.cell.revalidate(producer, &self.cell.context)?;
-        let expected = self.with_value_context(self.declaration_context()?)?;
-        if &expected.semantic_sha256() != context {
-            return Err(failure("completed prefix has another declaration context"));
-        }
-        Ok(())
-    }
-
-    fn declaration_context(
-        &self,
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        match &self.declaration_projection {
-            PrefixDeclarationProjection::Certified(context) => Ok(context.clone()),
-            PrefixDeclarationProjection::ProgramOriginal => Err(failure(
-                "program original is not a settled declaration projection",
-            )),
-            PrefixDeclarationProjection::Initial => Ok(self.cell.declaration_context.clone()),
-        }
-    }
-
     /// During same-request sealing, original declaration authority belongs to
     /// its checked item. It cannot authorize later source compilation.
     pub(crate) fn append_program_original(
@@ -3177,7 +3094,6 @@ impl ExactCompiledPrefix {
         }
         let mut next = self.clone();
         next.completed.push(CompletedCheckedItem::Declaration(item));
-        next.declaration_projection = PrefixDeclarationProjection::ProgramOriginal;
         Ok(next)
     }
 
@@ -3205,8 +3121,8 @@ impl ExactCompiledPrefix {
         next.completed.push(CompletedCheckedItem::Native(completed));
         Ok(next)
     }
-    /// Retain the compiler-issued cumulative interface without changing the
-    /// original native declaration identity or checked-item admission.
+    /// Validate the compiler-issued cumulative interface before advancing the
+    /// original native declaration's completed prefix.
     pub fn append_declaration_with_projection(
         &self,
         item: ExactCheckedItem,
@@ -3293,13 +3209,10 @@ impl ExactCompiledPrefix {
         // The new projection and retained actor membranes can share source
         // dependencies. Compose their selections through the context owner:
         // equal rows are one authority, while conflicting edges remain invalid.
-        let context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
-                .extend_lexical_joins(&joins, &lexical)?,
-        );
+        crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
+            .extend_lexical_joins(&joins, &lexical)?;
         let mut next = self.clone();
         next.completed.push(CompletedCheckedItem::Declaration(item));
-        next.declaration_projection = PrefixDeclarationProjection::Certified(context);
         Ok(next)
     }
     pub fn injected_modules(&self) -> Vec<String> {
@@ -3320,44 +3233,6 @@ impl ExactCompiledPrefix {
                     }),
             )
             .collect()
-    }
-    fn value_artifacts(&self) -> Result<BTreeMap<&str, &ValueInterfaceBytes>, CompileError> {
-        let mut inputs = self
-            .cell
-            .value_inputs
-            .baseline
-            .iter()
-            .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
-            .collect::<BTreeMap<_, _>>();
-        for item in self
-            .completed
-            .iter()
-            .filter_map(CompletedCheckedItem::native)
-        {
-            if let Some(artifact) = &item.value_interface {
-                if inputs
-                    .insert(&artifact.interface.module, &artifact.interface)
-                    .is_some()
-                {
-                    return Err(failure("duplicate checked value interface"));
-                }
-            }
-        }
-        Ok(inputs)
-    }
-    fn value_interface_authorization(&self) -> Result<Value, CompileError> {
-        Ok(Value::Array(
-            self.value_artifacts()?
-                .into_values()
-                .map(ValueInterfaceBytes::authorization)
-                .collect(),
-        ))
-    }
-
-    pub(crate) fn import_authority(&self) -> Result<CheckedValueImportAuthority, CompileError> {
-        Ok(CheckedValueImportAuthority::capture(
-            self.value_artifacts()?.into_values(),
-        ))
     }
     pub(crate) fn prepared_value_selection(&self) -> Result<CheckedSettledValues, CompileError> {
         // Requirements keep every original qualified binder, including names
@@ -3504,25 +3379,6 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
-    pub(crate) fn template_context(
-        &self,
-    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
-        self.cell.declaration_context.clone()
-    }
-    pub(crate) fn template_sources(&self) -> Vec<String> {
-        self.turn_templates()
-            .iter()
-            .map(|(_, source)| source.clone())
-            .collect()
-    }
-    fn template_imports(
-        &self,
-    ) -> Result<crate::declaration_context::SelectedTemplateImports, CompileError> {
-        self.cell
-            .declaration_context
-            .selected_template_imports(&self.template_sources())
-    }
-
     pub fn specification_digest(&self) -> [u8; 32] {
         self.cell.specification.specification_digest()
     }
@@ -3537,18 +3393,6 @@ impl ExactCheckedItem {
     }
     pub fn input_work(&self) -> CheckedInputWork {
         self.cell.value_inputs.work()
-    }
-    pub(crate) fn value_input_root(&self) -> &Path {
-        self.cell.value_inputs.root()
-    }
-    pub(crate) fn retain_input_diagnostics(
-        &self,
-        prefix: &ExactCompiledPrefix,
-        destination: &Path,
-    ) -> std::io::Result<()> {
-        self.cell
-            .value_inputs
-            .retain_diagnostics(Some(prefix), destination)
     }
     pub fn baseline_value_interfaces(
         &self,
@@ -3626,7 +3470,6 @@ impl ExactCheckedItem {
         Ok(ExactCompiledPrefix {
             cell: self.cell.clone(),
             completed: CheckedPrefixSequence::new(),
-            declaration_projection: PrefixDeclarationProjection::Initial,
         })
     }
     /// Compare editable presentation with the admitted source/verdict and the
@@ -3702,112 +3545,6 @@ pub(crate) struct CheckedItemOffer {
 }
 
 impl CheckedItemOffer {
-    pub(crate) fn authorization(
-        &self,
-        producer: &[u8],
-        context: [u8; 32],
-    ) -> Result<Value, CompileError> {
-        self.prefix.revalidate_context(producer, &context)?;
-        if self.item.index != self.prefix.next_item()
-            || !Arc::ptr_eq(&self.item.cell, &self.prefix.cell)
-            || self.runtime_prefix_digest == [0; 32]
-        {
-            return Err(failure(
-                "checked item has another or incomplete completed prefix",
-            ));
-        }
-        if self.item.kind() == CheckedItemKind::Declaration {
-            return Err(failure(
-                "planned original declaration certificate is unavailable",
-            ));
-        }
-        if (self.item.kind() == CheckedItemKind::Expression) != self.observation_name.is_some()
-            || self.observation_name.as_ref().is_some_and(|name| {
-                name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
-        {
-            return Err(failure(
-                "checked expression has no owning observation identity",
-            ));
-        }
-        let expected = &self.item.cell.items[self.item.index];
-        Ok(encode_item_authorization(ItemAuthorization {
-            admission: self.item.admission_digest(),
-            receipt: self.item.cell.receipt_digest,
-            index: self.item.index,
-            source: self.item.source(),
-            kind: self.item.kind(),
-            binders: self.item.binders(),
-            templates: &self.item.cell.specification.turn_templates,
-            injected: &self.prefix.injected_modules(),
-            signatures: self.item.signatures(),
-            expression: expected.expression.as_ref(),
-            generation: self.generation,
-            runtime_prefix: self.runtime_prefix_digest,
-            imports: &self.settled_values.imports,
-            observation: self.observation_name.as_deref(),
-            planned: self.prefix.planned_authorization(),
-            settled: self.settled_values.authorization.clone(),
-            value_interfaces: self.prefix.value_interface_authorization()?,
-            template_imports: self.item.template_imports()?,
-        }))
-    }
-
-    pub(crate) fn validate_templates(
-        &self,
-        templates: &[(String, String)],
-    ) -> Result<(), CompileError> {
-        if templates != &self.item.cell.specification.turn_templates {
-            return Err(failure("checked-item wrapper was edited after admission"));
-        }
-        Ok(())
-    }
-    pub(crate) fn validate_include(
-        &self,
-        include: &[std::path::PathBuf],
-    ) -> Result<(), CompileError> {
-        if !same_include_paths(include, &self.item.cell.include) {
-            return Err(failure("checked item include search order changed"));
-        }
-        Ok(())
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn seal(
-        &self,
-        root: &Path,
-        request: &str,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-        source_lexical: &[crate::declaration_join::ExactLexicalNode],
-        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
-        program_entry: Option<&CheckedTypedEntry>,
-        target_imports: &[crate::certified_products::PendingImportOwner],
-        target_native_selection: &crate::artifact_inventory::IssuedTargetNativeSelection,
-        produced: Option<&ProducedValueTypeInterfaces>,
-    ) -> Result<Arc<ExactCompiledItem>, CompileError> {
-        let output = PreparedCheckedItemOutput::capture(
-            &self.item,
-            self.generation,
-            self.observation_name.as_deref(),
-            self.is_program,
-            root,
-            request,
-            source,
-            target,
-            original_execution,
-            program_entry,
-            target_imports,
-            target_native_selection,
-        )?;
-        self.seal_prepared(
-            output,
-            artifact_context,
-            source_lexical,
-            CheckedValueCaptureInput::Ordinary { produced },
-        )
-    }
-
     pub(crate) fn seal_prepared(
         &self,
         output: PreparedCheckedItemOutput,
@@ -7017,257 +6754,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the matched Haskell worker and frontend"]
-    fn planned_prefix_revalidation_uses_publication_context_not_unrelated_value_rows() {
-        use super::*;
-        use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
-
-        let root = tempfile::tempdir().unwrap();
-        let source = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
-        let other_source = include_str!("../tests/fixtures/checked-prefix-publication/G2.hs");
-        for (name, bytes) in [
-            (
-                "PrefixSelectedSupport.hs",
-                include_str!(
-                    "../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"
-                ),
-            ),
-            (
-                "PrefixUnrelatedSupport.hs",
-                include_str!(
-                    "../tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs"
-                ),
-            ),
-        ] {
-            std::fs::write(root.path().join(name), bytes).unwrap();
-        }
-        let certify = |generation, source: &str, context| {
-            let owner = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
-            let path = root.path().join(owner.relative_hs_path());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, source).unwrap();
-            let includes = [root.path().to_path_buf()];
-            let certificate = match context {
-                None => crate::artifacts::test_support::certify_authored_declaration(
-                    owner,
-                    &path,
-                    source,
-                    &includes,
-                    root.path(),
-                ),
-                Some(context) => {
-                    crate::artifacts::test_support::certify_authored_declaration_in_context(
-                        owner,
-                        &path,
-                        source,
-                        &includes,
-                        root.path(),
-                        context,
-                    )
-                }
-            };
-            Arc::new(
-                certificate.expect(
-                    "matched producer issues original canonical/native declaration carriers",
-                ),
-            )
-        };
-        let certificate = certify(1, source, None);
-        let selected_context = Arc::new(
-            crate::declaration_join::ExactDeclarationContext::new(
-                std::slice::from_ref(&certificate),
-                &[],
-                Vec::new(),
-            )
-            .unwrap(),
-        );
-        let unrelated_certificate = certify(2, other_source, Some(selected_context));
-        assert_eq!(
-            certificate.product().module_interface().unwrap().origin(),
-            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 },
-        );
-        assert_eq!(
-            unrelated_certificate
-                .product()
-                .module_interface()
-                .unwrap()
-                .origin(),
-            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 2 },
-        );
-        let owner = certificate.product().owner();
-        let authored = ExactModuleIdentity {
-            unit: owner.unit.clone(),
-            module: owner.module.clone(),
-        };
-        let selected = ExactModuleIdentity {
-            unit: "main".into(),
-            module: "PrefixSelectedSupport".into(),
-        };
-        let unrelated = ExactModuleIdentity {
-            unit: "main".into(),
-            module: "PrefixUnrelatedSupport".into(),
-        };
-        let surface = certificate.shared_source_lexical_surface(&[]).unwrap();
-        assert!(surface.roots.contains(&selected));
-        assert!(!surface.lexical.iter().any(|node| node.owner == unrelated));
-        let mut expected_lexical = surface.lexical;
-        expected_lexical.push(ExactLexicalNode {
-            owner: authored.clone(),
-            imports: surface.roots,
-        });
-        let mut enriched_lexical = expected_lexical.clone();
-        enriched_lexical.push(ExactLexicalNode {
-            owner: unrelated.clone(),
-            imports: Vec::new(),
-        });
-        let publication_context = Arc::new(
-            crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
-        );
-        let enriched_context = Arc::new(
-            crate::declaration_join::ExactDeclarationContext::new(
-                &[certificate.clone(), unrelated_certificate.clone()],
-                &[],
-                enriched_lexical.clone(),
-            )
-            .unwrap(),
-        );
-        assert!(enriched_context
-            .lexical_graph()
-            .iter()
-            .any(|node| node.owner == unrelated));
-
-        let expected_publication = publication_context
-            .as_ref()
-            .clone()
-            .extend(std::slice::from_ref(&certificate), &[], expected_lexical)
-            .unwrap();
-        assert!(!expected_publication
-            .lexical_graph()
-            .iter()
-            .any(|node| node.owner == unrelated));
-        let incorrectly_promoted_publication = publication_context
-            .as_ref()
-            .clone()
-            .extend(
-                &[certificate.clone(), unrelated_certificate],
-                &[],
-                enriched_lexical,
-            )
-            .unwrap();
-        assert!(prefix_context_differs_only_by_unrelated_owner(
-            &expected_publication,
-            &incorrectly_promoted_publication
-        ));
-
-        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
-        let producer = endpoint.identity().producer_bytes();
-        let cell = Arc::new(ExactCheckedCell {
-            specification: CheckedCellSpecification {
-                admission_digest: [4; 32],
-                cell_source: source.into(),
-                template_source: String::new(),
-                turn_templates: Vec::new(),
-                injected_modules: Vec::new(),
-                reserved_declaration_modules: vec![authored.module.clone()],
-            },
-            producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                producer,
-            )
-            .sha256(),
-            context: enriched_context.semantic_sha256(),
-            declaration_context: enriched_context,
-            retained_projections: Vec::new(),
-            typed_segments: Vec::new(),
-            receipt_digest: [9; 32],
-            checked_source: source.into(),
-            evidence: Vec::new(),
-            observations: Vec::new(),
-            items: vec![CheckedItem {
-                kind: CheckedItemKind::Declaration,
-                source: source.into(),
-                binders: Vec::new(),
-                pins: Vec::new(),
-                expression: None,
-                signatures: Vec::new(),
-            }],
-            include: Vec::new(),
-            planned_declaration: Some(PlannedCheckedDeclaration {
-                source: source.into(),
-                interface_fingerprint: "fixture".into(),
-                compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                        certificate.compiler_input_projection(),
-                        &certificate.artifact_view().metadata_snapshot(),
-                        &tidepool_repr::execution_schema::InventoryOperation::new(
-                            Default::default(),
-                        ),
-                    )
-                    .unwrap(),
-                    certificate.artifact_view(),
-                )
-                .unwrap(),
-                certificate,
-                receipt_digest: [10; 32],
-            }),
-            planned_declarations: Default::default(),
-            value_inputs: CheckedValueInputs::capture_raw(Vec::new()).unwrap(),
-        });
-        let item = ExactCheckedItem {
-            cell: Arc::clone(&cell),
-            index: 0,
-        };
-        let unsettled = item
-            .initial_prefix()
-            .unwrap()
-            .append_program_original(item.clone())
-            .unwrap();
-        let error = unsettled
-            .revalidate_context(producer, &expected_publication.semantic_sha256())
-            .unwrap_err();
-        assert!(matches!(error, CompileError::ExtractFailed(detail)
-            if detail == "checked cell: program original is not a settled declaration projection"));
-        let mut completed = CheckedPrefixSequence::new();
-        completed.push(CompletedCheckedItem::Declaration(item));
-        let prefix = ExactCompiledPrefix {
-            cell,
-            completed,
-            declaration_projection: PrefixDeclarationProjection::Certified(Arc::new(
-                expected_publication.clone(),
-            )),
-        };
-
-        prefix
-            .revalidate_context(producer, &expected_publication.semantic_sha256())
-            .expect("same certificate revalidates the declaration publication surface");
-        assert!(prefix
-            .revalidate_context(
-                producer,
-                &incorrectly_promoted_publication.semantic_sha256()
-            )
-            .is_err());
-    }
-
-    fn prefix_context_differs_only_by_unrelated_owner(
-        expected: &crate::declaration_join::ExactDeclarationContext,
-        promoted: &crate::declaration_join::ExactDeclarationContext,
-    ) -> bool {
-        let expected = expected
-            .lexical_graph()
-            .iter()
-            .map(|node| (node.owner.clone(), node.imports.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let promoted = promoted
-            .lexical_graph()
-            .iter()
-            .map(|node| (node.owner.clone(), node.imports.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        promoted.len() == expected.len() + 1
-            && expected
-                .iter()
-                .all(|(owner, imports)| promoted.get(owner) == Some(imports))
-    }
-
-    #[test]
     fn canonical_input_witness_preserves_shape_and_original_interface_seals() {
         use super::*;
         let con = |name: &str| {
@@ -7613,7 +7099,7 @@ mod tests {
             .expect("unselected directory member");
         let retained = tempfile::tempdir().expect("retained diagnostic directory");
         inputs
-            .retain_diagnostics(None, retained.path())
+            .retain_diagnostics(retained.path())
             .expect("retain checked inputs");
         drop(inputs);
         let saved = retained.path().join("checked-value-inputs");

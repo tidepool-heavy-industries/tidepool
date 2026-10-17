@@ -150,9 +150,10 @@ impl Fixture {
         let entry = retain(&behavior.environment.runner, id, "predecessorEntry").await;
         let initial =
             Arc::new(retain(&behavior.environment.runner, id, "replacementCheckpoint").await);
-        let outcome = owner
-            .kernel
-            .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_application(
+        let outcome = behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(behavior.environment.runner.run_rooted_application(
                 context.clone(),
                 entry,
                 initial,
@@ -160,9 +161,10 @@ impl Fixture {
             ))
             .await
             .unwrap();
-        owner
-            .kernel
-            .compiler_lifecycle_scope(behavior.stabilize_program(
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(behavior.stabilize_program(
                 &owner.kernel,
                 &context,
                 &crate::CallAncestry::begin(actor),
@@ -199,9 +201,10 @@ impl Fixture {
             crate::KernelBehavior::resume(&mut behavior, &owner.kernel).await,
             Ok(KernelStep::Continue(()))
         ));
-        owner
-            .kernel
-            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(verify_retained_predecessor_custody(&behavior, actor))
             .await;
         (behavior, owner)
     }
@@ -393,9 +396,10 @@ async fn replacement_refusal_preserves_reserved_collision_and_materialized_place
         let result = if mode == 0 {
             behavior.stage_replacement(actor, definition).await
         } else {
-            owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
+            behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.stage_replacement(actor, definition))
                 .await
         };
         let error = failure(result);
@@ -452,9 +456,10 @@ async fn replacement_refusal_preserves_reserved_collision_and_materialized_place
                 .kind(candidate)
                 .is_none());
         }
-        owner
-            .kernel
-            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(verify_retained_predecessor_custody(&behavior, actor))
             .await;
         drop(behavior);
         owner.finish().await;
@@ -478,9 +483,10 @@ async fn cancelled_replacement_stage_retains_exact_shared_and_dedicated_cleanup(
             .checkout_run(parent)
             .unwrap();
         let mut staging = Box::pin(
-            owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition)),
+            behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.stage_replacement(actor, definition)),
         );
         std::future::poll_fn(|cx| {
             use std::future::Future;
@@ -535,9 +541,10 @@ async fn cancelled_replacement_stage_retains_exact_shared_and_dedicated_cleanup(
                 .is_none());
             checkout.restore_suspended(Vec::new());
         }
-        owner
-            .kernel
-            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(verify_retained_predecessor_custody(&behavior, actor))
             .await;
         drop(behavior);
         owner.finish().await;
@@ -560,21 +567,19 @@ async fn staged_successor_admission_refusal_and_cancellation_release_actual_plac
                 .reserve_successor_creation()
                 .await
                 .expect("actual staged replacement reservation before preparation");
-            let staged = owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
+            let staged = behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.stage_replacement(actor, definition))
                 .await
                 .expect("real replacement reaches readiness, checkpoint and receive");
             let actual = staged.descriptor.placement();
             let custody = staged.placement_custody.clone();
             owner.seal_membership().await;
-            let starting = owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.admit_staged_successor(
-                    &owner.kernel,
-                    staged,
-                    reservation,
-                ));
+            let starting = behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.admit_staged_successor(&owner.kernel, staged, reservation));
             if cancelled {
                 // Cancellation before producer submission drops the actual
                 // affine reservation; native placement custody still settles.
@@ -616,9 +621,10 @@ async fn staged_successor_admission_refusal_and_cancellation_release_actual_plac
             let work = behavior.workbench_executions.lock().actor_scope_root(actor);
             let cleanup = work.cleanup(&behavior.environment, &owner.kernel).await;
             assert_eq!(cleanup.uncertainty(), None);
-            owner
-                .kernel
-                .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+            behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(verify_retained_predecessor_custody(&behavior, actor))
                 .await;
             drop(behavior);
             owner.finish().await;
@@ -640,9 +646,10 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
                 .reserve_successor_creation()
                 .await
                 .expect("actual staged reservation before preparation");
-            let mut staged = owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
+            let mut staged = behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.stage_replacement(actor, definition))
                 .await
                 .unwrap();
             let actual = staged.descriptor.placement();
@@ -657,13 +664,10 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
             let machines = behavior.environment.runner.machines_for_test().clone();
             let held = unavailable_checkout.then(|| machines.checkout_run(parent).unwrap());
             let work = behavior.workbench_executions.lock().actor_scope_root(actor);
-            let result = owner
-                .kernel
-                .compiler_lifecycle_scope(behavior.admit_staged_successor(
-                    &owner.kernel,
-                    staged,
-                    reservation,
-                ))
+            let result = behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(behavior.admit_staged_successor(&owner.kernel, staged, reservation))
                 .await;
             let error = match result {
                 Err(error) => error,
@@ -717,9 +721,10 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
                 .is_none());
             assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
             checkout.restore_suspended(Vec::new());
-            owner
-                .kernel
-                .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+            behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(verify_retained_predecessor_custody(&behavior, actor))
                 .await;
             drop(behavior);
             owner.finish().await;
@@ -746,9 +751,10 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         )
         .await,
     );
-    let staged = owner
-        .kernel
-        .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
+    let staged = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.stage_replacement(actor, definition))
         .await
         .unwrap();
     staged
@@ -819,9 +825,10 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
     ));
     let context = behavior.context(actor);
     let entry = retain(&behavior.environment.runner, parent, "replacementEntry").await;
-    let outcome = owner
-        .kernel
-        .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_application(
+    let outcome = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.environment.runner.run_rooted_application(
             context.clone(),
             entry,
             Arc::clone(&paused.checkpoint.value),
@@ -853,9 +860,10 @@ async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_unce
     let parent = behavior.descriptor.placement().session;
     fixture.with_factory(&mut behavior, false);
     let (definition, _) = fixture.definition(&behavior, parent).await;
-    let staged = owner
-        .kernel
-        .compiler_lifecycle_scope(behavior.stage_replacement(target, definition))
+    let staged = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.stage_replacement(target, definition))
         .await
         .unwrap();
     staged

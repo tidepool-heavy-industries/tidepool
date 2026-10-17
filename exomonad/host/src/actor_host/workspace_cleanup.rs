@@ -499,6 +499,67 @@ mod tests {
     }
 
     #[test]
+    fn failed_manifest_presence_is_reported_as_unproved_and_preserves_source() {
+        use exomonad_worktree::{
+            GitOid, WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
+            WorktreeRegistry,
+        };
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let (run, _, source_file) = fixture(root.path());
+        let source = source_file.parent().unwrap();
+        let original = fs::read(&source_file).unwrap();
+        let repository = source.parent().unwrap().ancestors().nth(4).unwrap();
+        let registry = WorktreeRegistry::open(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap(),
+            repository
+                .join("registry")
+                .strip_prefix(root.path())
+                .unwrap(),
+        )
+        .unwrap();
+        let receipt = WorktreeReceipt {
+            worktree_id: WorktreeId::from_raw("wt-observation-error"),
+            cwd: repository.join("worktrees/wt-observation-error"),
+            branch: None,
+            source_head: GitOid::from_raw("a".repeat(40)),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            source_repository: root.path().to_owned(),
+            created_at_ms: 1,
+            status: WorktreeRecordStatus::Mounted,
+        };
+        registry
+            .put_retained_manifest(&receipt, vec![source.to_owned()])
+            .unwrap();
+        registry.put(&receipt).unwrap();
+        let control = cleanup(&run, false, true).unwrap();
+        assert!(control.iter().any(|entry| entry.path == source
+            && matches!(&entry.outcome,
+            Outcome::Retained(reason) if reason == "referenced by a retained worktree view")));
+        let manifest = registry
+            .root()
+            .join("retained-views/wt-observation-error.json");
+        fs::remove_file(&manifest).unwrap();
+        symlink(manifest.file_name().unwrap(), &manifest).unwrap();
+        assert_ne!(
+            fs::metadata(&manifest).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        for apply in [false, true] {
+            let report = cleanup(&run, apply, true).unwrap();
+            let entry = report.iter().find(|entry| entry.path == source).unwrap();
+            assert!(
+                matches!(&entry.outcome, Outcome::Retained(reason)
+                if reason.starts_with("source references cannot be proved:")
+                  && reason.contains(manifest.to_str().unwrap())),
+                "{entry:?}"
+            );
+            assert_eq!(fs::read(&source_file).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn symlinked_storage_is_not_followed() {
         let root = tempfile::tempdir().unwrap();
         let (run, build, _) = fixture(root.path());

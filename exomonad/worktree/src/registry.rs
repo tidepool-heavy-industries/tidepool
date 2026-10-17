@@ -405,12 +405,12 @@ impl WorktreeRegistry {
         let mut layers = BTreeSet::new();
         for receipt in &receipts {
             if receipt.status == WorktreeRecordStatus::Mounted
-                && !self.retained.exists(receipt.worktree_id.as_str())
+                && !self.retained.exists(receipt.worktree_id.as_str())?
             {
                 return Ok(None);
             }
             if receipt.status == WorktreeRecordStatus::Retained
-                && !self.retained.exists(receipt.worktree_id.as_str())
+                && !self.retained.exists(receipt.worktree_id.as_str())?
             {
                 return Err(storage_failure(
                     &receipt.cwd,
@@ -715,7 +715,7 @@ impl WorktreeRegistry {
     pub fn mint_id(&self) -> Result<WorktreeId, WorktreeError> {
         loop {
             let candidate = WorktreeId::from_raw(format!("wt-{}", uuid::Uuid::new_v4()));
-            if !self.records.exists(candidate.as_str()) {
+            if !self.records.exists(candidate.as_str())? {
                 return Ok(candidate);
             }
         }

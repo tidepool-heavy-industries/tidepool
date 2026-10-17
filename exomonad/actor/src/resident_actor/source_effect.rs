@@ -3,11 +3,12 @@
 use super::*;
 use crate::generated::source::{SourceError, SourceReq};
 use crate::resident_workbench::ActorRequestSnapshot;
+use crate::HasSourceInspection;
 
 /// Explicit inspection uses the active installation, while retaining which
 /// generation the inspecting model request captured. No background polling.
 pub(super) async fn refresh_source_observation(
-    layers: Option<crate::ActorSourceLayerResolver>,
+    layers: Option<crate::SourceInspectionServices>,
     installed: Arc<crate::resident_workbench::InstalledToolsState>,
     observation: crate::ActorRuntimeObservationHandle,
     issued: Option<ActorRequestSnapshot>,
@@ -21,12 +22,12 @@ pub(super) async fn refresh_source_observation(
         );
         return;
     };
-    let source = active.installation.source().clone();
-    let active_generation = active.id.get();
+    let source = active.installation().source().clone();
+    let active_generation = active.id().get();
     let issued_generation = issued
         .as_ref()
         .and_then(ActorRequestSnapshot::generation)
-        .map(|generation| generation.id.get());
+        .map(|generation| generation.id().get());
     // Filesystem observation needs only immutable issued source evidence. Do
     // not retain the generation's native scope through an uncancellable read.
     let issued_source = issued
@@ -36,9 +37,10 @@ pub(super) async fn refresh_source_observation(
     let inspected = tokio::task::spawn_blocking(move || {
         let issued_revision = issued_source
             .as_ref()
-            .map(|source| layers.revision(source))
+            .map(|source| layers.source_inspection().revision(source))
             .transpose()?;
         layers
+            .source_inspection()
             .observe(&source)
             .map(|status| (issued_revision, status))
     })
@@ -107,11 +109,11 @@ fn source_error(error: crate::SourceInspectionError) -> SourceError {
     }
 }
 
-async fn inspect_source<T: Send + 'static>(
-    layers: Option<crate::ActorSourceLayerResolver>,
+async fn inspect_source<T: Send + 'static, C: HasSourceInspection + Send + 'static>(
+    layers: Option<C>,
     issued: Option<ActorRequestSnapshot>,
     inspect: impl FnOnce(
-            &dyn crate::ActorSourceLayers,
+            &C::SourceInspection,
             &crate::CheckpointSourceLayer,
         ) -> Result<T, crate::SourceInspectionError>
         + Send
@@ -128,7 +130,7 @@ async fn inspect_source<T: Send + 'static>(
         )));
     };
     tokio::task::spawn_blocking(move || {
-        inspect(layers.as_ref(), issued.installation().source()).map_err(source_error)
+        inspect(layers.source_inspection(), issued.installation().source()).map_err(source_error)
     })
     .await
     .map_err(|error| {
@@ -185,7 +187,7 @@ where
         request: SourceReq,
     ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
         let runner = self.environment.runner.clone();
-        let layers = self.environment.source_layers.clone();
+        let layers = self.environment.source_inspection.clone();
         match request {
             SourceReq::SourceReadModule(name) => Box::pin(async move {
                 let _issued = issued.clone();
