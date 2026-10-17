@@ -878,6 +878,21 @@ mod tests {
         )
         .unwrap();
         let before = context.artifact_view().selected_native_groups();
+        // Held immutable custody survives its original files. A fresh acquisition
+        // must still authenticate those files and reject their corruption.
+        std::fs::write(
+            durable.path().join(&references[1].product_path),
+            b"corrupt native product",
+        )
+        .unwrap();
+        assert!(ExactDeclarationContext::capture_recovery(
+            durable.path(),
+            &references,
+            &[],
+            &[],
+            vec![]
+        )
+        .is_err());
         let context = Arc::new(context);
         let scratch = Arc::new(tempfile::tempdir().unwrap());
         let mut types = Vec::new();
@@ -899,6 +914,19 @@ mod tests {
             assert_eq!(std::fs::read(&artifact.interface.path).unwrap(), expected);
             assert_eq!(artifact.interface.sha256, sha256(expected));
         }
+        let scratch_files = std::fs::read_dir(scratch.path().join("artifacts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scratch_files.len(),
+            4,
+            "two inherited interfaces and their package witnesses"
+        );
+        assert!(scratch_files
+            .iter()
+            .all(|name| name.to_str().unwrap().ends_with(".hi")
+                || name.to_str().unwrap().ends_with(".hi.packages")));
         assert_eq!(context.artifact_view().selected_native_groups(), before);
     }
 
