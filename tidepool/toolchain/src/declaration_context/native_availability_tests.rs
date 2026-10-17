@@ -6175,7 +6175,11 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
             .expect("reusing a candidate cannot promote historical A into a second root")
             .unwrap();
-        assert!(reused.artifacts.selected_native_groups().is_empty());
+        assert_eq!(
+            exact_groups(&reused.artifacts),
+            b_groups,
+            "candidate fragment preserves the receiver's independently selected B roots"
+        );
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(context)
             .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(reused))
