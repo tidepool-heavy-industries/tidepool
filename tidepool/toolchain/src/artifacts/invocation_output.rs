@@ -196,6 +196,7 @@ mod tests {
     use super::*;
     use tidepool_repr::execution_schema::InventoryDecodeLimits;
 
+    // Representation-only raw files exercise acquisition, not semantic issuance.
     fn physical_outputs(root: &Path, names: &[&str]) {
         for name in names {
             std::fs::write(root.join(name), name.as_bytes()).unwrap();
@@ -264,7 +265,7 @@ mod tests {
                 bundle.bytes_len(),
                 names.iter().map(|name| name.len() as u64).sum::<u64>()
             );
-            // Every named output is required, including an empty-package witness.
+            // Every named output is required; package provenance cannot be omitted.
             for name in &names {
                 std::fs::remove_file(root.path().join(name)).unwrap();
                 assert!(
