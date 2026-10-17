@@ -8,7 +8,7 @@ import Tidepool.Actors.Exomonad
 
 let offlineWorkerOptions :: Text -> SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
     offlineWorkerOptions marker = (defaultSpawnOptions Installed.agentSpec)
-      { spawnModel = Just DSFlash
+      { spawnModel = Just DeepSeekFlash
       , spawnReasoning = Just (DeepSeekReasoning DeepSeekHigh)
       , spawnLifetime = ActorOwned
       , spawnLabel = Just marker
