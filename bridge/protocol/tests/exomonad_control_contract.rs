@@ -1,7 +1,6 @@
 //! Independent ABI pins for Exomonad control and agent admission.
 use tidepool_protocol::effects::{
-    agent_control::agent_control, agent_inspection::agent_inspection,
-    agent_launch::agent_launch,
+    agent_control::agent_control, agent_inspection::agent_inspection, agent_launch::agent_launch,
 };
 use tidepool_protocol::{hs::HsType, schema::RustBinding};
 
@@ -129,7 +128,10 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
         ]
     );
     assert_eq!(argument("context").ty, HsType::Named("SpawnContextWire"));
-    assert_eq!(argument("workspace").ty, HsType::Named("SpawnWorkspaceWire"));
+    assert_eq!(
+        argument("workspace").ty,
+        HsType::Named("SpawnWorkspaceWire")
+    );
     assert_eq!(
         argument("effects").ty,
         HsType::list(HsType::Named("ActorEffectKey"))
@@ -145,22 +147,13 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
         )
     );
     assert_eq!(argument("install").rust, RustBinding::HaskellValue);
-    assert_eq!(
-        argument("label").ty,
-        HsType::maybe(HsType::Text)
-    );
-    assert_eq!(
-        argument("model").ty,
-        HsType::maybe(HsType::Named("Model"))
-    );
+    assert_eq!(argument("label").ty, HsType::maybe(HsType::Text));
+    assert_eq!(argument("model").ty, HsType::maybe(HsType::Named("Model")));
     assert_eq!(
         argument("effort").ty,
         HsType::maybe(HsType::Named("ForkEffort"))
     );
-    assert_eq!(
-        argument("instructions").ty,
-        HsType::maybe(HsType::Text)
-    );
+    assert_eq!(argument("instructions").ty, HsType::maybe(HsType::Text));
     assert_eq!(
         argument("limits").ty,
         HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int]))
@@ -186,7 +179,10 @@ fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration(
         panic!("spawn error is a typed sum")
     };
     assert_eq!(
-        variants.iter().map(|variant| variant.ctor).collect::<Vec<_>>(),
+        variants
+            .iter()
+            .map(|variant| variant.ctor)
+            .collect::<Vec<_>>(),
         ["SpawnRefused", "SpawnPartialFailure"]
     );
     let tidepool_protocol::schema::VariantFields::Positional(refused) = &variants[0].fields else {
@@ -239,7 +235,10 @@ fn agent_control_uses_exact_incarnation_and_typed_retention_and_stop_results() {
         panic!("retention refusal is a typed sum")
     };
     assert_eq!(
-        variants.iter().map(|variant| variant.ctor).collect::<Vec<_>>(),
+        variants
+            .iter()
+            .map(|variant| variant.ctor)
+            .collect::<Vec<_>>(),
         [
             "AgentRetainUnavailable",
             "AgentRetainUnauthorized",
@@ -257,9 +256,10 @@ fn agent_control_uses_exact_incarnation_and_typed_retention_and_stop_results() {
         HsType::Tuple(vec![HsType::Int, HsType::Int])
     );
     assert_eq!(stop.ret, HsType::Named("AgentStopControlOutcome"));
-    assert!(!control.verbs.iter().any(|verb| {
-        verb.ctor.contains("Cleanup") || verb.ret == HsType::Named("CleanupPlan")
-    }));
+    assert!(!control
+        .verbs
+        .iter()
+        .any(|verb| { verb.ctor.contains("Cleanup") || verb.ret == HsType::Named("CleanupPlan") }));
 }
 
 #[test]
@@ -344,8 +344,32 @@ fn agent_launch_generates_shared_model_without_actor_owned_live_types() {
         .iter()
         .find(|file| file.path == "bridge/mcp/src/generated/agent_launch.rs")
         .unwrap();
-    for name in ["Luna", "Sol", "Astra", "CustomAlias", "ProviderModel"] {
+    for name in [
+        "Backend",
+        "DeepSeekFlash",
+        "DeepSeekPro",
+        "OpenAIModel",
+        "CustomModel",
+        "DeepSeekReasoning",
+        "DeepSeekNone",
+        "DeepSeekLow",
+        "DeepSeekHigh",
+        "DeepSeekMax",
+        "OpenAIReasoning",
+        "OpenAILow",
+        "OpenAIMedium",
+        "OpenAIHigh",
+    ] {
         assert!(wire.contents.contains(name));
         assert!(declaration.contents.contains(name));
+    }
+    for obsolete in [
+        "    Luna,",
+        "    Sol,",
+        "    Astra,",
+        "    CustomAlias(",
+        "    ProviderModel(",
+    ] {
+        assert!(!wire.contents.contains(obsolete));
     }
 }

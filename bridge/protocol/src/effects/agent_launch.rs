@@ -387,57 +387,46 @@ fn spawn_types() -> Vec<TypeDef> {
     types
 }
 
+fn inference_type(name: &'static str, variants: Vec<(&'static str, Vec<HsType>)>) -> TypeDef {
+    let mut definition = sum_type(name, Some(name), variants);
+    definition.haskell_module = Some("Tidepool.Effects.Core");
+    definition.json = JsonInstance::Generic;
+    definition.derives = WireDerives(&[
+        WireDerive::FromHaskell,
+        WireDerive::ToHaskell,
+        WireDerive::Clone,
+        WireDerive::Debug,
+        WireDerive::PartialEq,
+        WireDerive::Eq,
+        WireDerive::Serialize,
+        WireDerive::Deserialize,
+    ]);
+    definition
+}
+
 fn context_types() -> Vec<TypeDef> {
     vec![
-        TypeDef {
-            name: "Model",
-            wire_rust: Some("Model"),
-            haskell_module: Some("Tidepool.Effects.Core"),
-            shape: TypeShape::Sum {
-                variants: vec![
-                    SumVariant {
-                        ctor: "Luna",
-                        fields: VariantFields::Positional(vec![]),
-                        doc: &["The configured Luna tier."],
-                    },
-                    SumVariant {
-                        ctor: "Sol",
-                        fields: VariantFields::Positional(vec![]),
-                        doc: &["The configured Sol tier."],
-                    },
-                    SumVariant {
-                        ctor: "Astra",
-                        fields: VariantFields::Positional(vec![]),
-                        doc: &["The configured Astra tier."],
-                    },
-                    SumVariant {
-                        ctor: "CustomAlias",
-                        fields: VariantFields::Positional(vec![HsType::Text]),
-                        doc: &[],
-                    },
-                    SumVariant {
-                        ctor: "ProviderModel",
-                        fields: VariantFields::Positional(vec![HsType::Text]),
-                        doc: &[],
-                    },
-                ],
-            },
-            json: JsonInstance::Generic,
-            derives: WireDerives(&[
-                WireDerive::FromHaskell,
-                WireDerive::ToHaskell,
-                WireDerive::Clone,
-                WireDerive::Debug,
-                WireDerive::PartialEq,
-                WireDerive::Eq,
-                WireDerive::Serialize,
-                WireDerive::Deserialize,
-            ]),
-            domain: None,
-            doc: &[
-                "A configured built-in tier, custom workspace alias, or explicit provider model name.",
-            ],
-        },
+        inference_type("Backend", vec![("DeepSeek", vec![]), ("OpenAIPlan", vec![])]),
+        inference_type("OpenAIModel", vec![
+            ("Gpt61Sol", vec![]), ("Gpt6Sol", vec![]), ("Gpt6Astra", vec![]),
+            ("Gpt6Luna", vec![]), ("Gpt56Sol", vec![]),
+        ]),
+        inference_type("Model", vec![
+            ("DeepSeekFlash", vec![]), ("DeepSeekPro", vec![]),
+            ("OpenAIModel", vec![HsType::Named("OpenAIModel")]),
+            ("CustomModel", vec![HsType::Named("Backend"), HsType::Text]),
+        ]),
+        inference_type("DeepSeekReasoning", vec![
+            ("DeepSeekNone", vec![]), ("DeepSeekLow", vec![]),
+            ("DeepSeekHigh", vec![]), ("DeepSeekMax", vec![]),
+        ]),
+        inference_type("OpenAIReasoning", vec![
+            ("OpenAILow", vec![]), ("OpenAIMedium", vec![]), ("OpenAIHigh", vec![]),
+        ]),
+        inference_type("Reasoning", vec![
+            ("DeepSeekReasoning", vec![HsType::Named("DeepSeekReasoning")]),
+            ("OpenAIReasoning", vec![HsType::Named("OpenAIReasoning")]),
+        ]),
         TypeDef {
             name: "WorkerLifetime",
             wire_rust: None,
