@@ -3787,12 +3787,7 @@ impl ArtifactInventory {
                 }
             }
         }
-        if let ArtifactRootIntent::PrivateAvailability {
-            projection,
-            dependencies,
-            ..
-        } = root_intent
-        {
+        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
             native_availability::bind_fresh_product_dependencies(
                 &state,
                 parent,
