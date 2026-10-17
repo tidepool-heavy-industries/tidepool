@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds, TypeApplications #-}
-{-# OPTIONS_GHC -O1 #-}
 module SiteComponentFixture (answerA, answerB) where
 
 import Control.Monad.Freer (Eff)

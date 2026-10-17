@@ -51,7 +51,7 @@ verifySiteComponentHistories directory = do
     _ <- setSessionDynFlags
       ((`gopt_set` Opt_WriteInterface) $ (`gopt_set` Opt_WriteIfSimplifiedCore)
        $ (`gopt_set` Opt_ForceRecomp) $ (`gopt_unset` Opt_OmitInterfacePragmas)
-       $ (`gopt_unset` Opt_IgnoreInterfacePragmas) $ updOptLevel 1 flags)
+       $ (`gopt_unset` Opt_IgnoreInterfacePragmas) $ updOptLevel 0 flags)
         { importPaths = directory : importPaths flags
         , hiDir = Just directory, objectDir = Just directory
         , backend = ncgBackend, ghcLink = NoLink }
@@ -101,7 +101,8 @@ verifySiteComponentHistories directory = do
       assertPreserved "growth replaced A or its shared workers" first grown
       let modules = preparedComponentModules grown
           sites = concatMap pmYieldSites modules
-          internalTops = Map.unions (map pmStableTopSpellings modules)
+          internalTops = Map.unions (map pmStableTopSpellings
+            (filter preparedUsesSiteAuthority modules))
           originalNames = Set.fromList (map varName (fatComponentAllBinders
             (head (fatSelectionComponents selectionAB))))
       assert (length sites == 2 && Set.size (Set.fromList (map ysSite sites)) == 2
