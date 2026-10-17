@@ -1134,6 +1134,7 @@ pub(crate) struct RequestCompilerInputs {
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeTransportAvailability {
+    original: Arc<ArtifactEntry>,
     mode: NativeTransportMode,
     issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
 }
@@ -1157,11 +1158,51 @@ impl NativeTransportAvailability {
     }
 }
 
+/// Issuer-bound input availability, independent of output visibility and roles.
+/// Only transport issuance constructs a nonempty component; clones retain its
+/// exact payload owners and opaque availability handles.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestNativeAvailability(
+    Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+);
+
+impl RequestNativeAvailability {
+    pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
+        self.0.values()
+    }
+
+    pub(crate) fn requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.issued().flat_map(|availability| {
+            availability
+                .offers()
+                .iter()
+                .filter_map(|offer| offer.proof())
+        })
+    }
+
+    pub(crate) fn permits(
+        &self,
+        original: ArtifactId,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+        ordinal: u32,
+    ) -> Option<bool> {
+        self.0.get(&original).map(|availability| {
+            availability.original.descriptor.id == original
+                && matches!(&availability.original.payload,
+                    ArtifactPayload::Original(product) if product.owner() == owner)
+                && availability.permits(ordinal)
+        })
+    }
+}
+
 /// Transport can own dependency bodies without issuing compiler namespace roles.
 /// Exact issuer bindings remain in the offers; transport records body availability.
 struct NativeCompilerTransport {
     metadata: CompilerArtifactMetadata,
     availability: BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
+    private: RequestNativeAvailability,
 }
 
 impl NativeCompilerTransport {
@@ -1328,23 +1369,50 @@ impl NativeCompilerTransport {
         let availability = availability
             .into_iter()
             .map(|(id, offer)| {
+                let original = metadata
+                    .retained
+                    .artifacts
+                    .get(&id)
+                    .ok_or_else(|| failure("issued native original is outside request custody"))?
+                    .clone();
+                if original.descriptor.id != id
+                    || !matches!(original.payload, ArtifactPayload::Original(_))
+                {
+                    return Err(failure(
+                        "issued native availability lacks its exact original payload",
+                    ));
+                }
                 let mode = if full.contains(&id) {
                     NativeTransportMode::Full
                 } else {
                     NativeTransportMode::IssuedGroups(offer)
                 };
-                (
+                Ok((
                     id,
                     Arc::new(NativeTransportAvailability {
+                        original,
                         mode,
                         issuance: issuance.remove(&id).unwrap_or_default().into(),
                     }),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let role_originals = roles
+            .roles()
+            .into_iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        let private = RequestNativeAvailability(Arc::new(
+            availability
+                .iter()
+                .filter(|(original, _)| !role_originals.contains(*original))
+                .map(|(original, availability)| (*original, Arc::clone(availability)))
+                .collect(),
+        ));
         Ok(Self {
             metadata,
             availability,
+            private,
         })
     }
 }
@@ -1418,13 +1486,8 @@ impl RequestCompilerInputs {
         self.native_transport.availability.get(&original).cloned()
     }
 
-    pub(crate) fn issued_native_availability(
-        &self,
-    ) -> impl Iterator<Item = (ArtifactId, &Arc<NativeTransportAvailability>)> {
-        self.native_transport
-            .availability
-            .iter()
-            .map(|(original, availability)| (*original, availability))
+    pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
+        self.native_transport.private.clone()
     }
 
     pub(crate) fn available_original_sources(

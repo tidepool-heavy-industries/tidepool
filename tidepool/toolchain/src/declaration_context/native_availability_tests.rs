@@ -1358,23 +1358,27 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     assert_ne!(replacement_b.descriptor.id, b_id);
     let b = base.select_roots(vec![b_id]).unwrap();
     let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
-    let b_metadata = b_projection
-        .project_metadata(b.metadata_snapshot())
+    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: recover_fixture_compiler_support(
+            b_projection.clone(),
+            b.clone(),
+            receipt.offers().iter().cloned(),
+        )
+        .unwrap()
+        .finalize_namespace()
+        .unwrap(),
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let inputs = ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&context, None)
         .unwrap();
-    let b_transport = NativeCompilerTransport {
-        metadata: b_projection
-            .project_metadata(b.metadata_snapshot())
-            .unwrap(),
-        availability: BTreeMap::from([(b_id, receipt)]),
-    };
-    let inputs = RequestCompilerInputs {
-        projection: b_projection.clone(),
-        metadata: b_metadata,
-        artifacts: b.clone(),
-        native_transport: b_transport,
-        declaration_semantic_sha256: [0; 32],
-        original_sources: Default::default(),
-    };
+    let inherited = inputs.native_availability(b_id).unwrap();
+    assert!(inherited.permits(7));
+    assert!(!inherited.permits(9001));
+    assert_eq!(inherited.offers(), receipt.offers());
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         &inputs,
@@ -1383,6 +1387,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     )
     .unwrap();
     drop(inputs);
+    drop(context);
+    drop(inherited);
+    drop(receipt);
     drop(transport);
     drop(metadata);
     drop(unrelated_offer);
@@ -2174,11 +2181,13 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
             &selection,
         )
         .expect("later target uses the same issuer's previously unselected body");
-    assert!(demanded
-        .artifacts
-        .selected_native_groups()
-        .iter()
-        .any(|group| group.artifact == entry.descriptor.id && group.original_ordinal == 9001));
+    assert_eq!(
+        demanded.artifacts.selected_native_groups(),
+        BTreeSet::from([NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: 9001,
+        }])
+    );
     assert_eq!(context.as_ref(), &before);
 }
 
@@ -5533,12 +5542,13 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                             &selection,
                         )
                         .expect("restored private Full survives certification and actual demand");
-                    assert!(demanded
-                        .artifacts
-                        .selected_native_groups()
-                        .iter()
-                        .any(|group| group.artifact == entry.descriptor.id
-                            && group.original_ordinal == 9001));
+                    assert_eq!(
+                        demanded.artifacts.selected_native_groups(),
+                        BTreeSet::from([NativeGroupKey {
+                            artifact: entry.descriptor.id,
+                            original_ordinal: 9001,
+                        }])
+                    );
                 }
             }
             assert_eq!(
