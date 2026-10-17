@@ -10811,13 +10811,59 @@ mod tests {
                         imports: vec![],
                     }]
                 );
-                assert!(selected
-                    .facts
-                    .compiler_support
-                    .artifacts
-                    .descriptors()
-                    .iter()
-                    .all(|entry| entry.owner == owners[root_index]));
+                assert_eq!(
+                    selected.compiler_metadata_snapshot().unwrap().entries.keys().cloned().collect::<BTreeSet<_>>(),
+                    BTreeSet::from([owners[root_index].clone()]),
+                    "publication selects its issued compiler root independently of retained byte custody"
+                );
+                let widened = selected
+                    .artifact_view()
+                    .retain_issued_offer_custody(
+                        issued
+                            .compiler_source_support()
+                            .native_offers()
+                            .iter()
+                            .cloned(),
+                    )
+                    .unwrap();
+                assert!(
+                    widened
+                        .descriptors()
+                        .iter()
+                        .any(|entry| entry.owner == owners[1 - root_index]),
+                    "the authority control really retains another original's authenticated bytes"
+                );
+                let custody_only = selected
+                    .as_ref()
+                    .clone()
+                    .rebuild(|facts| {
+                        facts.compiler_support.artifacts = widened;
+                    })
+                    .finish()
+                    .unwrap();
+                assert_eq!(
+                    custody_only.compiler_input_roles(),
+                    selected.compiler_input_roles()
+                );
+                assert_eq!(custody_only.lexical_graph(), selected.lexical_graph());
+                assert_eq!(
+                    custody_only
+                        .selected_template_imports(&[template.clone()])
+                        .unwrap()
+                        .roots,
+                    template_owners
+                        .intersection(&BTreeSet::from([owners[root_index].clone()]))
+                        .cloned()
+                        .collect(),
+                    "retained bytes do not add selected lexical or template roots"
+                );
+                assert_eq!(
+                    custody_only.published_source_original_selections().unwrap()[0]
+                        .context()
+                        .semantic_sha256(),
+                    selected.semantic_sha256(),
+                    "unselected custody does not rewrite the issued publication"
+                );
                 assert_eq!(
                     selected
                         .selected_template_imports(&[template.clone()])
@@ -10864,26 +10910,66 @@ mod tests {
                     assert!(changed.normalize().is_err());
                 }
                 if template_mask & (1 << (1 - root_index)) != 0 {
-                    let mut missing = issued.clone();
-                    {
-                        let updated = selected.facts.compiler_support.artifacts.clone();
-                        missing =
-                            missing.rebuild(|facts| facts.compiler_support.artifacts = updated);
-                    }
-                    {
-                        let updated = issued
-                            .facts
-                            .compiler_support
-                            .projection
-                            .within_view(&missing.facts.compiler_support.artifacts);
-                        missing =
-                            missing.rebuild(|facts| facts.compiler_support.projection = updated);
-                    }
-                    {
-                        let updated = selected.facts.lexical.clone();
-                        missing = missing.rebuild(|facts| facts.lexical = updated);
-                    }
+                    let retained = retained.as_ref().unwrap();
+                    let other = &owners[1 - root_index];
+                    let missing_id = retained.graph[other].canonical;
+                    let canonical = issued
+                        .artifact_view()
+                        .entries()
+                        .into_iter()
+                        .filter(|entry| {
+                            matches!(entry.payload, ArtifactPayload::Canonical(_))
+                                && (entry.descriptor.owner == owners[root_index]
+                                    || retained.graph.contains_key(&entry.descriptor.owner))
+                        })
+                        .collect::<Vec<_>>();
+                    let inventory = ArtifactInventory::default();
+                    let complete_view = inventory
+                        .admit_shared(&inventory.empty_view(), canonical)
+                        .unwrap();
+                    assert!(complete_view.artifact_ids().contains(&missing_id));
+                    let projection = issued
+                        .compiler_input_projection()
+                        .interface_only()
+                        .within_view(&complete_view);
+                    let complete = ExactDeclarationContext::from_authenticated_interfaces(
+                        issued.facts.producer,
+                        &complete_view,
+                        projection,
+                    )
+                    .unwrap()
+                    .rebuild(|facts| {
+                        facts.lexical = selected.facts.lexical.clone();
+                        facts.template_imports = Some(retained.clone());
+                    })
+                    .finish()
+                    .unwrap();
+                    assert_eq!(complete.selected_template_imports(&[template.clone()]).unwrap().roots, template_owners,
+                        "the same retained template seals validate in the fresh canonical inventory");
+                    let root_id = complete.compiler_metadata_snapshot().unwrap().entries
+                        [&owners[root_index]]
+                        .descriptor
+                        .id;
+                    let missing_view = complete_view.select_roots(vec![root_id]).unwrap();
+                    assert!(!missing_view.artifact_ids().contains(&missing_id),
+                        "the refusal control actually omits the other selected template's canonical custody");
+                    assert!(missing_view.artifact_ids().contains(&root_id));
+                    let missing_projection = complete
+                        .compiler_input_projection()
+                        .within_view(&missing_view);
+                    let missing = complete.clone().rebuild(|facts| {
+                        facts.compiler_support =
+                            crate::artifact_inventory::CompilerSourceSupport::new(
+                                missing_projection,
+                                missing_view,
+                                [],
+                            )
+                            .unwrap();
+                    });
                     assert!(missing.normalize().is_err());
+                    assert!(missing.clone().rebuild(|facts| facts.template_imports = None).normalize().is_ok(),
+                        "without the missing template obligation the narrowed canonical context is valid");
+                    complete.normalize().unwrap();
                 }
                 assert_eq!(issued.semantic_sha256(), before);
                 assert_eq!(
@@ -10916,14 +11002,17 @@ mod tests {
                 imports: vec![]
             }]
         );
-        assert!(
+        assert_eq!(
             selection
                 .context()
-                .artifact_view()
-                .descriptors()
-                .iter()
-                .all(|row| row.owner == root),
-            "private target and unrelated available originals are excluded"
+                .compiler_metadata_snapshot()
+                .unwrap()
+                .entries
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root.clone()]),
+            "private targets and unrelated originals have no selected compiler role"
         );
         let mut narrowed = selection.context().as_ref().clone();
         let interface = narrowed
@@ -10933,12 +11022,24 @@ mod tests {
             .unwrap()
             .interface();
         {
-            let updated = narrowed
-                .facts
-                .compiler_support
-                .artifacts
-                .select_roots(vec![interface])
+            let canonical = narrowed
+                .artifact_view()
+                .entries()
+                .into_iter()
+                .find(|entry| entry.descriptor.id == interface)
                 .unwrap();
+            let inventory = ArtifactInventory::default();
+            let updated = inventory
+                .admit_shared(&inventory.empty_view(), vec![canonical])
+                .unwrap();
+            let original = narrowed
+                .compiler_input_roles()
+                .iter()
+                .find_map(CompilerInputRole::original)
+                .unwrap();
+            assert!(updated.artifact_ids().contains(&interface));
+            assert!(!updated.artifact_ids().contains(&original),
+                "the preserved publication policy really loses its native custody in the fresh canonical inventory");
             narrowed = narrowed.rebuild(|facts| facts.compiler_support.artifacts = updated);
         }
         {
