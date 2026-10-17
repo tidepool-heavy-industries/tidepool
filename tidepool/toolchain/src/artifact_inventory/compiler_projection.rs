@@ -514,6 +514,16 @@ impl CompilerSourceSupport {
         &self,
         incoming: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
+        let incoming = incoming.into_iter().collect::<Vec<_>>();
+        if incoming.iter().all(|incoming| {
+            self.native_offers
+                .iter()
+                .any(|retained| retained.same_issuance(incoming))
+        }) {
+            // These exact issuances already entered this closed owner in its
+            // retained order. No new acquisition or seed is being attached.
+            return Ok(self.clone());
+        }
         Self::new(
             self.projection.clone(),
             self.artifacts.clone(),
@@ -544,11 +554,44 @@ impl CompilerSourceSupport {
         &self,
         owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
-        Self::new(
-            self.projection.for_source_owners(owners),
-            self.artifacts.clone(),
-            self.native_offers.iter().cloned(),
-        )
+        let projection = self.projection.for_source_owners(owners);
+        if projection == self.projection {
+            return Ok(self.clone());
+        }
+        let mut entries = BTreeMap::new();
+        for row in self.selected.values() {
+            for (_, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                entries.insert(entry.descriptor.id, Arc::clone(entry));
+            }
+        }
+        // This operation changes policy over existing selected bindings only.
+        // Canonical requirements may differ from an original's requirements,
+        // so validate the resulting actual dependency/seal relationships.
+        projection.entries_from_artifacts(&entries)?;
+        let mut selected = self.selected.as_ref().clone();
+        for (owner, role) in &projection.roles {
+            let row = selected.get_mut(owner).expect("existing compiler role");
+            if row.interface.0.artifact != role.interface() {
+                return Err(failure(
+                    "source policy changed its admitted canonical binding",
+                ));
+            }
+            match (role.original(), row.original.as_ref()) {
+                (None, _) => row.original = None,
+                (Some(id), Some((binding, _))) if id == binding.artifact => {}
+                _ => {
+                    return Err(failure(
+                        "source policy changed its admitted original binding",
+                    ))
+                }
+            }
+        }
+        Ok(Self {
+            projection,
+            artifacts: self.artifacts.clone(),
+            native_offers: Arc::clone(&self.native_offers),
+            selected: Arc::new(selected),
+        })
     }
 
     pub(crate) fn certify_original_closure(
@@ -1278,5 +1321,180 @@ impl CompilerInputProjection {
             selected.insert(owner.clone(), Arc::clone(entry));
         }
         Ok(selected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_selected_reads_do_not_visit_historical_custody() {
+        for group_count in [1, 4, 16] {
+            let inventory = ArtifactInventory::default();
+            let selected = Arc::new(crate::artifact_inventory::tests::entry(
+                "Selected",
+                &["Required"],
+            ));
+            let required = Arc::new(crate::artifact_inventory::tests::entry("Required", &[]));
+            let expected = [selected.as_ref(), required.as_ref()]
+                .into_iter()
+                .map(|entry| {
+                    let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                        panic!("canonical fixture")
+                    };
+                    (
+                        entry.descriptor.owner.clone(),
+                        interface.interface_bytes().to_vec(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let product = crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "Historical",
+                    (0..group_count).map(|ordinal| (ordinal, vec![])).collect(),
+                    1,
+                    &BTreeMap::new(),
+                ),
+                [2; 32],
+            );
+            let original = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                .remove(0)
+                .product;
+            let historical = Arc::new(ArtifactEntry::original([2; 32], original).unwrap());
+            let view = inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        Arc::clone(&selected),
+                        Arc::clone(&required),
+                        Arc::clone(&historical),
+                    ],
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[
+                Arc::clone(&selected),
+                Arc::clone(&required),
+            ])
+            .unwrap();
+            let historical_projection =
+                CompilerInputProjection::from_issued_entries(&[Arc::clone(&historical)]).unwrap();
+            let offers =
+                IssuedNativeOffer::issue_context_offers(&historical_projection, &view, &[])
+                    .unwrap();
+            assert!(!offers.is_empty());
+            let support = CompilerSourceSupport::new(projection, view, offers).unwrap();
+            assert!(
+                support.artifacts.reads.read_projection.get().is_none(),
+                "the real offer retention must leave a cold returned view for this control"
+            );
+            let before = inventory.metrics();
+            let view_owner = Arc::clone(&support.artifacts.lease);
+            for _ in 0..4 {
+                let observation = support.selected_interfaces().unwrap();
+                let actual = observation
+                    .entries()
+                    .iter()
+                    .map(|(owner, entry)| {
+                        let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                            panic!("canonical observation")
+                        };
+                        (owner.clone(), interface.interface_bytes().to_vec())
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(actual, expected);
+            }
+            for _ in 0..4 {
+                let repeated = support
+                    .retain_offers(support.native_offers.iter().cloned())
+                    .unwrap();
+                let unchanged = repeated.for_source_owners(&BTreeSet::new()).unwrap();
+                assert!(Arc::ptr_eq(&support.selected, &unchanged.selected));
+                assert!(Arc::ptr_eq(
+                    &support.native_offers,
+                    &unchanged.native_offers
+                ));
+                assert!(Arc::ptr_eq(
+                    &support.artifacts.lease,
+                    &unchanged.artifacts.lease
+                ));
+            }
+            let after = inventory.metrics();
+            assert_eq!(after.graph_visits, before.graph_visits);
+            assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+            assert!(Arc::ptr_eq(&view_owner, &support.artifacts.lease));
+
+            let interfaces = support.selected_interfaces().unwrap();
+            let selected_support = interfaces
+                .support_for_owners(vec![selected.descriptor.owner.clone()])
+                .unwrap();
+            assert_eq!(
+                selected_support
+                    .projection
+                    .snapshot_roles()
+                    .keys()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                expected.keys().cloned().collect()
+            );
+            assert!(selected_support
+                .artifacts
+                .selected_native_groups()
+                .is_empty());
+
+            let reusable = CompilerSourceSupport::new(
+                historical_projection,
+                support.artifacts.clone(),
+                support.native_offers.iter().cloned(),
+            )
+            .unwrap();
+            let original_graph = reusable.artifacts.capture_graph_selection();
+            let before_policy = inventory.metrics();
+            let interface_only = reusable.for_source_owners(&BTreeSet::new()).unwrap();
+            assert!(interface_only
+                .projection
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert_eq!(
+                interface_only
+                    .projection
+                    .snapshot_roles()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![historical.descriptor.owner.clone()]
+            );
+            assert!(Arc::ptr_eq(
+                &reusable.artifacts.lease,
+                &interface_only.artifacts.lease
+            ));
+            assert!(Arc::ptr_eq(
+                &reusable.native_offers,
+                &interface_only.native_offers
+            ));
+            let after_policy = inventory.metrics();
+            assert_eq!(after_policy.graph_visits, before_policy.graph_visits);
+            assert_eq!(
+                after_policy.entry_handle_copies,
+                before_policy.entry_handle_copies
+            );
+            assert_eq!(
+                interface_only.artifacts.capture_graph_selection(),
+                original_graph
+            );
+
+            let missing =
+                CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
+            let refusal =
+                CompilerSourceSupport::new(missing, support.artifacts.clone(), []).unwrap_err();
+            assert!(matches!(refusal, CompileError::ArtifactInventory(error)
+                if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { dependent, required: dependency, .. }
+                    if dependent == &selected.descriptor.owner && dependency == &required.descriptor.owner)));
+            assert_eq!(
+                support.selected_interfaces().unwrap().entries().len(),
+                expected.len()
+            );
+        }
     }
 }
