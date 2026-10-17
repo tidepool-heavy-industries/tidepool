@@ -2059,7 +2059,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
           InspectModule "MetadataDependency" False, InspectModule "MissingMetadataModule" False]
       case inspected of
         [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries,
-            InspectionBrowse "MetadataDependency" False dependencies, InspectionModuleNotFound "MissingMetadataModule"] -> do
+            InspectionBrowse "MetadataDependency" False dependencies, InspectionModuleNotFound "MissingMetadataModule" _] -> do
           assertContains "inspection resolves the checked local probe" "Box Int" rendered
           assertEqual "checked target browsing uses its own exports"
             ["__tidepool_inspect_0"] (map infoName entries)

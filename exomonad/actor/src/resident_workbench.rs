@@ -16842,9 +16842,10 @@ pub(crate) mod request_tests {
         let lookup = inspected
             .iter()
             .find_map(|result| match result {
-                tidepool_runtime::session::InspectionResult::Info { entries, .. } => {
-                    entries.iter().find(|entry| entry.name == "lookupRaw")
-                }
+                tidepool_runtime::session::InspectionResult::Lookup {
+                    answer: tidepool_runtime::session::LookupAnswer::Info(entries),
+                    ..
+                } => entries.iter().find(|entry| entry.name == "lookupRaw"),
                 _ => None,
             })
             .expect("lookupRaw inspection");

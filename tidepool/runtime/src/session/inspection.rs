@@ -12,11 +12,18 @@ use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
+pub use tidepool_extract_cmd::LookupNameMode;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
+    LookupName {
+        query: String,
+        qualifier_module: Option<String>,
+        mode: LookupNameMode,
+    },
+    ExactName(ExactNameQuery),
     TypeSearch(String),
     ScopeBrowse,
     Browse {
@@ -51,6 +58,13 @@ pub enum NameNamespace {
 pub struct NameQuery {
     pub scope: NameScope,
     pub namespace: NameNamespace,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactNameQuery {
+    pub scope: NameScope,
+    pub namespace: IdentifierNamespace,
     pub name: String,
 }
 
@@ -208,7 +222,26 @@ pub struct TypeMatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LookupAnswer {
+    Info(Vec<InfoEntry>),
+    Ambiguous(Vec<InfoEntry>),
+    Module {
+        module: String,
+        entries: Vec<InfoEntry>,
+    },
+    Missing {
+        export_names: Vec<String>,
+    },
+    ModuleNotFound(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionResult {
+    Lookup {
+        query: String,
+        scopes: Vec<NameScope>,
+        answer: LookupAnswer,
+    },
     Type {
         expression: String,
         display: String,
@@ -227,6 +260,7 @@ pub enum InspectionResult {
     },
     ModuleNotFound {
         module: String,
+        scopes: Vec<NameScope>,
     },
     Rejected {
         diagnostic: String,
@@ -248,6 +282,17 @@ impl InspectionResult {
     #[must_use]
     pub fn render(&self) -> String {
         match self {
+            Self::Lookup { query, answer, .. } => match answer {
+                LookupAnswer::Info(entries)
+                | LookupAnswer::Ambiguous(entries)
+                | LookupAnswer::Module { entries, .. } => entries
+                    .iter()
+                    .map(|entry| entry.display.trim())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                LookupAnswer::Missing { .. } => format!("unknown name `{query}`"),
+                LookupAnswer::ModuleNotFound(module) => format!("unknown module `{module}`"),
+            },
             Self::Type {
                 expression,
                 display,
@@ -270,7 +315,7 @@ impl InspectionResult {
                 format!("ambiguous name `{query}`; candidates: {candidates}")
             }
             Self::NotFound { query } => format!("unknown name `{query}`"),
-            Self::ModuleNotFound { module } => format!("unknown module `{module}`"),
+            Self::ModuleNotFound { module, .. } => format!("unknown module `{module}`"),
             Self::Rejected { diagnostic } => diagnostic.clone(),
             Self::Browse {
                 module, entries, ..
@@ -497,6 +542,8 @@ fn run_inspections_with_policy(
         let shares_environment = matches!(
             query,
             InspectionQuery::Info(_)
+                | InspectionQuery::LookupName { .. }
+                | InspectionQuery::ExactName(_)
                 | InspectionQuery::ScopeBrowse
                 | InspectionQuery::Browse { .. }
                 | InspectionQuery::StructuredInfo { .. }
@@ -512,6 +559,8 @@ fn run_inspections_with_policy(
         let expressions = match query {
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
             InspectionQuery::Info(_)
+            | InspectionQuery::LookupName { .. }
+            | InspectionQuery::ExactName(_)
             | InspectionQuery::TypeSearch(_)
             | InspectionQuery::ScopeBrowse
             | InspectionQuery::Browse { .. }
@@ -536,6 +585,37 @@ fn run_inspections_with_policy(
         match query {
             InspectionQuery::TypeOf(expression) => {
                 command.inspect_type(expression);
+            }
+            InspectionQuery::LookupName {
+                query,
+                qualifier_module,
+                mode,
+            } => {
+                command.inspect_lookup_name(tidepool_extract_cmd::LookupNameInspection {
+                    query: query.clone(),
+                    qualifier_module: qualifier_module.clone(),
+                    mode: *mode,
+                });
+            }
+            InspectionQuery::ExactName(query) => {
+                command.inspect_exact_name(tidepool_extract_cmd::ExactNameInspection {
+                    scope: request_scope(&query.scope),
+                    namespace: match query.namespace {
+                        IdentifierNamespace::Value => {
+                            tidepool_extract_cmd::InspectionNamespace::Value
+                        }
+                        IdentifierNamespace::Type => {
+                            tidepool_extract_cmd::InspectionNamespace::Type
+                        }
+                        IdentifierNamespace::Constructor => {
+                            tidepool_extract_cmd::InspectionNamespace::Constructor
+                        }
+                        IdentifierNamespace::Field => {
+                            tidepool_extract_cmd::InspectionNamespace::Field
+                        }
+                    },
+                    name: query.name.clone(),
+                });
             }
             InspectionQuery::Info(name) => {
                 command.inspect_info(name);
@@ -808,13 +888,19 @@ fn structured_request(
     query: &NameQuery,
     provenance: &ScopeProvenance,
 ) -> tidepool_extract_cmd::StructuredInspection {
+    let exact = exact_name_request(query);
     tidepool_extract_cmd::StructuredInspection {
-        scope: match &query.scope {
-            NameScope::Current => tidepool_extract_cmd::InspectionScope::Current,
-            NameScope::PublicModule(module) => {
-                tidepool_extract_cmd::InspectionScope::PublicModule(module.clone())
-            }
-        },
+        scope: exact.scope,
+        namespace: exact.namespace,
+        name: exact.name,
+        generation: provenance.generation,
+        fingerprint: provenance.fingerprint.clone(),
+    }
+}
+
+fn exact_name_request(query: &NameQuery) -> tidepool_extract_cmd::ExactNameInspection {
+    tidepool_extract_cmd::ExactNameInspection {
+        scope: request_scope(&query.scope),
         namespace: match query.namespace {
             NameNamespace::Any => tidepool_extract_cmd::InspectionNamespace::Any,
             NameNamespace::Value => tidepool_extract_cmd::InspectionNamespace::Value,
@@ -822,8 +908,15 @@ fn structured_request(
             NameNamespace::Constructor => tidepool_extract_cmd::InspectionNamespace::Constructor,
         },
         name: query.name.clone(),
-        generation: provenance.generation,
-        fingerprint: provenance.fingerprint.clone(),
+    }
+}
+
+fn request_scope(scope: &NameScope) -> tidepool_extract_cmd::InspectionScope {
+    match scope {
+        NameScope::Current => tidepool_extract_cmd::InspectionScope::Current,
+        NameScope::PublicModule(module) => {
+            tidepool_extract_cmd::InspectionScope::PublicModule(module.clone())
+        }
     }
 }
 
@@ -839,7 +932,7 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP006" {
+    if text(&root[0], "version")? != "TPINSP007" {
         return Err(invalid("unsupported receipt version"));
     }
     array(&root[1], "results")?
@@ -855,6 +948,14 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
         .ok_or_else(|| invalid("empty result body"))
         .and_then(|value| text(value, "result tag"))?;
     match tag {
+        "Lookup" => {
+            let body = array_len(value, 4, "Lookup result")?;
+            Ok(InspectionResult::Lookup {
+                query: text(&body[1], "Lookup query")?.into(),
+                scopes: decode_scopes(&body[2])?,
+                answer: decode_lookup_answer(&body[3])?,
+            })
+        }
         "Type" => {
             let body = array_len(value, 4, "Type result")?;
             Ok(InspectionResult::Type {
@@ -892,9 +993,10 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
             })
         }
         "ModuleNotFound" => {
-            let body = array_len(value, 2, "ModuleNotFound result")?;
+            let body = array_len(value, 3, "ModuleNotFound result")?;
             Ok(InspectionResult::ModuleNotFound {
                 module: text(&body[1], "ModuleNotFound module")?.into(),
+                scopes: decode_scopes(&body[2])?,
             })
         }
         "Rejected" => {
@@ -1225,6 +1327,65 @@ fn boolean(value: &CborValue, what: &str) -> Result<bool, CompileError> {
     }
 }
 
+fn decode_scopes(value: &CborValue) -> Result<Vec<NameScope>, CompileError> {
+    let scopes = array(value, "searched scopes")?
+        .iter()
+        .map(decode_scope)
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, scope) in scopes.iter().enumerate() {
+        if scopes[..index].contains(scope) {
+            return Err(invalid("duplicate searched scope"));
+        }
+    }
+    Ok(scopes)
+}
+
+fn decode_lookup_answer(value: &CborValue) -> Result<LookupAnswer, CompileError> {
+    let fields = array(value, "Lookup answer")?;
+    let tag = fields
+        .first()
+        .ok_or_else(|| invalid("empty Lookup answer"))?;
+    let entries = |value| {
+        array(value, "Lookup entries")?
+            .iter()
+            .map(decode_info_entry)
+            .collect::<Result<Vec<_>, CompileError>>()
+    };
+    match text(tag, "Lookup answer tag")? {
+        "Info" => {
+            let row = array_len(value, 2, "Lookup Info")?;
+            Ok(LookupAnswer::Info(entries(&row[1])?))
+        }
+        "Ambiguous" => {
+            let row = array_len(value, 2, "Lookup Ambiguous")?;
+            Ok(LookupAnswer::Ambiguous(entries(&row[1])?))
+        }
+        "Module" => {
+            let row = array_len(value, 3, "Lookup Module")?;
+            Ok(LookupAnswer::Module {
+                module: text(&row[1], "Lookup module")?.into(),
+                entries: entries(&row[2])?,
+            })
+        }
+        "Missing" => {
+            let row = array_len(value, 2, "Lookup Missing")?;
+            Ok(LookupAnswer::Missing {
+                export_names: array(&row[1], "Lookup export names")?
+                    .iter()
+                    .map(|name| text(name, "Lookup export name").map(str::to_owned))
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        "ModuleNotFound" => {
+            let row = array_len(value, 2, "Lookup ModuleNotFound")?;
+            Ok(LookupAnswer::ModuleNotFound(
+                text(&row[1], "Lookup missing module")?.into(),
+            ))
+        }
+        other => Err(invalid(format!("unknown Lookup answer {other:?}"))),
+    }
+}
+
 fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
     let fields = array_len(value, 6, "Info entry")?;
     let module = match &fields[1] {
@@ -1391,7 +1552,7 @@ mod tests {
     #[test]
     fn decodes_every_result_shape() {
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP006".into()),
+            CborValue::Text("TPINSP007".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("Type".into()),
@@ -1494,7 +1655,7 @@ mod tests {
             CborValue::Text("scope-abc".into()),
         ]);
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP006".into()),
+            CborValue::Text("TPINSP007".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("StructuredTypeOk".into()),
@@ -1542,7 +1703,7 @@ mod tests {
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP006".into()),
+            CborValue::Text("TPINSP007".into()),
             CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
@@ -1556,7 +1717,7 @@ mod tests {
     fn decodes_row_availability_and_rejects_unknown_values() {
         let receipt = |availability: &str| {
             CborValue::Array(vec![
-                CborValue::Text("TPINSP006".into()),
+                CborValue::Text("TPINSP007".into()),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Text("TypeMatches".into()),
                     CborValue::Text("Eff effects ()".into()),
@@ -1584,6 +1745,160 @@ mod tests {
             );
         }
         assert!(decode_inspections(&encoded(receipt("Guess"))).is_err());
+    }
+
+    #[test]
+    fn selective_lookup_rich_work_does_not_grow_with_unrelated_exports() {
+        eval_harness::require_extract();
+        // Each counted case is process-isolated. Direct execution keeps the
+        // compiler-owned work census visible through its ordinary stderr.
+        std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        // The explicit frontend profile owns timing policy, including when
+        // this case is selected by a campaign whose default is minimal.
+        std::env::set_var(
+            "TIDEPOOL_TEST_TRACE_PROFILE",
+            tidepool_extract_cmd::CompilerTraceProfile::Full.name(),
+        );
+        let mut observed = Vec::new();
+        let artifact_root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT");
+        for unrelated in [0, 64] {
+            let mut root = match &artifact_root {
+                Some(parent) => tempfile::Builder::new()
+                    .prefix(&format!("lookup-work-{unrelated}-"))
+                    .tempdir_in(parent)
+                    .unwrap(),
+                None => tempfile::tempdir().unwrap(),
+            };
+            root.disable_cleanup(artifact_root.is_some());
+            let mut module =
+                String::from("module LookupWork where\nrequested :: Int\nrequested = 17\n");
+            for index in 0..unrelated {
+                module.push_str(&format!(
+                    "unrelated{index} :: Eq a => a -> Bool\nunrelated{index} x = x == x\n"
+                ));
+            }
+            std::fs::write(root.path().join("LookupWork.hs"), module).unwrap();
+            let source = root.path().join("Expr.hs");
+            std::fs::write(
+                &source,
+                "module Expr where\nimport qualified LookupWork as Work\n",
+            )
+            .unwrap();
+            let output = root.path().join("lookup.cbor");
+            let mut command = ExtractCmd::new().unwrap();
+            command
+                .output_dir(root.path())
+                .inspect_out(&output)
+                .includes(&[root.path()]);
+            for query in ["Work.requested", "LookupWork.requested"] {
+                command.input(&source).inspect_lookup_name(
+                    tidepool_extract_cmd::LookupNameInspection {
+                        query: query.into(),
+                        qualifier_module: Some("LookupWork".into()),
+                        mode: LookupNameMode::Name,
+                    },
+                );
+            }
+            command
+                .input(&source)
+                .inspect_exact_name(tidepool_extract_cmd::ExactNameInspection {
+                    scope: tidepool_extract_cmd::InspectionScope::PublicModule("LookupWork".into()),
+                    namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                    name: "requested".into(),
+                });
+            let run = command.bind().unwrap().execute(&command).unwrap();
+            std::fs::write(
+                root.path().join("lookup.stderr"),
+                run.stderr_lossy().as_bytes(),
+            )
+            .unwrap();
+            assert!(run.success(), "{}", run.stderr_lossy());
+            let results = decode_inspections(&std::fs::read(&output).unwrap()).unwrap();
+            assert!(matches!(&results[..], [
+                InspectionResult::Lookup { answer: LookupAnswer::Info(first), .. },
+                InspectionResult::Lookup { answer: LookupAnswer::Info(second), .. },
+                InspectionResult::Lookup { answer: LookupAnswer::Info(third), .. },
+            ] if [first, second, third].iter().all(|entries| entries.len() == 1 && entries[0].name == "requested")));
+            assert!(
+                matches!(&results[0], InspectionResult::Lookup { scopes, .. } if scopes == &[NameScope::Current])
+            );
+            assert!(
+                matches!(&results[1], InspectionResult::Lookup { scopes, .. } if scopes == &[NameScope::Current, NameScope::PublicModule("LookupWork".into())])
+            );
+            assert!(
+                matches!(&results[2], InspectionResult::Lookup { scopes, .. } if scopes == &[NameScope::PublicModule("LookupWork".into())])
+            );
+            let stderr = run.stderr_lossy();
+            let count = |name: &str| {
+                let prefix = format!("tidepool-count name=inspection.{name} count=");
+                let values = stderr
+                    .lines()
+                    .filter_map(|line| line.strip_prefix(&prefix))
+                    .map(|value| {
+                        value
+                            .split_whitespace()
+                            .next()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 1, "missing or repeated work census: {stderr}");
+                values[0]
+            };
+            let work = (
+                count("rich_entries"),
+                count("availability_checks"),
+                count("resolved_names"),
+                count("constraint_solves"),
+            );
+            assert_eq!(work.0, 3, "one rich projection per selected name: {stderr}");
+            assert_eq!(
+                work.3, 0,
+                "the selected Int value requires no constraint solving"
+            );
+            println!("lookup work unrelated_exports={unrelated} rich_entries={} availability_checks={} resolved_names={} constraint_solves={}", work.0, work.1, work.2, work.3);
+            observed.push(work);
+            // A complete browse remains explicit and must expose the extra
+            // entries. This control proves the census detects the old work.
+            let mut browse = ExtractCmd::new().unwrap();
+            let browse_output = root.path().join("browse.cbor");
+            browse
+                .output_dir(root.path())
+                .inspect_out(&browse_output)
+                .includes(&[root.path()])
+                .input(&source)
+                .inspect_browse("LookupWork", false);
+            let run = browse.bind().unwrap().execute(&browse).unwrap();
+            std::fs::write(
+                root.path().join("browse.stderr"),
+                run.stderr_lossy().as_bytes(),
+            )
+            .unwrap();
+            assert!(run.success(), "{}", run.stderr_lossy());
+            let results = decode_inspections(&std::fs::read(&browse_output).unwrap()).unwrap();
+            assert!(
+                matches!(&results[..], [InspectionResult::Browse { entries, .. }] if entries.len() == unrelated + 1)
+            );
+            assert!(run.stderr_lossy().contains(&format!(
+                "tidepool-count name=inspection.rich_entries count={} ",
+                unrelated + 1
+            )));
+            assert!(run.stderr_lossy().contains(&format!(
+                "tidepool-count name=inspection.constraint_solves count={unrelated} "
+            )));
+            for line in run
+                .stderr_lossy()
+                .lines()
+                .filter(|line| line.starts_with("tidepool-count name=inspection."))
+            {
+                println!("browse work unrelated_exports={unrelated} {line}");
+            }
+        }
+        assert_eq!(
+            observed[0], observed[1],
+            "unrelated exports changed rich lookup work"
+        );
     }
 
     #[test]
@@ -1642,12 +1957,14 @@ mod tests {
         std::fs::write(
             include.path().join("BrowseFixture.hs"),
             concat!(
-                "{-# LANGUAGE TypeFamilies #-}\n",
-                "module BrowseFixture (Public(..), Record(..), Abstract, Opaque, Solo(..), Alias, Family, Service(..), constrained, exportedValue, Maybe(..)) where\n",
+                "{-# LANGUAGE TypeFamilies, DuplicateRecordFields #-}\n",
+                "module BrowseFixture (Public(..), Record(..), TwinA(..), TwinB(..), Abstract, Opaque, Solo(..), Alias, Family, Service(..), constrained, exportedValue, Maybe(..)) where\n",
                 "import Prelude\n",
                 "import Data.Maybe (Maybe(..))\n",
                 "data Public = First | Second\n",
                 "data Record = Record { recordField :: Int }\n",
+                "data TwinA = TwinA { sharedField :: Int }\n",
+                "data TwinB = TwinB { sharedField :: Bool }\n",
                 "data Abstract = Hidden\n",
                 "newtype Opaque = Opaque Int\n",
                 "data Solo = Solo\n",
@@ -1667,6 +1984,7 @@ mod tests {
             "import BrowseFixture\n",
             "import qualified BrowseFixture as Alias\n",
             "localPreambleValue = exportedValue\n",
+            "__tidepool_fixture = exportedValue\n",
         );
         let current = ScopeProvenance {
             scope: NameScope::Current,
@@ -1763,6 +2081,76 @@ mod tests {
         // A preamble declaration lives only in the typechecked query module;
         // a request's `respond` is bound this way.
         queries.push(InspectionQuery::Info("localPreambleValue".into()));
+        let exact_start = queries.len();
+        for (namespace, name) in [
+            (IdentifierNamespace::Type, "Abstract"),
+            (IdentifierNamespace::Constructor, "Hidden"),
+            (IdentifierNamespace::Field, "recordField"),
+            (IdentifierNamespace::Value, "recordField"),
+            (IdentifierNamespace::Type, "Solo"),
+            (IdentifierNamespace::Constructor, "Solo"),
+            (IdentifierNamespace::Constructor, "Just"),
+        ] {
+            queries.push(InspectionQuery::ExactName(ExactNameQuery {
+                scope: NameScope::PublicModule("BrowseFixture".into()),
+                namespace,
+                name: name.into(),
+            }));
+        }
+        queries.push(InspectionQuery::ExactName(ExactNameQuery {
+            scope: NameScope::PublicModule("Tidepool.Session.Val.G1".into()),
+            namespace: IdentifierNamespace::Value,
+            name: "hidden".into(),
+        }));
+        queries.push(InspectionQuery::ExactName(ExactNameQuery {
+            scope: NameScope::Current,
+            namespace: IdentifierNamespace::Value,
+            name: "__tidepool_fixture".into(),
+        }));
+        queries.push(InspectionQuery::LookupName {
+            query: "Alias.exportedValu".into(),
+            qualifier_module: Some("BrowseFixture".into()),
+            mode: LookupNameMode::Name,
+        });
+        for namespace in [IdentifierNamespace::Field, IdentifierNamespace::Value] {
+            queries.push(InspectionQuery::ExactName(ExactNameQuery {
+                scope: NameScope::Current,
+                namespace,
+                name: "recordField".into(),
+            }));
+        }
+        let differential_start = queries.len();
+        for scope in [
+            NameScope::Current,
+            NameScope::PublicModule("BrowseFixture".into()),
+        ] {
+            for name in [
+                "exportedValue",
+                "recordField",
+                "sharedField",
+                "Service",
+                "service",
+                "Abstract",
+                "Hidden",
+                "Solo",
+                "Just",
+                "Alias",
+                "Family",
+            ] {
+                for namespace in [
+                    IdentifierNamespace::Value,
+                    IdentifierNamespace::Field,
+                    IdentifierNamespace::Type,
+                    IdentifierNamespace::Constructor,
+                ] {
+                    queries.push(InspectionQuery::ExactName(ExactNameQuery {
+                        scope: scope.clone(),
+                        namespace,
+                        name: name.into(),
+                    }));
+                }
+            }
+        }
         let results = tidepool_testing::with_settlement(|settlement| {
             run_inspections(
                 InspectionRequest {
@@ -1781,6 +2169,120 @@ mod tests {
         .unwrap();
 
         assert_eq!(results.len(), queries.len());
+        let selected = &results[exact_start..];
+        assert!(
+            matches!(&selected[0], InspectionResult::Lookup { answer: LookupAnswer::Info(entries), .. }
+            if entries.len() == 1 && entries[0].kind == "type" && !entries[0].display.contains("Hidden"))
+        );
+        for index in [1, 3] {
+            assert!(matches!(
+                &selected[index],
+                InspectionResult::Lookup {
+                    answer: LookupAnswer::Missing { .. },
+                    ..
+                }
+            ));
+        }
+        for (index, kind) in [
+            (2, "record-selector"),
+            (4, "type"),
+            (5, "constructor"),
+            (6, "constructor"),
+        ] {
+            assert!(
+                matches!(&selected[index], InspectionResult::Lookup { answer: LookupAnswer::Info(entries), .. }
+                if entries.len() == 1 && entries[0].kind == kind),
+                "{:?}",
+                selected[index]
+            );
+        }
+        assert!(
+            matches!(&selected[6], InspectionResult::Lookup { answer: LookupAnswer::Info(entries), .. }
+            if entries[0].module.as_deref().is_some_and(|owner| owner != "BrowseFixture"))
+        );
+        assert!(
+            matches!(&selected[7], InspectionResult::Lookup { scopes, answer: LookupAnswer::ModuleNotFound(_), .. }
+            if scopes.is_empty()),
+            "protected scope refusal claimed a GHC search: {:?}",
+            selected[7]
+        );
+
+        assert!(
+            matches!(
+                &selected[8],
+                InspectionResult::Lookup {
+                    answer: LookupAnswer::Missing { .. },
+                    ..
+                }
+            ),
+            "private generated reference escaped current-scope browse visibility: {:?}",
+            selected[8]
+        );
+        assert!(
+            matches!(&selected[9], InspectionResult::Lookup { answer: LookupAnswer::Missing { export_names }, .. }
+            if export_names.iter().any(|name| name == "exportedValue")
+                && ["Hidden", "recordField", "Just"].iter().all(|hidden| !export_names.iter().any(|name| name == hidden))),
+            "cheap suggestions changed compact export visibility: {:?}",
+            selected[9]
+        );
+        assert!(
+            matches!(&selected[10], InspectionResult::Lookup { answer: LookupAnswer::Info(entries), .. }
+            if entries.len() == 1 && entries[0].kind == "record-selector"),
+            "current field lookup disagrees with its exported selector: {:?}",
+            selected[10]
+        );
+        assert!(matches!(
+            &selected[11],
+            InspectionResult::Lookup {
+                answer: LookupAnswer::Missing { .. },
+                ..
+            }
+        ));
+        // Expanded browse is the independent old reference-selection oracle.
+        // Compare complete entries, including two distinct same-spelled fields.
+        for (query, observed) in queries[differential_start..]
+            .iter()
+            .zip(&results[differential_start..])
+        {
+            let InspectionQuery::ExactName(query) = query else {
+                unreachable!()
+            };
+            let InspectionResult::Browse { entries, .. } = &results[match query.scope {
+                NameScope::Current => 22,
+                NameScope::PublicModule(_) => 5,
+            }] else {
+                panic!("missing expanded browse oracle")
+            };
+            let namespace = |entry: &&InfoEntry| match entry.kind.as_str() {
+                "type" => IdentifierNamespace::Type,
+                "constructor" => IdentifierNamespace::Constructor,
+                "record-selector" => IdentifierNamespace::Field,
+                _ => IdentifierNamespace::Value,
+            };
+            let mut expected = entries
+                .iter()
+                .filter(|entry| entry.name == query.name && namespace(entry) == query.namespace)
+                .cloned()
+                .collect::<Vec<_>>();
+            if query.name == "sharedField" && query.namespace == IdentifierNamespace::Field {
+                assert_eq!(expected.len(), 2, "duplicate-field oracle lost an owner");
+            }
+            let InspectionResult::Lookup { answer, .. } = observed else {
+                panic!("missing exact answer: {observed:?}")
+            };
+            let mut actual = match (expected.len(), answer) {
+                (0, LookupAnswer::Missing { export_names }) if export_names.is_empty() => vec![],
+                (1, LookupAnswer::Info(entries)) => entries.clone(),
+                (count, LookupAnswer::Ambiguous(entries)) if count > 1 => entries.clone(),
+                _ => panic!("wrong exact outcome for {query:?}: expected {expected:?}, observed {observed:?}"),
+            };
+            expected.sort_by_cached_key(|entry| format!("{entry:?}"));
+            actual.sort_by_cached_key(|entry| format!("{entry:?}"));
+            assert_eq!(
+                actual, expected,
+                "exact query differs from expanded browse: {query:?}"
+            );
+        }
         let InspectionResult::Browse {
             module, entries, ..
         } = &results[22]
@@ -1806,7 +2308,8 @@ mod tests {
         assert_eq!(
             results[3],
             InspectionResult::ModuleNotFound {
-                module: "No.Such.Module".into()
+                module: "No.Such.Module".into(),
+                scopes: vec![NameScope::PublicModule("No.Such.Module".into())],
             }
         );
         // Alias.Public / Alias.exportedValue / Missing.Public / the three TypeSearch
