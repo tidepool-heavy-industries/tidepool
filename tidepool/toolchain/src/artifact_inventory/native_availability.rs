@@ -29,6 +29,63 @@ pub(crate) fn validate_consumed_native_namespace(
     Ok(())
 }
 
+/// Observation key for locating an already authenticated native offer. The key
+/// itself grants no custody, availability or issuer authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NativeOfferObservationId([u8; 32]);
+
+/// The canonical exact offer set selected once by a publication issuer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct PublishedNativeOfferReferences(BTreeSet<NativeOfferObservationId>);
+
+impl<'de> Deserialize<'de> for PublishedNativeOfferReferences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let ids = Vec::<NativeOfferObservationId>::deserialize(deserializer)?;
+        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(serde::de::Error::custom(
+                "noncanonical published native offer references",
+            ));
+        }
+        Ok(Self(ids.into_iter().collect()))
+    }
+}
+
+impl PublishedNativeOfferReferences {
+    pub(crate) fn capture(offers: &[IssuedNativeOffer]) -> Result<Self, CompileError> {
+        offers
+            .iter()
+            .map(|offer| offer.observation_id())
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map(Self)
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<Vec<IssuedNativeOffer>, CompileError> {
+        if self.0.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut missing = self.0.clone();
+        let mut selected = Vec::new();
+        for offer in offers {
+            let id = offer.observation_id()?;
+            if self.0.contains(&id) {
+                missing.remove(&id);
+                selected.push(offer.clone());
+            }
+        }
+        if !missing.is_empty() {
+            return Err(failure(
+                "published native offer reference lacks its authenticated owner",
+            ));
+        }
+        Ok(selected)
+    }
+}
+
 /// One availability issuance and exactly the graph custody supporting it.
 /// Propagation can retain or narrow this owner, never rediscover another proof.
 #[derive(Clone, Debug)]
@@ -61,6 +118,12 @@ enum NativeOfferBody {
 }
 
 impl IssuedNativeOffer {
+    fn observation_id(&self) -> Result<NativeOfferObservationId, CompileError> {
+        self.snapshot_facts()
+            .identity()
+            .map(NativeOfferObservationId)
+    }
+
     /// The immutable declaration context is an issuance ingress. Capture its
     /// own roles and graph before merging any private input. Protected roles
     /// whose carrier is not present here wait for their exact private offer.

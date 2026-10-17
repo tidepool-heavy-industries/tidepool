@@ -113,6 +113,7 @@ impl ExactDeclarationContext {
             source_revision,
             original_input_identity,
             selection,
+            native_offers,
             ..
         } = role
         else {
@@ -165,7 +166,7 @@ impl ExactDeclarationContext {
             }
         }
         let bytes = serde_json::to_vec(&(
-            "published-source-original3",
+            "published-source-original4",
             self.facts.producer,
             root,
             interface,
@@ -175,6 +176,7 @@ impl ExactDeclarationContext {
             metadata.artifacts.keys().copied().collect::<Vec<_>>(),
             closure.selected_native_groups(),
             selection.observation_digest()?,
+            native_offers,
             self.published_lexical_closure(root)?,
         ))
         .map_err(failure)?;
@@ -198,6 +200,7 @@ impl ExactDeclarationContext {
             if let CompilerInputRole::PublishedSourceOriginal {
                 interface,
                 selection_sha256,
+                native_offers,
                 ..
             } = &role
             {
@@ -207,6 +210,7 @@ impl ExactDeclarationContext {
                     .ok_or_else(|| failure("published interface is outside retained custody"))?
                     .descriptor
                     .owner;
+                native_offers.resolve(self.facts.compiler_support.native_offers())?;
                 if self.published_selection_sha256(root, &role)? != *selection_sha256 {
                     return Err(failure(
                         "published original selection differs from its issued closure",
@@ -395,12 +399,31 @@ impl ExactDeclarationContext {
                 }
             })
             .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::restore(&inventory, &roles)?;
+        let offers = match projection
+            .roles()
+            .iter()
+            .find(|role| role.original() == Some(original))
+        {
+            Some(CompilerInputRole::PublishedSourceOriginal { native_offers, .. }) => {
+                native_offers.resolve(self.facts.compiler_support.native_offers())?
+            }
+            _ => self
+                .facts
+                .compiler_support
+                .native_offers()
+                .iter()
+                .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
+                    Ok(true) => Some(Ok(offer.clone())),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
         Self::from_facts(DeclarationContextFacts {
             producer: self.facts.producer,
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
-                CompilerInputProjection::restore(&inventory, &roles)?,
-                inventory,
-                self.facts.compiler_support.native_offers.iter().cloned(),
+                projection, inventory, offers,
             )?,
             lexical: self
                 .facts
@@ -458,6 +481,9 @@ impl ExactDeclarationContext {
                 &context.facts.compiler_support.artifacts,
             ),
             selection_sha256: [0; 32],
+            native_offers: crate::artifact_inventory::PublishedNativeOfferReferences::capture(
+                context.compiler_source_support().native_offers(),
+            )?,
         };
         let digest = context.published_selection_sha256(root, &role)?;
         if let CompilerInputRole::PublishedSourceOriginal {

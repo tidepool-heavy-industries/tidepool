@@ -19,6 +19,7 @@ mod native_availability;
 pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 pub(crate) use native_availability::{validate_consumed_native_namespace, IssuedNativeOffer};
+pub use native_availability::{NativeOfferObservationId, PublishedNativeOfferReferences};
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
@@ -14849,6 +14850,7 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
+            native_offers: PublishedNativeOfferReferences::default(),
         };
         let mut projection = CompilerInputProjection::default();
         projection

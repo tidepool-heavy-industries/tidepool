@@ -1878,6 +1878,18 @@ impl RecoveredArtifactInventory {
         roles: &[CompilerInputRole],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<ExactDeclarationContext, CompileError> {
+        ExactDeclarationContext::from_facts(
+            self.recover_graph_selection(selection, roles, lexical)?,
+        )
+        .finish()
+    }
+
+    fn recover_graph_selection(
+        &self,
+        selection: &ArtifactGraphSelection,
+        roles: &[CompilerInputRole],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<DeclarationContextFacts, CompileError> {
         let namespace = selection
             .namespace
             .iter()
@@ -1932,7 +1944,7 @@ impl RecoveredArtifactInventory {
         let restored =
             inventory.recover_selection(&inventory.empty_view(), entries, selection, &edges)?;
         let compiler_projection = CompilerInputProjection::restore(&restored, roles)?;
-        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        Ok(DeclarationContextFacts {
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::new(
                 compiler_projection,
                 restored,
@@ -1944,8 +1956,7 @@ impl RecoveredArtifactInventory {
             template_imports: None,
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default().replace(lexical)?,
-        });
-        context.finish()
+        })
     }
 
     pub fn context_with_snapshot(
@@ -1953,21 +1964,18 @@ impl RecoveredArtifactInventory {
         snapshot: &crate::exact_context::ExactContextSnapshot,
     ) -> Result<ExactDeclarationContext, CompileError> {
         let graph = snapshot.graph_selection().map_err(failure)?;
-        let mut context = self.context_with_graph_selection(
-            &graph,
-            &snapshot.compiler_roles(),
-            snapshot.lexical(),
-        )?;
+        let mut facts =
+            self.recover_graph_selection(&graph, &snapshot.compiler_roles(), snapshot.lexical())?;
         let offers = snapshot
             .native_offers()
-            .map(|fact| fact.restore(context.artifact_view()))
+            .map(|fact| fact.restore(&facts.compiler_support.artifacts))
             .collect::<Result<Vec<_>, _>>()?;
-        context.facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
-            context.facts.compiler_support.projection.clone(),
-            context.artifact_view().clone(),
+        facts.compiler_support = crate::artifact_inventory::CompilerSourceSupport::new(
+            facts.compiler_support.projection.clone(),
+            facts.compiler_support.artifacts.clone(),
             offers,
         )?;
-        Ok(context)
+        ExactDeclarationContext::from_facts(facts).finish()
     }
 
     fn capture_inputs(

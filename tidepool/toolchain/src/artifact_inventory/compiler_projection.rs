@@ -23,6 +23,7 @@ pub enum CompilerInputRole {
         original_input_identity: String,
         selection: ExactArtifactSelection,
         selection_sha256: [u8; 32],
+        native_offers: PublishedNativeOfferReferences,
     },
 }
 
@@ -50,6 +51,7 @@ impl PartialEq for CompilerInputRole {
                     original_input_identity: lp,
                     selection: ls,
                     selection_sha256: ld,
+                    native_offers: ln,
                 },
                 Self::PublishedSourceOriginal {
                     interface: ri,
@@ -58,9 +60,10 @@ impl PartialEq for CompilerInputRole {
                     original_input_identity: rp,
                     selection: rs,
                     selection_sha256: rd,
+                    native_offers: rn,
                 },
             ) => {
-                li == ri && lo == ro && lr == rr && lp == rp && ld == rd
+                li == ri && lo == ro && lr == rr && lp == rp && ld == rd && ln == rn
                 // Persistent-map equality covers available proof facts too.
                 // Selected semantic identity is observed separately below.
                 && (Arc::ptr_eq(ls.snapshot(), rs.snapshot()) || ls.snapshot() == rs.snapshot())
@@ -111,6 +114,7 @@ impl CompilerInputRole {
                 original_input_identity,
                 selection,
                 selection_sha256,
+                native_offers,
             } => CompilerRoleObservation::PublishedSourceOriginal {
                 interface: *interface,
                 original: *original,
@@ -118,6 +122,7 @@ impl CompilerInputRole {
                 original_input_identity,
                 selection: selection.observation_digest()?,
                 selection_sha256: *selection_sha256,
+                native_offers,
             },
         })
     }
@@ -142,6 +147,7 @@ pub(crate) enum CompilerRoleObservation<'a> {
         original_input_identity: &'a str,
         selection: ExactArtifactSelectionDigest,
         selection_sha256: [u8; 32],
+        native_offers: &'a PublishedNativeOfferReferences,
     },
 }
 

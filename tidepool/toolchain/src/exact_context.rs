@@ -1222,6 +1222,7 @@ pub enum CompilerRoleFact {
         original_input_identity: String,
         selection: SelectionRoot,
         selection_sha256: [u8; 32],
+        native_offers: crate::artifact_inventory::PublishedNativeOfferReferences,
     },
 }
 #[derive(Clone, Copy, Debug)]
@@ -1250,6 +1251,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                 original_input_identity,
                 selection,
                 selection_sha256,
+                native_offers,
             } => {
                 let base = store.selection_base.clone();
                 let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
@@ -1260,6 +1262,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                     original_input_identity: original_input_identity.clone(),
                     selection: selection.root,
                     selection_sha256: *selection_sha256,
+                    native_offers: native_offers.clone(),
                 }
             }
         };
@@ -1287,6 +1290,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                 original_input_identity,
                 selection,
                 selection_sha256,
+                native_offers,
             } => {
                 let selection = store.selection(&selection)?;
                 CompilerInputRole::PublishedSourceOriginal {
@@ -1298,6 +1302,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                         selection.snapshot,
                     ),
                     selection_sha256,
+                    native_offers,
                 }
             }
         })
@@ -1353,7 +1358,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             &next.offers,
         )?;
         let descriptor = ContextDescriptor {
-            version: 3,
+            version: 4,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
@@ -1388,7 +1393,7 @@ pub fn hydrate_context<BS: Blockstore>(
     let hydrator = SnapshotHydrator::new(store);
     let store = &hydrator;
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 3 {
+    if descriptor.version != 4 {
         return Err(malformed("context encoding version"));
     }
     let selection = store.selection(&descriptor.selection)?;
