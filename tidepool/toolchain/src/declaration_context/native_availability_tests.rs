@@ -5312,3 +5312,81 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     );
     assert!(request.artifacts.selected_native_groups().is_empty());
 }
+
+#[test]
+fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
+    use crate::artifact_inventory::{CompilerSourceSupport, IssuedNativeOffer};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let owner = ExactModuleIdentity {
+        unit: "main".into(),
+        module: "TemplateOwner".into(),
+    };
+    let entries = [b"old canonical".to_vec(), b"current canonical".to_vec()]
+        .into_iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            let finalized = fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    &owner.module,
+                    vec![(7, vec![])],
+                    index as u8 + 1,
+                    &BTreeMap::new(),
+                    bytes,
+                ),
+                producer,
+            );
+            let product = recovered_witness_fixtures(&[finalized]).remove(0).product;
+            Arc::new(ArtifactEntry::original(producer, product).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let views = entries
+        .iter()
+        .map(|entry| {
+            let inventory = ArtifactInventory::default();
+            inventory
+                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let owner = entries[0].descriptor.owner.clone();
+    for selected in 0..2 {
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[entries[selected].clone()]).unwrap();
+        let expected = projection.snapshot_roles().get(&owner).unwrap().interface();
+        let historical = IssuedNativeOffer::issue(
+            entries[1 - selected].descriptor.id,
+            &views[1 - selected],
+            None,
+        )
+        .unwrap();
+        let support =
+            CompilerSourceSupport::new(projection, views[selected].clone(), [historical]).unwrap();
+        let original = ExactDeclarationContext::from_authenticated_execution_support(
+            producer,
+            support,
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }],
+            owner.clone(),
+            std::slice::from_ref(&owner),
+        )
+        .unwrap();
+        let retained =
+            RetainedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
+                .unwrap()
+                .unwrap();
+        assert_eq!(retained.graph[&owner].canonical, expected);
+        retained.validate(producer, &retained.artifacts).unwrap();
+        let mut mismatched = retained.as_ref().clone();
+        mismatched
+            .graph
+            .get_mut(&owner)
+            .unwrap()
+            .interface
+            .interface_sha256[0] ^= 1;
+        assert!(mismatched
+            .validate(producer, original.artifact_view())
+            .is_err());
+    }
+}
