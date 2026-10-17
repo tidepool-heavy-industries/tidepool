@@ -153,18 +153,6 @@ pub(super) fn bind_fresh_product_dependencies(
             ));
         }
     }
-    let mut selected_roots = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-    for node in parent.lease.selection.roots.keys() {
-        if let InventoryNodeKey::Group(group) = node {
-            let key = NativeGroupKey {
-                artifact: group.binding.artifact(),
-                original_ordinal: group.original_ordinal,
-            };
-            if wanted.contains(&key) {
-                selected_roots.entry(key).or_default().insert(*group);
-            }
-        }
-    }
     for key in wanted {
         let mut candidates = BTreeSet::new();
         let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
@@ -203,18 +191,6 @@ pub(super) fn bind_fresh_product_dependencies(
                 if compatible {
                     candidates.insert(*group);
                 }
-            }
-        }
-        if let Some(selected) = selected_roots.get(&key) {
-            // A carried demand chooses its exact issuer; broader availability
-            // cannot replace it with an equal-payload historical binding.
-            candidates.retain(|candidate| selected.contains(candidate));
-            if selected.len() != 1 {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::BindingAmbiguity {
-                        artifact: key.artifact,
-                    },
-                ));
             }
         }
         if let InputNativeDecision::IssuedChoices(choices) =
