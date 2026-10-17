@@ -192,11 +192,16 @@ fn restored(
     context: &ExactDeclarationContext,
     roles: &[CompilerInputRole],
 ) -> Result<ExactDeclarationContext, CompileError> {
-    let mut snapshot = context.snapshot();
-    snapshot.roles = CompilerInputProjection::restore(context.artifact_view(), roles)?
-        .snapshot_roles()
-        .clone();
-    restore_snapshot(context, &snapshot)
+    let projection = CompilerInputProjection::restore(context.artifact_view(), roles)?;
+    // Raw decoded roles cross the owning validation boundary before a canonical
+    // writer may normalize their graph representation into immutable snapshots.
+    let validated = context
+        .clone()
+        .rebuild(|facts| {
+            facts.compiler_support.projection = projection;
+        })
+        .finish()?;
+    restore_snapshot(&validated, &validated.snapshot())
 }
 
 fn restore_snapshot(
