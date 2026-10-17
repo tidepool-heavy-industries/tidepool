@@ -7179,13 +7179,13 @@ mod module_product_tests {
         .unwrap();
         let mismatch = parsed.admit_build_action(&source, &[], "different invocation text");
         assert!(matches!(mismatch,
-            Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+            Err(CompileError::CompilerEvidence(error)) if matches!(&*error,
                 certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
-                if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                if matches!(&**failure, cache::DependencyEvidenceFailure::Source {
                     index: 0,
                     reason: cache::SourceWitnessFailure::Changed { expected, actual }
-                } if expected == format!("{:x}", Sha256::digest(text.as_bytes()))
-                    && actual == format!("{:x}", Sha256::digest(b"different invocation text"))))
+                } if expected == &format!("{:x}", Sha256::digest(text.as_bytes()))
+                    && actual == &format!("{:x}", Sha256::digest(b"different invocation text"))))
         ));
         assert_eq!(SOURCE_EVIDENCE_DECODES.with(|count| count.replace(0)), 1);
         let parsed = ParsedSourceEvidence::parse(
@@ -7618,9 +7618,9 @@ mod module_product_tests {
                     "a refused source cannot publish portable output"
                 );
                 assert!(matches!(result,
-                    Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                    Err(CompileError::CompilerEvidence(error)) if matches!(&*error,
                         certified_products::CertificationError::CompletedSourceEvidence { failure, .. }
-                        if matches!(*failure, cache::DependencyEvidenceFailure::Source {
+                        if matches!(&**failure, cache::DependencyEvidenceFailure::Source {
                             reason: cache::SourceWitnessFailure::Changed { .. }, ..
                         }))
                 ));
