@@ -9962,6 +9962,64 @@ mod tests {
             &edges,
         )
         .unwrap();
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            product.module_interface().unwrap().clone(),
+        ));
+        let canonical_view = issuer
+            .admit_shared(&issuer.empty_view(), vec![canonical])
+            .unwrap();
+        let canonical_selection = canonical_view.capture_graph_selection();
+        let canonical_reference = products[0].module_interface.as_ref().unwrap();
+        let mut acquisition = RecoveredArtifactAcquisition::new(directory.path());
+        acquisition
+            .capture_bound(
+                &[],
+                std::slice::from_ref(canonical_reference),
+                &[],
+                &[],
+                &canonical_view.descriptors(),
+                &canonical_selection.bindings,
+                &canonical_view.binding_dependencies(),
+            )
+            .unwrap();
+        let canonical_path = directory.path().join(&canonical_reference.certificate_path);
+        let canonical_bytes = std::fs::read(&canonical_path).unwrap();
+        std::fs::write(
+            &canonical_path,
+            b"held canonical certificate later corrupted",
+        )
+        .unwrap();
+        let acquired_native = acquisition
+            .capture_bound(
+                &products,
+                &interfaces,
+                &[],
+                &[],
+                &descriptors,
+                &selection.bindings,
+                &edges,
+            )
+            .unwrap();
+        assert_eq!(
+            acquired_native
+                .context_with_graph_selection(&selection, &roles, vec![])
+                .unwrap()
+                .artifact_view()
+                .capture_graph_selection(),
+            selection
+        );
+        assert!(RecoveredArtifactInventory::capture_bound(
+            directory.path(),
+            &products,
+            &interfaces,
+            &[],
+            &[],
+            &descriptors,
+            &selection.bindings,
+            &edges
+        )
+        .is_err());
+        std::fs::write(&canonical_path, canonical_bytes).unwrap();
         let restore = || {
             recovered
                 .context_with_graph_selection(&selection, &roles, vec![])
