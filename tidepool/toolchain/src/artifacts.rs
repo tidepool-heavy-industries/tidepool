@@ -8963,9 +8963,20 @@ mod constructor_identity_tests {
                     dc.qualified_name = Some("another.display.alias".into())
                 });
             }
-            let replacement = write_metadata(&alternate, &MetaWarnings::default()).unwrap();
+            let changed_warnings = if changed_table {
+                warnings.clone()
+            } else {
+                MetaWarnings::default()
+            };
+            let replacement = write_metadata(&alternate, &changed_warnings).unwrap();
             assert_ne!(original, replacement);
-            tidepool_repr::serial::read_metadata_for_program(&replacement, &target).unwrap();
+            let (replacement_table, replacement_warnings) =
+                tidepool_repr::serial::read_metadata_for_program(&replacement, &target).unwrap();
+            assert_eq!(replacement_table == table, !changed_table);
+            assert_eq!(
+                replacement_warnings.captured_type == warnings.captured_type,
+                changed_table
+            );
             std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
             let (captured, decoded, observed) = output.decode_metadata().unwrap();
             assert!(Arc::ptr_eq(&target, output.target()));
