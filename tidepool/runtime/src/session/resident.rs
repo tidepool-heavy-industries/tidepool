@@ -11076,6 +11076,63 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn ordinary_turn_admission_resolves_once_for_owned_startup_and_sync_execution() {
+        use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
+        for startup in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut includes = effects.include_paths().to_vec();
+            includes.push(root.path().to_path_buf());
+            let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+                run_turn(
+                    TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: "(42 :: Int)",
+                        templates: &templates,
+                        include: &includes,
+                        session_root: root.path(),
+                        inject_modules: &[],
+                        gen: 1,
+                        verdict: None,
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+            }).unwrap() else {
+                panic!("expected the real compiler's expression target");
+            };
+            let group_count = compiled.certification.as_ref().unwrap().groups.len();
+            let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, None);
+            let before = session.state.certified_resolution_work();
+            // No CompiledTurn or borrowed code survives this transfer. The
+            // admission and installed custody must retain its original inputs.
+            let code = compiled.into_code();
+            let outcome = tidepool_testing::with_settlement(|settlement| {
+                if startup {
+                    let entry = session.prepare_startup_entry(code).unwrap();
+                    session.run_startup_entry(entry, settlement)
+                } else {
+                    session.run_with_sites("owned ordinary admission", code, settlement)
+                }
+            }).unwrap();
+            let ResidentOutcome::Completed { result, .. } = outcome else {
+                panic!("the pure ordinary target must complete");
+            };
+            assert_eq!(result.to_json(), serde_json::json!(42));
+            let after = session.state.certified_resolution_work();
+            assert_eq!(after.0 - before.0, 1);
+            assert_eq!(after.1 - before.1, group_count);
+        }
+    }
+
+    #[test]
     fn certified_install_fences_hidden_binding_replacement() {
         use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
         use tidepool_testing::effect_surface::TestEffectSurface;
