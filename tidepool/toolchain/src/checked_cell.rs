@@ -5715,7 +5715,7 @@ mod tests {
             let source = ArtifactBindingNode::Group(group);
             assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
                 && matches!(to, ArtifactBindingNode::Artifact(binding)
-                        if binding.artifact() == binding_source)
+                        if binding.artifact == binding_source)
                 && *edge == ArtifactDependency::Interface));
             assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
                 && matches!(to, ArtifactBindingNode::Artifact(binding)
