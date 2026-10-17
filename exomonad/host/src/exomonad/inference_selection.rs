@@ -152,6 +152,11 @@ mod tests {
             legacy.reasoning,
             Reasoning::for_backend(Backend::OpenAIPlan, "medium").unwrap()
         );
+        let omitted: AgentInferenceDefaults = toml::from_str("model='gpt-6.1-sol'").unwrap();
+        assert_eq!(
+            omitted.reasoning,
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow)
+        );
         let default = AgentInferenceDefaults::deepseek_default();
         let text = toml::to_string(&default).unwrap();
         assert!(text.contains("deepseek"));

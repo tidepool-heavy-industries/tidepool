@@ -1120,6 +1120,30 @@ tidepool_rust_binary(
 )
 
 tidepool_rust_test_cases(
+    name = "host_inference_config_tests",
+    binary = ":exomonad_host_unit_tests",
+    exact_tests = [
+        "exomonad::inference_selection::tests::legacy_config_remains_openai_and_new_config_is_explicit",
+        "exomonad::inference_selection::tests::qualified_config_refuses_cross_backend_and_legacy_effort_ambiguity",
+        "exomonad::tests::retained_launch_selection_preserves_legacy_openai_without_rewriting",
+        "exomonad::tests::launch_version_and_selection_shape_must_agree",
+        "actor_host::display_output::transport_admission_tests::preadmitted_transport_requires_unopened_store_and_preserves_existing_state",
+        "actor_host::display_output::transport_admission_tests::preadmitted_transport_does_not_treat_uninspectable_store_as_fresh",
+        "actor_host::cell_model::tests::cell_model_policy_resolves_only_the_fixed_backend_before_provider_work",
+        "actor_host::run_auth::tests::injected_contract_refuses_backend_and_limits_before_startup_work",
+    ],
+    expected_count = 8,
+    ignored = False,
+    jobs = 1,
+    timeout = 30,
+    test_rule_timeout_ms = 300000,
+    resources = [
+        "toolchains//:exomonad_runtime_tools",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "facade_source_revision_tests",
     binary = ":exomonad_host_unit_tests",
     exact_tests = [

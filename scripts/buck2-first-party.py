@@ -1296,6 +1296,16 @@ def facade_test_cases(binary):
                                + ["//bridge/atomic-write:directory_fault_shared"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("host_inference_config_tests", [
+            "exomonad::inference_selection::tests::legacy_config_remains_openai_and_new_config_is_explicit",
+            "exomonad::inference_selection::tests::qualified_config_refuses_cross_backend_and_legacy_effort_ambiguity",
+            "exomonad::tests::retained_launch_selection_preserves_legacy_openai_without_rewriting",
+            "exomonad::tests::launch_version_and_selection_shape_must_agree",
+            "actor_host::display_output::transport_admission_tests::preadmitted_transport_requires_unopened_store_and_preserves_existing_state",
+            "actor_host::display_output::transport_admission_tests::preadmitted_transport_does_not_treat_uninspectable_store_as_fresh",
+            "actor_host::cell_model::tests::cell_model_policy_resolves_only_the_fixed_backend_before_provider_work",
+            "actor_host::run_auth::tests::injected_contract_refuses_backend_and_limits_before_startup_work",
+        ], {}, {}, ["toolchains//:exomonad_runtime_tools"], False, False, 30),
         ("facade_source_revision_tests", [
             "exomonad::source::tests::missing_active_record_is_reconciled_from_the_published_link",
             "exomonad::source::tests::corrupt_published_root_indexes_remain_visibly_unavailable",

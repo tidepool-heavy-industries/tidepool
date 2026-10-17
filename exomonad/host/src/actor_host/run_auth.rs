@@ -90,3 +90,32 @@ impl Auth for RunAuth {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn injected_contract_refuses_backend_and_limits_before_startup_work() {
+        let mut settings: crate::exomonad::EmbeddedLaunchConfig = toml::from_str(
+            "provider='deepseek'\nlisten='127.0.0.1:0'\nasset_root='/unused'\ncontext_capacity_tokens=4096\n",
+        ).unwrap();
+        let auth = RunAuth::DeepSeek(
+            DeepSeekAuth::from_reference(
+                CredentialReference::Env {
+                    name: "DEEPSEEK_TEST_REFERENCE_NOT_ACCESSED".into(),
+                },
+                settings.inference_limits.resolve(settings.provider),
+            )
+            .unwrap(),
+        );
+        // The production constructor and admission check do not retrieve the key.
+        auth.validate_for(&settings).unwrap();
+        settings.inference_limits.max_inflight = Some(5);
+        assert!(auth.validate_for(&settings).is_err());
+        settings.inference_limits.max_inflight = None;
+        auth.validate_for(&settings).unwrap();
+        settings.provider = exomonad_actor::Backend::OpenAIPlan;
+        assert!(auth.validate_for(&settings).is_err());
+    }
+}
