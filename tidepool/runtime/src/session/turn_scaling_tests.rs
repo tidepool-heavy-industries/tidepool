@@ -983,15 +983,13 @@ pub(super) fn assert_compiler_work(
         for (index, item) in program.items().iter().enumerate() {
             let native = item.native().unwrap();
             let target = native.target_owned();
-            let (table, _) =
-                tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
-                    .unwrap();
+            let table = native.table();
             let turn: ciborium::value::Value =
                 ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
             let fields = turn.as_array().unwrap()[1].as_array().unwrap();
             let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
             let context = native
-                .original_execution_context(&target, &table, &sites)
+                .original_execution_context(&target, table, &sites)
                 .unwrap();
             // The entry stub can call a selected original helper that demands
             // a live capture. Inspect that sealed group closure, not the
@@ -1659,14 +1657,13 @@ where
             first_native.typed_entry().unwrap().entry(),
             second.native().unwrap().typed_entry().unwrap().entry()
         );
-        let (table, _) =
-            tidepool_repr::serial::read_metadata(first.native_metadata_bytes().unwrap()).unwrap();
+        let table = first_native.table();
         let turn: ciborium::value::Value =
             ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
         let fields = turn.as_array().unwrap()[1].as_array().unwrap();
         let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
         let context = first_native
-            .original_execution_context(&first_native.target_owned(), &table, &sites)
+            .original_execution_context(&first_native.target_owned(), table, &sites)
             .unwrap();
         let requirements = context
             .artifact_view()
@@ -2842,16 +2839,14 @@ fn generic_program_admission_preserves_delayed_capture_prefix() {
             for index in [0, 1, 2, 5] {
                 let item = &program.items()[index];
                 let native = item.native().unwrap();
-                let (table, _) =
-                    tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
-                        .unwrap();
+                let table = native.table();
                 let turn: ciborium::value::Value =
                     ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
                 let fields = turn.as_array().unwrap()[1].as_array().unwrap();
                 let sites =
                     tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
                 let context = native
-                    .original_execution_context(&native.target_owned(), &table, &sites)
+                    .original_execution_context(&native.target_owned(), table, &sites)
                     .unwrap();
                 let entry = native.typed_entry().unwrap();
                 let requirements = context
