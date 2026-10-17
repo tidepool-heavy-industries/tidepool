@@ -1362,12 +1362,11 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
 -- typed owner and seal select already captured bytes, never a filesystem read.
 bindCapturedPurposeValues :: ExactScope -> RequestOriginalInputs -> Either String RequestOriginalInputs
 bindCapturedPurposeValues scope inputs = do
+  let AdmittedScopeInputs _ admitted _ _ _ = scopeInputs scope
   aliases <- forM (scopeValueInterfaces scope) $ \value -> do
     let owner = (exactUnit value,exactModule value)
-        candidates = [iface | (iface,_,_) <- scopeInterfaces scope
-          , (exactUnit iface,exactModule iface) == owner]
-    case (Map.lookup owner (scopeInterfaceEvidence scope),candidates) of
-      (Just CheckedValueEvidence,[iface])
+    case Map.lookup owner admitted of
+      Just (ScopeInterfaceInput (iface,_,_) CheckedValueEvidence)
         | exactSha256 iface == exactSha256 value ->
             Right (exactPath value,exactPath iface,exactSha256 value)
       _ -> Left "checked purpose value differs from its captured value interface owner"
