@@ -145,6 +145,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'exomonad/host/src/actor_host/fixtures/saved-account-test.json',
         'exomonad/host/src/actor_host/fixtures/jev-recording-reload.hs',
         'exomonad/host/src/actor_host/fixtures/startup_persona_refresh.hs',
+        'exomonad/host/src/actor_host/fixtures/startup_persona_web_selection.hs',
         'exomonad/host/src/actor_host/fixtures/coherent_reload_after_rejection.hs',
         'exomonad/host/src/actor_host/fixtures/coherent_reload_bind_a.hs',
         'exomonad/host/src/actor_host/fixtures/coherent_reload_late_a.hs',
