@@ -2977,6 +2977,63 @@ impl CertifiedSourceSelection {
         Ok(())
     }
 
+    /// Query the physical receipt's exact resolver choice for one demanded key.
+    /// Explicit issuer roots qualify retained availability; they are never
+    /// reconstructed from a broader inventory or from completeness ranking.
+    pub(crate) fn native_group_candidates(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+    ) -> BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
+        use crate::artifact_inventory::ArtifactBindingNode;
+        let qualified = self
+            .native_original_requirements()
+            .flat_map(|proof| {
+                proof
+                    .selection
+                    .snapshot()
+                    .roots
+                    .keys()
+                    .filter_map(move |root| match root {
+                        ArtifactBindingNode::Group(group)
+                            if key.artifact == proof.original
+                                && group.binding.artifact() == key.artifact
+                                && group.original_ordinal == key.original_ordinal =>
+                        {
+                            Some(*group)
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        if !qualified.is_empty() {
+            return qualified;
+        }
+        self.native_selections()
+            .flat_map(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .flat_map(|offer| offer.group_bindings(key))
+                    .collect::<BTreeSet<_>>(),
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
+                    .iter()
+                    .flat_map(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .copied()
+                    })
+                    .filter(|group| {
+                        group.binding.artifact() == key.artifact
+                            && group.original_ordinal == key.original_ordinal
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// A completed fresh product owns its body. Retained request bodies are
     /// limited to their closed availability and exact dependency proofs.
     pub(crate) fn permits_native_group(

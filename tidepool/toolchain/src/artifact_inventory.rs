@@ -2539,6 +2539,7 @@ pub(crate) struct BoundArtifactSelection {
     captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
+    native_source: crate::certified_products::CertifiedSourceSelection,
 }
 
 impl BoundArtifactSelection {
@@ -2760,41 +2761,6 @@ impl ArtifactInventory {
                 .or_default()
                 .insert(*group);
         }
-        // Body offers narrow retained custody without choosing among issuers.
-        let mut offered = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-        for proof in selection.native_original_requirements() {
-            for group in &proof.selection.graph_selection().native_groups {
-                offered
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
-            }
-        }
-        groups.extend(offered);
-        // The issuing role may qualify a group among several retained bindings.
-        // Availability by itself leaves ambiguity intact until demand.
-        let mut qualified = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
-        for requirement in selection.native_original_requirements() {
-            for root in requirement.selection.snapshot().roots.keys() {
-                let ArtifactBindingNode::Group(group) = root else {
-                    continue;
-                };
-                if group.binding.artifact() != requirement.original {
-                    continue;
-                }
-                qualified
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
-            }
-        }
-        groups.extend(qualified);
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -2805,6 +2771,7 @@ impl ArtifactInventory {
             captured_facts,
             materializations,
             groups,
+            native_source: selection.clone(),
         })
     }
 
@@ -2928,14 +2895,21 @@ impl ArtifactInventory {
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let issued_nodes = fixed
-                .groups
-                .get(&group)
-                .into_iter()
-                .flatten()
-                .copied()
-                .map(InventoryNodeKey::Group)
-                .collect::<imbl::OrdSet<_>>();
+            let recorded = fixed.native_source.native_group_candidates(group);
+            let issued_nodes = if recorded.is_empty() {
+                fixed
+                    .groups
+                    .get(&group)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect()
+            } else {
+                recorded
+            }
+            .into_iter()
+            .map(InventoryNodeKey::Group)
+            .collect::<imbl::OrdSet<_>>();
             let issued = NativeSelectionIndex::build(&state, &issued_nodes);
             let carrier = if fixed
                 .view
