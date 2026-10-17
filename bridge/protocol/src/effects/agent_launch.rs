@@ -234,20 +234,6 @@ fn spec_type(
 ) -> TypeDef {
     let mut definition = sum_type(name, Some(rust), variants);
     definition.json = JsonInstance::Generic;
-    if name != "Model" {
-        definition.derives = WireDerives(&[
-            WireDerive::FromHaskell,
-            WireDerive::ToHaskell,
-            WireDerive::Clone,
-            WireDerive::Copy,
-            WireDerive::Debug,
-            WireDerive::PartialEq,
-            WireDerive::Eq,
-            WireDerive::Serialize,
-            WireDerive::Deserialize,
-        ]);
-        return definition;
-    }
     definition
 }
 
