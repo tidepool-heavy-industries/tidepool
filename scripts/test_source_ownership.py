@@ -148,6 +148,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_spawn.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs',
+        'exomonad/host/src/actor_host/fixtures/deepseek_offline_command_proof.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_score_tests.rs',

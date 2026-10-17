@@ -17,7 +17,7 @@ use harness::transport::{
     ResponsesProtocol, ResponsesRoute, ResponsesTurn, TransportError,
 };
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use tokio::sync::{mpsc, oneshot};
@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 const SPAWN: &str = include_str!("fixtures/deepseek_offline_spawn.hs");
 const JOIN: &str = include_str!("fixtures/deepseek_offline_join.hs");
 const CLEANUP: &str = include_str!("fixtures/deepseek_offline_cleanup.hs");
+const COMMAND_PROOF: &str = include_str!("fixtures/deepseek_offline_command_proof.hs");
 const INITIAL: &str = include_str!("fixtures/deepseek_offline_initial_score.rs");
 const REPAIRED: &str = include_str!("fixtures/deepseek_offline_repaired_score.rs");
 const TESTS: &str = include_str!("fixtures/deepseek_offline_score_tests.rs");
@@ -289,6 +290,9 @@ struct Driver {
     issued: mpsc::UnboundedReceiver<IssuedRequest>,
     pending_http: Vec<HttpRequest>,
     pending_rounds: VecDeque<Round>,
+    observed_bodies: HashMap<Vec<u8>, RequestId>,
+    observed_requests: HashSet<RequestId>,
+    captured_bodies: HashSet<Vec<u8>>,
 }
 
 impl Driver {
@@ -310,13 +314,26 @@ impl Driver {
                 .unwrap()
                 .expect("actual native request within existing cold settlement budget")
                 .expect("native observation remains open");
+            assert!(
+                self.observed_requests.insert(issued.request.clone()),
+                "a prepared request is forwarded only once"
+            );
+            assert!(
+                self.observed_bodies
+                    .insert(issued.wire.clone(), issued.request.clone())
+                    .is_none(),
+                "this bounded script requires a unique wire body per actual issued request"
+            );
             let http = loop {
-                if let Some(index) = self
+                let matches = self
                     .pending_http
                     .iter()
-                    .position(|http| http.bytes == issued.wire)
-                {
-                    break self.pending_http.remove(index);
+                    .enumerate()
+                    .filter_map(|(index, http)| (http.bytes == issued.wire).then_some(index))
+                    .collect::<Vec<_>>();
+                assert!(matches.len() <= 1, "ambiguous captured HTTP body");
+                if let Some(index) = matches.first() {
+                    break self.pending_http.remove(*index);
                 }
                 let request = host
                     .while_host_running(tokio::time::timeout(
@@ -327,6 +344,10 @@ impl Driver {
                     .unwrap()
                     .expect("issued native client reaches the local listener")
                     .expect("HTTP fixture remains open");
+                assert!(
+                    self.captured_bodies.insert(request.bytes.clone()),
+                    "a second byte-identical HTTP request cannot select an issued identity"
+                );
                 self.pending_http.push(request);
             };
             let graph = host.context.forest.inspect_host_graph().await.unwrap();
@@ -398,11 +419,11 @@ fn canonical(
         .unwrap()
         .unwrap();
     assert_eq!(next.output(&operation.call.0), projected);
-    let claims = host.runtime.store().claims_on(&operation.request).unwrap();
-    let claims = claims
-        .iter()
-        .filter(|claim| claim.operation == *operation)
-        .collect::<Vec<_>>();
+    let claims = host
+        .runtime
+        .store()
+        .claims_for_operation(operation)
+        .unwrap();
     assert_eq!(claims.len(), 1, "one exact claim for the original effect");
     assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
     let envelope: Value =
@@ -482,23 +503,6 @@ fn configured_workspace(config: &mut ActorHostConfig, auth: DeepSeekAuth) {
     );
     config.inference_auth = Some(RunAuth::DeepSeek(auth));
     config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
-    let owner = exomonad_node::command_resources::CommandResources::delegated(
-        exomonad_node::command_resources::CommandResourcePolicy {
-            general_bytes: 2 * exomonad_node::command_resources::GIB,
-            protected_bytes: 0,
-            swap_max_bytes: 0,
-            ..Default::default()
-        },
-    )
-    .expect("the test owns delegated production command resources");
-    config.command_resources = Some(
-        exomonad_node::command_resources::CommandResourceClient::local(
-            owner,
-            exomonad_node::command_resources::CommandRunIdentity::new("offline-host".into(), 1)
-                .unwrap(),
-        )
-        .unwrap(),
-    );
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
         project.defaults.model = config.model.clone();
         project.defaults.reasoning = config.reasoning.clone();
@@ -542,6 +546,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
     })
     .unwrap();
     let auth = DeepSeekAuth::from_admission(admission).unwrap();
+    let expected_contract = auth.admission().unwrap().contract().clone();
     let mut settings = hosted_test_settings(&files, 3);
     settings.provider = exomonad_actor::Backend::DeepSeek;
     settings.credential_file = key_path;
@@ -552,8 +557,16 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
     let (issued, received) = mpsc::unbounded_channel();
     let host = HostedTestRuntime::start_with_factory(
         &settings,
+        Some(exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 2 * exomonad_node::command_resources::GIB,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        }),
         |config| configured_workspace(config, auth),
         move |runtime, _| {
+            assert_eq!(runtime.inference_auth().admission().unwrap().contract(), &expected_contract,
+                "the fresh host must retain the exact synthetic local endpoint and credential source before any HTTP client dispatch");
             Arc::new(ObservedClient {
                 client: ResponsesClient::new(runtime.inference_auth().clone()),
                 issued,
@@ -567,6 +580,9 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
         issued: received,
         pending_http: vec![],
         pending_rounds: VecDeque::new(),
+        observed_bodies: HashMap::new(),
+        observed_requests: HashSet::new(),
+        captured_bodies: HashSet::new(),
     };
     host.run_scenario(|host| Box::pin(async move {
         let root_actor = host.context.actor.identity();
@@ -648,7 +664,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
             .expect("the actual rustc and test process succeed before the next inference");
         let command_binding = command_success(host, &compile, &root);
         let proof = issued_call(&root, "offline-command-proof");
-        root.cell("offline-command-proof", &format!("terminal <- Cmd.await {command_binding}\ndisplay (Cmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean)"));
+        root.cell("offline-command-proof", &format!("let offlineRustJob = {command_binding}\n{COMMAND_PROOF}"));
         let root = driver.next(host, root_actor).await;
         display_true(host, &proof, &root);
         let cleanup = issued_call(&root, "offline-workers-stop");
@@ -669,6 +685,7 @@ async fn hosted_deepseek_edits_tests_and_joins_two_workers() {
         }
         assert!(driver.pending_http.is_empty());
         assert!(driver.pending_rounds.is_empty());
+        assert_eq!(driver.observed_bodies.len(), driver.captured_bodies.len());
         root.finish("offline-hosted-final");
         driver.http.finish().await;
     })).await;

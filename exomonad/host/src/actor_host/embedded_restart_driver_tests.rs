@@ -462,6 +462,7 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
         let (failure, observed_failure) = oneshot::channel();
         let host = HostedTestRuntime::start_with_factory(
             &settings,
+            None,
             |config| {
                 retained_config(config, repository.path(), &run_root);
                 configure_command_path(config);
@@ -675,6 +676,7 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
     let provider_calls = Arc::clone(&calls);
     let host = HostedTestRuntime::start_with_factory(
         &settings,
+        None,
         |_| {},
         move |runtime, _| {
             Arc::new(InterruptedStream {

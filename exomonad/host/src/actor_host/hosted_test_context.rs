@@ -1535,6 +1535,7 @@ impl HostedTestRuntime {
 
     pub(super) async fn start_with_factory(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
+        command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
                 &Arc<embedded_harness::EmbeddedHarnessRuntime>,
@@ -1554,7 +1555,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             None,
-            None,
+            command_policy,
             None,
         )
         .await

@@ -535,6 +535,7 @@ rust_filegroup(
         "src/actor_host/embedded_reflect.rs": "exomonad/host/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "exomonad/host/src/actor_host/embedded_service.rs",
         "src/actor_host/fixtures/deepseek_offline_cleanup.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs",
+        "src/actor_host/fixtures/deepseek_offline_command_proof.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_command_proof.hs",
         "src/actor_host/fixtures/deepseek_offline_initial_score.rs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs",
         "src/actor_host/fixtures/deepseek_offline_join.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs",
         "src/actor_host/fixtures/deepseek_offline_repaired_score.rs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs",
@@ -812,6 +813,7 @@ rust_filegroup(
         "src/actor_host/fixtures/context_acceptance_idle_request.hs": "exomonad/host/src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "exomonad/host/src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "src/actor_host/fixtures/deepseek_offline_cleanup.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs",
+        "src/actor_host/fixtures/deepseek_offline_command_proof.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_command_proof.hs",
         "src/actor_host/fixtures/deepseek_offline_initial_score.rs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs",
         "src/actor_host/fixtures/deepseek_offline_join.hs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs",
         "src/actor_host/fixtures/deepseek_offline_repaired_score.rs": "exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs",
@@ -1083,6 +1085,7 @@ tidepool_rust_binary(
         "exomonad/host/src/actor_host/fixtures/coherent_reload_work_b.hs",
         "exomonad/host/src/actor_host/fixtures/coherent_reload_work_invalid.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs",
+        "exomonad/host/src/actor_host/fixtures/deepseek_offline_command_proof.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs",
@@ -2756,6 +2759,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/context_acceptance_idle_request.hs": "src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "exomonad/host/src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs": "src/actor_host/fixtures/deepseek_offline_cleanup.hs",
+        "exomonad/host/src/actor_host/fixtures/deepseek_offline_command_proof.hs": "src/actor_host/fixtures/deepseek_offline_command_proof.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_initial_score.rs": "src/actor_host/fixtures/deepseek_offline_initial_score.rs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs": "src/actor_host/fixtures/deepseek_offline_join.hs",
         "exomonad/host/src/actor_host/fixtures/deepseek_offline_repaired_score.rs": "src/actor_host/fixtures/deepseek_offline_repaired_score.rs",
@@ -3709,6 +3713,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f646565707365656b5f6f66666c696e655f636c65616e75702e6873",
     src = "src/actor_host/fixtures/deepseek_offline_cleanup.hs",
     out = "deepseek_offline_cleanup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f646565707365656b5f6f66666c696e655f636f6d6d616e645f70726f6f662e6873",
+    src = "src/actor_host/fixtures/deepseek_offline_command_proof.hs",
+    out = "deepseek_offline_command_proof.hs",
     visibility = ["PUBLIC"],
 )
 

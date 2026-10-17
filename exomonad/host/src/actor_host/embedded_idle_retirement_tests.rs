@@ -229,6 +229,7 @@ async fn start_host(
     let (rounds, received) = mpsc::unbounded_channel();
     let host = HostedTestRuntime::start_with_factory(
         &settings,
+        None,
         |_| {},
         move |runtime, _| {
             runtime

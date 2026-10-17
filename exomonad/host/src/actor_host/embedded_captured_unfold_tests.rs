@@ -943,6 +943,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     let transport_slot = prepared_transport.clone();
     let host = super::hosted_test_context::HostedTestRuntime::start_with_factory(
         &settings,
+        None,
         |_| {},
         move |runtime, config| {
             let root_origin = ConversationIdentity::Embedded {
@@ -2349,6 +2350,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let prepared = slot.clone();
     let host = super::hosted_test_context::HostedTestRuntime::start_with_factory(
         &settings,
+        None,
         |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(&authored).unwrap();
