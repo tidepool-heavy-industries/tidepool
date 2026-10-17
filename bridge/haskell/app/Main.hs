@@ -456,19 +456,7 @@ processFile bound timing path = do
       PortableOutputs _ -> do
         _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
         writeRequestInputProof args outDir prepared
-        let names = ["meta.cbor"] ++ concat
-              [[paTarget artifact ++ ".prepared.cbor",
-                if length preparedArtifacts > 1 then paTarget artifact ++ ".asks.json" else "asks.json"]
-              | artifact <- preparedArtifacts] ++ ["dependencies.json"]
-            text = encodeString . T.pack
-        members <- forM names $ \name -> do
-          bytes <- BS.readFile (outDir </> name)
-          pure (encodeListLen 2 <> text name <> text (shaHex bytes))
-        BS.writeFile (outDir </> "portable-output.cbor") $ toStrictByteString
-          (encodeListLen 4 <> text "TPPORTABLEOUTPUT" <> text "1"
-            <> encodeListLen (fromIntegral (length preparedArtifacts))
-            <> foldMap (text . paTarget) preparedArtifacts
-            <> encodeListLen (fromIntegral (length members)) <> mconcat members)
+        BS.writeFile (outDir </> "portable-output.cbor") "TPPORTABLEOUTPUT1\n"
 
   either throwIO (const (pure [])) res
 

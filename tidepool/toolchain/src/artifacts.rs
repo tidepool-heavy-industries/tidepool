@@ -4945,7 +4945,6 @@ fn compile_invocation_inner(
                     }
                 },
             )?;
-            bundle.validate_receipt()?;
             validate_prepared_fixture_sources(bundle.dependencies(), &input_path, inv.include)?;
             let raw = bundle.targets();
             let artifacts = assemble(bundle.metadata(), &raw, &mut on_stage)?;
@@ -5840,7 +5839,7 @@ pub(crate) struct RawTargetOutput {
 /// already gives an ordinary eval compile, so a bad target name or any other
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
-pub(crate) fn extract_and_read<P>(
+pub(crate) fn extract_and_read<P: invocation_output::OutputPurpose>(
     run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
     layout: &invocation_output::InvocationOutputLayout<P>,

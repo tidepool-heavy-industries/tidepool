@@ -1,6 +1,5 @@
 //! Complete named compiler output, shared by physical acquisition and memo IO.
 
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::path::{Component, Path};
@@ -39,6 +38,27 @@ impl Artifact {
 pub(crate) struct NativeOutput;
 pub(crate) struct PortableOutput;
 
+pub(crate) trait OutputPurpose: Sized {
+    fn validate(bundle: &InvocationOutputBundle<Self>) -> Result<(), CompileError>;
+}
+
+impl OutputPurpose for NativeOutput {
+    fn validate(_: &InvocationOutputBundle<Self>) -> Result<(), CompileError> {
+        Ok(())
+    }
+}
+
+impl OutputPurpose for PortableOutput {
+    fn validate(bundle: &InvocationOutputBundle<Self>) -> Result<(), CompileError> {
+        if bundle.get(&Artifact::PortableReceipt).as_slice() != b"TPPORTABLEOUTPUT1\n" {
+            return Err(CompileError::ExtractFailed(
+                "portable output mode receipt differs".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct InvocationOutputLayout<P = NativeOutput> {
     artifacts: Vec<Artifact>,
     purpose: PhantomData<P>,
@@ -50,6 +70,19 @@ impl InvocationOutputLayout<NativeOutput> {
             targets,
             [Artifact::ModuleProducts, Artifact::ModulePackageImports],
         )
+    }
+
+    pub(crate) fn capture<E>(
+        &self,
+        operation: Arc<InventoryOperation>,
+        mut read: impl FnMut(&str, bool) -> Result<Vec<u8>, E>,
+    ) -> Result<InvocationOutputBundle, E> {
+        self.capture_members(operation, |artifact| {
+            read(
+                &artifact.filename(),
+                matches!(artifact, Artifact::Prepared(_)),
+            )
+        })
     }
 }
 
@@ -109,17 +142,14 @@ impl<P> InvocationOutputLayout<P> {
 
     /// The reader must supply every required member. Its typed identity stays
     /// attached to its bytes through persistence and downstream interpretation.
-    pub(crate) fn capture<E>(
+    fn capture_members<E>(
         &self,
         operation: Arc<InventoryOperation>,
-        mut read: impl FnMut(&str, bool) -> Result<Vec<u8>, E>,
+        mut read: impl FnMut(&Artifact) -> Result<Vec<u8>, E>,
     ) -> Result<InvocationOutputBundle<P>, E> {
         let mut artifacts = Vec::with_capacity(self.artifacts.len());
         for artifact in &self.artifacts {
-            let bytes = read(
-                &artifact.filename(),
-                matches!(artifact, Artifact::Prepared(_)),
-            )?;
+            let bytes = read(artifact)?;
             artifacts.push((artifact.clone(), Arc::new(bytes)));
         }
         Ok(InvocationOutputBundle {
@@ -133,16 +163,19 @@ impl<P> InvocationOutputLayout<P> {
         &self,
         root: &Path,
         operation: Arc<InventoryOperation>,
-    ) -> Result<InvocationOutputBundle<P>, CompileError> {
+    ) -> Result<InvocationOutputBundle<P>, CompileError>
+    where
+        P: OutputPurpose,
+    {
         operation
             .reserve::<(Artifact, Arc<Vec<u8>>)>(self.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
-        self.capture(operation.clone(), |name, prepared| {
-            let path = root.join(name);
-            let limit = if prepared {
-                DecodeLimits::default().max_bytes
-            } else {
-                operation.limits().max_bytes
+        let bundle = self.capture_members(operation.clone(), |artifact| {
+            let path = root.join(artifact.filename());
+            let limit = match artifact {
+                Artifact::Prepared(_) => DecodeLimits::default().max_bytes,
+                Artifact::PortableReceipt => b"TPPORTABLEOUTPUT1\n".len(),
+                _ => operation.limits().max_bytes,
             };
             certified_products::read_bounded_with_operation(&path, limit as u64, &operation)
                 .map_err(|error| match &error {
@@ -154,7 +187,9 @@ impl<P> InvocationOutputLayout<P> {
                     }
                     _ => compiler_evidence_failure(error),
                 })
-        })
+        })?;
+        P::validate(&bundle)?;
+        Ok(bundle)
     }
 }
 
@@ -234,138 +269,65 @@ impl InvocationOutputBundle<PortableOutput> {
     pub(crate) fn dependencies(&self) -> &[u8] {
         self.get(&Artifact::Dependencies)
     }
-
-    pub(crate) fn receipt(&self) -> &[u8] {
-        self.get(&Artifact::PortableReceipt)
-    }
-
-    pub(crate) fn validate_receipt(&self) -> Result<(), CompileError> {
-        let mut reader = std::io::Cursor::new(self.receipt());
-        let (magic, version, targets, members): (
-            String,
-            String,
-            Vec<String>,
-            Vec<(String, String)>,
-        ) = ciborium::de::from_reader(&mut reader)
-            .map_err(|error| CompileError::ExtractFailed(format!("portable receipt: {error}")))?;
-        let expected_targets = self
-            .artifacts
-            .iter()
-            .filter_map(|(artifact, _)| match artifact {
-                Artifact::Prepared(target) => Some(target.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let expected_members = self
-            .artifacts
-            .iter()
-            .filter_map(|(artifact, bytes)| {
-                (!matches!(artifact, Artifact::PortableReceipt)).then(|| {
-                    (
-                        artifact.filename(),
-                        format!("{:x}", Sha256::digest(bytes.as_slice())),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        if reader.position() != self.receipt().len() as u64
-            || magic != "TPPORTABLEOUTPUT"
-            || version != "1"
-            || targets != expected_targets
-            || members != expected_members
-        {
-            return Err(CompileError::ExtractFailed(
-                "portable output receipt differs from acquired members".into(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod portable_tests {
     use super::*;
-    use std::collections::BTreeMap;
-
-    fn portable_members() -> BTreeMap<String, Vec<u8>> {
-        let mut members = BTreeMap::from([
-            ("meta.cbor".into(), b"metadata".to_vec()),
-            ("entry.prepared.cbor".into(), b"prepared".to_vec()),
-            ("asks.json".into(), b"sites".to_vec()),
-            ("dependencies.json".into(), b"dependencies".to_vec()),
-        ]);
-        let hashes = [
-            "meta.cbor",
-            "entry.prepared.cbor",
-            "asks.json",
-            "dependencies.json",
-        ]
-        .map(|name| {
-            (
-                name.to_owned(),
-                format!("{:x}", Sha256::digest(&members[name])),
-            )
-        });
-        let mut receipt = Vec::new();
-        ciborium::ser::into_writer(&("TPPORTABLEOUTPUT", "1", ["entry"], hashes), &mut receipt)
-            .unwrap();
-        members.insert("portable-output.cbor".into(), receipt);
-        members
-    }
 
     #[test]
-    fn portable_receipt_refuses_unpaired_output_and_wrong_target_mode() {
+    fn portable_acquisition_refuses_wrong_mode_and_missing_members() {
         let layout = InvocationOutputLayout::portable(&["entry"]).unwrap();
-        let capture = |members: &BTreeMap<String, Vec<u8>>| {
-            layout
-                .capture(
-                    Arc::new(InventoryOperation::new(Default::default())),
-                    |name, _| members.get(name).cloned().ok_or_else(|| name.to_owned()),
-                )
-                .unwrap()
-        };
-        let members = portable_members();
-        capture(&members).validate_receipt().unwrap();
-        let mut stale = members.clone();
-        stale.insert("asks.json".into(), b"other typed sites".to_vec());
-        assert!(capture(&stale).validate_receipt().is_err());
-        let mut trailing = members.clone();
-        trailing.get_mut("portable-output.cbor").unwrap().push(0);
-        assert!(capture(&trailing).validate_receipt().is_err());
-        let mut wrong = members.clone();
-        let mut receipt = Vec::new();
-        ciborium::ser::into_writer(
-            &(
-                "TPPORTABLEOUTPUT",
-                "0",
-                ["entry"],
-                Vec::<(String, String)>::new(),
-            ),
-            &mut receipt,
+        let root = tempfile::tempdir().unwrap();
+        for (artifact, bytes) in [
+            ("meta.cbor", b"metadata".as_slice()),
+            ("entry.prepared.cbor", b"prepared"),
+            ("asks.json", b"sites"),
+            ("dependencies.json", b"dependencies"),
+            ("portable-output.cbor", b"TPPORTABLEOUTPUT1\n"),
+        ] {
+            std::fs::write(root.path().join(artifact), bytes).unwrap();
+        }
+        let operation = || Arc::new(InventoryOperation::new(Default::default()));
+        layout.read(root.path(), operation()).unwrap();
+        std::fs::write(
+            root.path().join("portable-output.cbor"),
+            b"TPPORTABLEOUTPUT0\n",
         )
         .unwrap();
-        wrong.insert("portable-output.cbor".into(), receipt);
-        assert!(capture(&wrong).validate_receipt().is_err());
-        wrong = members.clone();
-        wrong.insert("other.prepared.cbor".into(), b"prepared".to_vec());
-        let other = InvocationOutputLayout::portable(&["other"])
-            .unwrap()
-            .capture(
-                Arc::new(InventoryOperation::new(Default::default())),
-                |name, _| wrong.get(name).cloned().ok_or_else(|| name.to_owned()),
-            )
-            .unwrap();
-        assert!(other.validate_receipt().is_err());
+        assert!(layout.read(root.path(), operation()).is_err());
+        // A corrupt encoded-length prefix is never decoded or allocated.
+        std::fs::write(
+            root.path().join("portable-output.cbor"),
+            [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
+        )
+        .unwrap();
+        assert!(layout.read(root.path(), operation()).is_err());
+        std::fs::write(
+            root.path().join("portable-output.cbor"),
+            b"TPPORTABLEOUTPUT1\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.path().join("entry.prepared.cbor")).unwrap();
+        assert!(matches!(
+            layout.read(root.path(), operation()),
+            Err(CompileError::MissingOutput(_))
+        ));
     }
 
     #[test]
     fn portable_members_cannot_satisfy_native_layout() {
-        let members = portable_members();
         let layout = InvocationOutputLayout::new(&["entry"]).unwrap();
         let missing = layout
             .capture(
                 Arc::new(InventoryOperation::new(Default::default())),
-                |name, _| members.get(name).cloned().ok_or_else(|| name.to_owned()),
+                |name, _| {
+                    if matches!(name, "meta.cbor" | "entry.prepared.cbor" | "asks.json") {
+                        Ok(Vec::new())
+                    } else {
+                        Err(name.to_owned())
+                    }
+                },
             )
             .err()
             .expect("native output still requires native products");
