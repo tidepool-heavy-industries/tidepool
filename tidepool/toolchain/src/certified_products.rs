@@ -6497,6 +6497,20 @@ pub(crate) struct CertifiedRecoveredOriginal {
     pub(crate) requirements: RecoveryOriginalRequirements,
 }
 
+/// Validate one requested recovery composition, including already-held originals.
+/// Separate acquisitions may retain different certificates for the same owner.
+pub(crate) fn validate_recovery_original_owners<'a>(
+    owners: impl IntoIterator<Item = &'a CachedHomeOwner>,
+) -> CertResult<()> {
+    let mut distinct = std::collections::HashSet::new();
+    for owner in owners {
+        if !distinct.insert(owner) {
+            return Err(CertificationError::Mismatch("duplicate recovery original"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn certify_recovery_products_with_validation(
     artifacts: Vec<crate::recovery_artifacts::VerifiedRecoveryArtifact>,
     validation: &mut PackageInterfaceValidation,
@@ -6510,11 +6524,8 @@ pub(crate) fn certify_recovery_products_with_validation(
             )
         })
         .collect::<CertResult<Vec<_>>>()?;
-    let mut original_owners = std::collections::HashSet::new();
+    validate_recovery_original_owners(parsed.iter().map(|(_, witness)| &witness.owner))?;
     for (product, witness) in &parsed {
-        if !original_owners.insert(witness.owner.clone()) {
-            return Err(CertificationError::Mismatch("duplicate recovery original"));
-        }
         validate_inherited_group_headers(product, witness)?;
     }
     let resolved = parsed

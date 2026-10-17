@@ -2041,6 +2041,66 @@ pub(crate) fn materialize_joined_interface_with_validation(
     )
 }
 
+/// Interface files carry no native or lexical role authority. Only the caller's
+/// authenticated owner determines which contract consumes them.
+pub(crate) struct MaterializedInterfaceFiles {
+    pub interface_path: PathBuf,
+    pub skinny_iface_sha256: [u8; 32],
+    package_imports_path: PathBuf,
+    package_imports_sha256: [u8; 32],
+}
+
+/// Project only the interface and package witness of an already authenticated
+/// payload. This does not issue, inspect or materialize its native availability.
+pub(crate) fn materialize_certified_interface(
+    root: &Path,
+    payload: &crate::artifact_inventory::ArtifactPayload,
+    producer: [u8; 32],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
+    use crate::artifact_inventory::ArtifactPayload;
+    let (unit, module, bytes, packages) = match payload {
+        ArtifactPayload::Original(product) => (
+            product.owner().unit.as_str(),
+            product.owner().module.as_str(),
+            product.interface_bytes(),
+            product.package_imports_bytes(),
+        ),
+        ArtifactPayload::Canonical(interface) => {
+            if interface.producer_sha256() != producer {
+                return Err(RecoveryArtifactError::InvalidReference);
+            }
+            (
+                interface.unit(),
+                interface.module(),
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            )
+        }
+        ArtifactPayload::Interface(interface, _) => {
+            if interface.toolchain_identity_sha256() != producer {
+                return Err(RecoveryArtifactError::InvalidReference);
+            }
+            (
+                interface.unit(),
+                interface.module(),
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            )
+        }
+    };
+    materialize_owned_interface(
+        root,
+        producer,
+        unit,
+        module,
+        bytes,
+        packages,
+        validation,
+        MaterializationMode::Scratch,
+    )
+}
+
 fn materialize_owned_join(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2051,6 +2111,37 @@ fn materialize_owned_join(
     validation: &mut PackageInterfaceValidation,
     mode: MaterializationMode,
 ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+    let files = materialize_owned_interface(
+        recovery_root,
+        toolchain_identity_sha256,
+        unit,
+        module,
+        bytes,
+        package_imports,
+        validation,
+        mode,
+    )?;
+    Ok(RecoveryJoinRef {
+        toolchain_identity_sha256,
+        unit: unit.to_owned(),
+        module: module.to_owned(),
+        skinny_iface_sha256: files.skinny_iface_sha256,
+        interface_path: files.interface_path,
+        package_imports_path: files.package_imports_path,
+        package_imports_sha256: files.package_imports_sha256,
+    })
+}
+
+fn materialize_owned_interface(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    unit: &str,
+    module: &str,
+    bytes: &[u8],
+    package_imports: &[u8],
+    validation: &mut PackageInterfaceValidation,
+    mode: MaterializationMode,
+) -> Result<MaterializedInterfaceFiles, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -2093,10 +2184,7 @@ fn materialize_owned_join(
     if mode == MaterializationMode::Durable {
         File::open(&owned)?.sync_all()?;
     }
-    Ok(RecoveryJoinRef {
-        toolchain_identity_sha256,
-        unit: unit.to_owned(),
-        module: module.to_owned(),
+    Ok(MaterializedInterfaceFiles {
         skinny_iface_sha256,
         interface_path,
         package_imports_path,
@@ -2314,6 +2402,40 @@ pub fn materialize_certified_products_with_work(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static NATIVE_MATERIALIZATION_WORK: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn observe_native_materialization<T>(operation: impl FnOnce() -> T) -> (T, (u64, u64)) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_MATERIALIZATION_WORK.with(|work| work.set(None));
+        }
+    }
+    NATIVE_MATERIALIZATION_WORK.with(|work| {
+        assert!(
+            work.replace(Some((0, 0))).is_none(),
+            "nested native work observation"
+        );
+    });
+    let _reset = Reset;
+    let result = operation();
+    let work = NATIVE_MATERIALIZATION_WORK.with(|work| work.get().unwrap());
+    (result, work)
+}
+
+#[cfg(test)]
+fn record_native_materialization(hashed: usize, copied: usize) {
+    NATIVE_MATERIALIZATION_WORK.with(|work| {
+        if let Some((hashes, copies)) = work.get() {
+            work.set(Some((hashes + hashed as u64, copies + copied as u64)));
+        }
+    });
+}
+
 pub(crate) fn materialize_certified_products_with_validation(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
@@ -2365,8 +2487,12 @@ pub(crate) fn materialize_certified_products_with_validation(
         if owner.unit.is_empty() || owner.module.is_empty() {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256
-            || validation.digest(&product.product_bytes) != owner.product_sha256
+        if validation.digest(&product.interface_bytes) != owner.skinny_iface_sha256 || {
+            #[cfg(test)]
+            record_native_materialization(product.product_bytes.len(), 0);
+            validation.digest(&product.product_bytes)
+        } != owner
+            .product_sha256
         {
             return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
                 owner,
@@ -2430,6 +2556,8 @@ pub(crate) fn materialize_certified_products_with_validation(
             mode,
             validation,
         )?;
+        #[cfg(test)]
+        let native_written_before = validation.written_bytes;
         materialize_copy_with_validation(
             &owned.join(
                 product_path
@@ -2441,6 +2569,11 @@ pub(crate) fn materialize_certified_products_with_validation(
             mode,
             validation,
         )?;
+        #[cfg(test)]
+        record_native_materialization(
+            0,
+            (validation.written_bytes - native_written_before) as usize,
+        );
         materialize_copy_with_validation(
             &owned.join(
                 package_imports_path

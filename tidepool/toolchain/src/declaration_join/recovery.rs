@@ -150,30 +150,12 @@ pub fn certify_recovered_declaration_tip_in_context(
             "recovered join root has no certified lexical-join role",
         ));
     }
-    let scratch = Arc::new(tempfile::tempdir()?);
-    let materialized = context.materialize_scratch(&scratch)?;
-    let roots = materialized
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact.interface.unit == selection.root.unit
-                && artifact.interface.module == selection.root.module
-        })
-        .collect::<Vec<_>>();
-    if roots.len() != 1 {
-        return Err(contract("recovered root has no unique retained interface"));
-    }
-    let root_interface = roots[0].interface.clone();
-    context.validate_artifacts(&materialized.artifacts)?;
-    let outcome = inspect_declaration_artifacts_with_producer(
-        &materialized.artifacts,
-        includes,
-        scratch.path(),
-        Some(context.toolchain_identity_sha256()),
-        scratch.clone(),
-        settlement,
-    )?;
-    context.validate_artifacts(&materialized.artifacts)?;
+    let inputs = context.recovery_inspection_inputs()?;
+    let root_interface = inputs
+        .interface(&selection.root)
+        .ok_or_else(|| contract("recovered root has no unique retained interface"))?
+        .clone();
+    let outcome = inputs.inspect(includes, settlement)?;
     if let JoinDecision::Rejected { diagnostic, .. } = outcome.decision {
         return Err(contract(format!(
             "recovery inventory rejected: {diagnostic}"

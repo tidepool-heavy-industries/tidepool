@@ -7099,3 +7099,187 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         "only a historical different carrier's offer cannot authorize the current dependency"
     );
 }
+
+#[test]
+fn recovery_interface_materialization_work_is_independent_of_native_body_growth() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let mut observed = Vec::new();
+    let mut native_sizes = Vec::new();
+    for groups in [1u32, 64] {
+        let product = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "InspectionGrowth",
+                (0..groups).map(|ordinal| (ordinal, vec![])).collect(),
+                61,
+                &BTreeMap::new(),
+                b"fixed interface".to_vec(),
+            ),
+            producer,
+        );
+        native_sizes.push(product.product_bytes().len());
+        let payload = ArtifactPayload::Original(product);
+        let directory = tempfile::tempdir().unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let files = recovery_artifacts::materialize_certified_interface(
+            directory.path(),
+            &payload,
+            producer,
+            &mut validation,
+        )
+        .unwrap();
+        let paths = std::fs::read_dir(directory.path().join("artifacts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths.len(),
+            2,
+            "only interface and package witness are materialized"
+        );
+        assert!(paths
+            .iter()
+            .all(|path| path.to_str().unwrap().ends_with(".hi")
+                || path.to_str().unwrap().ends_with(".hi.packages")));
+        assert!(directory.path().join(&files.interface_path).is_file());
+        observed.push(validation.work());
+    }
+    assert!(
+        native_sizes[1] > native_sizes[0],
+        "the control must grow native bytes"
+    );
+    assert_eq!(
+        observed[0], observed[1],
+        "growing authenticated native bodies must add no copied, read, decoded or hashed bytes"
+    );
+}
+
+fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationContext> {
+    let inventory = ArtifactInventory::default();
+    let entry = Arc::new(
+        ArtifactEntry::original(
+            CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            product.clone(),
+        )
+        .unwrap(),
+    );
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let view = inventory
+        .admit_shared(&inventory.empty_view(), vec![entry])
+        .unwrap();
+    Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+            compiler_support: fixture_compiler_support(projection, view),
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ))
+}
+
+#[test]
+fn recovery_interface_projection_preserves_native_availability_modes() {
+    let baseline = product("InspectBaseline", 31);
+    let required = product("InspectRequired", 32);
+    let unused = product("InspectUnused", 33);
+    let full = native_context(&baseline);
+    assert!(full
+        .compiler_source_support()
+        .native_offers()
+        .iter()
+        .any(|offer| offer.is_full()));
+    for context in [
+        type_context(&[baseline.clone(), required.clone(), unused.clone()]),
+        partial_context(&baseline, &required, &unused, None),
+        full,
+    ] {
+        let before = context.snapshot();
+        let inputs = context.recovery_inspection_inputs().unwrap();
+        assert!(!inputs.0.artifacts.is_empty());
+        assert!(inputs
+            .0
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.product.is_none()));
+        inputs.0.validate().unwrap();
+        let after = context.snapshot();
+        assert_eq!(after.producer, before.producer);
+        assert_eq!(
+            after.graph_selection().unwrap(),
+            before.graph_selection().unwrap()
+        );
+        assert_eq!(after.roles, before.roles);
+        assert_eq!(
+            after.offers, before.offers,
+            "interface inspection cannot issue native availability"
+        );
+        assert_eq!(after.lexical, before.lexical);
+    }
+}
+
+#[test]
+fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
+    let baseline = native_context(&product("InspectedOwner", 48));
+    let before = baseline.recovery_inspection_inputs().unwrap();
+    let incoming = baseline
+        .artifact_view()
+        .inventory()
+        .admit_shared(
+            baseline.artifact_view(),
+            vec![Arc::new(
+                ArtifactEntry::original(
+                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+                    product("UnrelatedNativeOwner", 49),
+                )
+                .unwrap(),
+            )],
+        )
+        .unwrap();
+    let support = baseline
+        .compiler_source_support()
+        .retain_custody(&incoming)
+        .unwrap();
+    let expanded = Arc::new(
+        baseline
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support),
+    );
+    assert!(
+        expanded.artifact_view().artifact_ids().len()
+            > baseline.artifact_view().artifact_ids().len(),
+        "native custody must actually grow"
+    );
+    let after = expanded.recovery_inspection_inputs().unwrap();
+    let roster = |inputs: &RecoveryInspectionInputs| {
+        inputs
+            .0
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.interface.unit.clone(),
+                    artifact.interface.module.clone(),
+                    artifact.interface.sha256.clone(),
+                    artifact.interface.requirements.clone(),
+                    artifact.product.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roster(&before), roster(&after));
+    let files = |inputs: &RecoveryInspectionInputs| {
+        std::fs::read_dir(inputs.0.directory.path().join("artifacts"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        files(&before),
+        files(&after),
+        "unrelated native custody must add no copied inspection files or native payload"
+    );
+}
