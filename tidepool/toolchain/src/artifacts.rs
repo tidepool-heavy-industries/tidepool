@@ -4395,9 +4395,47 @@ fn charge_source_evidence(
         .map_err(|error| compiler_evidence_failure(error.into()))
 }
 
+/// One captured worker dependency observation and its authenticated source facts.
+/// Borrowing the raw input keeps digest authentication tied to the same parse.
+/// Constructors belong to the physical source-admission pipeline.
+pub(crate) struct SourceEvidenceAdmission<'a> {
+    worker_bytes: &'a [u8],
+    input_path: &'a Path,
+    target_source: &'a str,
+    inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+    completed: cache::CompletedSourceEvidence,
+}
+
+impl SourceEvidenceAdmission<'_> {
+    pub(crate) fn worker_bytes(&self) -> &[u8] {
+        self.worker_bytes
+    }
+
+    pub(crate) fn input_path(&self) -> &Path {
+        self.input_path
+    }
+
+    pub(crate) fn target_source(&self) -> &str {
+        self.target_source
+    }
+
+    pub(crate) fn inventory(&self) -> &tidepool_repr::execution_schema::InventoryOperation {
+        self.inventory
+    }
+
+    pub(crate) fn completed(&self) -> &cache::CompletedSourceEvidence {
+        &self.completed
+    }
+}
+
 /// Parsed worker observations, without consumed-byte or import-witness authority.
 /// The owning admission charges its existing inventory before the sole JSON decode.
-struct ParsedSourceEvidence(cache::DependencyEvidence);
+#[cfg_attr(test, derive(Clone))]
+struct ParsedSourceEvidence<'a>(
+    cache::DependencyEvidence,
+    &'a [u8],
+    &'a tidepool_repr::execution_schema::InventoryOperation,
+);
 
 #[derive(Clone, Copy)]
 enum SourceEvidenceUse {
@@ -4406,10 +4444,10 @@ enum SourceEvidenceUse {
     Compiler,
 }
 
-impl ParsedSourceEvidence {
+impl<'a> ParsedSourceEvidence<'a> {
     fn parse(
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
-        bytes: &[u8],
+        operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+        bytes: &'a [u8],
         usage: SourceEvidenceUse,
         input: &Path,
     ) -> Result<Self, CompileError> {
@@ -4417,7 +4455,7 @@ impl ParsedSourceEvidence {
         #[cfg(test)]
         SOURCE_EVIDENCE_DECODES.with(|count| count.set(count.get() + 1));
         serde_json::from_slice(bytes)
-            .map(Self)
+            .map(|facts| Self(facts, bytes, operation))
             .map_err(|error| match usage {
                 SourceEvidenceUse::BuildAction => CompileError::ExtractFailed(format!(
                     "build-action dependency evidence: {error}"
@@ -4445,6 +4483,22 @@ impl ParsedSourceEvidence {
             ));
         }
         validate_declared_source_closure(&self.0, source, include)
+    }
+
+    fn authenticate_for_certification(
+        self,
+        input: &'a Path,
+        source: &'a str,
+    ) -> Result<SourceEvidenceAdmission<'a>, CompileError> {
+        let completed = cache::CompletedSourceEvidence::from_worker_evidence(self.0, input, source)
+            .map_err(|failure| source_evidence_failure(input, failure))?;
+        Ok(SourceEvidenceAdmission {
+            worker_bytes: self.1,
+            input_path: input,
+            target_source: source,
+            inventory: self.2,
+            completed,
+        })
     }
 
     fn authenticate(
@@ -7204,9 +7258,7 @@ mod module_product_tests {
         )
         .unwrap();
         parsed.validate_build_action_closure(&source, &[]).unwrap();
-        ParsedSourceEvidence(parsed.0.clone())
-            .authenticate_build_input(&source)
-            .unwrap();
+        parsed.clone().authenticate_build_input(&source).unwrap();
         assert!(parsed
             .authenticate(&source, "different invocation text")
             .is_err());

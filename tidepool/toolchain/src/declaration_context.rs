@@ -3863,7 +3863,35 @@ impl ExactSourceWitness {
     }
 }
 
+/// The existing compiler request identity, borrowed for comparison and retained
+/// only by source admissions issued after receipt validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExactRequestIdentity<'a> {
+    request_sha256: std::borrow::Cow<'a, str>,
+    semantic_sha256: [u8; 32],
+    producer_sha256: [u8; 32],
+}
+
+impl<'a> ExactRequestIdentity<'a> {
+    fn from_request(request: &'a ExactCompilationRequest) -> Self {
+        Self {
+            request_sha256: std::borrow::Cow::Borrowed(&request.request_sha256),
+            semantic_sha256: request.semantic_sha256,
+            producer_sha256: request.producer_sha256,
+        }
+    }
+
+    fn into_owned(self) -> ExactRequestIdentity<'static> {
+        ExactRequestIdentity {
+            request_sha256: std::borrow::Cow::Owned(self.request_sha256.into_owned()),
+            semantic_sha256: self.semantic_sha256,
+            producer_sha256: self.producer_sha256,
+        }
+    }
+}
+
 pub(crate) struct ExactSourceAdmission {
+    request_identity: ExactRequestIdentity<'static>,
     pub(crate) witness: ExactSourceWitness,
     pub(crate) evidence: Arc<crate::cache::CompletedSourceEvidence>,
     pub(crate) evidence_bytes: Vec<u8>,
@@ -3885,9 +3913,8 @@ pub(crate) struct ExactProgramSegmentAdmission {
 }
 impl ExactProgramSegmentAdmission {
     fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
-        if self.request.request_sha256 != request.request_sha256
-            || self.request.semantic_sha256 != request.semantic_sha256
-            || self.request.producer_sha256 != request.producer_sha256
+        if ExactRequestIdentity::from_request(&self.request)
+            != ExactRequestIdentity::from_request(request)
         {
             return Err(failure(
                 "segment source authority has another physical request",
@@ -3912,6 +3939,7 @@ impl ExactProgramSegmentAdmission {
             .first()
             .ok_or_else(|| failure("projected item lacks its physical segment source receipt"))?;
         for admission in &matched {
+            admission.validate_request(request)?;
             admission.validate_ineligible_evidence(evidence)?;
         }
         // Repeated projected receipt rows are equal authority, not new source
@@ -4064,6 +4092,16 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn validate_request(
+        &self,
+        request: &ExactCompilationRequest,
+    ) -> Result<(), CompileError> {
+        if self.request_identity != ExactRequestIdentity::from_request(request) {
+            return Err(failure("completed source has another physical request"));
+        }
+        Ok(())
+    }
+
     /// Item projections can publish separate receipts for one source owner.
     /// Only the scaffold identity is combined; support policy retains every
     /// validated admission and its import and original-selection evidence.
@@ -5590,6 +5628,7 @@ impl ExactCompilationRequest {
             return Err(failure("exact import witness omits a fresh source module"));
         }
         Ok(ExactSourceAdmission {
+            request_identity: ExactRequestIdentity::from_request(self).into_owned(),
             witness: ExactSourceWitness {
                 source_path,
                 source_sha256,
