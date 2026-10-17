@@ -1353,7 +1353,7 @@ impl NativeCompilerTransport {
             }
             // Each offer authenticates its own exact group-to-carrier edges.
             // Independent offers may retain different bindings for the same body.
-            if private.is_some() {
+            if (offered_roots.contains(&offer.original()) && offer.is_full()) || private.is_some() {
                 if !groups
                     .keys()
                     .any(|group| group.binding.artifact() == offer.original())
