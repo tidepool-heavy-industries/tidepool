@@ -623,7 +623,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     .unwrap();
     let selected_owners = certified
         .source_selection
-        .selected_original_owners()
+        .native_body_owners()
         .cloned()
         .collect::<BTreeSet<_>>();
     assert_eq!(selected_owners.len(), 2);
@@ -802,7 +802,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert_eq!(
             selected
                 .source_selection
-                .selected_original_owners()
+                .native_body_owners()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             selected_owners
@@ -1189,7 +1189,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         );
         let selected = next
             .source_selection
-            .selected_original_owners()
+            .native_body_owners()
             .cloned()
             .collect::<BTreeSet<_>>();
         assert_eq!(selected.len(), 2);

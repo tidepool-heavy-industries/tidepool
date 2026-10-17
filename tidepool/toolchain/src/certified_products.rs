@@ -2522,6 +2522,16 @@ impl ReceiptSourceSelection {
             Self::InterfaceOnly { .. } => None,
         }
     }
+
+    fn compiler_namespace_original(&self) -> Option<&ReceiptNativeSelection> {
+        match self {
+            Self::Native { native, .. } => match native.version {
+                ReceiptSourceVersion::Original | ReceiptSourceVersion::Fresh => Some(native),
+                ReceiptSourceVersion::RetainedCore => None,
+            },
+            Self::InterfaceOnly { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3075,9 +3085,14 @@ impl CertifiedSourceSelection {
             .filter_map(ReceiptSourceSelection::native)
     }
 
-    /// Exact originals selected by this request's issuer, including validated
-    /// newly finalized rows. The caller still authenticates their artifact IDs.
-    pub(crate) fn selected_original_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
+    fn compiler_namespace_originals(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
+        self.visible_modules()
+            .filter_map(|(_, row)| row.compiler_namespace_original())
+    }
+
+    /// Native body owners, including retained realizations without source roles.
+    #[cfg(test)]
+    pub(crate) fn native_body_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
         self.native_selections().map(|selected| &selected.owner)
     }
 
@@ -3140,7 +3155,7 @@ impl CertifiedSourceSelection {
                     "issued compiler interface artifact",
                 ))?;
             entries.push(Arc::clone(interface));
-            if let Some(native) = selected.native() {
+            if let Some(native) = selected.compiler_namespace_original() {
                 let matching = metadata.artifacts.values().filter(|entry| {
                     matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
                 }).collect::<Vec<_>>();
@@ -8548,8 +8563,7 @@ pub(crate) fn certify_products_with_validation(
         // A new recipe describes this compiler request's namespace. Older
         // original graphs stay attached to their exact retained carriers.
         let owners: Vec<_> = source_selection
-            .native_selections()
-            .filter(|selected| !matches!(selected.version, ReceiptSourceVersion::RetainedCore))
+            .compiler_namespace_originals()
             .map(|selected| selected.owner.clone())
             .collect();
         let mut retained_sources: BTreeMap<_, _> = projected_originals
@@ -11174,7 +11188,7 @@ pub(crate) mod tests {
             &operation,
         )
         .unwrap();
-        assert_eq!(selection.selected_original_owners().count(), 0);
+        assert_eq!(selection.native_body_owners().count(), 0);
         assert_eq!(selection.compiler_projection(&view).unwrap(), issued);
         let sources =
             available_original_source_map(std::slice::from_ref(&original), &[], &operation)
@@ -11237,7 +11251,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(
-            selection.selected_original_owners().collect::<Vec<_>>(),
+            selection.native_body_owners().collect::<Vec<_>>(),
             vec![original.owner()]
         );
         let upgraded = selection.compiler_projection(&view).unwrap();
@@ -11267,6 +11281,173 @@ pub(crate) mod tests {
             ))
         ));
         assert_eq!(selection.compiler_projection(&view).unwrap(), upgraded);
+    }
+
+    #[test]
+    fn continuation_namespace_preserves_roles_without_promoting_retained_bodies() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
+        let producer_bytes = b"continuation-role-cycle";
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_bytes,
+        );
+        let original = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture(
+                "RoleCycle",
+                vec![(3, vec![]), (9, vec![])],
+                7,
+                &BTreeMap::new(),
+            ),
+            producer.sha256(),
+        )])
+        .remove(0)
+        .product;
+        let canonical = original.module_interface().unwrap();
+        let interface = Arc::new(ArtifactEntry::canonical(canonical.clone()));
+        let native = Arc::new(
+            ArtifactEntry::original(canonical.producer_sha256(), original.clone()).unwrap(),
+        );
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![native.clone(), interface.clone()],
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        for (origin, namespace_original) in [
+            (ProductOrigin::Fresh, true),
+            (ProductOrigin::Cached, true),
+            (ProductOrigin::RetainedCore, false),
+        ] {
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[interface.clone()]).unwrap();
+            let mut selection = CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &view.metadata_snapshot(),
+                &operation,
+            )
+            .unwrap();
+            selection
+                .admit_current(original.owner(), origin, canonical, &operation)
+                .unwrap();
+            assert_eq!(
+                selection.native_body_owners().collect::<Vec<_>>(),
+                vec![original.owner()]
+            );
+            assert_eq!(
+                selection.compiler_namespace_originals().count(),
+                usize::from(namespace_original)
+            );
+            assert_eq!(
+                selection.complete_native_products(&view).unwrap(),
+                vec![original.clone()]
+            );
+            assert!(selection.permits_native_group(native.descriptor.id, original.owner(), 9));
+            let projected = selection.compiler_projection(&view).unwrap();
+            assert_eq!(
+                projected.roles()[0].original().is_some(),
+                namespace_original
+            );
+            assert_eq!(
+                projected.roles()[0].interface(),
+                projection.roles()[0].interface()
+            );
+            assert_eq!(
+                selection.compiler_support_projection(&view, &[]).unwrap(),
+                projected
+            );
+            let mut carried = selection;
+            for _ in 0..3 {
+                let owner = crate::declaration_join::ExactModuleIdentity {
+                    unit: original.owner().unit.clone(),
+                    module: original.owner().module.clone(),
+                };
+                let context =
+                    crate::declaration_context::ExactDeclarationContext::from_source_selection(
+                        producer.sha256(),
+                        &carried,
+                        &view,
+                        vec![crate::declaration_join::ExactLexicalNode {
+                            owner: owner.clone(),
+                            imports: vec![],
+                        }],
+                        owner,
+                        &[],
+                    )
+                    .unwrap();
+                assert!(context
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .any(|offer| offer.original() == native.descriptor.id && offer.is_full()));
+                let root = tempfile::tempdir().unwrap();
+                let request =
+                    crate::declaration_context::ExactCompileContext::new(Arc::new(context))
+                        .prepare_compilation(root.path(), producer_bytes)
+                        .unwrap();
+                assert!(request.groups.is_empty());
+                assert!(request
+                    .compiler_inputs()
+                    .artifacts
+                    .selected_native_groups()
+                    .is_empty());
+                let inputs = request.compiler_inputs();
+                carried = CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &inputs.metadata,
+                    &operation,
+                )
+                .unwrap();
+                assert_eq!(
+                    carried.compiler_namespace_originals().count(),
+                    usize::from(namespace_original)
+                );
+                assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
+            }
+            if !namespace_original {
+                assert_eq!(carried.native_body_owners().count(), 0);
+                carried
+                    .admit_current(
+                        original.owner(),
+                        ProductOrigin::Cached,
+                        canonical,
+                        &operation,
+                    )
+                    .unwrap();
+                assert_eq!(carried.compiler_namespace_originals().count(), 1);
+                assert!(carried.compiler_projection(&view).unwrap().roles()[0]
+                    .original()
+                    .is_some());
+            }
+        }
+        let prior = CompilerInputProjection::from_issued_entries(&[interface, native]).unwrap();
+        let mut selection = CertifiedSourceSelection::from_compiler_projection(
+            &prior,
+            &view.metadata_snapshot(),
+            &operation,
+        )
+        .unwrap();
+        selection
+            .admit_current(
+                original.owner(),
+                ProductOrigin::Cached,
+                canonical,
+                &operation,
+            )
+            .unwrap();
+        assert_eq!(selection.compiler_projection(&view).unwrap(), prior);
+        assert!(selection
+            .admit_current(
+                original.owner(),
+                ProductOrigin::RetainedCore,
+                canonical,
+                &operation
+            )
+            .is_err());
+        assert_eq!(selection.compiler_projection(&view).unwrap(), prior);
     }
 
     #[test]
@@ -11984,7 +12165,7 @@ pub(crate) mod tests {
         assert!(sources.get(&(staged, 3, binder.clone())).is_none());
         assert!(sources.get(&(old, 3, binder.clone())).is_some());
         assert_eq!(
-            selection.selected_original_owners().collect::<Vec<_>>(),
+            selection.native_body_owners().collect::<Vec<_>>(),
             vec![&final_owner]
         );
         assert_eq!(
@@ -16896,7 +17077,7 @@ pub(crate) mod tests {
             assert_eq!(
                 issued
                     .source_selection
-                    .selected_original_owners()
+                    .native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
             );
@@ -17859,7 +18040,7 @@ pub(crate) mod tests {
             assert_eq!(
                 certified
                     .source_selection
-                    .selected_original_owners()
+                    .native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
             );
@@ -18135,7 +18316,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     cached
                         .source_selection
-                        .selected_original_owners()
+                        .native_body_owners()
                         .collect::<Vec<_>>(),
                     vec![&owner]
                 );
