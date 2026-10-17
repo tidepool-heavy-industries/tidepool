@@ -248,8 +248,13 @@ impl GenerationSupport {
             Some(&authority),
         )
         .unwrap();
-        let tools = actor
-            .compiler_lifecycle_scope(
+        let tools = runner
+            .compiler_scope(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    actor.retained_exit(),
+                ),
+            )
+            .scope(
                 runner
                     .application_workbench()
                     .with_compilation_authority(compilation)
@@ -289,9 +294,14 @@ impl GenerationSupport {
                 expected,
                 None,
             );
-            match fixture
-                .actor
-                .compiler_lifecycle_scope(ReloadPreparation::prepare(
+            match self
+                .runner
+                .compiler_scope(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                        fixture.actor.retained_exit(),
+                    ),
+                )
+                .scope(ReloadPreparation::prepare(
                     services.reload_preparation(),
                     Vec::new(),
                     tidepool_bridge_effects::RlPolicy::CompatibleOnly,
