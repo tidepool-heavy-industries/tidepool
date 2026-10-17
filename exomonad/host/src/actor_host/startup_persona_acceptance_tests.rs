@@ -1,9 +1,7 @@
 //! The delivered persona carries full authored memory to the first provider
 //! request and refreshes that exact issued block only on explicit activation.
 
-use super::hosted_test_context::{
-    panic_message, HostedTestRuntime, ScenarioOutcome, ScenarioPhase,
-};
+use super::hosted_test_context::{HostedTestRuntime, ScenarioOutcome};
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     retained_committed_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
