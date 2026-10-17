@@ -6438,58 +6438,66 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
         role
     );
-    let candidates = crate::module_candidates::CandidateSet {
-        manifest_path: PathBuf::from("candidate-native-issuance-only"),
-        by_owner: BTreeMap::new(),
-        native_availability: vec![native],
-        catalog_owner: None,
-        input_transport: Vec::new(),
-    };
-    let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-        .unwrap()
-        .unwrap();
-    assert!(reused
-        .issued_artifacts()
-        .selected_native_groups()
-        .is_empty());
-    assert!(reused
-        .selected_demand_source()
-        .unwrap()
-        .selected_native_groups()
-        .is_empty());
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-        published.compiler_input_projection(),
-        &published.artifact_view().metadata_snapshot(),
-        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
-    let policy_fragment =
-        OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
-    assert!(policy_fragment.selected_demand_source().is_none());
-    for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
-        let merged = left.merge(right).unwrap();
-        assert!(merged.issued_artifacts().selected_native_groups().is_empty(),
-            "an explicit empty source cannot fall back to the published role policy in either order");
-        assert!(merged
+    let fresh = product("FreshBesidePublishedZeroDemand", 138);
+    for mixed_fresh in [false, true] {
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("candidate-native-issuance-only"),
+            by_owner: BTreeMap::new(),
+            native_availability: if mixed_fresh {
+                vec![native.clone(), fresh.clone()]
+            } else {
+                vec![native.clone()]
+            },
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .unwrap()
+            .unwrap();
+        assert!(reused
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert!(reused
             .selected_demand_source()
             .unwrap()
             .selected_native_groups()
             .is_empty());
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                published.compiler_input_projection(),
+                &published.artifact_view().metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let policy_fragment =
+            OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
+        assert!(policy_fragment.selected_demand_source().is_none());
+        for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
+            let merged = left.merge(right).unwrap();
+            assert!(merged.issued_artifacts().selected_native_groups().is_empty(),
+            "an explicit empty source cannot fall back to the published role policy in either order");
+            assert!(merged
+                .selected_demand_source()
+                .unwrap()
+                .selected_native_groups()
+                .is_empty());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context.clone()))
+            .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(reused))
+            .unwrap();
+        assert!(
+            request
+                .compiler_inputs()
+                .artifacts
+                .selected_native_groups()
+                .is_empty(),
+            "published policy cannot resurrect withdrawn source demand"
+        );
+        assert_eq!(
+            request.compiler_inputs().projection.snapshot_roles()[&entry.descriptor.owner],
+            role
+        );
     }
-    let directory = tempfile::tempdir().unwrap();
-    let request = ExactCompileContext::new(Arc::new(context))
-        .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(reused))
-        .unwrap();
-    assert!(
-        request
-            .compiler_inputs()
-            .artifacts
-            .selected_native_groups()
-            .is_empty(),
-        "published policy cannot resurrect withdrawn source demand"
-    );
-    assert_eq!(
-        request.compiler_inputs().projection.snapshot_roles()[&entry.descriptor.owner],
-        role
-    );
 }
