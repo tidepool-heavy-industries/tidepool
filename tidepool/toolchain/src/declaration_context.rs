@@ -9720,15 +9720,11 @@ mod tests {
 
     #[test]
     fn recovery_payload_acquisition_preserves_batch_original_owner_uniqueness() {
-        use crate::certified_products::tests::original_groups_fixture;
-        let raw = original_groups_fixture("RepeatedOwner", vec![(3, vec![])], 1, &BTreeMap::new());
-        let products = [1, 2].map(|generation| {
-            crate::certified_products::fixture_native_declaration_product(
-                raw.clone(),
-                [2; 32],
-                generation,
-            )
-        });
+        let raw = support_product_in_unit("main", "Tidepool.Session.Lib.G11");
+        let products = [
+            crate::certified_products::fixture_finalized_product(raw.clone(), [2; 32]),
+            crate::certified_products::fixture_native_declaration_product(raw, [2; 32], 11),
+        ];
         assert_eq!(products[0].owner(), products[1].owner());
         assert_ne!(
             products[0].certification_bytes(),
