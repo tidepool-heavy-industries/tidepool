@@ -3135,6 +3135,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             BTreeSet::from([current_native]),
             "one exact issued offer wins over unoffered equal-canonical custody"
         );
+        assert!(
+            OriginalCompilerInputs::from_selected_authored_declarations(
+                &canonical_only, producer, std::slice::from_ref(&products[1]),
+            ).is_err(),
+            "a genuine unique authored private claim cannot be replaced by a fresh same-owner candidate",
+        );
         let other = OriginalCompilerInputs::from_native_availability(
             &type_context(std::slice::from_ref(&products[1])),
             producer,

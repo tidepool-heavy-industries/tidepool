@@ -549,10 +549,11 @@ impl OriginalCompilerInputs {
         let carried = if fallback.is_empty() {
             None
         } else {
-            let mut projection = context
-                .compiler_input_projection()
-                .for_source_owners(&fallback);
-            for offer in context.facts.compiler_support.native_offers() {
+            let source = context
+                .compiler_source_support()
+                .source_support(&fallback)?;
+            let mut projection = source.projection().clone();
+            for offer in source.native_offers() {
                 let facts = offer.snapshot_facts();
                 if !fallback.contains(&facts.owner) {
                     continue;
@@ -579,15 +580,12 @@ impl OriginalCompilerInputs {
                     },
                 )?;
             }
-            let native_offers = preserve_native_offers(
-                &projection,
-                context.artifact_view(),
-                context.facts.compiler_support.native_offers(),
-            )?;
+            let native_offers =
+                preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
                 demand: OriginalInputDemand::RolePolicy,
                 projection,
-                artifacts: retain_native_offers(context.artifact_view(), &native_offers)?,
+                artifacts: retain_native_offers(source.artifacts(), &native_offers)?,
                 native_offers,
             })
         };
