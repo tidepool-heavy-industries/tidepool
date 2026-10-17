@@ -1395,6 +1395,22 @@ fn decode_selected_lookup(value: &CborValue) -> Result<SelectedLookupAnswer, Com
     }
 }
 
+fn exact_entry_address_matches(query: &str, entry: &InfoEntry) -> bool {
+    if query == entry.name {
+        return true;
+    }
+    match &entry.module {
+        Some(owner) => query == format!("{owner}.{}", entry.name),
+        // Local preamble declarations intentionally omit their defining module
+        // in generic InfoEntry presentation. Check the actual occurrence suffix
+        // without inventing that missing identity. The retained GHC Name and
+        // consumed-source owner still validate the nominal qualifier at issuance.
+        None => query
+            .strip_suffix(&format!(".{}", entry.name))
+            .is_some_and(|prefix| !prefix.is_empty()),
+    }
+}
+
 fn validate_hosted_output(
     batch: &HostedLookupBatch,
     output: &HostedLookupOutput,
@@ -1519,6 +1535,12 @@ fn validate_hosted_output(
                     | SelectedLookupAnswer::Ambiguous(matches) => matches.entries.as_slice(),
                     _ => &[],
                 };
+                if entries
+                    .iter()
+                    .any(|entry| !exact_entry_address_matches(&query.name, entry))
+                {
+                    return Err(invalid("exact reference entry differs from its submitted occurrence or known defining owner"));
+                }
                 if entries.iter().any(|entry| match query.namespace {
                     tidepool_extract_cmd::InspectionNamespace::Value => matches!(
                         entry.kind.as_str(),
@@ -2427,6 +2449,40 @@ mod tests {
     }
 
     #[test]
+    fn exact_reply_addresses_use_occurrences_and_only_available_defining_identity() {
+        for occurrence in ["value", "field", "café", ".", ".+."] {
+            let mut entry = InfoEntry {
+                name: occurrence.into(),
+                module: Some("Defining.Owner".into()),
+                kind: "value".into(),
+                display: "retained declaration".into(),
+                availability: InspectionAvailability::Unknown,
+                references: vec![],
+            };
+            assert!(exact_entry_address_matches(occurrence, &entry));
+            assert!(exact_entry_address_matches(
+                &format!("Defining.Owner.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches(
+                &format!("Facade.Owner.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches(
+                "Defining.Owner.different",
+                &entry
+            ));
+            entry.module = None;
+            assert!(exact_entry_address_matches(occurrence, &entry));
+            assert!(exact_entry_address_matches(
+                &format!("Expr.{occurrence}"),
+                &entry
+            ));
+            assert!(!exact_entry_address_matches("Expr.different", &entry));
+        }
+    }
+
+    #[test]
     fn hosted_decoding_and_typed_validation_share_count_and_status_refusals() {
         let integer = |n: u64| CborValue::Integer(n.into());
         let text = |s: &str| CborValue::Text(s.into());
@@ -3095,6 +3151,11 @@ mod tests {
             })
         })
         .collect::<Vec<_>>();
+        queries.push(InspectionQuery::ExactName(ExactNameQuery {
+            scope: NameScope::Current,
+            namespace: IdentifierNamespace::Value,
+            name: "Expr.localValue".into(),
+        }));
         queries.push(InspectionQuery::LookupName {
             query: "Alias.clash".into(),
             qualifier_module: Some("LookupFacade".into()),
@@ -3107,7 +3168,7 @@ mod tests {
         }));
         let results = tidepool_testing::with_settlement(|settlement| run_inspections(InspectionRequest {
             exact_context: None,
-            preamble: "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport qualified LookupFacade as Alias\nimport qualified OtherLookup as Other\n",
+            preamble: "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport qualified LookupFacade as Alias\nimport qualified OtherLookup as Other\nlocalValue = Alias.clash\n",
             imports: "", include: &[root.path()], session_root: root.path(), inject_modules: &[], queries: &queries, effects: None,
         }, settlement)).unwrap();
         for (bare, qualified) in [(0, 1), (2, 3)] {
@@ -3143,13 +3204,31 @@ mod tests {
             } => entries.clone(),
             other => panic!("nominal lookup {index}: {other:?}"),
         };
-        assert_eq!(nominal(6), nominal(10));
+        assert_eq!(nominal(6), nominal(11));
         assert_eq!(
             nominal(6),
-            nominal(11),
+            nominal(12),
             "public facade returns original defining identity"
         );
         assert_ne!(nominal(6), nominal(8), "two visible owners remain distinct");
+        let batch = HostedLookupBatch {
+            operations: vec![HostedLookupOperation::ExactReference {
+                destinations: vec![0],
+                query: tidepool_extract_cmd::ExactNameInspection {
+                    scope: tidepool_extract_cmd::InspectionScope::Current,
+                    namespace: tidepool_extract_cmd::InspectionNamespace::Value,
+                    name: "Expr.localValue".into(),
+                },
+            }],
+            discovery: None,
+        };
+        let local = tidepool_testing::with_settlement(|settlement| run_hosted_lookup(HostedLookupRequest {
+            exact_context: None,
+            preamble: "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport qualified LookupFacade as Alias\nimport qualified OtherLookup as Other\nlocalValue = Alias.clash\n",
+            imports: "", include: &[root.path()], session_root: root.path(), inject_modules: &[], batch: &batch, effects: None,
+        }, settlement)).unwrap();
+        assert!(matches!(&local.answers[..], [HostedLookupAnswer::Reference { answer: SelectedLookupAnswer::Info(matches), .. }]
+            if matches.entries == nominal(10) && matches.entries[0].module.is_none()), "local nominal qualifier must remain issued by GHC even when generic presentation omits its module: {local:#?}");
     }
 
     #[test]

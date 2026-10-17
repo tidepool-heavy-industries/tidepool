@@ -1791,13 +1791,18 @@ mod tests {
                 assert!(result.candidates.is_empty());
             }
         }
-        for mutation in 0..5 {
+        for mutation in 0..8 {
             let mut req = request(&[], false);
             req.references.push(LookupReference {
                 module: String::new(),
                 name: "Owner.value".into(),
                 namespace: LookupNamespace::Value,
             });
+            let nominal = |name: &str| {
+                let mut hit = entry(name);
+                hit.module = Some("Owner".into());
+                hit
+            };
             let result = execute(req, "view".into(), "", &[], &[], Default::default(), |_| {
                 let answer = match mutation {
                     0 => SelectedLookupAnswer::Module {
@@ -1811,15 +1816,26 @@ mod tests {
                     1 => SelectedLookupAnswer::ModuleNotFound("Other".into()),
                     2 => SelectedLookupAnswer::Ambiguous(SelectedMatches {
                         observed: 1,
-                        entries: vec![entry("value")],
+                        entries: vec![nominal("value")],
                         limit: 20,
                     }),
                     3 => {
-                        let mut wrong = entry("value");
+                        let mut wrong = nominal("value");
                         wrong.kind = "type".into();
                         selected(vec![wrong])
                     }
-                    _ => selected(vec![entry("value")]),
+                    5 => selected(vec![nominal("other")]),
+                    6 => {
+                        let mut wrong = entry("other");
+                        wrong.module = None;
+                        selected(vec![wrong])
+                    }
+                    7 => selected(vec![entry("value")]),
+                    _ => {
+                        let mut local = entry("value");
+                        local.module = None;
+                        selected(vec![local])
+                    }
                 };
                 Ok(output(vec![HostedLookupAnswer::Reference {
                     destinations: vec![0],
