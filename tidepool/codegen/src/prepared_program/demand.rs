@@ -1309,6 +1309,16 @@ mod tests {
             prop_assert_eq!(projected.imports, actual.imports);
             prop_assert_eq!(general_rows[0], helpers + exports);
             prop_assert_ne!(general_rows, touched);
+            if helpers == 512 {
+                eprintln!("certified outline work: {}", serde_json::json!({
+                    "helpers": helpers, "exports": exports, "imports": imports,
+                    "definition_rows": touched[0], "export_rows": touched[1],
+                    "source_import_comparisons": touched[2], "import_rows": touched[3],
+                    "general_definition_rows": general_rows[0],
+                    "general_source_import_comparisons": general_rows[2],
+                    "oracle_definition_rows": oracle_rows,
+                }));
+            }
             Ok(())
         };
         // Fixed large-helper/single-export and zero-export controls ensure the
