@@ -986,7 +986,8 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertIn('--delegated-service', command)
                     self.assertEqual(command[command.index('--service-slice') + 1],
                                      'tidepool-completion-build.slice')
-                    self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
+                    self.assertEqual(kwargs['env'], {**qualification.execution_environment(descriptor),
+                                                    'EXOMONAD_NIX_OFFLINE': '1'})
                     tests = output / 'tests'
                     tests.mkdir()
                     names = selected.copy()
@@ -2078,7 +2079,8 @@ class NativeQualificationTests(unittest.TestCase):
                                       'compiler_allowances': {'requested_foreground_jobs': receipt_foreground_jobs if receipt_foreground_jobs is not None else foreground_jobs,
                                                               'requested_preparation_jobs': preparation_jobs,
                                                               'worker_processes': receipt_workers if receipt_workers is not None else (compiler_workers or 1)}}})
-                self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
+                self.assertEqual(kwargs['env'], {**qualification.execution_environment(descriptor),
+                                                    'EXOMONAD_NIX_OFFLINE': '1'})
                 self.assertEqual(command[0], '/frozen/runtime-tools/bin/python3')
                 self.assertEqual(kwargs['env']['PATH'], '/frozen/runtime-tools/bin')
                 return subprocess.CompletedProcess(command, 0)
