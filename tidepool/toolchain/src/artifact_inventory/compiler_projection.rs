@@ -1924,13 +1924,30 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
+            // Expected bindings and bytes come from the original issued view,
+            // before either narrowing implementation is called.
+            let expected_issued = [&selected, &required]
+                .into_iter()
+                .map(|entry| {
+                    let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                        panic!("canonical fixture")
+                    };
+                    (
+                        entry.descriptor.owner.clone(),
+                        (
+                            view.lease.selection.namespace[&entry.descriptor.id],
+                            interface.interface_bytes().to_vec(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             let projection =
                 CompilerInputProjection::from_issued_entries(&[selected.clone(), required])
                     .unwrap();
             let support = CompilerSourceSupport::new(projection, view, []).unwrap();
+            let before = inventory.metrics();
             let interfaces = support.selected_interfaces().unwrap();
             let owner = selected.descriptor.owner.clone();
-            let before = inventory.metrics();
             let narrowed = interfaces.support_for_owners(vec![owner.clone()]).unwrap();
             let candidate = inventory.metrics();
             assert!(narrowed
@@ -1939,8 +1956,18 @@ mod tests {
                 .read_projection
                 .get()
                 .is_none_or(|projection| projection.metadata.get().is_none()));
-            // Independent legacy path keeps the old validating constructor and
-            // includes the same preceding selection, not just constructor cost.
+            for (owner, (binding, bytes)) in &expected_issued {
+                let row = &narrowed.selected[owner];
+                assert_eq!(row.interface.0, *binding);
+                let ArtifactPayload::Canonical(interface) = &row.interface.1.payload else {
+                    panic!("canonical narrowed row")
+                };
+                assert_eq!(interface.interface_bytes(), bytes.as_slice());
+                assert!(row.original.is_none());
+            }
+            // This independently validates the constructor, not the old
+            // selection topology: both routes use select_owners. The legacy
+            // route also gets an already-warm parent, explicitly reported below.
             let baseline_view = interfaces
                 .select_owners(narrowed.projection.roles.keys().cloned().collect())
                 .unwrap();
@@ -1992,6 +2019,10 @@ mod tests {
             assert_eq!(source.input_decisions, legacy.input_decisions);
             drop(interfaces);
             drop(support);
+            drop(baseline);
+            drop(legacy);
+            // This checks retained semantic facts, not physical materialization
+            // release: the fixture still holds its original entry handle.
             assert_eq!(
                 source.selected[&selected.descriptor.owner]
                     .interface
@@ -2099,6 +2130,8 @@ mod tests {
             assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
             assert!(Arc::ptr_eq(&view_owner, &support.artifacts.lease));
 
+            assert!(support.artifacts.reads.read_projection.get().is_none());
+            let before_narrowing = inventory.metrics();
             let interfaces = support.selected_interfaces().unwrap();
             let selected_support = interfaces
                 .support_for_owners(vec![selected.descriptor.owner.clone()])
@@ -2116,6 +2149,11 @@ mod tests {
                 .artifacts
                 .selected_native_groups()
                 .is_empty());
+
+            let after_narrowing = inventory.metrics();
+            eprintln!("closed-role-native-work unrelated_groups={group_count} whole_chain_graph={} whole_chain_handles={}",
+                after_narrowing.graph_visits - before_narrowing.graph_visits,
+                after_narrowing.entry_handle_copies - before_narrowing.entry_handle_copies);
 
             let reusable = CompilerSourceSupport::new(
                 historical_projection,
@@ -2193,16 +2231,17 @@ mod tests {
                 narrowed.native_offer_observations().unwrap(),
                 legacy.native_offer_observations().unwrap()
             );
+            let expected_binding = legacy.selected[&historical.descriptor.owner].interface.0;
+            drop(legacy);
             drop(reusable);
+            // Retained semantic payload/canonical pairing; this fixture does
+            // not establish last physical materialization release.
             let row = &narrowed.selected[&historical.descriptor.owner];
             assert_eq!(
                 row.original.as_ref().unwrap().1.descriptor.id,
                 historical.descriptor.id
             );
-            assert_eq!(
-                row.interface.0,
-                legacy.selected[&historical.descriptor.owner].interface.0
-            );
+            assert_eq!(row.interface.0, expected_binding);
 
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
