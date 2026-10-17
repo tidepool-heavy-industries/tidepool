@@ -1154,7 +1154,7 @@ mod tests {
     #[test]
     fn completed_manifest_preserves_acquisition_errors_and_wire_budget() {
         // Each completed owner is consumed exactly once; acquisition refusal
-        // remains the original typed interruption rather than an empty offer.
+        // reaches the existing outer selection refusal without an encoded offer.
         let make = || {
             PreparedInventory::new([()], |_| None)
                 .unwrap()
