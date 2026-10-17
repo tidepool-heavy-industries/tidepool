@@ -147,7 +147,9 @@ impl<'a> PublicationCohort<'a> {
             .and_then(Option::as_ref)
             .expect("captured proof has its issued reference");
         let mut data = data(reference);
-        data.evidence = reference.clone();
+        if &data.evidence != reference {
+            data.evidence = reference.clone();
+        }
         let owner = computed_owner(&data);
         data.original_owner = OriginalOwner::from_owner(&owner);
         let mut record = Record {

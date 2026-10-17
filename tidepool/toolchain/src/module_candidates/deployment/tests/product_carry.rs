@@ -159,6 +159,63 @@ fn deployment_export_writes_one_evidence_blob_for_78_module_rows() {
 }
 
 #[test]
+fn export_evidence_refuses_bounds_and_failed_writes_without_issuing_a_receipt() {
+    use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+    let fixture = Fixture::new();
+    let package = fixture.load().unwrap();
+    let evidence = &*package.records[0].evidence;
+    let root = fixture._root.path().join("refused-export");
+    let mut receipt = ExportEvidence {
+        evidence,
+        reference: None,
+    };
+    let inventory = InventoryOperation::new(InventoryDecodeLimits {
+        max_bytes: 1,
+        ..Default::default()
+    });
+    assert!(matches!(
+        receipt.reference(&root, &inventory),
+        Err(ModulePackageError::Bounds)
+    ));
+    assert!(receipt.reference.is_none());
+    assert!(
+        !root.exists(),
+        "budget refusal must precede physical writes"
+    );
+
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("evidence"), b"blocked directory").unwrap();
+    let inventory = InventoryOperation::new(Default::default());
+    assert!(matches!(
+        receipt.reference(&root, &inventory),
+        Err(ModulePackageError::Io { .. })
+    ));
+    assert!(receipt.reference.is_none());
+    assert_eq!(
+        fs::read(root.join("evidence")).unwrap(),
+        b"blocked directory"
+    );
+
+    let mut oversized = evidence.clone();
+    oversized.packages.push("x".repeat(RECORD_LIMIT));
+    let absent = fixture._root.path().join("oversized-export");
+    let mut receipt = ExportEvidence {
+        evidence: &oversized,
+        reference: None,
+    };
+    let inventory = InventoryOperation::new(Default::default());
+    assert!(matches!(
+        receipt.reference(&absent, &inventory),
+        Err(ModulePackageError::Bounds)
+    ));
+    assert!(receipt.reference.is_none());
+    assert!(
+        !absent.exists(),
+        "format bound must precede physical writes"
+    );
+}
+
+#[test]
 fn deployment_evidence_sharing_keeps_distinct_authenticated_wire_proofs_separate() {
     let fixture = Fixture::with_modules(&["A", "B"]);
     let mut catalog = fixture.catalog();
