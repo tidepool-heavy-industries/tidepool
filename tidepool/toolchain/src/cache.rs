@@ -1455,7 +1455,11 @@ mod tests {
             },
         );
         assert_eq!(
-            stopped.action.unwrap_err().kind(),
+            stopped
+                .action
+                .err()
+                .expect("cancelled lookup must refuse")
+                .kind(),
             std::io::ErrorKind::Interrupted
         );
         assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
