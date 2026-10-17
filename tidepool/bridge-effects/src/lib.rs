@@ -338,7 +338,7 @@ mod model_control_tests;
 
 #[cfg(test)]
 mod context_constructor_tests {
-    use super::{ContextBlock, ContextNativeKind, ContextRole, Model};
+    use super::{Backend, ContextBlock, ContextNativeKind, ContextRole, Model, OpenAIModel};
     use tidepool_bridge::{FromHaskell, HaskellValue, ToHaskell};
     use tidepool_repr::{DataCon, DataConId, DataConTable};
 
