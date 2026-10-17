@@ -172,10 +172,8 @@ impl SessionModule {
 
     /// The on-disk `.hi` iface path relative to a `--session-root` dir,
     /// mirroring GHC's own `hiDir` layout (dots become slashes) — the Rust
-    /// twin of Haskell's `Tidepool.Session.sessionHiPath`. Used by the
-    /// compile memo to content-fingerprint a
-    /// stable `--inject-val` module's iface, the same way an `--include`
-    /// root is fingerprinted.
+    /// twin of Haskell's `Tidepool.Session.sessionHiPath`. Sealed compiler
+    /// inputs use this path to materialize and validate captured session interfaces.
     #[must_use]
     pub fn relative_hi_path(&self) -> String {
         format!("Tidepool/Session/{}/G{}.hi", self.kind.tag(), self.gen.0)

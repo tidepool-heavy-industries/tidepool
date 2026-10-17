@@ -1274,8 +1274,7 @@ fn bound_identity(bin: &Path, socket: &Path) -> tidepool_extract_cmd::CompilerId
 /// `daemon.rs`'s `boot_epoch()`) from the SAME extract binary must still
 /// report the SAME producer identity. This is the actual scenario
 /// independent process owners exercise with fresh daemon launches: the
-/// compile memo (`tidepool-toolchain`'s `cache::invocation_key`) and the
-/// `-fwrite-interface` build-products directory
+/// native candidate store and `-fwrite-interface` build-products directory
 /// (`tidepool-toolchain`'s `paths::build_products_dir`) key off
 /// `CompilerIdentity::producer_bytes()`/`producer_hex()`, not
 /// `as_bytes()`/`to_hex()`, so a fresh daemon reuses a prior daemon's warm
@@ -1304,8 +1303,7 @@ fn producer_identity_survives_independent_daemon_boots() {
     assert_eq!(
         identity_a.producer_hex(),
         identity_b.producer_hex(),
-        "producer_hex must match too — this is what paths::build_products_dir and \
-         cache::invocation_key now key their cache namespace on"
+        "producer_hex must match too — build-products and native candidates share this producer identity"
     );
     assert_ne!(
         identity_a.as_bytes(),
