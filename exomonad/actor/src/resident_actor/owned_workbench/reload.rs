@@ -29,7 +29,12 @@ where
             checked: Vec<String>,
             policy: RlPolicy,
         ) -> Result<ReloadPreparationOutcome, SourceError> {
-            services.reload_preparation().prepare(checked, policy).await
+            crate::resident_workbench::ReloadPreparation::prepare(
+                services.reload_preparation(),
+                checked,
+                policy,
+            )
+            .await
         }
         let prepared = match prepare(&self.preparation, self.checked, self.policy).await? {
             ReloadPreparationOutcome::Settled(outcome) => return Ok(outcome),
