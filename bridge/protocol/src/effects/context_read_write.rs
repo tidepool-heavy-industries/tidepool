@@ -756,14 +756,6 @@ fn field(hs_name: &'static str, rust_name: &'static str, ty: HsType) -> RecordFi
     }
 }
 
-fn arg(name: &'static str, ty: HsType) -> Arg {
-    Arg {
-        name,
-        ty,
-        rust: RustBinding::Derived,
-    }
-}
-
 fn bridged_arg(name: &'static str, wire_name: &'static str, ty: HsType) -> Arg {
     Arg {
         name,
