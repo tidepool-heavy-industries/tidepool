@@ -692,15 +692,29 @@ fn same_owner_later_proof_does_not_change_reopened_publication() {
         published.artifact_view().clone(),
     )
     .unwrap();
-    assert!(later
-        .native_offers()
-        .iter()
-        .any(|offer| offer.original() == root.descriptor.id));
-    assert_ne!(
-        later.native_offer_observations().unwrap(),
-        original_offers,
-        "the same root's role selection is a distinct proof from its earlier native offer"
+    // This is a separately issued later offer, not reconstruction of the old one.
+    let root_offers = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+        support
+            .native_offers()
+            .iter()
+            .map(|offer| offer.snapshot_facts())
+            .filter(|facts| facts.original == root.descriptor.id)
+            .map(|facts| (facts.interface, facts.identity().unwrap()))
+            .collect::<BTreeSet<_>>()
+    };
+    let original_root = root_offers(published.compiler_source_support());
+    let later_root = root_offers(&later);
+    assert_eq!(original_root.len(), 1);
+    assert_eq!(later_root.len(), 1);
+    assert_eq!(
+        original_root.first().unwrap().0,
+        later_root.first().unwrap().0
     );
+    assert_ne!(
+        original_root, later_root,
+        "the same original and interface retain distinct exact proof identities"
+    );
+    let later_offers = later.native_offer_observations().unwrap();
     let carried = crate::artifact_inventory::CompilerSourceSupport::new(
         published.compiler_input_projection().clone(),
         published.artifact_view().clone(),
@@ -712,6 +726,9 @@ fn same_owner_later_proof_does_not_change_reopened_publication() {
             .cloned(),
     )
     .unwrap();
+    let carried_observations = carried.native_offer_observations().unwrap();
+    assert!(original_offers.is_subset(&carried_observations));
+    assert!(later_offers.is_subset(&carried_observations));
     let continued = ExactDeclarationContext::from_authenticated_execution_support(
         [2; 32],
         carried,
