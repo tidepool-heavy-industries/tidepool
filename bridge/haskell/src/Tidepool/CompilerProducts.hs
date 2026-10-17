@@ -72,15 +72,14 @@ import Tidepool.ExactScope
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
-  , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
+  , prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
-  , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
+  , preparedModuleProductEncodings, preparedModuleProductOmissions, resolveTextPackageUnit
   , rawOriginalProductOwner
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductBinders, rawOriginalProductDemands
-  , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings )
 import Tidepool.ExecutionSchema
@@ -816,7 +815,7 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
         ++ "#" ++ show (omittedOriginalOrdinal omission) ++ " "
         ++ show (omittedOriginalBinders omission) ++ " "
         ++ show (omittedOriginalReason omission))
-  outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
+  outcomes <- forM (preparedModuleProductEncodings inventory) $ \(owner, outcome) -> do
     let name = moduleName owner
         key = (unitString (moduleUnit owner), moduleNameString name)
     let selectedInterface = Map.lookup owner retained >>= \original ->
@@ -868,17 +867,8 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
           pure (encodePackageImports iface roots)
       when (BS.length sidecar > 4 * 1024 * 1024) $
         ioError (userError "direct package import witness exceeds four MiB")
-      let retainedGroups = do
-            raw <- preparedRawProducts productContext
-            ownerRaw <- case filter ((== owner) . rawOriginalProductOwner) raw of
-              [selected] -> Just selected
-              _ -> Nothing
-            traverse (\group -> Map.lookup (projectedOriginalOrdinal group)
-              (rawOriginalGroupEncodings ownerRaw)) groups
-          encoded = case retainedGroups of
-            Just encodedGroups -> prepareModuleProductEncodingFromGroups
-              (T.pack (fst key)) (T.pack (snd key)) bytes encodedGroups
-            Nothing -> prepareModuleProductEncoding (T.pack (fst key),T.pack (snd key),bytes,groups)
+      let encoded = prepareModuleProductEncodingFromGroups
+            (T.pack (fst key)) (T.pack (snd key)) bytes groups
       pure (key, ProductReady, Just encoded, Just sidecar)
 
 -- Interface-only captures emit the same valid inventory framing with no native

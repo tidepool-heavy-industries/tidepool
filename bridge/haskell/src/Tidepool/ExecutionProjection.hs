@@ -16,9 +16,8 @@ module Tidepool.ExecutionProjection
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
-  , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
-  , preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
+  , preparedModuleProductOutcomes, preparedModuleProductEncodings, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
   , prepareProjection
@@ -120,7 +119,7 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.Timing (readTimingEnabled, timeModuleDetailPhase, emitModuleCounts)
 import Tidepool.ExecutionEncode
-  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes, encodeTypeIdentity)
+  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingInput, projectedGroupEncodingBytes, encodeTypeIdentity)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -310,10 +309,13 @@ data OriginalGroupOmission = OriginalGroupOmission
 -- The wire arena and its compiler provenance are one lowering result. Neither
 -- caching nor dependency settlement can retain one without the other.
 data ProjectedGroupEvidence = ProjectedGroupEvidence
-  { projectedGroupWire :: ProjectedGroup
+  { projectedGroupEncoding :: ProjectedGroupEncoding
   , projectedGroupConstructors :: [IssuedConstructor]
   , projectedGroupYieldSites :: [Effect.YieldSite]
   }
+
+projectedGroupWire :: ProjectedGroupEvidence -> ProjectedGroup
+projectedGroupWire = projectedGroupEncodingInput . projectedGroupEncoding
 
 newtype PreparedModuleProducts = PreparedModuleProducts
   [(Module, Either ProjectionError [ProjectedGroupEvidence], [OriginalGroupOmission])]
@@ -348,7 +350,6 @@ data RawModuleProducts = RawModuleProducts
   { rawOriginalProductOwner :: Module
   , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
   , rawExecutableProduct :: Either ProjectionError [ProjectedGroupEvidence]
-  , rawOriginalGroupEncodings :: Map Word32 ProjectedGroupEncoding
   }
 
 -- Raw facts retain exact prepared compiler objects and projection authority.
@@ -440,7 +441,7 @@ projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
 projectRawOriginalHomeModuleProducts env interfaces context prepared =
-  RawModuleProducts owner original executable encodings
+  RawModuleProducts owner original executable
   where
     owner = pmModule prepared
     isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
@@ -451,8 +452,6 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
       _ -> Nothing
     executable = traverse (\(_,_,result) -> result)
       (projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing)
-    encodings = Map.fromList [(ordinal,prepareProjectedGroupEncoding (projectedGroupWire group))
-      | outcomes <- maybe [] pure original, (ordinal,_,Right group) <- outcomes]
 
 -- Force the local lowering on its executor worker, before incorporation.
 -- Failed groups remain values; only infrastructure exceptions abort the batch.
@@ -472,6 +471,8 @@ forceRawModuleProducts raw = do
           either (const True) (const True) result])
         pure ()
       else pure ()
+      -- preparedBindingGroups issues ascending original ordinals. Force
+      -- successful payloads in that order, before retaining compiler identities.
       pure [group | (_,_,Right group) <- outcomes]
     Nothing -> do
       outcome <- evaluate (rawExecutableProduct raw)
@@ -482,8 +483,7 @@ forceRawModuleProducts raw = do
     Just _ -> do
       _ <- evaluate (Set.size (rawOriginalProductDemands raw)
         + Set.size (rawOriginalProductBinders raw)
-        + sum (map (BS.length . projectedGroupEncodingBytes)
-            (Map.elems (rawOriginalGroupEncodings raw))))
+        + sum (map (BS.length . projectedGroupEncodingBytes . projectedGroupEncoding) selected))
       pure ()
     Nothing -> pure ()
   -- Consume the census spine and exact compiler identities on the worker,
@@ -524,9 +524,10 @@ forceRawModuleProducts raw = do
           , ("operations", total (length . projectedOperations))
           , ("type_nodes", total (IntMap.size . typeGraphNodes . projectedTypes))
           , ("type_edges", total (sum . map length . IntMap.elems . typeGraphEdges . projectedTypes))
-          , ("original_encoding_bytes", toInteger (sum (map
-              (BS.length . projectedGroupEncodingBytes)
-              (Map.elems (rawOriginalGroupEncodings raw)))))
+          , ("original_encoding_bytes", case rawOriginalProductGroups raw of
+              Nothing -> 0
+              Just _ -> toInteger (sum (map
+                (BS.length . projectedGroupEncodingBytes . projectedGroupEncoding) selected)))
           ] ++ case rawOriginalProductGroups raw of
             Nothing -> []
             Just outcomes -> [("original_groups", toInteger (length outcomes)),
@@ -631,6 +632,13 @@ preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
 preparedModuleProductOutcomes (PreparedModuleProducts outcomes) =
   [(owner, map projectedGroupWire <$> outcome) | (owner, outcome, _) <- outcomes]
+
+-- The exact encoding plan follows its semantic group through settlement. No
+-- caller reconstructs the pairing from owner names or original ordinals.
+preparedModuleProductEncodings :: PreparedModuleProducts
+  -> [(Module, Either ProjectionError [ProjectedGroupEncoding])]
+preparedModuleProductEncodings (PreparedModuleProducts outcomes) =
+  [(owner, map projectedGroupEncoding <$> outcome) | (owner, outcome, _) <- outcomes]
 
 preparedModuleProductOmissions :: PreparedModuleProducts
   -> [(Module, [OriginalGroupOmission])]
@@ -797,7 +805,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             (types, sites, verbSites) <- lowerPreparedEvidence [onlyGroup] [evidence] auxiliary
             jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
-      pure (ProjectedGroupEvidence (ProjectedGroup
+      pure (ProjectedGroupEvidence (prepareProjectedGroupEncoding (ProjectedGroup
         { projectedOriginalOrdinal = ordinal
         , projectedBinders = binders
         , projectedBody = ProjectedGroupBody
@@ -814,7 +822,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             , projectedConstructorReplies = verbSites
             , projectedJsonLayout = jsonLayout
             }
-        }) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
+        })) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.

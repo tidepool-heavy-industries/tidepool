@@ -8,7 +8,7 @@ module Tidepool.ExecutionEncode
   , ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
   , ProjectedGroupEncoding, prepareProjectedGroupEncoding, prepareModuleProductEncodingFromGroups
-  , projectedGroupEncodingBytes
+  , projectedGroupEncodingInput, projectedGroupEncodingBytes
   ) where
 
 import Codec.CBOR.Encoding
@@ -107,6 +107,9 @@ data ProjectedGroupEncoding = ProjectedGroupEncoding ProjectedGroup ByteString
 
 prepareProjectedGroupEncoding :: ProjectedGroup -> ProjectedGroupEncoding
 prepareProjectedGroupEncoding group = ProjectedGroupEncoding group (encodeProjectedGroup group)
+
+projectedGroupEncodingInput :: ProjectedGroupEncoding -> ProjectedGroup
+projectedGroupEncodingInput (ProjectedGroupEncoding group _) = group
 
 projectedGroupEncodingBytes :: ProjectedGroupEncoding -> ByteString
 projectedGroupEncodingBytes (ProjectedGroupEncoding _ bytes) = bytes
