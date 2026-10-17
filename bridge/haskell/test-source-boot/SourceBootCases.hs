@@ -143,7 +143,7 @@ import Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, preparedModuleProductEncodings, rawOriginalProductOwner, preparedModuleProductOmissions)
+import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, preparedModuleProductEncodings, preparedModuleProductOmissions)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
   , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
@@ -2855,10 +2855,13 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
           Left failure -> TList [TString "refused", TString (T.pack (show failure))]
           Right groups -> TList (TString "available" :
             map (TInteger . toInteger . projectedOriginalOrdinal) groups)])
-    forM_ (map snd cold) $ \raw ->
-      forM_ (Map.toAscList (rawOriginalGroupEncodings raw)) $ \(ordinal,encoding) ->
-        emit (TList (TString "group" : ownerTerm (rawOriginalProductOwner raw) ++
-          [TInteger (toInteger ordinal), TBytes (projectedGroupEncodingBytes encoding)]))
+    -- Group observations contain accepted settled encodings, not every raw
+    -- successful projection. Rejected groups must not be forced for diagnostics.
+    forM_ [(owner,encodings) | (owner,Right encodings) <- preparedModuleProductEncodings coldProducts] $
+      \(owner,encodings) -> forM_ encodings $ \encoding ->
+        emit (TList (TString "group" : ownerTerm owner ++
+          [TInteger (toInteger (projectedOriginalOrdinal (projectedGroupEncodingInput encoding))),
+            TBytes (projectedGroupEncodingBytes encoding)]))
     forM_ [("normal", coldProducts), ("withdrawn", settled cold (Set.singleton requestOwner))] $
       \(label,products) -> emit (TList [TString "settlement", TString label,
         TList (map outcomeTerm (preparedModuleProductOutcomes products)),
