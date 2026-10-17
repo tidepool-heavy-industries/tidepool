@@ -10589,6 +10589,7 @@ mod tests {
         let inputs = context.recovery_inspection_inputs().unwrap();
         assert_eq!(inputs.0.artifacts.len(), 4);
         assert!(inputs
+            .0
             .artifacts
             .iter()
             .all(|artifact| artifact.product.is_none()));

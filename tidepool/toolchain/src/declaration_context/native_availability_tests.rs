@@ -7193,6 +7193,7 @@ fn recovery_interface_projection_preserves_native_availability_modes() {
         let inputs = context.recovery_inspection_inputs().unwrap();
         assert!(!inputs.0.artifacts.is_empty());
         assert!(inputs
+            .0
             .artifacts
             .iter()
             .all(|artifact| artifact.product.is_none()));
