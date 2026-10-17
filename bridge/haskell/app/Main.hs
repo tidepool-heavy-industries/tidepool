@@ -456,7 +456,7 @@ processFile bound timing path = do
       PortableOutputs _ -> do
         _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
         writeRequestInputProof args outDir prepared
-        BS.writeFile (outDir </> "portable-output.cbor") "TPPORTABLEOUTPUT1\n"
+        BS.writeFile (outDir </> "portable-output.mode") "TPPORTABLEOUTPUT1\n"
 
   either throwIO (const (pure [])) res
 

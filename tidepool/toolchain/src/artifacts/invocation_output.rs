@@ -29,7 +29,7 @@ impl Artifact {
             Self::YieldSites(None) => "asks.json".into(),
             Self::ModuleProducts => "module-products.cbor".into(),
             Self::ModulePackageImports => "module-package-imports.cbor".into(),
-            Self::PortableReceipt => "portable-output.cbor".into(),
+            Self::PortableReceipt => "portable-output.mode".into(),
             Self::Dependencies => "dependencies.json".into(),
         }
     }
@@ -37,27 +37,6 @@ impl Artifact {
 
 pub(crate) struct NativeOutput;
 pub(crate) struct PortableOutput;
-
-pub(crate) trait OutputPurpose: Sized {
-    fn validate(bundle: &InvocationOutputBundle<Self>) -> Result<(), CompileError>;
-}
-
-impl OutputPurpose for NativeOutput {
-    fn validate(_: &InvocationOutputBundle<Self>) -> Result<(), CompileError> {
-        Ok(())
-    }
-}
-
-impl OutputPurpose for PortableOutput {
-    fn validate(bundle: &InvocationOutputBundle<Self>) -> Result<(), CompileError> {
-        if bundle.get(&Artifact::PortableReceipt).as_slice() != b"TPPORTABLEOUTPUT1\n" {
-            return Err(CompileError::ExtractFailed(
-                "portable output mode receipt differs".into(),
-            ));
-        }
-        Ok(())
-    }
-}
 
 pub(crate) struct InvocationOutputLayout<P = NativeOutput> {
     artifacts: Vec<Artifact>,
@@ -99,7 +78,12 @@ impl<P> InvocationOutputLayout<P> {
                 "invocation output requires a target".into(),
             ));
         }
-        let mut artifacts = vec![Artifact::Metadata];
+        let mut artifacts = members
+            .iter()
+            .filter(|artifact| matches!(artifact, Artifact::PortableReceipt))
+            .cloned()
+            .collect::<Vec<_>>();
+        artifacts.push(Artifact::Metadata);
         let mut target_names = BTreeSet::new();
         for target in targets {
             if target.is_empty() || !target_names.insert(*target) {
@@ -112,7 +96,11 @@ impl<P> InvocationOutputLayout<P> {
                 (targets.len() > 1).then(|| (*target).into()),
             ));
         }
-        artifacts.extend(members);
+        artifacts.extend(
+            members
+                .into_iter()
+                .filter(|artifact| !matches!(artifact, Artifact::PortableReceipt)),
+        );
         let mut filenames = BTreeSet::new();
         for artifact in &artifacts {
             let filename = artifact.filename();
@@ -163,10 +151,7 @@ impl<P> InvocationOutputLayout<P> {
         &self,
         root: &Path,
         operation: Arc<InventoryOperation>,
-    ) -> Result<InvocationOutputBundle<P>, CompileError>
-    where
-        P: OutputPurpose,
-    {
+    ) -> Result<InvocationOutputBundle<P>, CompileError> {
         operation
             .reserve::<(Artifact, Arc<Vec<u8>>)>(self.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
@@ -177,18 +162,24 @@ impl<P> InvocationOutputLayout<P> {
                 Artifact::PortableReceipt => b"TPPORTABLEOUTPUT1\n".len(),
                 _ => operation.limits().max_bytes,
             };
-            certified_products::read_bounded_with_operation(&path, limit as u64, &operation)
-                .map_err(|error| match &error {
-                    certified_products::CertificationError::EvidenceRead {
-                        failure: certified_products::EvidenceReadFailure::Io { error, .. },
-                        ..
-                    } if error.kind() == std::io::ErrorKind::NotFound => {
-                        CompileError::MissingOutput(path)
-                    }
-                    _ => compiler_evidence_failure(error),
-                })
+            let bytes =
+                certified_products::read_bounded_with_operation(&path, limit as u64, &operation)
+                    .map_err(|error| match &error {
+                        certified_products::CertificationError::EvidenceRead {
+                            failure: certified_products::EvidenceReadFailure::Io { error, .. },
+                            ..
+                        } if error.kind() == std::io::ErrorKind::NotFound => {
+                            CompileError::MissingOutput(path)
+                        }
+                        _ => compiler_evidence_failure(error),
+                    })?;
+            if matches!(artifact, Artifact::PortableReceipt) && bytes != b"TPPORTABLEOUTPUT1\n" {
+                return Err(CompileError::ExtractFailed(
+                    "portable output mode receipt differs".into(),
+                ));
+            }
+            Ok(bytes)
         })?;
-        P::validate(&bundle)?;
         Ok(bundle)
     }
 }
@@ -284,27 +275,44 @@ mod portable_tests {
             ("entry.prepared.cbor", b"prepared"),
             ("asks.json", b"sites"),
             ("dependencies.json", b"dependencies"),
-            ("portable-output.cbor", b"TPPORTABLEOUTPUT1\n"),
+            ("portable-output.mode", b"TPPORTABLEOUTPUT1\n"),
         ] {
             std::fs::write(root.path().join(artifact), bytes).unwrap();
         }
         let operation = || Arc::new(InventoryOperation::new(Default::default()));
         layout.read(root.path(), operation()).unwrap();
+        // Exactly eighteen bytes is the accepted marker; nineteen refuses at
+        // the physical reader's bound before larger members are acquired.
+        assert_eq!(b"TPPORTABLEOUTPUT1\n".len(), 18);
         std::fs::write(
-            root.path().join("portable-output.cbor"),
+            root.path().join("portable-output.mode"),
+            b"TPPORTABLEOUTPUT1\nX",
+        )
+        .unwrap();
+        std::fs::remove_file(root.path().join("meta.cbor")).unwrap();
+        assert!(matches!(
+            layout.read(root.path(), operation()),
+            Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                certified_products::CertificationError::EvidenceRead {
+                    failure: certified_products::EvidenceReadFailure::SizeLimit { actual: 19, limit: 18 }, ..
+                })
+        ));
+        std::fs::write(root.path().join("meta.cbor"), b"metadata").unwrap();
+        std::fs::write(
+            root.path().join("portable-output.mode"),
             b"TPPORTABLEOUTPUT0\n",
         )
         .unwrap();
         assert!(layout.read(root.path(), operation()).is_err());
-        // A corrupt encoded-length prefix is never decoded or allocated.
+        // Encoded-length-looking bytes are a wrong marker, never a decoder input.
         std::fs::write(
-            root.path().join("portable-output.cbor"),
+            root.path().join("portable-output.mode"),
             [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
         )
         .unwrap();
         assert!(layout.read(root.path(), operation()).is_err());
         std::fs::write(
-            root.path().join("portable-output.cbor"),
+            root.path().join("portable-output.mode"),
             b"TPPORTABLEOUTPUT1\n",
         )
         .unwrap();
