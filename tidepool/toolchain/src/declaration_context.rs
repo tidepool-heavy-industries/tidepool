@@ -2268,18 +2268,16 @@ impl RecoveredArtifactInventory {
         bindings: &[ArtifactBinding],
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<Self, RecoveryInventoryError> {
-        // Delta certification sees only new products. Preserve the fresh
-        // batch's owner uniqueness across this complete requested inventory.
-        {
-            let mut original_owners = BTreeSet::new();
-            for entry in captured.entries.values() {
-                if let ArtifactPayload::Original(product) = &entry.payload {
-                    if !original_owners.insert(product.owner()) {
-                        return Err(failure("duplicate recovery original").into());
-                    }
-                }
-            }
-        }
+        crate::certified_products::validate_recovery_original_owners(
+            captured
+                .entries
+                .values()
+                .filter_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(product) => Some(product.owner()),
+                    _ => None,
+                }),
+        )
+        .map_err(failure)?;
         let actual = captured
             .entries
             .iter()
