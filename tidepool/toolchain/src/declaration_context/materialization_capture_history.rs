@@ -530,10 +530,8 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     // the production host input/materialization owners without pretending to
     // qualify a compiler endpoint whose producer bytes cannot match it.
     let extend = |context: &Arc<ExactDeclarationContext>, module: &str| {
-        let product = crate::certified_products::fixture_finalized_product(
-            support_product(module),
-            [7; 32],
-        );
+        let product =
+            crate::certified_products::fixture_finalized_product(support_product(module), [7; 32]);
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
             std::slice::from_ref(&product),
         )
@@ -542,7 +540,10 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         assert_eq!(recovered.owner(), product.owner());
         assert_eq!(recovered.interface_bytes(), product.interface_bytes());
         assert_eq!(recovered.product_bytes(), product.product_bytes());
-        assert_eq!(recovered.certification_bytes(), product.certification_bytes());
+        assert_eq!(
+            recovered.certification_bytes(),
+            product.certification_bytes()
+        );
         assert_eq!(
             crate::certified_products::original_available_groups(&recovered)
                 .unwrap()
@@ -680,7 +681,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     }
     let mut captured = next.as_ref().clone();
     let selected = support
-        .retain_custody(&inputs.artifacts)
+        .retain_custody(inputs.artifacts())
         .unwrap()
         .select_support_roots(roots)
         .unwrap();

@@ -338,19 +338,24 @@ fn old_selection_and_context_versions_are_rejected() {
     let lexical = materializer
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
-    let descriptor = ContextDescriptor {
-        version: 2,
-        producer: [0; 32],
-        selection: selection.root().clone(),
-        roles: roles.root().clone(),
-        lexical: lexical.root().clone(),
-        offers: lexical.root().clone(),
-    };
-    let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
     install(&store, materializer.finish().unwrap());
-    assert!(
-        matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
-    );
+    for version in [2, 3] {
+        let mut materializer = Materializer::new(&store);
+        let descriptor = ContextDescriptor {
+            version,
+            producer: [0; 32],
+            selection: selection.root().clone(),
+            roles: roles.root().clone(),
+            lexical: lexical.root().clone(),
+            offers: lexical.root().clone(),
+            input_decisions: None,
+        };
+        let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
+        install(&store, materializer.finish().unwrap());
+        assert!(
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 4 with issued input decisions")
+        );
+    }
 }
 
 #[test]
@@ -439,5 +444,93 @@ fn native_offer_classes_round_trip_and_change_context_identity() {
             .offers
             .len(),
         2
+    );
+}
+
+#[test]
+fn recorded_input_domain_distinguishes_empty_from_absent_without_issuing_authority() {
+    let store = MemoryBlockstore::new();
+    let owner = ExactModuleIdentity {
+        unit: "home".into(),
+        module: "RecordedOnly".into(),
+    };
+    // These are untrusted wire facts. Hydration is deliberately not a compiler
+    // admission and this test never constructs an issued decision owner.
+    let mut snapshot = ExactContextSnapshot::empty();
+    let mut writer = Materializer::new(&store);
+    let absent = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    snapshot.input_decisions.insert(
+        owner.clone(),
+        crate::artifact_inventory::RecordedInputNativeDecision {
+            role: CompilerInputRole::ReusableOriginal {
+                interface: ArtifactId([1; 32]),
+                original: ArtifactId([2; 32]),
+            },
+            groups: OrdMap::new(),
+        },
+    );
+    let mut writer = Materializer::new(&store);
+    let empty = writer
+        .materialize_context(Some(&absent), &snapshot)
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    assert_ne!(absent.root(), empty.root());
+    let reopened = hydrate_context(&store, empty.root()).unwrap();
+    assert_eq!(
+        reopened.snapshot().input_decisions,
+        snapshot.input_decisions
+    );
+    assert!(reopened.snapshot().input_decisions[&owner]
+        .groups
+        .is_empty());
+    assert!(hydrate_context(&store, absent.root())
+        .unwrap()
+        .snapshot()
+        .input_decisions
+        .is_empty());
+}
+
+#[test]
+fn input_decision_codec_refuses_non_original_roles_and_duplicate_ordinals() {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let no_original = CompilerRoleCodec::encode(
+        &mut writer,
+        &CompilerInputRole::InterfaceOnly {
+            interface: ArtifactId([1; 32]),
+        },
+    )
+    .unwrap();
+    let original = CompilerRoleCodec::encode(
+        &mut writer,
+        &CompilerInputRole::ReusableOriginal {
+            interface: ArtifactId([1; 32]),
+            original: ArtifactId([2; 32]),
+        },
+    )
+    .unwrap();
+    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(serde_json::json!({
+        "binding": { "artifact": vec![2u8; 32], "selection": vec![3u8; 32] }, "original_ordinal": 7
+    })).unwrap();
+    let interface_fact = writer
+        .materialize_value(&InputNativeDecisionWire {
+            role: no_original,
+            groups: vec![],
+        })
+        .unwrap();
+    let duplicate_fact = writer
+        .materialize_value(&InputNativeDecisionWire {
+            role: original,
+            groups: vec![group, group],
+        })
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    let reader = SnapshotHydrator::new(&store);
+    assert!(
+        matches!(InputNativeDecisionCodec::decode(&reader, interface_fact), Err(SnapshotError::Malformed(message)) if message == "input decision has no original role")
+    );
+    assert!(
+        matches!(InputNativeDecisionCodec::decode(&reader, duplicate_fact), Err(SnapshotError::Malformed(message)) if message == "input decision repeats an ordinal")
     );
 }

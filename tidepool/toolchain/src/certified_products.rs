@@ -463,7 +463,7 @@ impl CertifiedSegmentOriginals {
         }
         crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
             &mut products.source_selection,
-            &exact.request.compiler_inputs().artifacts,
+            exact.request.compiler_inputs().artifacts(),
             artifact_entries
                 .iter()
                 .chain(&value_entries)
@@ -1142,8 +1142,23 @@ pub struct OriginalAvailabilityRefusal {
     pub original_ordinal: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum InputDecisionRefusal {
+    MissingContinuationOwner,
+    MissingDecision,
+    NativeOwnerMismatch,
+    ArtifactIdentityMismatch,
+    RoleMismatch,
+    UnexpectedVersion,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("input native decision for {owner:?} refused: {reason:?}")]
+    InputDecision {
+        owner: crate::declaration_join::ExactModuleIdentity,
+        reason: InputDecisionRefusal,
+    },
     #[error("compiler host work interrupted: {0}")]
     Interrupted(#[source] std::io::Error),
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -2410,10 +2425,17 @@ fn duplicate_source_binder(
 
 /// Exact type and native roles issued for one compiler request, completed by
 /// that request's validated output rows. Full retained custody is not an offer.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CertifiedSourceSelection {
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    input_origin: CertifiedInputOrigin,
+}
+
+#[derive(Clone, Debug)]
+enum CertifiedInputOrigin {
+    Continuation(Arc<crate::artifact_inventory::CompilerSourceSupport>),
+    NewProducts,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -2468,9 +2490,16 @@ enum ReceiptSourceSelection {
 
 #[derive(Clone, Debug)]
 struct ReceiptNativeSelection {
+    origin: ReceiptNativeOrigin,
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
     availability: ReceiptNativeAvailability,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReceiptNativeOrigin {
+    Input,
+    NewProduct,
 }
 
 #[derive(Clone, Debug)]
@@ -2531,6 +2560,52 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    /// A validated output with no certified original rows carries no inherited
+    /// input choice. This cannot construct a native role or availability.
+    pub(crate) fn empty_product_output() -> Self {
+        Self::new_product_ingress()
+    }
+
+    pub(crate) fn continuation_input(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> CertResult<
+        Option<(
+            &crate::artifact_inventory::CompilerSourceSupport,
+            &CachedHomeOwner,
+        )>,
+    > {
+        let Some(native) = self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+            .and_then(ReceiptSourceSelection::native)
+        else {
+            return Ok(None);
+        };
+        if matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+            return Ok(None);
+        }
+        let refusal = |reason| CertificationError::InputDecision {
+            owner: owner.clone(),
+            reason,
+        };
+        if !matches!(native.version, ReceiptSourceVersion::Original) {
+            return Err(refusal(InputDecisionRefusal::UnexpectedVersion));
+        }
+        let CertifiedInputOrigin::Continuation(source) = &self.input_origin else {
+            return Err(refusal(InputDecisionRefusal::MissingContinuationOwner));
+        };
+        Ok(Some((source, &native.owner)))
+    }
+
+    fn new_product_ingress() -> Self {
+        Self {
+            modules: Arc::new(BTreeMap::new()),
+            produced_types: None,
+            input_origin: CertifiedInputOrigin::NewProducts,
+        }
+    }
+
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
@@ -2576,8 +2651,10 @@ impl CertifiedSourceSelection {
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let mut selected =
-            Self::from_compiler_projection(&inputs.projection, &metadata.retained, operation)?;
-        for role in inputs.projection.roles() {
+            Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
+        selected.input_origin =
+            CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
+        for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
             };
@@ -2601,6 +2678,7 @@ impl CertifiedSourceSelection {
                     "request original compiler owner",
                 ));
             }
+            native.origin = ReceiptNativeOrigin::Input;
             native.availability =
                 ReceiptNativeAvailability::Issued(inputs.native_availability(original).ok_or(
                     CertificationError::Mismatch("request original availability"),
@@ -2977,6 +3055,63 @@ impl CertifiedSourceSelection {
         Ok(())
     }
 
+    /// Query the physical receipt's exact resolver choice for one demanded key.
+    /// Explicit issuer roots qualify retained availability; they are never
+    /// reconstructed from a broader inventory or from completeness ranking.
+    pub(crate) fn native_group_candidates(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+    ) -> BTreeSet<crate::artifact_inventory::NativeGroupBinding> {
+        use crate::artifact_inventory::ArtifactBindingNode;
+        let qualified = self
+            .native_original_requirements()
+            .flat_map(|proof| {
+                proof
+                    .selection
+                    .snapshot()
+                    .roots
+                    .keys()
+                    .filter_map(move |root| match root {
+                        ArtifactBindingNode::Group(group)
+                            if key.artifact == proof.original
+                                && group.binding.artifact() == key.artifact
+                                && group.original_ordinal == key.original_ordinal =>
+                        {
+                            Some(*group)
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        if !qualified.is_empty() {
+            return qualified;
+        }
+        self.native_selections()
+            .flat_map(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .flat_map(|offer| offer.group_bindings(key))
+                    .collect::<BTreeSet<_>>(),
+                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
+                    .iter()
+                    .flat_map(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .copied()
+                    })
+                    .filter(|group| {
+                        group.binding.artifact() == key.artifact
+                            && group.original_ordinal == key.original_ordinal
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// A completed fresh product owns its body. Retained request bodies are
     /// limited to their closed availability and exact dependency proofs.
     pub(crate) fn permits_native_group(
@@ -2991,16 +3126,30 @@ impl CertifiedSourceSelection {
         {
             return selected.availability.permits(ordinal);
         }
-        self.native_original_requirements().any(|proof| {
-            proof
-                .selection
-                .graph_selection()
-                .native_groups
-                .iter()
-                .any(|group| {
-                    group.binding.artifact() == original && group.original_ordinal == ordinal
-                })
-        })
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: original,
+            original_ordinal: ordinal,
+        };
+        self.native_selections()
+            .any(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .any(|offer| offer.group_bindings(key).next().is_some()),
+                ReceiptNativeAvailability::NewProduct { dependencies } => {
+                    dependencies.iter().any(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .any(|group| {
+                                group.binding.artifact() == original
+                                    && group.original_ordinal == ordinal
+                            })
+                    })
+                }
+            })
     }
 
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
@@ -3100,7 +3249,7 @@ impl CertifiedSourceSelection {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
-        let mut selected = Self::default();
+        let mut selected = Self::new_product_ingress();
         for product in products {
             let witness = product
                 .original_native()
@@ -3132,6 +3281,7 @@ impl CertifiedSourceSelection {
                         .descriptor
                         .id,
                         native: ReceiptNativeSelection {
+                            origin: ReceiptNativeOrigin::NewProduct,
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
                             availability: ReceiptNativeAvailability::NewProduct {
@@ -3240,6 +3390,7 @@ impl CertifiedSourceSelection {
             ReceiptSourceSelection::Native {
                 interface,
                 native: ReceiptNativeSelection {
+                    origin: ReceiptNativeOrigin::NewProduct,
                     owner: owner.clone(),
                     version,
                     availability: ReceiptNativeAvailability::NewProduct {
@@ -8249,7 +8400,7 @@ pub(crate) fn certify_products_with_validation(
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?;
             CertifiedSourceSelection::from_compiler_inputs(inputs, metadata, &validation.inventory)?
         }
-        None => CertifiedSourceSelection::default(),
+        None => CertifiedSourceSelection::new_product_ingress(),
     };
     for interface in &module_interfaces {
         source_selection.admit_interface(
@@ -11577,7 +11728,7 @@ pub(crate) mod tests {
                 binder: binder.clone()
             }
         );
-        let mut current_selection = CertifiedSourceSelection::default();
+        let mut current_selection = CertifiedSourceSelection::new_product_ingress();
         current_selection
             .admit_current(
                 new.owner(),
@@ -11717,7 +11868,7 @@ pub(crate) mod tests {
         let products = [original.clone(), old_helper.clone(), new_helper.clone()];
         let mut validation = PackageInterfaceValidation::default();
         let sources = available_original_source_map(&products, &[], &validation.inventory).unwrap();
-        let mut current = CertifiedSourceSelection::default();
+        let mut current = CertifiedSourceSelection::new_product_ingress();
         current
             .admit_current(
                 new_helper.owner(),
@@ -11924,7 +12075,7 @@ pub(crate) mod tests {
             (staged.clone(), ProductOrigin::RetainedCore),
         );
         let operation = InventoryOperation::new(Default::default());
-        let mut selection = CertifiedSourceSelection::default();
+        let mut selection = CertifiedSourceSelection::new_product_ingress();
         selection
             .admit_current(
                 &staged,
@@ -12468,10 +12619,19 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
+            let mut missing_input_owner = selection.clone();
+            missing_input_owner.input_origin = CertifiedInputOrigin::NewProducts;
+            assert!(matches!(
+                OriginalCompilerInputs::from_selection(&missing_input_owner, request.compiler_inputs().artifacts()),
+                Err(crate::CompileError::CompilerEvidence(error))
+                    if matches!(*error, CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::MissingContinuationOwner, ..
+                    })
+            ), "a continuation cannot fall back to fresh policy when its exact input owner is lost");
             if mode == "current" {
                 // A newly certified complete product is issued by the current
                 // source owner, independently of this request's empty baseline.
-                selection = CertifiedSourceSelection::default();
+                selection = CertifiedSourceSelection::new_product_ingress();
                 selection
                     .admit_current(
                         product.owner(),
@@ -12486,14 +12646,30 @@ pub(crate) mod tests {
                     // A separately issued complete carrier is legitimate new custody;
                     // it cannot rewrite this earlier request's availability choice.
                     inventory
-                        .admit_shared(&request.compiler_inputs().artifacts, vec![entry.clone()])
+                        .admit_shared(request.compiler_inputs().artifacts(), vec![entry.clone()])
                         .unwrap()
-                        .retain_original_custody(&request.compiler_inputs().artifacts)
+                        .retain_original_custody(request.compiler_inputs().artifacts())
                         .unwrap()
                 } else {
-                    request.compiler_inputs().artifacts.clone()
+                    request.compiler_inputs().artifacts().clone()
                 };
                 let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
+                if mode != "current" {
+                    let issued = request
+                        .compiler_inputs()
+                        .compiler_source_support()
+                        .recorded_input_decisions();
+                    assert!(issued.contains_key(&entry.descriptor.owner),
+                        "the actual request issuer records the domain even when it chooses no Group");
+                    assert_eq!(
+                        private.issued_input_decisions().unwrap().recorded_facts(),
+                        issued,
+                        "certified continuation retains exact input choices despite extra custody mode={mode} broaden={broaden}",
+                    );
+                    if mode == "empty" {
+                        assert!(issued[&entry.descriptor.owner].groups.is_empty());
+                    }
+                }
                 let public = Arc::new(
                     ExactDeclarationContext::new(&[], &[], vec![])
                         .unwrap()
@@ -12583,13 +12759,14 @@ pub(crate) mod tests {
                         };
                         let admitted = inventory
                             .admit_certified_with_demand(
-                                &next.compiler_inputs().artifacts,
+                                next.compiler_inputs().artifacts(),
                                 vec![entry.clone()],
                                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                                 &next_selection,
                             )
                             .unwrap();
-                        let mut groups = next.compiler_inputs().artifacts.selected_native_groups();
+                        let mut groups =
+                            next.compiler_inputs().artifacts().selected_native_groups();
                         groups.insert(NativeGroupKey {
                             artifact: entry.descriptor.id,
                             original_ordinal: ordinal,
@@ -12735,9 +12912,9 @@ pub(crate) mod tests {
             .unwrap()
             .permits(17));
         assert!(!inputs
-            .artifacts
+            .artifacts()
             .contains_namespace_artifact(future.descriptor.id));
-        assert!(inputs.artifacts.selected_native_groups().is_empty());
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(request.groups.is_empty());
         assert_eq!(
             issued_groups,
@@ -12746,11 +12923,11 @@ pub(crate) mod tests {
                 .iter()
                 .find(|p| p.original == native.descriptor.id)
                 .unwrap()
-                .issued_group_carriers(&inputs.artifacts)
+                .issued_group_carriers(inputs.artifacts())
                 .unwrap()
         );
         let mut fixed = inventory
-            .bind_segment(&inputs.artifacts, entries, &physical)
+            .bind_segment(inputs.artifacts(), entries, &physical)
             .unwrap();
         let source = |ordinal| {
             let definitions = original_native_group_definitions(&product, ordinal).unwrap();
@@ -12933,7 +13110,7 @@ pub(crate) mod tests {
                     &[dependency.clone(), current.clone()],
                     &[],
                     &[],
-                    Some(&request.compiler_inputs().artifacts),
+                    Some(request.compiler_inputs().artifacts()),
                     NativeArtifactDemand::ScopeInterfaces,
                     &mut validation,
                 )
@@ -17694,7 +17871,7 @@ pub(crate) mod tests {
                         &certified.recovery_products,
                         &certified.module_interfaces,
                         &certified.value_interfaces,
-                        Some(&request.compiler_inputs().artifacts),
+                        Some(request.compiler_inputs().artifacts()),
                         crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
                         &mut PackageInterfaceValidation::default(),
                     )
@@ -17929,7 +18106,7 @@ pub(crate) mod tests {
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
                 let inventory = ArtifactInventory::default();
-                let mut private_entries = request.compiler_inputs().artifacts.entries();
+                let mut private_entries = request.compiler_inputs().artifacts().entries();
                 private_entries.extend(context.artifact_view().entries());
                 let private_view = inventory
                     .admit_recovery_selection(
