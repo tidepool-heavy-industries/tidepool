@@ -630,6 +630,12 @@ impl IssuedNativeOffer {
         })))
     }
 
+    /// Borrow durable custody facts without constructing a selected view.
+    /// Reopening these facts still requires the recovery admission boundary.
+    pub(crate) fn custody_snapshot(&self) -> &Arc<crate::exact_context::ExactSelectionSnapshot> {
+        &self.0.custody.lease.selection
+    }
+
     pub(crate) fn snapshot_facts(&self) -> crate::exact_context::NativeOfferSnapshotFacts {
         use crate::exact_context::{NativeOfferSnapshotBody, NativeOfferSnapshotFacts};
         NativeOfferSnapshotFacts {
@@ -637,11 +643,9 @@ impl IssuedNativeOffer {
             interface: self.0.interface,
             owner: self.0.owner.clone(),
             body: match &self.0.body {
-                NativeOfferBody::Empty => {
-                    NativeOfferSnapshotBody::Empty(ExactArtifactSelection::from_snapshot(
-                        Arc::clone(&self.0.custody.lease.selection),
-                    ))
-                }
+                NativeOfferBody::Empty => NativeOfferSnapshotBody::Empty(
+                    ExactArtifactSelection::from_snapshot(Arc::clone(self.custody_snapshot())),
+                ),
                 NativeOfferBody::Partial(proof) => {
                     NativeOfferSnapshotBody::Partial(proof.selection.clone())
                 }

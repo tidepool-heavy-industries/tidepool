@@ -4919,23 +4919,18 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     })
     .descriptor
     .id;
-    assert!(empty
-        .custody()
-        .artifact_ids()
-        .contains(&entry.descriptor.id));
-    assert!(empty.custody().artifact_ids().contains(&canonical));
-    assert!(empty.custody().selected_native_groups().is_empty());
-    assert!(empty
-        .custody()
-        .capture_graph_selection()
-        .native_groups
-        .is_empty());
-    assert!(empty.custody().capture_graph_selection().roots.is_empty());
-    assert!(empty
-        .custody()
-        .capture_graph_selection()
-        .namespace
-        .is_empty());
+    let empty_graph = empty.custody_snapshot().graph_selection().unwrap();
+    let empty_ids = empty_graph
+        .bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    assert!(empty_ids.contains(&entry.descriptor.id));
+    assert!(empty_ids.contains(&canonical));
+    assert!(empty.issued_group_carriers().unwrap().is_empty());
+    assert!(empty_graph.native_groups.is_empty());
+    assert!(empty_graph.roots.is_empty());
+    assert!(empty_graph.namespace.is_empty());
     let canonical_support = recover_fixture_compiler_support(
         projection.interface_only(),
         artifacts.clone(),
@@ -5068,19 +5063,28 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
     let right = issue("EmptyRight", 90);
     let left_offer = IssuedNativeOffer::issue(entry.descriptor.id, &left, None).unwrap();
     let right_offer = IssuedNativeOffer::issue(entry.descriptor.id, &right, None).unwrap();
+    let left_graph = left_offer.custody_snapshot().graph_selection().unwrap();
+    let right_graph = right_offer.custody_snapshot().graph_selection().unwrap();
     assert_eq!(
-        left_offer.custody(),
-        right_offer.custody(),
-        "payload/group view equality cannot identify issuance"
+        left_graph
+            .bindings
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>(),
+        right_graph
+            .bindings
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>(),
+        "identical payload membership cannot identify issuance",
     );
+    assert!(left_graph.native_groups.is_empty());
+    assert!(right_graph.native_groups.is_empty());
     assert_ne!(
         left_offer, right_offer,
         "scoped Empty facts survive live offer deduplication"
     );
-    assert_ne!(
-        left_offer.custody().capture_graph_selection(),
-        right_offer.custody().capture_graph_selection()
-    );
+    assert_ne!(left_graph, right_graph);
     assert_ne!(
         left_offer.snapshot_facts().identity().unwrap(),
         right_offer.snapshot_facts().identity().unwrap()
@@ -5174,7 +5178,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         .map(|offer| {
             assert!(offer.proof().is_none());
             assert!(!offer.is_full());
-            assert!(offer.custody().selected_native_groups().is_empty());
+            assert!(offer.custody_snapshot().roots.is_empty());
             let fact = offer.snapshot_facts();
             (fact.identity().unwrap(), fact)
         })
