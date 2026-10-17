@@ -804,6 +804,7 @@ struct RetainedSourceGraph {
     entries: exomonad_actor::SourceEntryStorage,
     catalog: tidepool_toolchain::toolchain::CatalogSelection,
     evidence: exomonad_actor::SourceGenerationEvidence,
+    source_revision_identity: String,
 }
 
 impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
@@ -829,6 +830,10 @@ impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
 
     fn generation_evidence(&self) -> Option<&exomonad_actor::SourceGenerationEvidence> {
         Some(&self.evidence)
+    }
+
+    fn source_revision_identity(&self) -> Option<&str> {
+        Some(&self.source_revision_identity)
     }
 }
 
@@ -859,6 +864,8 @@ pub(crate) struct ExomonadSourceReload {
     /// The actor's generation owner fences publication separately.
     gate: Mutex<()>,
     prompt_composers: RwLock<HashMap<PrincipalId, prompt_files::PromptComposer>>,
+    #[cfg(test)]
+    revision_projection_work: [std::sync::atomic::AtomicUsize; 2],
 }
 
 impl ExomonadSourceReload {
@@ -925,7 +932,18 @@ impl ExomonadSourceReload {
             helper_scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
             prompt_composers: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            revision_projection_work: Default::default(),
         })
+    }
+
+    #[cfg(test)]
+    fn revision_projection_work(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering;
+        (
+            self.revision_projection_work[0].load(Ordering::Relaxed),
+            self.revision_projection_work[1].load(Ordering::Relaxed),
+        )
     }
 
     #[cfg(test)]
@@ -3520,6 +3538,150 @@ mod tests {
     }
 
     #[test]
+    fn issued_source_locators_retain_identity_without_full_revision_projection() {
+        use exomonad_actor::{ActorSourceLayers, SourceInspection};
+        for (selected, unrelated) in [(1, 1), (20, 64)] {
+            let (project, owner) = generation_owner();
+            let a = owner.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+            let a_revision = owner.revision_issued(&a).unwrap();
+            let directory = project.path().join(".exomonad/Project");
+            for index in 0..selected + unrelated {
+                std::fs::write(
+                    directory.join(format!("Locator{index}.hs")),
+                    format!("module Project.Locator{index} where\nvalue :: Int\nvalue = {index}\n"),
+                )
+                .unwrap();
+            }
+            let staged = owner
+                .clone()
+                .stage_reload(PrincipalId::SYSTEM, &a, &[])
+                .unwrap();
+            let b = staged.source().clone();
+            let b_revision = owner.revision_issued(&b).unwrap();
+            assert_ne!(a_revision.identity, b_revision.identity);
+            assert_eq!(
+                b.source_revision_identity(),
+                Some(b_revision.identity.as_str())
+            );
+            let evidence = b.generation_evidence().unwrap().clone();
+            let reference = evidence.reference.clone();
+            let before = owner.revision_projection_work();
+            for source in [&a, &b, &a] {
+                let expected = if source.same_revision(&a) {
+                    &a_revision.identity
+                } else {
+                    &b_revision.identity
+                };
+                assert_eq!(
+                    owner
+                        .locate_issued(source, "Project.Work")
+                        .unwrap()
+                        .as_ref(),
+                    Some(expected)
+                );
+                assert!(owner
+                    .read_issued(source, "Project.Work")
+                    .unwrap()
+                    .1
+                    .contains("work = 1"));
+            }
+            for index in 0..selected {
+                let module = format!("Project.Locator{index}");
+                assert_eq!(
+                    owner.locate_issued(&b, &module).unwrap(),
+                    Some(b_revision.identity.clone())
+                );
+            }
+            assert_eq!(owner.locate_issued(&b, "Project.Absent").unwrap(), None);
+            assert_eq!(
+                owner.revision_projection_work(),
+                before,
+                "identity-only observations must not decode/project the full revision"
+            );
+            assert_eq!(b.generation_evidence().unwrap().reference, reference);
+            assert_eq!(
+                b.generation_evidence().unwrap().configuration_digest,
+                evidence.configuration_digest
+            );
+            let positive = owner.revision_projection_work();
+            assert_eq!(owner.revision_issued(&b).unwrap(), b_revision);
+            let after = owner.revision_projection_work();
+            assert_eq!(after.0 - positive.0, 1);
+            assert_eq!(after.1 - positive.1, b_revision.modules.len());
+
+            let SourceRootOwner::Temporary(run) = owner.source_owner.as_ref() else {
+                panic!("owned temporary source fixture");
+            };
+            let cold = Arc::new(runtime_reload_for_run(project.path(), Arc::clone(run)).unwrap());
+            let restored = cold.restore_source(&reference).unwrap();
+            let restored_revision = cold.revision_issued(&restored).unwrap();
+            assert_eq!(restored_revision, b_revision);
+            assert_eq!(
+                restored.source_revision_identity(),
+                b.source_revision_identity()
+            );
+            assert_eq!(restored.generation_evidence().unwrap().reference, reference);
+            assert!(
+                matches!(
+                    owner.locate_issued(&restored, "Project.Work"),
+                    Err(exomonad_actor::SourceInspectionError::Unavailable(_))
+                ),
+                "even identical revision identity from another real issuer grants no authority"
+            );
+            let before = cold.revision_projection_work();
+            assert_eq!(
+                cold.locate_issued(&restored, "Project.Work").unwrap(),
+                Some(b_revision.identity.clone())
+            );
+            assert_eq!(cold.revision_projection_work(), before);
+            let entries = cold
+                .restore_graph_with_entries(&reference, cold.fresh_entry_storage.clone())
+                .unwrap();
+            assert_eq!(
+                entries.source_revision_identity(),
+                restored.source_revision_identity()
+            );
+            assert_eq!(entries.generation_evidence().unwrap().reference, reference);
+            let mut wrong: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+            wrong["revision"]["identity"] = serde_json::json!("wrong authenticated revision");
+            let wrong = tidepool_runtime::session::GenerationArtifactReference::capture(
+                serde_json::to_vec(&wrong).unwrap(),
+            );
+            assert!(cold.restore_source(&wrong).is_err());
+
+            let path = b
+                .include_paths()
+                .iter()
+                .map(|root| root.join("Project/Locator0.hs"))
+                .find(|path| path.is_file())
+                .unwrap();
+            let original = std::fs::read(&path).unwrap();
+            std::fs::write(&path, b"corrupt issued body").unwrap();
+            assert_eq!(
+                owner.locate_issued(&b, "Project.Locator0").unwrap(),
+                Some(b_revision.identity.clone())
+            );
+            assert!(matches!(
+                owner.read_issued(&b, "Project.Locator0"),
+                Err(exomonad_actor::SourceInspectionError::Unreadable(_))
+            ));
+            assert!(cold.restore_source(&reference).is_err());
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(
+                owner.locate_issued(&b, "Project.Locator0").unwrap(),
+                Some(b_revision.identity.clone())
+            );
+            assert!(matches!(
+                owner.read_issued(&b, "Project.Locator0"),
+                Err(exomonad_actor::SourceInspectionError::Unreadable(_))
+            ));
+            assert!(cold.restore_source(&reference).is_err());
+            std::fs::write(&path, original).unwrap();
+            assert!(cold.restore_source(&reference).is_ok());
+        }
+    }
+
+    #[test]
     fn coherent_source_generation_retains_reads_prompts_and_recovers_without_links() {
         use exomonad_actor::ActorSourceLayers;
         let (project, reload) = generation_owner();
@@ -3998,6 +4160,15 @@ mod tests {
             "Project.Work"
         };
         let expected = capsule.model.modules();
+        let inspection = services.source_inspection();
+        let full_revision = inspection.revision(&capsule.source).unwrap();
+        let located = inspection.locate_module(&capsule.source, module).unwrap();
+        proptest::prop_assert_eq!(
+            located,
+            expected
+                .contains_key(module)
+                .then_some(full_revision.identity)
+        );
         let read = services
             .source_inspection()
             .read_from(&capsule.source, module);
@@ -4197,6 +4368,15 @@ mod tests {
                             .unwrap(),
                         _ => unreachable!(),
                     };
+                    let full_revision = inspection.revision(&restored).unwrap();
+                    proptest::prop_assert_eq!(
+                        restored.source_revision_identity(),
+                        Some(full_revision.identity.as_str())
+                    );
+                    proptest::prop_assert_eq!(
+                        restored.source_revision_identity(),
+                        capsule.source.source_revision_identity()
+                    );
                     match mode {
                         0 | 3 => proptest::prop_assert_eq!(
                             restored.semantic_digest(),
