@@ -21,7 +21,6 @@ use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 #[serial_test::serial]
 fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() {
     tidepool_testing::eval_harness::require_extract();
-    let _daemon = OwnedEnvironment::set("TIDEPOOL_EXTRACT_DAEMON_SOCKET", None);
     let cache = tempfile::tempdir().unwrap();
     let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
     let root = tempfile::tempdir().unwrap();

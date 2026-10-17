@@ -576,7 +576,51 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
                 .collect(),
         )
         .unwrap();
-    let type_view = types.artifacts().clone();
+    let retained_types = types.artifacts();
+    for original in selected
+        .roles()
+        .iter()
+        .filter_map(CompilerInputRole::original)
+    {
+        assert!(retained_types.artifact_ids().contains(&original));
+    }
+    assert!(retained_types.selected_native_groups().is_empty());
+    // Role restoration checks explicit metadata against retained bytes; it
+    // does not change the type support or issue native availability or demand.
+    let restored_roles =
+        CompilerInputProjection::restore(retained_types, &selected.roles()).unwrap();
+    assert_eq!(restored_roles, selected);
+    assert!(types
+        .projection()
+        .roles()
+        .iter()
+        .all(|role| matches!(role, CompilerInputRole::InterfaceOnly { .. })));
+    assert!(types.native_offers().is_empty());
+    assert!(retained_types.selected_native_groups().is_empty());
+    assert!(!retained_types
+        .capture_graph_selection()
+        .native_groups
+        .is_empty());
+
+    let canonical = catalog
+        .interfaces
+        .iter()
+        .cloned()
+        .chain(std::iter::once(catalog.capture.clone()))
+        .collect::<Vec<_>>();
+    let canonical_inventory = ArtifactInventory::default();
+    let type_view = canonical_inventory
+        .admit_shared(&canonical_inventory.empty_view(), canonical)
+        .unwrap();
+    for original in &catalog.originals {
+        assert!(
+            !type_view.artifact_ids().contains(&original.descriptor.id),
+            "the missing-body control must omit every native original"
+        );
+    }
+    assert!(type_view.entries().iter().all(|entry| !entry.is_native()));
+    assert!(type_view.selected_native_groups().is_empty());
+    assert!(type_view.capture_graph_selection().native_groups.is_empty());
     assert!(
         CompilerInputProjection::restore(&type_view, &selected.roles()).is_err(),
         "canonical custody cannot supply missing body proof"

@@ -5367,7 +5367,7 @@ mod tests {
         use super::*;
         let producer = [2; 32];
         let epoch = |version| {
-            crate::certified_products::fixture_finalized_product(
+            let product = crate::certified_products::fixture_finalized_product(
                 crate::certified_products::tests::original_groups_fixture_with_interface(
                     "Epoch",
                     vec![(7, vec![])],
@@ -5376,7 +5376,22 @@ mod tests {
                     vec![version; 16],
                 ),
                 producer,
-            )
+            );
+            let body = product.product_bytes().to_vec();
+            let interface = product.interface_bytes().to_vec();
+            let authenticated =
+                crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                    .remove(0)
+                    .product;
+            assert_eq!(authenticated.product_bytes(), body);
+            assert_eq!(authenticated.interface_bytes(), interface);
+            assert_eq!(
+                crate::certified_products::original_available_groups(&authenticated)
+                    .unwrap()
+                    .count(),
+                1
+            );
+            authenticated
         };
         let context = |version| {
             Arc::new(

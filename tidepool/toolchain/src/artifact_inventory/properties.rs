@@ -729,8 +729,6 @@ fn run_history(
                 ) {
                     let expected = if right_model.roots.is_empty() {
                         Ok(left_model.clone())
-                    } else if left_model.roots.is_empty() {
-                        Ok(right_model.clone())
                     } else {
                         let incoming: Vec<_> = model
                             .contents(&right_model)
@@ -925,6 +923,21 @@ proptest! {
         history.extend(tail);
         run_history(&catalog, &history, &mut Coverage::default())?;
     }
+}
+
+#[test]
+fn empty_receiver_merge_preserves_inventory_after_projected_history() {
+    let catalog = Catalog::new(&[0; OWNERS]);
+    let mut history = prefix();
+    history.push(Op::Merge {
+        left: 1,
+        right: 4,
+        to: 0,
+    });
+    let mut coverage = Coverage::default();
+    run_history(&catalog, &history, &mut coverage).unwrap();
+    assert_eq!(coverage.cross_merged, 2, "{coverage:?}");
+    assert!(coverage.reclaimed > 0, "{coverage:?}");
 }
 
 #[test]

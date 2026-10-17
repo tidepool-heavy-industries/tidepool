@@ -5773,11 +5773,42 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             )
             .unwrap();
             let expected_view = views[selected].select_roots(vec![expected]).unwrap();
+            let issued_graph = views[selected].capture_graph_selection();
+            let canonical_binding = *issued_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == expected)
+                .expect("the selected role has its issuer's exact canonical binding");
+            let issued_edges = views[selected].binding_dependencies();
+            let mut expected_namespace = BTreeSet::from([canonical_binding]);
+            let mut pending = vec![canonical_binding];
+            while let Some(binding) = pending.pop() {
+                for (from, to, dependency) in &issued_edges {
+                    if *from != ArtifactBindingNode::Artifact(binding)
+                        || *dependency != ArtifactDependency::Interface
+                    {
+                        continue;
+                    }
+                    if let ArtifactBindingNode::Artifact(target) = to {
+                        if expected_namespace.insert(*target) {
+                            pending.push(*target);
+                        }
+                    }
+                }
+            }
+            // Type selection narrows only the namespace. The raw selection
+            // independently checks every retained proof, binding and custody seed.
+            let mut expected_graph = expected_view.capture_graph_selection();
+            expected_graph.namespace = expected_namespace.into_iter().collect();
             if !changed_canonical {
-                let other = views[1 - selected].select_roots(vec![expected]).unwrap();
+                let other_graph = views[1 - selected].capture_graph_selection();
+                let other_canonical = other_graph
+                    .namespace
+                    .iter()
+                    .find(|binding| binding.artifact == expected)
+                    .expect("equal canonical bytes retain their other issuer's binding");
                 assert_ne!(
-                    expected_view.capture_graph_selection().namespace,
-                    other.capture_graph_selection().namespace,
+                    &canonical_binding, other_canonical,
                     "equal canonical payloads must have independently issued bindings"
                 );
             }
@@ -5793,6 +5824,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             )
             .unwrap();
             let before = original.artifact_view().capture_graph_selection();
+            let before_lexical = original.lexical_graph().to_vec();
             let retained =
                 RetainedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
                     .unwrap()
@@ -5803,8 +5835,13 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .compiler_support
                     .artifacts()
                     .capture_graph_selection(),
-                expected_view.capture_graph_selection()
+                expected_graph
             );
+            assert_eq!(
+                retained.compiler_support.projection().roles(),
+                vec![CompilerInputRole::InterfaceOnly { interface: expected }]
+            );
+            assert_eq!(original.lexical_graph(), before_lexical);
             assert!(retained
                 .compiler_support
                 .artifacts()
