@@ -8784,16 +8784,14 @@ mod module_product_tests {
         unsafe {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
         }
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
         let work = tempfile::tempdir().unwrap();
         let root = work.path().to_path_buf();
-        std::fs::copy(
-            fixtures.join("ModuleProductA.hs"),
+        std::fs::write(
             root.join("ModuleProductA.hs"),
+            include_str!("../../../bridge/haskell/test-prepared-stg/ModuleProductA.hs"),
         )
         .unwrap();
-        let first = std::fs::read_to_string(fixtures.join("ModuleProductB.hs")).unwrap();
+        let first = include_str!("../../../bridge/haskell/test-prepared-stg/ModuleProductB.hs");
         let (first_artifacts, first_artifacts_publications) =
             compile_observed("first", &first, &root);
         assert!(!first_artifacts.certified_groups.is_empty());
