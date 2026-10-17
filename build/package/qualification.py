@@ -2009,6 +2009,10 @@ def verify(path: Path) -> dict:
         path = nix_path(Path(item["path"]))
         if str(store_root(path)) != item["store_path"]:
             raise ValueError(f"declared Nix selection changed: {path}")
+    selected_compilers = offline_compilers(contract.get("offline_compilers"))
+    if any(descriptor["external_inputs"][name]["path"] != selected_compilers[name]
+           for name in OFFLINE_COMPILERS):
+        raise ValueError("retained offline compiler differs from the assembled compiler contract")
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     registered_roots = _RegisteredGcRoots(tools, descriptor["nix_closure"]["roots"])
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}

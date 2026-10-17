@@ -2856,7 +2856,7 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(verify_catalog.call_count, 1)
             self.assertEqual(verify_root.call_count, 3)
 
-            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema'):
+            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler'):
                 changed = json.loads(json.dumps(descriptor))
                 if mutation == 'missing_compiler':
                     del changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']
@@ -2867,10 +2867,19 @@ class CatalogSourceTests(unittest.TestCase):
                 elif mutation == 'wrong_nar':
                     first = next(iter(changed['nix_closure']['nar_hashes']))
                     changed['nix_closure']['nar_hashes'][first] = 'changed-nar'
+                elif mutation == 'coherent_other_compiler':
+                    original_compiler = changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']['store_path']
+                    changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC'] = dict(
+                        changed['external_inputs']['EXOMONAD_OFFLINE_CC'])
+                    roots = [value for value in changed['nix_closure']['roots'] if value != original_compiler]
+                    changed['nix_closure'] = metadata(tools, roots)
+                    changed['gc_roots'] = [value for value in changed['gc_roots']
+                                           if value['store_path'] != original_compiler]
                 else:
                     changed['schema'] = 3
                 qualification.write_json(descriptor_path, changed)
-                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                message = 'assembled compiler contract' if mutation == 'coherent_other_compiler' else ''
+                with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, message):
                     qualification.verify(descriptor_path)
             qualification.write_json(descriptor_path, descriptor)
 
