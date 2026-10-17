@@ -43,6 +43,79 @@ fn operation(host: &HostedTestRuntime, round: &HostedScriptRound, call: &str) ->
     }
 }
 
+fn model_tool_receipt(round: &HostedScriptRound, call: &str) -> serde_json::Value {
+    round.settled_output(call)
+}
+
+// Provider history intentionally omits semantic values. Inspect the exact
+// retained native operation, and separately check its model projection.
+fn canonical_tool_receipt(
+    host: &HostedTestRuntime,
+    issuer: &HostIdentity,
+    original: &OperationId,
+    model_round: &HostedScriptRound,
+) -> serde_json::Value {
+    let recorded = host
+        .runtime
+        .store()
+        .inspect_embedded_result(issuer, original)
+        .unwrap()
+        .expect("the issuing operation retains its canonical result");
+    assert_eq!(recorded.terminal, harness::store::TerminalOutcome::Success);
+    assert_eq!(
+        recorded.output_format,
+        harness::provider::OutputFormat::NativeReceiptV1
+    );
+    let projected = super::embedded_policy::project_retained_result(&recorded, original)
+        .unwrap()
+        .expect("the native envelope owner validates its version and exact operation");
+    assert_eq!(model_tool_receipt(model_round, &original.call.0), projected);
+    let envelope: serde_json::Value =
+        serde_json::from_str(recorded.item.0["output"].as_str().unwrap()).unwrap();
+    assert_eq!(envelope["nativeResult"]["kind"], "workbench");
+    let canonical = envelope["nativeResult"]["body"].clone();
+    assert_eq!(canonical["status"], "committed", "{canonical}");
+    assert_eq!(
+        canonical["publication"]["status"], "published",
+        "{canonical}"
+    );
+    let items = canonical["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{canonical}");
+    assert_eq!(items[0]["status"], "committed", "{canonical}");
+    assert_eq!(
+        items[0]["presentation"]["status"], "published",
+        "{canonical}"
+    );
+    assert!(items[0].get("value").is_some(), "{canonical}");
+    assert!(projected["items"][0].get("value").is_none(), "{projected}");
+    canonical
+}
+
+fn assert_canonical_command_success(
+    host: &HostedTestRuntime,
+    issuer: &HostIdentity,
+    original: &OperationId,
+    model_round: &HostedScriptRound,
+) -> String {
+    let canonical = canonical_tool_receipt(host, issuer, original, model_round);
+    let item = &canonical["items"][0];
+    let bindings = item["installedBindings"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1, "{canonical}");
+    let binding = bindings[0].as_str().unwrap();
+    assert_eq!(canonical["publication"]["bindings"], json!([binding]));
+    let facts = &item["value"];
+    assert_eq!(facts["state"], "Finished", "{canonical}");
+    assert_eq!(facts["successful"], true, "{canonical}");
+    assert_eq!(
+        facts["outcome"],
+        json!({"tag": "OutcomeExited", "contents": 0}),
+        "{canonical}"
+    );
+    assert_eq!(facts["cleanup"], "CleanupClean", "{canonical}");
+    assert_eq!(facts["retained_binding"], binding, "{canonical}");
+    binding.to_owned()
+}
+
 async fn next(
     host: &HostedTestRuntime,
     requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
@@ -374,7 +447,12 @@ async fn command_cleanup(host: &HostedTestRuntime, actor: ActorRef) {
         .command_resources
         .as_ref()
         .unwrap()
-        .seal_producer(&exomonad_node::command_resources::CommandActorIdentity::new(actor.id.0, actor.incarnation.0))
+        .seal_producer(
+            &exomonad_node::command_resources::CommandActorIdentity::new(
+                actor.id.0,
+                actor.incarnation.0,
+            ),
+        )
         .await
         .expect("the exact actor has no active commands or retained resource allocations");
 }
@@ -391,8 +469,14 @@ fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
         },
     )
     .expect("the isolated test cgroup delegates production command resources");
-    config.command_resources =
-        Some(exomonad_node::command_resources::CommandResourceClient::local(owner, exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1).unwrap()).unwrap());
+    config.command_resources = Some(
+        exomonad_node::command_resources::CommandResourceClient::local(
+            owner,
+            exomonad_node::command_resources::CommandRunIdentity::new("isolated-test".into(), 1)
+                .unwrap(),
+        )
+        .unwrap(),
+    );
     config.model = "gpt-6.1-sol".into();
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
@@ -462,6 +546,8 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 "portability leaves the original native response envelope in Store"
             );
             let child_path = identity(&child).actor;
+            let shell_issuer = identity(&child);
+            let shell_operation = operation(host, &child, "recursive-default-bash");
             child.function(
                 "recursive-default-bash",
                 "bash",
@@ -473,12 +559,21 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 }),
             );
             child = next(host, &mut requests, &mut pending, &child_path).await;
-            let shell = child.settled_output("recursive-default-bash");
-            assert_eq!(shell["status"], "committed", "{shell}");
-            assert_eq!(shell["items"][0]["value"]["successful"], true, "{shell}");
+            let binding = assert_canonical_command_success(host, &shell_issuer, &shell_operation, &child);
+            let shell = model_tool_receipt(&child, "recursive-default-bash");
             assert!(
                 shell.to_string().contains("captured-default-shell"),
                 "{shell}"
+            );
+            child.call("recursive-default-command-proof", &format!(
+                "terminal <- Cmd.await {binding}\ndisplay (Cmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean)"
+            ));
+            child = next(host, &mut requests, &mut pending, &child_path).await;
+            child.assert_authored_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), child_actor),
+                "recursive-default-command-proof",
+                "True",
             );
             let child_prefix = transcript(&child);
             let child_operation = operation(host, &child, CHILD_CALL);
@@ -666,6 +761,8 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
             child = next(host, &mut requests, &mut pending, &child_path) => child,
         };
         child.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), child_actor), "fresh-default-input", "True");
+        let shell_issuer = identity(&child);
+        let shell_operation = self::operation(host, &child, "fresh-default-bash");
         child.function("fresh-default-bash", "bash", json!({
             "cmd": "printf fresh-default-shell", "workdir": null, "environment": null,
             "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
@@ -676,9 +773,8 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
             terminal = terminal.wait() => panic!("fresh default child retired after bash: {:?}: {}", terminal.kind, terminal.summary),
             child = next(host, &mut requests, &mut pending, &child_path) => child,
         };
-        let shell = child.settled_output("fresh-default-bash");
-        assert_eq!(shell["status"], "committed", "{shell}");
-        assert_eq!(shell["items"][0]["value"]["successful"], true, "{shell}");
+        assert_canonical_command_success(host, &shell_issuer, &shell_operation, &child);
+        let shell = model_tool_receipt(&child, "fresh-default-bash");
         assert!(shell.to_string().contains("fresh-default-shell"), "{shell}");
         child.call("fresh-default-reply", "respond (\"fresh-default-native-reply\" :: Text)");
         let child = tokio::select! {
@@ -775,19 +871,22 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
             ("review-stale-id", first_id, revised.as_str(), json!({"tag":"RequestIdMismatch", "contents":assigned_id})),
             ("review-wrong-oid", assigned_id, first.as_str(), json!({"tag":"CandidateOidMismatch", "contents":revised})),
         ] {
+            let refusal_issuer = identity(&child);
+            let refusal_operation = operation(host, &child, call);
             child.function(call, "submit_review", json!({
                 "expectedRequestId": request_id, "expectedCandidateOid": candidate,
                 "submittedChecks": ["native revised inspection"], "submittedRationale": "native assigned acceptance",
             }));
             child = next(host, &mut requests, &mut pending, &reviewer_path).await;
-            let result = child.settled_output(call);
-            assert_eq!(result["status"], "committed", "{result}");
+            let result = canonical_tool_receipt(host, &refusal_issuer, &refusal_operation, &child);
             assert_eq!(result["items"][0]["value"], refusal, "{result}");
             let pending_call = format!("{call}-pending");
             root.call(&pending_call, "state <- pollResponse assignedReview\ndisplay (case state of { ResponsePending _ -> True; _ -> False })");
             root = next(host, &mut requests, &mut pending, &root_path).await;
             root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), &pending_call, "True");
         }
+        let advance_issuer = identity(&child);
+        let advance_operation = operation(host, &child, "review-advance");
         child.function("review-advance", "bash", json!({
             "cmd": format!("git merge --ff-only {revised} && printf dirty > review-fixture.txt"),
             "workdir": null, "environment": null, "memory_mib": null, "tty": null,
@@ -795,23 +894,28 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
             "intent": "advance the exact retained reviewer and introduce a dirty working file",
         }));
         child = next(host, &mut requests, &mut pending, &reviewer_path).await;
-        assert_eq!(child.settled_output("review-advance")["items"][0]["value"]["successful"], true);
+        assert_canonical_command_success(host, &advance_issuer, &advance_operation, &child);
+        let dirty_issuer = identity(&child);
+        let dirty_operation = operation(host, &child, "review-dirty");
         child.function("review-dirty", "submit_review", json!({
             "expectedRequestId": assigned_id, "expectedCandidateOid": revised,
             "submittedChecks": ["native revised inspection"], "submittedRationale": "native assigned acceptance",
         }));
         child = next(host, &mut requests, &mut pending, &reviewer_path).await;
-        assert_eq!(child.settled_output("review-dirty")["items"][0]["value"], json!({"tag":"ReviewCheckoutDirty"}));
+        let dirty = canonical_tool_receipt(host, &dirty_issuer, &dirty_operation, &child);
+        assert_eq!(dirty["items"][0]["value"], json!({"tag":"ReviewCheckoutDirty"}), "{dirty}");
         root.call("review-dirty-pending", "state <- pollResponse assignedReview\ndisplay (case state of { ResponsePending _ -> True; _ -> False })");
         root = next(host, &mut requests, &mut pending, &root_path).await;
         root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "review-dirty-pending", "True");
+        let restore_issuer = identity(&child);
+        let restore_operation = operation(host, &child, "review-restore");
         child.function("review-restore", "bash", json!({
             "cmd": "git restore -- review-fixture.txt", "workdir": null, "environment": null,
             "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
             "max_output_bytes": 2048, "intent": "restore the exact committed reviewer checkout",
         }));
         child = next(host, &mut requests, &mut pending, &reviewer_path).await;
-        assert_eq!(child.settled_output("review-restore")["items"][0]["value"]["successful"], true);
+        assert_canonical_command_success(host, &restore_issuer, &restore_operation, &child);
         let operation = child.operation("review-fresh-consumer");
         child.async_call("review-fresh-consumer", include_str!("fixtures/review_fresh_consumer.hs"));
         let child_wait = next(host, &mut requests, &mut pending, &reviewer_path).await;
