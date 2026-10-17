@@ -10,6 +10,7 @@ import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, 
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
@@ -47,6 +48,7 @@ import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , CanonicalInterfaceProof, bindCanonicalProofInputs, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , canonicalCorePath, canonicalCoreSha256, readExactScope, revalidateExactScope
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , writeCheckedExactCompilation, writeRetainedExactCompilation
@@ -62,6 +64,7 @@ import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
+import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
@@ -74,6 +77,7 @@ import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
   , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
 import Codec.CBOR.Term (Term(..), encodeTerm)
+import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport
@@ -123,6 +127,26 @@ ownedArenaRangeReads = withScratch $ \work -> do
     cold <- continueRequestInputs emptyCapturedOriginalContent [selected]
     actual <- capturedRequestInput cold (originalInputPath selected) (digest bytes)
     unless (actual == bytes && requestInputBytes cold == 3) (fail "cold arena range capture differs")
+    -- These receiving aliases deliberately contain valid readable bytes. A
+    -- missing continued part must refuse rather than acquire any trap file.
+    forM_ ["interface.hi", "packages", "certificate", "core", "native", "census", "execution-graph"] $ \name -> do
+      let trap = work </> name
+      BS.writeFile trap bytes
+      attempted <- try (withCapturedRequestInputTokens cold $ \reader -> reader trap 3)
+        :: IO (Either IOException (ArtifactBytes,RequestOriginalInputs))
+      unless (either (const True) (const False) attempted)
+        (fail ("continued input used a readable trap file: " ++ name))
+      unchanged <- BS.readFile trap
+      unless (unchanged == bytes && requestInputBytes cold == 3)
+        (fail "refused continued input changed its prior owner or trap")
+    (strictBody,_) <- withCapturedRequestInputTokens cold $ \reader ->
+      reader (originalInputPath selected) 3
+    unless (artifactBytes strictBody == bytes) (fail "strict continued reader lost its sealed part")
+    overBound <- try (withCapturedRequestInputTokens cold $ \reader ->
+      reader (originalInputPath selected) 2)
+      :: IO (Either IOException (ArtifactBytes,RequestOriginalInputs))
+    unless (either (const True) (const False) overBound)
+      (fail "strict continued reader ignored its consumer bound")
     retained <- either fail pure (selectedOriginalContent [selected] cold)
     badSha <- reference endpoint (work </> "bad-sha") (digest (BS.singleton 0)) 3 7 2
     badLength <- reference endpoint (work </> "bad-length") (digest bytes) 2 7 2
@@ -192,7 +216,7 @@ ownedFixtureScope handles path = do
             | core <- maybe [] pure (canonicalCoreArtifact proof)]) (scopeModuleInterfaceProofs scope)
   nativeParts <- case scopeCodecField ScopeCodecNativeProducts fixture of
     TList rows -> Map.fromListWith (++) <$> forM rows (\row -> case row of
-      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha]] -> do
+      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha],_] -> do
         let key = (T.unpack unit,T.unpack name)
         product' <- maybe (fail "issued native census lacks its admitted product") pure
           (Map.lookup key (Map.fromList [((originalUnit value,originalModule value),value)
@@ -244,6 +268,78 @@ ownedFixtureScope handles path = do
   _ <- readExactScope path >>= either fail pure
   pure path
 
+-- Descriptor-completeness control: mutate only an already admitted packet.
+-- This refuses before the strict reader; reached-reader sensitivity is covered
+-- separately by incomplete captured canonical promotion below.
+-- Its genuine artifact files remain
+-- readable, and the remaining image digest is valid, so missing-part refusal
+-- cannot be explained by an unreadable trap or a stale image checksum.
+missingOwnedPartsRefuse :: FilePath -> IO ()
+missingOwnedPartsRefuse path = do
+  (_,fixture) <- readScopeCodecFixture path
+  (arenas,terms) <- case scopeCodecAcquisition fixture of
+    Just (ContinueCodecOriginals arenas (TList images)) -> pure (arenas,images)
+    _ -> fail "missing-part control needs an admitted continued packet"
+  images <- case deserialiseFromBytes Transport.decodeInputAcquisition
+      (BL.fromStrict (toStrictByteString (encodeTerm (scopeCodecField ScopeCodecAcquisition fixture)))) of
+    Right (remaining,Transport.ContinueOwnedOriginals images) | BL.null remaining -> pure images
+    _ -> fail "admitted continued packet lost its input images"
+  unless (length images == length terms) (fail "continued image oracle lost a packet row")
+  forM_ [InputInterface,InputPackages,InputCertificate,InputCore,InputNative,InputCensus,InputGraph] $ \kind -> do
+    (key,reference) <- case [(key,reference) | Transport.OriginalInputImage _ key _ parts <- images
+        , (actual,reference) <- parts, actual == kind] of
+      selected : _ -> pure selected
+      [] -> fail ("genuine executable packet lacks control kind " ++ show kind)
+    trap <- BS.readFile (originalInputPath reference)
+    unless (digest trap == originalInputSha256 reference && BS.length trap == originalInputLength reference)
+      (fail "missing-part trap differs from its valid original")
+    changed <- forM (zip images terms) $ \(Transport.OriginalInputImage producer owner _ parts,term) ->
+      if owner /= key then pure term else case term of
+        TList [p,u,n,_,TList encodedParts] -> do
+          let retained = filter ((/=kind) . fst) parts
+              keep part = case part of
+                TList (TString tag : _) -> tag /= T.pack (inputKindTag kind)
+                _ -> False
+          pure (TList [p,u,n,TString (T.pack (inputImageDigest producer owner retained)),
+            TList (filter keep encodedParts)])
+        _ -> fail "admitted image has another shape"
+    let mutated = path ++ ".missing-" ++ inputKindTag kind
+    BS.writeFile mutated (toStrictByteString (encodeTerm (scopeCodecTerm
+      (replaceScopeCodecAcquisition (ContinueCodecOriginals arenas (TList changed)) fixture))))
+    refused <- readExactScope mutated
+    unless (either (const True) (const False) refused)
+      (fail ("continued packet acquired a missing part from its readable trap: " ++ show kind))
+    unchanged <- BS.readFile (originalInputPath reference)
+    unless (unchanged == trap) (fail "missing-part refusal changed its original trap")
+
+missingCapturedProofPartsRefuse :: ExactScope -> IO ()
+missingCapturedProofPartsRefuse scope = do
+  (key,proof,core) <- case [(key,proof,core) | (key,proof) <- Map.toAscList (scopeModuleInterfaceProofs scope)
+      , Just core <- [canonicalCoreArtifact proof]] of
+    selected : _ -> pure selected
+    [] -> fail "genuine executable scope lacks canonical Core for promotion controls"
+  (iface,packages,_) <- case [row | row@(iface,_,_) <- scopeInterfaces scope
+      , (exactUnit iface,exactModule iface) == key] of
+    [row] -> pure row
+    _ -> fail "canonical promotion control lacks one exact interface row"
+  let required = [exactPath iface,packages,canonicalCertificatePath proof,canonicalCorePath core]
+      native = [originalProductPath product | product <- scopeProducts scope
+        , (originalUnit product,originalModule product) == key]
+      acquire paths = snd <$> captureRequestInputs Nothing (\reader ->
+        mapM_ (\path -> reader path (64 * 1024 * 1024)) paths)
+  full <- acquire (required ++ native)
+  _ <- captureCanonicalProofs Nothing [(bindCanonicalProofInputs full proof,ExecutableInterfaceUse)]
+  forM_ required $ \missing -> do
+    trap <- BS.readFile missing
+    partial <- acquire (filter (/=missing) (required ++ native))
+    rejected <- try (captureCanonicalProofs Nothing
+      [(bindCanonicalProofInputs partial proof,ExecutableInterfaceUse)])
+      :: IO (Either IOException [CanonicalInterfaceProof])
+    unless (either (const True) (const False) rejected)
+      (fail ("captured canonical promotion read a missing part from disk: " ++ missing))
+    unchanged <- BS.readFile missing
+    unless (unchanged == trap) (fail "refused canonical promotion changed its readable trap")
+
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
@@ -261,6 +357,9 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "file-only fixture claimed owned continuation reuse")
     owner <- newExactInputOwner
     firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
+    missingOwnedPartsRefuse firstPath
+    capturedProofScope <- readExactScope firstPath >>= either fail pure
+    missingCapturedProofPartsRefuse capturedProofScope
     (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
     secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
     (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)

@@ -18,7 +18,8 @@
 //! `writeChecked` a repair.
 //!
 //! A source-snapshot memo avoids repeating the fault-isolation decision for
-//! unchanged library files. Compiler probes use the shared artifact cache.
+//! unchanged library files. Compiler probes enter the shared compilation front
+//! door and retain its source validation and native module reuse.
 
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -78,7 +79,7 @@ fn compute_layer(
     include: &[PathBuf],
     settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<LibLayer, tidepool_runtime::CompileError> {
-    // The artifact cache validates compiler evidence for this import.
+    // The compilation owner validates consumed sources for this import.
     if probe_compiles("Library", include, settlement)? {
         return Ok(LibLayer::default());
     }

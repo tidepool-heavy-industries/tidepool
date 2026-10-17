@@ -101,7 +101,7 @@ pub enum RuntimeError {
 ///
 /// GHC parses, typechecks, desugars, optimizes, and lowers the requested target
 /// to STG. Tidepool serializes the prepared program and constructor metadata;
-/// repeated compilations may be served from the toolchain cache.
+/// repeated compilations can reuse compiler-owned native modules.
 pub fn compile_haskell(
     source: &str,
     target: &str,
