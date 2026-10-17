@@ -5486,6 +5486,130 @@ mod tests {
     }
 
     #[test]
+    fn program_value_admission_preserves_unselected_native_offer_custody() {
+        use super::*;
+        use crate::artifact_inventory::ArtifactBindingNode;
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::ExactModuleIdentity;
+
+        checked_value_custody_histories(|captured, _| {
+            let certificate = captured.certified_interface().clone();
+            let value_id = certificate.artifact_id();
+            let value_owner = ExactModuleIdentity {
+                unit: certificate.interface().unit().into(),
+                module: certificate.interface().module().into(),
+            };
+            let source = captured.compiler_source_support();
+            let issued_offers = source.native_offer_observations().unwrap();
+            assert!(!issued_offers.is_empty());
+            assert!(source.native_offers().iter().any(|offer| offer.is_full()));
+            let support = source
+                .without_value_roots(&BTreeSet::from([value_id]))
+                .map_err(|error| format!("remove captured value premise: {error}"))?
+                .for_source_owners(&BTreeSet::new())
+                .map_err(|error| format!("type-only source premise: {error}"))?
+                .finalize_namespace()
+                .map_err(|error| format!("selected type namespace premise: {error}"))?;
+            assert_eq!(support.native_offer_observations().unwrap(), issued_offers);
+            assert!(support
+                .projection()
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(!support
+                .projection()
+                .snapshot_roles()
+                .contains_key(&value_owner));
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .map_err(|error| format!("paired receiving context premise: {error}"))?;
+            let before = context.artifact_view().capture_graph_selection();
+            let before_edges = context.artifact_view().binding_dependencies();
+            let before_roles = context.compiler_input_projection().snapshot_roles().clone();
+            let before_offers = context
+                .compiler_source_support()
+                .native_offer_observations()
+                .unwrap();
+            assert_eq!(before_offers, issued_offers);
+            assert!(context.lexical_graph().is_empty());
+            assert!(context.artifact_view().selected_native_groups().is_empty());
+            assert!(!context.artifact_view().artifact_ids().contains(&value_id));
+            for offer in context.compiler_source_support().native_offers() {
+                assert!(
+                    !context
+                        .compiler_input_projection()
+                        .roles()
+                        .iter()
+                        .any(|role| role.original() == Some(offer.original())),
+                    "retained offers do not require active original roles"
+                );
+                assert!(context
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&offer.original()));
+            }
+
+            let admitted = context
+                .clone()
+                .extend_program_value_interface(certificate)
+                .map_err(|error| format!("actual program value admission: {error}"))?;
+            let after = admitted.artifact_view().capture_graph_selection();
+            let after_roles = admitted.compiler_input_projection().snapshot_roles();
+            for (owner, role) in &before_roles {
+                assert_eq!(after_roles.get(owner), Some(role));
+            }
+            assert_eq!(after_roles.len(), before_roles.len() + 1);
+            assert_eq!(after_roles[&value_owner].interface(), value_id);
+            assert!(after_roles.values().all(|role| role.original().is_none()));
+            for binding in &before.namespace {
+                assert!(
+                    after.namespace.contains(binding),
+                    "selected canonical bindings retain their issuers"
+                );
+            }
+            assert_eq!(after.native_groups, before.native_groups);
+            assert!(before
+                .bindings
+                .iter()
+                .all(|binding| after.bindings.contains(binding)));
+            assert!(before_edges.iter().all(|edge| admitted
+                .artifact_view()
+                .binding_dependencies()
+                .contains(edge)));
+            assert_eq!(
+                admitted
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .unwrap(),
+                before_offers
+            );
+            assert!(admitted.artifact_view().selected_native_groups().is_empty());
+            let old_roots = before.roots.iter().copied().collect::<BTreeSet<_>>();
+            let new_roots = after.roots.iter().copied().collect::<BTreeSet<_>>();
+            assert!(old_roots.is_subset(&new_roots));
+            let value_binding = *after
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == value_id)
+                .unwrap();
+            assert_eq!(
+                new_roots
+                    .difference(&old_roots)
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([ArtifactBindingNode::Artifact(value_binding)])
+            );
+            assert_eq!(admitted.lexical_graph().len(), 1);
+            assert_eq!(admitted.lexical_graph()[0].owner, value_owner);
+            assert!(admitted.lexical_graph()[0].imports.is_empty());
+            assert_eq!(context.artifact_view().capture_graph_selection(), before);
+            assert_eq!(source.native_offer_observations().unwrap(), issued_offers);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn authored_lifetime_query_ignores_unrelated_historical_owner_conflicts() {
         checked_value_custody_histories(|_, context| {
             let before = context.artifact_view().capture_graph_selection();
@@ -6263,7 +6387,7 @@ mod tests {
                             .unwrap();
                         match observe(&captured, &next) {
                             Ok(()) => completed += 1,
-                            Err(error) => failures.push(format!("changed_child={changed_child} selected={selected} template={template} prepared={prepared}: lifetime consumer: {error}")),
+                            Err(error) => failures.push(format!("changed_child={changed_child} selected={selected} template={template} prepared={prepared}: observed consumer: {error}")),
                         }
                     }
                 }
