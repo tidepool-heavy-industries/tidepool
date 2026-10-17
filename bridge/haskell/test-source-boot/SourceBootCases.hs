@@ -218,8 +218,8 @@ import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..))
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
-  , scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
-  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
@@ -3235,11 +3235,11 @@ originalNativeAvailabilityChecks environment scope emitted = do
             _ -> field
           else field | (index,field) <- zip [0::Int ..] fields])
       replaceRow selected availability entry = case entry of
-        TList [TString unit,TString name,_,_,_,_,_,descriptor,issued]
+        TList [TString unit,TString name,_,_,_,_,_,descriptor,issued,classification]
           | (T.unpack unit,T.unpack name) == owner -> TList
             [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
             ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
-            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor,maybe issued id availability]
+            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor,maybe issued id availability,classification]
         _ -> entry
       text = TString . T.pack
       requireInvalid action = action >>= \case
@@ -3265,6 +3265,39 @@ originalNativeAvailabilityChecks environment scope emitted = do
       fail "selection changed the old native payload, version or full census"
   unless (map originalGroups (filter ((== owner) . productOwner) (scopeProducts zeroScope)) == [[]]) $
     fail "zero selected groups acquired an executable root"
+  -- Equal empty execution selections do not erase the issuer's namespace role.
+  -- Both roles retain the same authenticated body availability.
+  let withClassification classification = readScopeVariant zeroScope (\fields ->
+        [if index == 6 then case field of
+            TList rows -> TList [case entry of
+              TList values@(TString unit:TString name:_)
+                | (T.unpack unit,T.unpack name) == owner -> TList (take 9 values ++ [text classification])
+              _ -> entry | entry <- rows]
+            _ -> field
+          else field | (index,field) <- zip [0::Int ..] fields])
+  compilerOriginal <- withClassification "compiler-original" >>= either fail pure
+  privateNative <- withClassification "private-native" >>= either fail pure
+  forM_ [compilerOriginal,privateNative] $ \classified -> do
+    revalidateExactScope environment classified >>= either fail pure
+    unless (scopeAvailableOriginalProducts classified == available
+        && [originalGroups value | value <- scopeProducts classified, productOwner value == owner] == [[]]) $
+      fail "native classification changed body availability or selected execution"
+  unless (owner `elem` map productOwner (scopeRecipeOriginals compilerOriginal)
+      && owner `notElem` map productOwner (scopeRecipeOriginals privateNative)) $
+    fail "recipe original ownership ignored the issued native classification"
+  let emptyProduct = snapshot {originalGroups=[]}
+  forM_ [(compilerOriginal,CompilerOriginal emptyProduct),(privateNative,PrivateNative emptyProduct)] $ \(classified,original) -> do
+    continued <- extendExactScopeGeneration classified [] [original] [] >>= either fail pure
+    hydrated <- readExactScope (scopeManifestPath classified) >>= either fail pure
+    unless (scopeRecipeOriginals continued == scopeRecipeOriginals classified
+        && scopeRecipeOriginals hydrated == scopeRecipeOriginals classified
+        && scopeAvailableOriginalProducts continued == available) $
+      fail "continuation or hydration lost native input classification"
+  requireInvalid (extendExactScopeGeneration compilerOriginal [] [PrivateNative emptyProduct] [])
+  requireInvalid (extendExactScopeGeneration privateNative [] [CompilerOriginal emptyProduct] [])
+  requireInvalid (withClassification "unknown-native-role")
+  requireInvalid (readScopeVariant zeroScope (\fields ->
+    [if index == 1 then text "15" else field | (index,field) <- zip [0::Int ..] fields]))
   -- Narrow only the request projection of an actual Rust-issued full census.
   -- Available groups never become executable selection, and continuation must
   -- retain this bound rather than reconstructing fullness from the census.
@@ -3393,7 +3426,7 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
       [values | (6,TList rows) <- zip [0::Int ..] fields
         , TList values@(TString unit:TString name:_) <- rows
         , (T.unpack unit,T.unpack name) == owner] of
-    [[_,_,_,_,_,_,_,TList [TString path,TString sha],TList [TString "full-carrier"]]] -> pure (T.unpack path,T.unpack sha)
+    [[_,_,_,_,_,_,_,TList [TString path,TString sha],TList [TString "full-carrier"],_]] -> pure (T.unpack path,T.unpack sha)
     _ -> fail "genuine native owner lacks its unique full-carrier descriptor"
   nativeBytes <- BS.readFile descriptorPath
   nativeTerm <- decode nativeBytes

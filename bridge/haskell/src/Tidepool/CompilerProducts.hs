@@ -60,7 +60,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
@@ -935,7 +935,7 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
-              retained = map originalIdentity (scopeProducts scope)
+              retained = map originalIdentity (scopeRecipeOriginals scope)
                 ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
                     (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
                     (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
@@ -1040,7 +1040,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
   (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached outputWrites) finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
-  admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
+  admitted <- extendExactScopeGeneration cached additions (map CompilerOriginal pendingProducts) pendingLexical >>= either fail pure
   promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
@@ -1207,7 +1207,8 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       writeFresh outputWrites productPath productBytes
-      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+      extendExactScopeGeneration scope [] [if Map.member key (certifiedRetainedOriginals certified)
+        then PrivateNative original else CompilerOriginal original] [] >>= either fail pure
     writeFresh outputWrites path bytes = do
       BS.writeFile path bytes
       modifyIORef' outputWrites (++ [(path,bytes)])

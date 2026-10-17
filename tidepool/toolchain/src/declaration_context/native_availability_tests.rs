@@ -201,6 +201,17 @@ fn wire_mode(request: &ExactCompilationRequest, module: &str) -> Value {
         .unwrap()[8]
         .clone()
 }
+fn wire_classification(request: &ExactCompilationRequest, module: &str) -> Value {
+    scope(request)[6]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.as_array().unwrap()[1] == text(module))
+        .unwrap()
+        .as_array()
+        .unwrap()[9]
+        .clone()
+}
 fn full_mode() -> Value {
     Value::Array(vec![text("full-carrier")])
 }
@@ -2066,6 +2077,10 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .prepare_compilation(root.path(), PRODUCER)
         .unwrap();
     assert_eq!(wire_mode(&request, "PrivateFullInterface"), full_mode());
+    assert_eq!(
+        wire_classification(&request, "PrivateFullInterface"),
+        text("private-native")
+    );
     assert!(wire_groups(&request)["PrivateFullInterface"].is_empty());
     assert!(request
         .artifacts
@@ -4327,6 +4342,10 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
         .prepare_compilation(root.path(), PRODUCER)
         .unwrap();
     assert_eq!(wire_mode(&request, "UnavailableOriginal"), issued_mode(&[]));
+    assert_eq!(
+        wire_classification(&request, "UnavailableOriginal"),
+        text("compiler-original")
+    );
     assert!(wire_groups(&request)["UnavailableOriginal"].is_empty());
     assert!(request.groups.is_empty());
 }
