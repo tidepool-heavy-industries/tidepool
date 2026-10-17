@@ -118,6 +118,7 @@ import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
+import Tidepool.Timing (readTimingEnabled, timeModuleDetailPhase, emitModuleCounts)
 import Tidepool.ExecutionEncode
   (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes, encodeTypeIdentity)
 import Tidepool.ExecutionSchema
@@ -447,22 +448,36 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
 -- Failed groups remain values; only infrastructure exceptions abort the batch.
 forceRawModuleProducts :: RawModuleProducts -> IO RawModuleProducts
 forceRawModuleProducts raw = do
-  selected <- case rawOriginalProductGroups raw of
+  enabled <- readTimingEnabled
+  let timed = timeModuleDetailPhase enabled "raw_projection_task_service"
+        -- These are forcing boundaries, not exclusive pure-function costs.
+        -- Projection remaining lazy after result WHNF is charged to encoding.
+      owner = rawOriginalProductOwner raw
+  selected <- timed "raw_result_readiness" owner $ case rawOriginalProductGroups raw of
     Just outcomes -> do
-      _ <- evaluate (Set.size (rawOriginalProductDemands raw)
-        + Set.size (rawOriginalProductBinders raw)
-        + sum (map (BS.length . projectedGroupEncodingBytes)
-            (Map.elems (rawOriginalGroupEncodings raw))))
+      if enabled then do
+        _ <- evaluate (length [() | (_,_,result) <- outcomes,
+          either (const True) (const True) result])
+        pure ()
+      else pure ()
       pure [group | (_,_,Right group) <- outcomes]
     Nothing -> do
       outcome <- evaluate (rawExecutableProduct raw)
       case outcome of
         Left _ -> pure []
         Right groups -> pure groups
+  timed "raw_demands_and_encoding" owner $ case rawOriginalProductGroups raw of
+    Just _ -> do
+      _ <- evaluate (Set.size (rawOriginalProductDemands raw)
+        + Set.size (rawOriginalProductBinders raw)
+        + sum (map (BS.length . projectedGroupEncodingBytes)
+            (Map.elems (rawOriginalGroupEncodings raw))))
+      pure ()
+    Nothing -> pure ()
   -- Consume the census spine and exact compiler identities on the worker,
   -- releasing the lazy traversal of the completed projection state. DataCons
   -- themselves remain paired with their original compiler environment lifetime.
-  forM_ selected $ \group -> do
+  timed "raw_retained_identity_forcing" owner $ forM_ selected $ \group -> do
     forM_ (projectedGroupConstructors group) $ \issued -> do
       let con = issuedDataCon issued
           identity = constructorSymbol (issuedConstructorIdentity issued)
@@ -481,6 +496,33 @@ forceRawModuleProducts raw = do
         + length (Effect.ysInputTypeWitnesses site)
         + maybe 0 Text.length (Effect.ysReplyDeclaration site))
       pure ()
+  -- Original encodings are already forced above. Do not serialize the
+  -- executable fallback merely to measure it, or count omitted groups as output.
+  if enabled then timed "raw_output_census" owner $ do
+    let bodies = map (projectedBody . projectedGroupWire) selected
+        total f = toInteger (sum (map f bodies))
+        counts =
+          [ ("successful_groups", toInteger (length selected))
+          , ("signatures", total (length . projectedSignatures))
+          , ("binding_groups", total (length . projectedBindings))
+          , ("sites", total (length . projectedSites))
+          , ("constructor_replies", total (length . projectedConstructorReplies))
+          , ("constructors", total (length . projectedConstructors))
+          , ("globals", total (length . projectedGlobals))
+          , ("operations", total (length . projectedOperations))
+          , ("type_nodes", total (IntMap.size . typeGraphNodes . projectedTypes))
+          , ("type_edges", total (sum . map length . IntMap.elems . typeGraphEdges . projectedTypes))
+          , ("original_encoding_bytes", toInteger (sum (map
+              (BS.length . projectedGroupEncodingBytes)
+              (Map.elems (rawOriginalGroupEncodings raw)))))
+          ] ++ case rawOriginalProductGroups raw of
+            Nothing -> []
+            Just outcomes -> [("original_groups", toInteger (length outcomes)),
+              ("refused_groups", toInteger (length [() | (_,_,Left _) <- outcomes]))]
+    -- Force all aggregate arithmetic within this span, before writing the line.
+    _ <- evaluate (sum (map snd counts))
+    emitModuleCounts True "raw_projection_output" owner counts
+  else pure ()
   pure raw
  where
   siteTypeSize siteType = Text.length (Effect.stType siteType)
