@@ -1574,15 +1574,20 @@ impl InstalledToolLease {
             .ok_or("generation preparation has no issued source evidence")?;
         let source = evidence.reference.clone();
         let configuration_digest = evidence.configuration_digest;
+        let facts = PersistedActorInstallation::capture(&self, &source)?;
         source.validate().map_err(|error| {
             ActorInstallationRecoveryError::Corrupt(error.to_string()).to_string()
         })?;
-        let facts = PersistedActorInstallation::capture(&self, &source)?;
         Ok(ObservedInstallation {
             lease: self,
             source,
             facts,
             configuration_digest,
+            #[cfg(test)]
+            work: InstallationObservationWork {
+                captures: 1,
+                ..Default::default()
+            },
         })
     }
 
@@ -1596,6 +1601,14 @@ impl InstalledToolLease {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct InstallationObservationWork {
+    captures: usize,
+    encodings: usize,
+    restored_decodes: usize,
+}
+
 /// Installation facts derived from this exact retained lease. Durable encoding
 /// is a projection for a new stored generation, not preparation authority.
 struct ObservedInstallation {
@@ -1603,13 +1616,19 @@ struct ObservedInstallation {
     source: tidepool_runtime::session::GenerationArtifactReference,
     facts: PersistedActorInstallation,
     configuration_digest: [u8; 32],
+    #[cfg(test)]
+    work: InstallationObservationWork,
 }
 
 impl ObservedInstallation {
     fn durable_references(
-        &self,
+        &mut self,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
+        #[cfg(test)]
+        {
+            self.work.encodings += 1;
+        }
         let bytes = serde_json::to_vec(&self.facts).map_err(|error| error.to_string())?;
         Ok(tidepool_runtime::session::DurableGenerationReferences {
             source: self.source.clone(),
@@ -1619,13 +1638,17 @@ impl ObservedInstallation {
     }
 
     fn verify_restored(
-        &self,
+        &mut self,
         references: &tidepool_runtime::session::DurableGenerationReferences,
         prompts: &tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<(), String> {
         references.validate().map_err(|error| error.to_string())?;
         if self.source != references.source || prompts != &references.prompts {
             return Err("restored generation must retain its source and prompt references".into());
+        }
+        #[cfg(test)]
+        {
+            self.work.restored_decodes += 1;
         }
         let persisted =
             PersistedActorInstallation::decode(&references.installation, &references.source)
@@ -1699,6 +1722,8 @@ pub(crate) struct PreparedActorGeneration {
     scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     commit: PreparedGenerationCommit,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
+    #[cfg(test)]
+    installation_work: InstallationObservationWork,
 }
 
 #[cfg(test)]
@@ -2192,7 +2217,7 @@ where
                 "generation preparation actor does not own installation".into(),
             ));
         }
-        let observed = installation
+        let mut observed = installation
             .observe_generation()
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let configuration_digest = observed.configuration_digest;
@@ -2316,6 +2341,8 @@ where
                     prompts,
                     configuration_digest,
                     reload_report: None,
+                    #[cfg(test)]
+                    installation_work: observed.work,
                     installation: observed.lease,
                     context: next_context,
                     scope,
@@ -19663,6 +19690,14 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .unwrap();
+            let expected_work = InstallationObservationWork {
+                captures: 1,
+                encodings: usize::from(
+                    descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable,
+                ),
+                restored_decodes: 0,
+            };
+            assert_eq!(prepared.installation_work, expected_work);
             let initial = match workbench
                 .generation_publisher(state.clone())
                 .publish(
@@ -19684,6 +19719,31 @@ pub(crate) mod request_tests {
                 Err(BootstrapInstallationError::PublishedGeneration)
             );
             assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+            if let Some(selected) = &initial.durable {
+                // The stored reference is produced by real generation publication;
+                // this control does not manufacture native or source authority.
+                let mut observed = installation.clone().observe_generation().unwrap();
+                observed
+                    .verify_restored(&selected.references, &prompts)
+                    .unwrap();
+                assert_eq!(
+                    observed.work,
+                    InstallationObservationWork {
+                        captures: 1,
+                        encodings: 0,
+                        restored_decodes: 1,
+                    }
+                );
+                assert!(observed.lease.same_installation(&installation));
+                let mut corrupt = selected.references.clone();
+                corrupt.installation =
+                    tidepool_runtime::session::GenerationArtifactReference::capture(
+                        b"not installation json".to_vec(),
+                    );
+                assert!(observed.verify_restored(&corrupt, &prompts).is_err());
+                assert!(observed.lease.same_installation(&installation));
+                assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+            }
             let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
             let (before, before_visibility) = workbench
                 .access
@@ -19727,6 +19787,7 @@ pub(crate) mod request_tests {
                     )
                     .await
                     .unwrap();
+                assert_eq!(rejected.installation_work, expected_work);
                 let rejected_scope = rejected.scope.clone();
                 let decision = tidepool_runtime::session::PublicationDecision::new();
                 if cancelled {
@@ -19851,6 +19912,7 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .unwrap();
+            assert_eq!(prepared.installation_work, expected_work);
             let next_scope = prepared.scope.scope();
             workbench
                 .access
