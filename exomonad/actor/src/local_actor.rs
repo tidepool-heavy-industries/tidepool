@@ -3782,6 +3782,27 @@ async fn transfer_supervised_children(
         .await
 }
 
+fn retained_child_cleanup(
+    expected: ActorRef,
+    cleanup: &crate::ResidentCleanupOutcome,
+) -> crate::CleanupComponentOutcome {
+    if cleanup.actor() == expected && cleanup.is_confirmed() {
+        return crate::CleanupComponentOutcome::Confirmed;
+    }
+    let reason = if cleanup.actor() == expected {
+        "cleanup is unconfirmed"
+    } else {
+        "cleanup receipt identity mismatch"
+    };
+    crate::CleanupComponentOutcome::Unconfirmed(format!(
+        "child {expected:?} {reason}: receipt actor {:?}; hook={:?}; realm={:?}; children={:?}",
+        cleanup.actor(),
+        cleanup.hook(),
+        cleanup.realm(),
+        cleanup.children(),
+    ))
+}
+
 async fn shutdown_children(
     context: &KernelContext,
     owner_exit: ActorExitKind,
@@ -3821,16 +3842,7 @@ async fn shutdown_children(
             let result =
                 tokio::time::timeout(timeout, child.shutdown_with_cleanup(requested.clone())).await;
             match result {
-                Ok(Ok(outcome))
-                    if outcome.cleanup.actor() == child.identity()
-                        && outcome.cleanup.is_confirmed() =>
-                {
-                    crate::CleanupComponentOutcome::Confirmed
-                }
-                Ok(Ok(_)) => crate::CleanupComponentOutcome::Unconfirmed(format!(
-                    "child {:?} cleanup is unconfirmed",
-                    child.identity()
-                )),
+                Ok(Ok(outcome)) => retained_child_cleanup(child.identity(), &outcome.cleanup),
                 _ => {
                     if child.terminal().get().is_none() {
                         publish_exit(
@@ -9107,6 +9119,67 @@ mod tests {
             task.await.unwrap();
             assert_eq!(child.terminal().wait().await.kind, kind);
         }
+    }
+
+    #[tokio::test]
+    async fn child_cleanup_retains_owner_components_and_refuses_mismatched_receipt() {
+        use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed, Unsupported};
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, parent_task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let mut child = behavior(false).behavior;
+        child.shutdown_override = Some(ShutdownOverride::Fixed(
+            Unconfirmed("owned hook refusal λ".into()),
+            Unsupported,
+        ));
+        let child = context.spawn_child(None, child).await.unwrap();
+        let mut confirmed = behavior(false).behavior;
+        confirmed.shutdown_override = Some(ShutdownOverride::Fixed(Confirmed, Confirmed));
+        let confirmed = context.spawn_child(None, confirmed).await.unwrap();
+        let outcome =
+            shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await;
+        let retained = child
+            .terminal()
+            .cleanup()
+            .expect("child owner retained cleanup");
+        assert_eq!(retained.actor(), child.identity());
+        assert_eq!(retained.hook(), &Unconfirmed("owned hook refusal λ".into()));
+        assert_eq!(retained.realm(), &Unsupported);
+        assert_eq!(retained.children(), &Confirmed);
+        let Unconfirmed(detail) = outcome else {
+            panic!("child refusal must remain unconfirmed")
+        };
+        assert!(detail.contains(&format!("child {:?}", child.identity())));
+        assert!(detail.contains(&format!("receipt actor {:?}", retained.actor())));
+        assert!(detail.contains("hook=Unconfirmed(\"owned hook refusal λ\")"));
+        assert!(detail.contains("realm=Unsupported"));
+        assert!(detail.contains("children=Confirmed"));
+
+        // Observe the real retained receipt against another expected owner;
+        // the reporting helper cannot turn matching component values into identity.
+        let confirmed_receipt = confirmed
+            .terminal()
+            .cleanup()
+            .expect("confirmed owner receipt");
+        assert_eq!(
+            retained_child_cleanup(confirmed.identity(), &confirmed_receipt),
+            Confirmed
+        );
+        let mismatch = retained_child_cleanup(parent.identity(), &confirmed_receipt);
+        let Unconfirmed(detail) = mismatch else {
+            panic!("mismatched owner cannot confirm")
+        };
+        assert!(detail.contains("identity mismatch"));
+        assert!(detail.contains(&format!("child {:?}", parent.identity())));
+        assert!(detail.contains(&format!("receipt actor {:?}", confirmed.identity())));
+        assert!(detail.contains("hook=Confirmed; realm=Confirmed; children=Confirmed"));
+        parent
+            .shutdown(ActorTerminal::new(ActorExitKind::Completed, "test done"))
+            .await
+            .unwrap();
+        parent_task.await.unwrap();
     }
 
     #[tokio::test]
