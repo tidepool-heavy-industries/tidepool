@@ -18007,6 +18007,10 @@ pub(crate) mod request_tests {
             ));
         } else {
             assert_eq!(settled, crate::CleanupComponentOutcome::Confirmed);
+            assert_eq!(
+                run.shutdown_run_resources().await,
+                crate::CleanupComponentOutcome::Confirmed
+            );
             run.finish_run().await.unwrap();
         }
         task.await.unwrap();
