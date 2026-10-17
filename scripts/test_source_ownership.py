@@ -92,6 +92,8 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'exomonad/actor/src/resident_workbench/replacement_input_tests.rs',
     })),
     ('tidepool-runtime', frozenset({
+        'tidepool/runtime/src/retained_core_receive_tests.rs',
+        'tidepool/runtime/src/typed_receive_test_support.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/registry_properties.rs',
@@ -204,6 +206,10 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'exomonad/host/src/actor_host/restart_effect_once.hs',
     })),
     ('tidepool-runtime', frozenset({
+        'tidepool/runtime/tests/fixtures/RetainedReceiveOwner.hs',
+        'tidepool/runtime/tests/fixtures/RetainedReceiveSupport.hs',
+        'tidepool/runtime/tests/fixtures/RetainedReceiveProbe.hs',
+        'tidepool/runtime/tests/fixtures/RetainedReceiveConsumer.hs',
         'tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs',
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',

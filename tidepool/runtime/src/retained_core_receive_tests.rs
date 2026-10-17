@@ -24,12 +24,12 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let support_source = work.path().join("RetainedReceiveSupport.hs");
     std::fs::write(
         &owner_source,
-        include_str!("fixtures/RetainedReceiveOwner.hs"),
+        include_str!("../tests/fixtures/RetainedReceiveOwner.hs"),
     )
     .unwrap();
     std::fs::write(
         &support_source,
-        include_str!("fixtures/RetainedReceiveSupport.hs"),
+        include_str!("../tests/fixtures/RetainedReceiveSupport.hs"),
     )
     .unwrap();
     let mut include = vec![work.path().to_path_buf()];
@@ -52,7 +52,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         &probe_source,
         format!(
             "{}\n__prepared :: Int\n__prepared = result\n",
-            include_str!("fixtures/RetainedReceiveProbe.hs")
+            include_str!("../tests/fixtures/RetainedReceiveProbe.hs")
         ),
     )
     .unwrap();
@@ -232,11 +232,11 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     std::fs::remove_file(&owner_source).unwrap();
     std::fs::remove_file(&support_source).unwrap();
     assert!(!owner_source.exists() && !support_source.exists());
-    let mut compiled = tidepool_testing::with_settlement(|settlement| {
+    let compiled = tidepool_testing::with_settlement(|settlement| {
         compile_invocation_in_context(
             &CompileInvocation {
-                source: include_str!("fixtures/RetainedReceiveConsumer.hs"),
-                targets: &["__prepared"],
+                source: include_str!("../tests/fixtures/RetainedReceiveConsumer.hs"),
+                targets: &["__prepared", "__payload"],
                 include: &include,
                 fallback_module_name: "RetainedReceiveConsumer",
             },
@@ -278,7 +278,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .certified_groups
         .iter()
         .find(|group| {
-            group.owner().module == support.module
+            group.owner().unit == support.unit
+                && group.owner().module == support.module
                 && group
                     .group()
                     .binders()
@@ -296,15 +297,115 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
                 binding.identity.occurrence == "routeEven"
             }))
         }));
-    let prepared = compiled
-        .targets
-        .remove("__prepared")
-        .unwrap()
-        .prepared
-        .into_prepared();
-    assert!(prepared
+    let declared_site = compiled.targets["__prepared"]
+        .asks
         .sites()
+        .into_iter()
+        .find(|site| site.origin == "RetainedReceiveOwner.result")
+        .expect("the complete compiler output retains the original receive site");
+    let receive = compiled
+        .certified_groups
         .iter()
-        .any(|site| site.origin == "RetainedReceiveOwner.result"));
-    super::prepared_execution::assert_typed_receive_json(prepared, compiled.table);
+        .filter(|group| group.owner().unit == owner.unit && group.owner().module == owner.module)
+        .filter(|group| {
+            group.group().binders().iter().any(|binder| {
+                binder.unit == owner.unit
+                    && binder.module == owner.module
+                    && binder.occurrence == "result"
+            })
+        })
+        .find(|group| {
+            group
+                .group()
+                .definitions()
+                .sites()
+                .iter()
+                .any(|site| site.site == declared_site.site)
+        })
+        .expect("the certified retained owner carries its original receive site");
+    assert_eq!(receive.origin(), ProductOrigin::RetainedCore);
+    let mut state = crate::session::PersistentSession::new(None, 4096);
+    let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
+        .expect("install the target and its complete certified native closure");
+    let table = state.session_table().clone();
+    let payload_group = reached_payload_construction(&compiled);
+    let payload_layout = crate::typed_receive_test_support::json_layout(
+        payload_group.group().definitions(),
+        &format!(
+            "{:?} original group {} authored payload",
+            payload_group.owner(),
+            payload_group.group().original_ordinal()
+        ),
+    );
+    let mut producer = crate::session::PersistentSession::new(None, 4096);
+    let payload_program = crate::install_compiled_target(&mut producer, &compiled, "__payload")
+        .expect("install the payload target and its complete certified native closure");
+    crate::typed_receive_test_support::assert_typed_receive_json(
+        state.prepared_mut().unwrap(),
+        program,
+        table,
+        declared_site.site,
+        (
+            producer.prepared_mut().unwrap(),
+            payload_program,
+            payload_layout,
+        ),
+        crate::session::prepared::assert_parked_receive_schema,
+    );
+    assert!(state.prepared_mut().unwrap().unpin(program));
+    assert!(producer.prepared_mut().unwrap().unpin(payload_program));
+}
+
+fn reached_payload_construction(
+    compiled: &crate::CompiledArtifacts,
+) -> &tidepool_toolchain::certified_products::PendingCertifiedGroup {
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+    let mut pending = compiled.targets["__payload"]
+        .pending_imports
+        .iter()
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    let mut payload: Option<&tidepool_toolchain::certified_products::PendingCertifiedGroup> = None;
+    while let Some(import) = pending.pop() {
+        let PendingImportOwner::Source {
+            owner,
+            original_ordinal,
+            binder,
+        } = import
+        else {
+            continue;
+        };
+        let mut matches = compiled.certified_groups.iter().filter(|group| {
+            group.owner() == owner && group.group().original_ordinal() == *original_ordinal
+        });
+        let group = matches
+            .next()
+            .unwrap_or_else(|| panic!("missing certified source group for {import:?}"));
+        assert!(
+            matches.next().is_none(),
+            "duplicate certified source group for {import:?}"
+        );
+        assert!(
+            group.group().binders().contains(binder),
+            "certified group does not export exact dependency {import:?}"
+        );
+        if binder.unit == "main"
+            && binder.module == "RetainedReceiveConsumer"
+            && binder.namespace == "value"
+            && binder.occurrence == "payload"
+            && binder.record_parent.is_none()
+        {
+            if let Some(previous) = payload {
+                assert!(
+                    std::ptr::eq(previous, group),
+                    "multiple reached authored payload construction owners"
+                );
+            }
+            payload = Some(group);
+        }
+        if visited.insert((owner.clone(), *original_ordinal)) {
+            pending.extend(group.imports());
+        }
+    }
+    payload.expect("__payload must reach the exact certified authored payload construction")
 }

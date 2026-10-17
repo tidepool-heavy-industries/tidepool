@@ -414,6 +414,13 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 }
 
 #[cfg(test)]
+use crate as runtime;
+#[cfg(test)]
+mod retained_core_receive_tests;
+#[cfg(test)]
+mod typed_receive_test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
