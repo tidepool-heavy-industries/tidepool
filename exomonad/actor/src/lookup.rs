@@ -1981,15 +1981,16 @@ mod tests {
                         namespace: LookupNamespace::Value,
                     });
                 }
+                let live_modules = if live {
+                    vec!["Tidepool.Command".into()]
+                } else {
+                    Vec::new()
+                };
                 let result = execute(
                     req,
                     "view".into(),
                     "qualified Tidepool.Command as Cmd",
-                    if live {
-                        &["Tidepool.Command".into()]
-                    } else {
-                        &[]
-                    },
+                    &live_modules,
                     &[],
                     usage.clone(),
                     |batch| {
