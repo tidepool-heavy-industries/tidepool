@@ -2159,6 +2159,51 @@ mod tests {
                 original_graph
             );
 
+            // Real recovered native custody remains private while closed-role
+            // source narrowing agrees with the independent validating route.
+            let owners = BTreeSet::from([historical.descriptor.owner.clone()]);
+            let narrowed = reusable.source_support(&owners).unwrap();
+            let legacy = reusable
+                .projection
+                .source_support(&reusable.artifacts, &owners)
+                .unwrap();
+            let offers = reusable
+                .native_offers
+                .iter()
+                .filter_map(
+                    |offer| match offer.is_relevant_to_support(&legacy.projection) {
+                        Ok(true) => Some(Ok(offer.clone())),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let legacy = reusable
+                .rebuild_narrowed(legacy.projection, legacy.artifacts, offers)
+                .unwrap();
+            assert_eq!(narrowed.selected, legacy.selected);
+            assert_eq!(narrowed.projection, legacy.projection);
+            assert_eq!(narrowed.input_decisions, legacy.input_decisions);
+            assert_eq!(
+                narrowed.artifacts.selection_snapshot(),
+                legacy.artifacts.selection_snapshot()
+            );
+            assert_eq!(
+                narrowed.native_offer_observations().unwrap(),
+                legacy.native_offer_observations().unwrap()
+            );
+            drop(reusable);
+            let row = &narrowed.selected[&historical.descriptor.owner];
+            assert_eq!(
+                row.original.as_ref().unwrap().1.descriptor.id,
+                historical.descriptor.id
+            );
+            assert_eq!(
+                row.interface.0,
+                legacy.selected[&historical.descriptor.owner].interface.0
+            );
+
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
             let refusal =
