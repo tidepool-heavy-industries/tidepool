@@ -749,16 +749,14 @@ impl OriginalCompilerInputs {
             }
         }
         // Available code retains custody without selecting executable groups.
-        let mut artifacts = inventory.inventory().admit_projected_with_native_offers(
+        let mut artifacts = effective.admit_interfaces_with_native_offers(
             inventory,
             entries.clone(),
-            &effective,
             &dependency_offers,
         )?;
-        let issued = artifacts.inventory().admit_private_complete_products(
+        let issued = effective.admit_complete_native_products(
             &artifacts,
             entries.clone(),
-            &effective,
             &dependency_offers,
         )?;
         for entry in &entries {

@@ -6535,14 +6535,19 @@ mod tests {
                     .copied()
                     .collect::<Vec<_>>();
                 assert_eq!(child_bindings, vec![selected_child]);
-                let admitted = available
-                    .inventory()
-                    .admit_projected_with_native_requirements(
-                        available,
-                        vec![],
-                        projection,
-                        &requirements,
-                    )
+                let offers = requirements
+                    .iter()
+                    .map(|requirement| {
+                        crate::artifact_inventory::IssuedNativeOffer::issue(
+                            requirement.original,
+                            available,
+                            Some(requirement.clone()),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let admitted = projection
+                    .admit_interfaces_with_native_offers(available, vec![], &offers)
                     .unwrap();
                 admitted
                     .native_requirements_from_roots(&[NativeRequirementRoot::Group {
@@ -6563,10 +6568,21 @@ mod tests {
                 NativeOriginalRequirement::for_projection(projection, &ambiguous, &[]).unwrap();
             let before = ambiguous.capture_graph_selection();
             let nodes = ambiguous.inventory().node_count();
+            let admitted = requirements
+                .iter()
+                .map(|requirement| {
+                    crate::artifact_inventory::IssuedNativeOffer::issue(
+                        requirement.original,
+                        &ambiguous,
+                        Some(requirement.clone()),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|offers| {
+                    projection.admit_interfaces_with_native_offers(&ambiguous, vec![], &offers)
+                });
             assert!(
-                matches!(ambiguous.inventory().admit_projected_with_native_requirements(
-                &ambiguous, vec![], projection, &requirements,
-            ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                matches!(admitted, Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
                 ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == native_id))
             );
             assert_eq!(ambiguous.capture_graph_selection(), before);

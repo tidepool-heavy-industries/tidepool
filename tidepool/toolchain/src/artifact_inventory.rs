@@ -3280,7 +3280,7 @@ impl ArtifactInventory {
 
     /// The compiler-role owner supplies the exact namespace before adding
     /// authenticated interface facts. Historical parents remain independent custody.
-    pub(crate) fn admit_projected_with_native_requirements(
+    fn admit_projected_with_native_requirements(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
@@ -3313,7 +3313,7 @@ impl ArtifactInventory {
     /// Accept exact availability support without importing the issuer's roots.
     /// An offer may supply groups for a projected dependency while its own
     /// original remains outside the compiler namespace.
-    pub(crate) fn admit_projected_with_native_offers(
+    fn admit_projected_with_native_offers(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
@@ -3349,7 +3349,7 @@ impl ArtifactInventory {
     }
     /// Issue complete private products using only the request's exact external
     /// dependency proofs. This temporary view does not publish execution demand.
-    pub(crate) fn admit_private_complete_products(
+    fn admit_private_complete_products(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
