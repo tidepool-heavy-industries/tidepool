@@ -259,7 +259,6 @@ impl PreparationTask {
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
     state: Mutex<PreparationState>,
-    compiler_owner: crate::RetainedActorExit,
     #[cfg(test)]
     fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -339,13 +338,16 @@ impl ToolsetPreparation {
 
     pub(crate) async fn prepare(
         self: &Arc<Self>,
+        client: &crate::CompilerPreparationClient,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
         source: crate::CheckpointSourceLayer,
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
-        let (task, disposition) = self.lookup(&recipe);
+        let (task, disposition) = client
+            .claim(|| self.lookup(&recipe))
+            .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         tracing::info!(
             target: "exomonad_actor::toolset_preparation",
             phase = "lookup",
@@ -356,12 +358,8 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let admitted =
-                crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
-                    owner
-                        .shared_preparation(self.compiler_owner.clone())
-                        .register_work()
-                });
+            let admitted = crate::resident_workbench::CompilerCloseOwner::current()
+                .and_then(|owner| owner.shared_preparation(client.producer()).register_work());
             let compiler_work = match admitted {
                 Ok(ticket) => ticket,
                 Err(error) => {
@@ -443,6 +441,7 @@ impl ToolsetPreparation {
     /// evidence. Initial-install imports are not the candidate's recipe.
     pub(crate) async fn restore(
         self: &Arc<Self>,
+        client: &crate::CompilerPreparationClient,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
@@ -451,11 +450,7 @@ impl ToolsetPreparation {
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let compiler_work = crate::resident_workbench::CompilerCloseOwner::current()
-            .and_then(|owner| {
-                owner
-                    .shared_preparation(self.compiler_owner.clone())
-                    .register_work()
-            })
+            .and_then(|owner| owner.shared_preparation(client.producer()).register_work())
             .map_err(|error| PreparationFailure::Admission(Arc::new(error)))?;
         let preparation = uuid::Uuid::new_v4();
         let mut wait_timing = crate::call_timing::PreparationWait::restore(preparation);

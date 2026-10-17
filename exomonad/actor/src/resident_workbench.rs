@@ -466,8 +466,25 @@ pub struct ActorWorkbenchSource {
     toolset_support: Arc<[PathBuf]>,
     toolset_support_manifests:
         Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
-    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
     prepared_toolset: Option<PreparedSourceToolset>,
+}
+
+/// Source configuration bound to one run's preparation lifetime. Clones share
+/// pending work; independently binding a configuration creates independent work.
+#[derive(Clone)]
+pub struct BoundActorWorkbenchSource {
+    config: ActorWorkbenchSource,
+    preparation: crate::CompilerPreparationClient,
+    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+}
+
+impl BoundActorWorkbenchSource {
+    pub fn config(&self) -> &ActorWorkbenchSource {
+        &self.config
+    }
+    pub fn into_config(self) -> ActorWorkbenchSource {
+        self.config
+    }
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -579,7 +596,7 @@ struct WorkbenchCompilation {
     injected: Vec<String>,
 }
 
-impl ActorWorkbenchSource {
+impl BoundActorWorkbenchSource {
     /// Prepare one exact granted and supported row from an owned immutable run
     /// source graph. Preparation does not install tools or borrow actor heaps.
     /// The caller selects urgency; required startup is foreground and optional
@@ -632,14 +649,15 @@ impl ActorWorkbenchSource {
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
         validation: Option<&SourceImports>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        let (recipe, resolved) = self.installer_recipe_selected(
+        self.preparation.claim(|| ())?;
+        let (recipe, resolved) = self.config.installer_recipe_selected(
             &source,
             granted_effects,
             supported_effects,
             validation,
         )?;
         let effects = recipe.effects.clone();
-        if let Some(ready) = &self.prepared_toolset {
+        if let Some(ready) = &self.config.prepared_toolset {
             let exact_selection = match ready.selection() {
                 Some(crate::ToolsetProgramSelection::BuiltinDeploymentProgram { .. }) => true,
                 Some(crate::ToolsetProgramSelection::WorkspaceOriginal { recipe, original }) => {
@@ -658,7 +676,14 @@ impl ActorWorkbenchSource {
         }
         let prepared = self
             .toolset_preparation
-            .prepare(workload, recipe, resolved, source, registry)
+            .prepare(
+                &self.preparation,
+                workload,
+                recipe,
+                resolved,
+                source,
+                registry,
+            )
             .await
             .map_err(|failure| match failure {
                 crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
@@ -689,6 +714,7 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        self.preparation.claim(|| ())?;
         if source
             .generation_evidence()
             .is_none_or(|evidence| evidence.reference.sha256() != &installation.source_sha256)
@@ -697,7 +723,7 @@ impl ActorWorkbenchSource {
                 "recovered installer selects a different source artifact".into(),
             ));
         }
-        let mut pinned = self.clone();
+        let mut pinned = self.config.clone();
         pinned.spec = installation.entry().map(Arc::from);
         // Metadata is resolved against immutable source with the persisted
         // entry pin. These imports are never used to locate or load the entry.
@@ -728,6 +754,7 @@ impl ActorWorkbenchSource {
         let prepared = self
             .toolset_preparation
             .restore(
+                &self.preparation,
                 workload,
                 recipe,
                 resolved,
@@ -753,7 +780,9 @@ impl ActorWorkbenchSource {
             })?;
         Ok(PreparedSourceToolset { prepared, effects })
     }
+}
 
+impl ActorWorkbenchSource {
     /// Recompute deployment coverage against the same source, imports and
     /// actual interpreter support used by installer acquisition, without
     /// looking up readiness or admitting compiler work.
@@ -949,6 +978,17 @@ impl ActorWorkbenchSource {
     }
 
     #[must_use]
+    pub fn bind_preparation(
+        self,
+        preparation: crate::CompilerPreparationClient,
+    ) -> BoundActorWorkbenchSource {
+        BoundActorWorkbenchSource {
+            config: self,
+            preparation,
+            toolset_preparation: Default::default(),
+        }
+    }
+
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
             preamble: preamble.into(),
@@ -967,7 +1007,6 @@ impl ActorWorkbenchSource {
             tool_surface_validator: None,
             request_evidence: None,
             request_helper_recipe: Default::default(),
-            toolset_preparation: Default::default(),
             prepared_toolset: None,
         }
     }
@@ -2322,7 +2361,7 @@ pub type HandlerEffectSupport<H> =
 
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
-    source: ActorWorkbenchSource,
+    source: BoundActorWorkbenchSource,
     handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
@@ -2429,7 +2468,7 @@ impl Drop for CancelCompilerTransactionOnDrop {
 }
 
 impl<H, O> ResidentMachineAccess<H, O> {
-    fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+    fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: BoundActorWorkbenchSource) -> Self {
         Self {
             machines,
             source,
@@ -4424,13 +4463,20 @@ impl ResidentRequest {
 }
 
 impl<H, O> ResidentActorRunner<H, O> {
+    pub(crate) fn preparation_source(&self) -> BoundActorWorkbenchSource {
+        self.access.source.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn machines_for_test(&self) -> &Arc<ActorMachineRegistry<H, O>> {
         &self.access.machines
     }
 
     #[must_use]
-    pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+    pub fn new(
+        machines: Arc<ActorMachineRegistry<H, O>>,
+        source: BoundActorWorkbenchSource,
+    ) -> Self {
         Self {
             access: ResidentMachineAccess::new(machines, source),
         }
@@ -4924,7 +4970,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     ) -> ResidentActorWorkbench<H, O> {
         let mut access = self.access.sharing();
-        access.source.request_evidence = Some(evidence);
+        access.source.config.request_evidence = Some(evidence);
         ResidentActorWorkbench::from_access(
             access,
             Some(RequestWorkbenchScope { response, request }),
@@ -4958,7 +5004,7 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     #[must_use]
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,
-        source: ActorWorkbenchSource,
+        source: BoundActorWorkbenchSource,
         request_scope: Option<RequestWorkbenchScope>,
     ) -> Self {
         Self::from_access(ResidentMachineAccess::new(machines, source), request_scope)
@@ -4983,13 +5029,13 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         mut self,
         keys: Vec<exomonad_tool::ToolEffectKey>,
     ) -> Self {
-        let mut support = self.access.source.installed_effect_support.to_vec();
+        let mut support = self.access.source.config.installed_effect_support.to_vec();
         for key in keys {
             if !support.contains(&key) {
                 support.push(key);
             }
         }
-        self.access.source.installed_effect_support = support.into();
+        self.access.source.config.installed_effect_support = support.into();
         self
     }
 
@@ -5585,7 +5631,7 @@ where
             // `ResidentMachineAccess::image_registry`.
             session.set_image_registry(Arc::clone(registry));
         }
-        let source = self.source.clone();
+        let source = self.source.config.clone();
         let machines = Arc::clone(&self.machines);
         let child_cleanup = self.sharing();
 
@@ -5837,8 +5883,8 @@ where
         // AgentSpec, so every actor discovers the run's current spec.
         let roots = context
             .source_layer
-            .include_paths(&self.access.source.base_include);
-        crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
+            .include_paths(&self.access.source.config.base_include);
+        crate::agent_spec::resolve(roots, self.access.source.config.spec.as_deref())
     }
 
     /// Prepare immutable source/native code against actual assembled support.
@@ -5859,7 +5905,12 @@ where
         granted_effects: Vec<crate::ActorEffectKey>,
         validation: Option<&SourceImports>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
-        let source_support = self.access.source.installed_effect_support().to_vec();
+        let source_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         let admitted_support = self
             .access
@@ -5947,7 +5998,12 @@ where
         granted_effects: Vec<crate::ActorEffectKey>,
         recovered: &PersistedActorInstallation,
     ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
-        let source_support = self.access.source.installed_effect_support().to_vec();
+        let source_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         let support = self
             .access
@@ -6129,7 +6185,12 @@ where
         metadata: serde_json::Value,
     ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
         let expected = crate::tool_contract::decode_installation(metadata)?;
-        let support = self.access.source.installed_effect_support().to_vec();
+        let support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let expected = crate::tool_contract::admit_reply_spec_metadata(expected, &support)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let tools = self
@@ -6203,7 +6264,12 @@ where
         );
         Box::pin(
             async move {
-                let support = self.access.source.installed_effect_support().to_vec();
+                let support = self
+                    .access
+                    .source
+                    .config
+                    .installed_effect_support()
+                    .to_vec();
                 let observer = self.access.handler_effect_support.clone();
                 let requested = granted_effects.clone();
                 let admitted_base = self
@@ -6285,8 +6351,13 @@ where
             Some(installation_scope.clone()),
         );
         let registration = abort_guard.registration();
-        let tool_surface_validator = self.access.source.tool_surface_validator.clone();
-        let installed_effect_support = self.access.source.installed_effect_support().to_vec();
+        let tool_surface_validator = self.access.source.config.tool_surface_validator.clone();
+        let installed_effect_support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
         let (step, pending_originals, source_original) = registration
             .scope(self.access.with_compiler_machine(compile_context.clone(), {
@@ -6779,10 +6850,10 @@ where
         let execution = private_owner.clone();
         let reply_declaration = reply_declaration.filter(|_| {
             reply_declaration_modules.iter().any(|module| {
-                declaration_worth_showing(module, &self.access.source.workspace_modules)
+                declaration_worth_showing(module, &self.access.source.config.workspace_modules)
             })
         });
-        let mut source = self.access.source.clone().for_activation(&context);
+        let mut source = self.access.source.config.clone().for_activation(&context);
         source.request_evidence = Some(input.type_evidence().clone());
 
         #[cfg(test)]
@@ -7213,9 +7284,9 @@ where
             kind.type_name()
         );
         let mut installer = Self::from_access(self.access.sharing(), None);
-        installer.access.source.workbench_imports = kind.imports();
-        installer.access.source.request_evidence = None;
-        installer.access.source.request_helper_recipe =
+        installer.access.source.config.workbench_imports = kind.imports();
+        installer.access.source.config.request_evidence = None;
+        installer.access.source.config.request_helper_recipe =
             tidepool_toolchain::declaration_join::RequestHelperRecipe::None;
         let (checked, prepared) = Box::pin(installer.prepare_checked_host_cell(
             context.clone(),
@@ -7328,7 +7399,7 @@ where
         }
         let snapshot_execution = purpose.execution().cloned();
         let pure_host_carrier = matches!(purpose, CellPreparationPurpose::HostCarrier { .. });
-        let snapshot_source = self.access.source.clone();
+        let snapshot_source = self.access.source.config.clone();
 
         let request_scope = self.request_scope.clone();
         let mounted_input = leased_input
@@ -7530,7 +7601,7 @@ where
     ) -> Result<String, ResidentActorWorkbenchError> {
         let request_scope = self.request_scope.clone();
 
-        let source = self.access.source.clone();
+        let source = self.access.source.config.clone();
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let source = source.for_workbench(context, request_scope.as_ref());
@@ -7884,7 +7955,7 @@ where
         query: tidepool_runtime::session::NameQuery,
         kind: StructuredInspectionKind,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let source = self.access.source.clone();
+        let source = self.access.source.config.clone();
         let snapshot_source = source.clone();
         let query_scope = query.scope.clone();
         let snapshot = self
@@ -8614,7 +8685,12 @@ where
                 "reply decoder preparation requires its captured machine session".into(),
             ));
         }
-        let mut support = self.access.source.installed_effect_support().to_vec();
+        let mut support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
         self.access
             .with_machine(context, move |machine, _, _| {
@@ -8639,9 +8715,14 @@ where
         crate::tool_contract::SpecValidationError,
     > {
         use crate::tool_contract::SpecValidationError;
-        let support = self.access.source.installed_effect_support().to_vec();
+        let support = self
+            .access
+            .source
+            .config
+            .installed_effect_support()
+            .to_vec();
         let observer = self.access.handler_effect_support.clone();
-        let validate_surface = self.access.source.tool_surface_validator.clone();
+        let validate_surface = self.access.source.config.tool_surface_validator.clone();
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = (|| {

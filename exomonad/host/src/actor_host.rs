@@ -3749,6 +3749,7 @@ pub(crate) async fn prepare_workspace_toolsets(
             supported.push(key);
         }
     }
+    let workbench = forest.preparation_source();
     let frozen = exomonad_actor::ActorSourceLayers::freeze_toolset_layer(
         source.as_ref(),
         tidepool_repr::PrincipalId::SYSTEM,

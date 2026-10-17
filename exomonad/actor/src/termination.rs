@@ -340,6 +340,29 @@ impl ActorCompilerCloseOwner {
     }
 }
 
+/// A run-issued client. Cloning it cannot close the producer lifetime.
+#[derive(Clone)]
+pub struct CompilerPreparationClient {
+    retained: RetainedActorExit,
+}
+
+impl CompilerPreparationClient {
+    pub(crate) fn claim<T>(
+        &self,
+        claim: impl FnOnce() -> T,
+    ) -> Result<T, crate::ResidentActorWorkbenchError> {
+        let shutdown = self.retained.state.requested_shutdown.lock();
+        if shutdown.is_some() {
+            return Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed);
+        }
+        Ok(claim())
+    }
+
+    pub(crate) fn producer(&self) -> RetainedActorExit {
+        self.retained.clone()
+    }
+}
+
 /// A compiler preparation lifetime before any actor is admitted. Retain this
 /// owner independently of its cancelable operation future.
 #[derive(Default)]
@@ -350,6 +373,41 @@ pub struct CompilerPreparationOwner {
 impl CompilerPreparationOwner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn client(&self) -> CompilerPreparationClient {
+        CompilerPreparationClient {
+            retained: self.retained.clone(),
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        self.retained.request_shutdown(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "compiler preparation lifetime closed",
+        ));
+        self.retained.close_compiler_admission();
+    }
+
+    /// The guard is created before the future, so even an unpolled scope closes
+    /// admission and cancels physical work. Individual waiters do not own it.
+    pub fn scope_with_client<T, F: std::future::Future<Output = T>>(
+        &mut self,
+        operation: impl FnOnce(CompilerPreparationClient) -> F,
+    ) -> impl std::future::Future<Output = CompilerPreparationOutcome<T>> {
+        let guard = PreparationAdmissionGuard {
+            owner: self.retained.clone(),
+            completed: false,
+        };
+        let cleanup = self.cleanup();
+        let client = self.client();
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
+        async move {
+            let action = owner.scope(operation(client)).await;
+            drop(guard);
+            CompilerPreparationOutcome { action, cleanup }
+        }
     }
 
     /// Admit synchronous preparation through the same retained cleanup owner.
@@ -396,6 +454,12 @@ impl CompilerPreparationOwner {
             drop(admission);
             CompilerPreparationOutcome { action, cleanup }
         }
+    }
+}
+
+impl Drop for CompilerPreparationOwner {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

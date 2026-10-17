@@ -14229,6 +14229,7 @@ where
         let (directory, control_task) = crate::LocalActorDirectory::start().await?;
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
+        let source = source.bind_preparation(directory.preparation_client());
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let environment = ResidentEnvironment::new(runner, deployments, fork_workspaces);
@@ -14242,6 +14243,10 @@ where
             },
             receiver,
         ))
+    }
+
+    pub fn preparation_source(&self) -> crate::BoundActorWorkbenchSource {
+        self.environment.runner.preparation_source()
     }
 
     /// Read whether an exact actor still owns a retained watch.
