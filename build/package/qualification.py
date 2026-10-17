@@ -2038,7 +2038,11 @@ def compiler_trace_selection(execution: dict, profile: str) -> bool:
     if profile == "minimal" and (type(capture.get("raw_detail_lines")) is not int or capture["raw_detail_lines"] != 0):
         return False
     physical = selected[0].get("physical_compiler_timing") or {}
-    return (type(physical.get("physical_request_count")) is int
+    return (physical.get("request_count_complete") is True
+            and physical.get("request_identities_truncated") is False
+            and type(physical.get("unclassified_request_records")) is int
+            and physical["unclassified_request_records"] == 0
+            and type(physical.get("physical_request_count")) is int
             and physical["physical_request_count"] >= 0
             and (physical["physical_request_count"] == 0
                  or type(capture.get("summary_lines")) is int and capture["summary_lines"] > 0))

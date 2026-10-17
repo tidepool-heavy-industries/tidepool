@@ -171,7 +171,10 @@ def captured_execution(execution, profile="minimal"):
     compiler = str(Path(root) / "compiler")
     execution["diagnostic_summaries"] = {"owned_compiler_roots": [{
         "path": compiler,
-        "physical_compiler_timing": {"physical_request_count": 1},
+        "physical_compiler_timing": {"physical_request_count": 1,
+                                     "request_count_complete": True,
+                                     "request_identities_truncated": False,
+                                     "unclassified_request_records": 0},
         "trace_capture": {"complete": True, "summary_lines": 1, "raw_detail_lines": 0,
                           "compiler_boots": [{"daemon_pid": 42}],
                           "applied_profiles": [{"profile": profile,
@@ -233,6 +236,54 @@ class NativeQualificationTests(unittest.TestCase):
                 incomplete.pop(qualification.RECIPE_WORKSPACE_SOURCE + '/' + name)
                 with self.assertRaisesRegex(ValueError, 'complete recipe workspace'):
                     qualification.copy_recipe_workspace(incomplete, root / 'resource', root / 'bundle')
+
+    def test_trace_scanner_and_qualification_distinguish_idle_from_unclassified_work(self):
+        runner_path = SCRIPT.parents[1] / 'rust/isolated-libtest.py'
+        spec = importlib.util.spec_from_file_location('qualification_trace_scanner', runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        for scenario, expected in (("idle", True), ("work", True), ("work-without-summary", False),
+                                   ("unclassified", False), ("truncated", False), ("missing", False)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                compiler = root / 'compiler'
+                compiler.mkdir()
+                trace = compiler / 'compiler.jsonl'
+                rows = [
+                    {'fields': {'message': 'compiler trace profile applied', 'profile': 'minimal',
+                                'raw_detail': 'off', 'filter_contract': 1, 'process_id': 42,
+                                'writer': str(trace)}},
+                    {'fields': {'message': 'compiler daemon ready', 'daemon_pid': 42}},
+                ]
+                if scenario not in ('idle', 'missing'):
+                    rows.append({'fields': {'message': 'compiler request started',
+                        'compile_request': 'logical-request', 'physical_execution': 'physical-request',
+                        'execution_layer': 'unknown' if scenario == 'unclassified' else 'physical'}})
+                if scenario == 'work':
+                    rows.append({'fields': {'message': 'compiler timing',
+                                           'line': 'tidepool-compile-summary modules=1'}})
+                if scenario != 'missing':
+                    trace.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                with patch.object(runner, 'TRACE_IDENTITY_LIMIT', 0 if scenario == 'truncated' else runner.TRACE_IDENTITY_LIMIT):
+                    summaries = runner.diagnostic_summaries(root)
+                execution = {'artifact_root': str(root), 'diagnostic_summaries': summaries}
+                self.assertEqual(qualification.compiler_trace_selection(execution, 'minimal'), expected)
+                if scenario == 'idle':
+                    physical = summaries['owned_compiler_roots'][0]['physical_compiler_timing']
+                    self.assertEqual(physical['physical_request_count'], 0)
+                    for key in ('request_count_complete', 'request_identities_truncated', 'unclassified_request_records'):
+                        saved = physical.pop(key)
+                        self.assertFalse(qualification.compiler_trace_selection(execution, 'minimal'), key)
+                        physical[key] = saved
+                if scenario == 'unclassified':
+                    selected = summaries['owned_compiler_roots'][0]
+                    self.assertTrue(selected['trace_capture']['complete'])
+                    self.assertEqual(selected['physical_compiler_timing']['physical_request_count'], 0)
+                    self.assertEqual(selected['physical_compiler_timing']['unclassified_request_records'], 1)
+                if scenario == 'truncated':
+                    physical = summaries['owned_compiler_roots'][0]['physical_compiler_timing']
+                    self.assertTrue(physical['request_identities_truncated'])
+                    self.assertFalse(physical['request_count_complete'])
 
     def test_applied_trace_selection_requires_writer_and_summary_evidence(self):
         import copy

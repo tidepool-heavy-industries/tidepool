@@ -80,6 +80,10 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         return stop_daemon(&args[1..]);
     }
 
+    let profile = crate::CompilerTraceProfile::select(
+        std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
+        std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
+    )?;
     let worker_args = match worker_payload(&args)? {
         Some(payload) => vec![WORKER_REQUEST_FLAG.into(), payload],
         None => {
@@ -95,7 +99,7 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         .map_err(FrontendError::Io)?;
     let worker = prepare_worker()?;
     let mut command = worker.command()?;
-    command.args(worker_args);
+    command.envs(profile.environment()).args(worker_args);
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
@@ -1607,6 +1611,14 @@ mod tests {
                 r#"
 fn main() {{
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(path) = std::env::var_os("TIDEPOOL_TEST_WORKER_LAUNCHES") {{
+        use std::io::Write;
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(out, "{{}}|{{}}|{{}}",
+            std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").unwrap_or_default(),
+            std::env::var("TIDEPOOL_TIMING").unwrap_or_default(),
+            std::env::var("TIDEPOOL_TIMING_SUMMARY").unwrap_or_default()).unwrap();
+    }}
     if args == ["{probe}"] {{
         print!("{flag}");
         return;
@@ -1633,6 +1645,76 @@ fn main() {{
             .status()
             .unwrap();
         assert!(rustc.success(), "fake worker failed to compile");
+    }
+
+    #[test]
+    fn direct_cli_applies_capture_before_worker_launch_and_refuses_invalid_profile() {
+        let _env = ENV.lock().unwrap();
+        struct Restore(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let names = [
+            WORKER_ENV,
+            "TIDEPOOL_GHC_LIBDIR",
+            "TIDEPOOL_BUILD_PRODUCTS_DIR",
+            "TIDEPOOL_TEST_WORKER_LAUNCHES",
+            "TIDEPOOL_TEST_TRACE_PROFILE",
+            "TIDEPOOL_TIMING",
+            "TIDEPOOL_TIMING_SUMMARY",
+        ];
+        let _restore = Restore(
+            names
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        compile_fake_worker(&dir.path().join("worker.rs"), &worker, "capture");
+        let launches = dir.path().join("launches");
+        let source = dir.path().join("Input.hs");
+        std::fs::write(&source, "module Input where\nanswer = 42\n").unwrap();
+        std::env::set_var(WORKER_ENV, &worker);
+        std::env::set_var("TIDEPOOL_GHC_LIBDIR", dir.path());
+        std::env::set_var("TIDEPOOL_BUILD_PRODUCTS_DIR", dir.path().join("products"));
+        std::env::set_var("TIDEPOOL_TEST_WORKER_LAUNCHES", &launches);
+        for (profile, timing, expected) in [
+            (None, None, "minimal|0|1"),
+            (Some("minimal"), Some("1"), "minimal|0|1"),
+            (Some("full"), Some("0"), "full|1|1"),
+            (None, Some("1"), "full|1|1"),
+        ] {
+            match profile {
+                Some(value) => std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", value),
+                None => std::env::remove_var("TIDEPOOL_TEST_TRACE_PROFILE"),
+            }
+            match timing {
+                Some(value) => std::env::set_var("TIDEPOOL_TIMING", value),
+                None => std::env::remove_var("TIDEPOOL_TIMING"),
+            }
+            std::env::set_var("TIDEPOOL_TIMING_SUMMARY", "0");
+            assert_eq!(run(vec![source.clone().into_os_string()]).unwrap(), 0);
+            let observed = std::fs::read_to_string(&launches).unwrap();
+            assert_eq!(observed.lines().last(), Some(expected));
+            std::fs::remove_file(&launches).unwrap();
+        }
+        std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", "unknown");
+        assert!(matches!(
+            run(vec![source.into_os_string()]),
+            Err(FrontendError::Daemon(_))
+        ));
+        assert!(
+            !launches.exists(),
+            "invalid capture must refuse before the worker protocol probe or launch"
+        );
     }
 
     #[test]
