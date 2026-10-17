@@ -198,51 +198,13 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let module_interfaces = original_interfaces
             .materialize_module_interfaces(durable.path())
             .unwrap();
-        let reference = references
-            .iter()
-            .find(|reference| reference.unit == "main" && reference.module == "CheckedQuoterFacade")
-            .unwrap();
-        assert!(reference.execution_source.is_some());
-        let recovered =
-            tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
-                durable.path(),
-                &references,
-                &module_interfaces,
-                &[],
-                Vec::new(),
-            )
-            .unwrap();
-        let recovered_products = recovered.recovery_products();
-        let recovered_original = recovered_products
-            .iter()
-            .find(|product| {
-                product.owner().unit == "main" && product.owner().module == "CheckedQuoterFacade"
-            })
-            .unwrap();
-        // Recovery preserves durable authority, but does not reissue the fresh
-        // source witness used to admit declarations in the original transaction.
-        assert!(original.source_sha256().is_some());
-        assert!(recovered_original.source_sha256().is_none());
-        assert_eq!(original.owner(), recovered_original.owner());
-        assert!(original.interface_bytes() == recovered_original.interface_bytes());
-        assert!(original.product_bytes() == recovered_original.product_bytes());
-        let recovered_durable = tempfile::tempdir().unwrap();
-        let recovered_references =
-            tidepool_toolchain::recovery_artifacts::materialize_certified_products(
-                recovered_durable.path(),
-                program.parsed_plan().producer_sha256(),
-                &recovered_products,
-            )
-            .unwrap();
-        let recovered_reference = recovered_references
-            .iter()
-            .find(|reference| reference.unit == "main" && reference.module == "CheckedQuoterFacade")
-            .unwrap();
-        assert_eq!(reference, recovered_reference);
-        let graph = &reference.execution_source.as_ref().unwrap().path;
-        assert!(
-            std::fs::read(durable.path().join(graph)).unwrap()
-                == std::fs::read(recovered_durable.path().join(graph)).unwrap()
+        assert_original_durability(
+            durable.path(),
+            program.parsed_plan().producer_sha256(),
+            original,
+            &references,
+            &module_interfaces,
+            SourceReplay::Unavailable,
         );
         eprintln!(
             "checked quoter {phase}: {} ms",
@@ -252,4 +214,153 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         // or executing the quoted command's contents.
         assert_eq!(session.scope_binding_count(public), 0);
     }
+}
+
+#[derive(Clone, Copy)]
+enum SourceReplay {
+    Available,
+    Unavailable,
+}
+
+fn assert_original_durability(
+    durable: &std::path::Path,
+    producer: [u8; 32],
+    original: &tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct,
+    references: &[tidepool_toolchain::recovery_artifacts::RecoveryArtifactRef],
+    module_interfaces: &[tidepool_toolchain::recovery_artifacts::RecoveryModuleInterfaceRef],
+    replay: SourceReplay,
+) {
+    let is_owner = |unit: &str, module: &str| {
+        unit == original.owner().unit && module == original.owner().module
+    };
+    let matching = references
+        .iter()
+        .filter(|reference| is_owner(&reference.unit, &reference.module))
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let reference = matching[0];
+    assert!(original.source_sha256().is_some());
+    match replay {
+        SourceReplay::Available => assert!(reference.execution_source.is_some()),
+        SourceReplay::Unavailable => assert!(reference.execution_source.is_none()),
+    }
+    let recovered =
+        tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
+            durable,
+            references,
+            module_interfaces,
+            &[],
+            Vec::new(),
+        )
+        .unwrap();
+    let recovered_products = recovered.recovery_products();
+    let matching = recovered_products
+        .iter()
+        .filter(|product| is_owner(&product.owner().unit, &product.owner().module))
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let recovered_original = matching[0];
+    // Durable recovery preserves the original, not its fresh source admission.
+    assert!(recovered_original.source_sha256().is_none());
+    assert_eq!(original.owner(), recovered_original.owner());
+    assert_eq!(
+        original.interface_bytes(),
+        recovered_original.interface_bytes()
+    );
+    assert_eq!(original.product_bytes(), recovered_original.product_bytes());
+    let recovered_durable = tempfile::tempdir().unwrap();
+    let recovered_references =
+        tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+            recovered_durable.path(),
+            producer,
+            &recovered_products,
+        )
+        .unwrap();
+    let matching = recovered_references
+        .iter()
+        .filter(|reference| is_owner(&reference.unit, &reference.module))
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let recovered_reference = matching[0];
+    assert_eq!(reference, recovered_reference);
+    if let SourceReplay::Available = replay {
+        let graph = &reference.execution_source.as_ref().unwrap().path;
+        assert_eq!(
+            std::fs::read(durable.join(graph)).unwrap(),
+            std::fs::read(recovered_durable.path().join(graph)).unwrap()
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn fixture_original_source_recipe_survives_recovery_without_compile_time_execution() {
+    tidepool_testing::eval_harness::require_extract();
+    let cache = tempfile::tempdir().unwrap();
+    let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("CheckedOriginalReplayOwner.hs"),
+        include_str!("fixtures/CheckedOriginalReplayOwner.hs"),
+    )
+    .unwrap();
+    let include = [root.path().to_path_buf()];
+    let compiled = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::compile_invocation(
+            &tidepool_toolchain::artifacts::CompileInvocation {
+                source: include_str!("fixtures/CheckedOriginalReplayProbe.hs"),
+                targets: &["result"],
+                include: &include,
+                fallback_module_name: "CheckedOriginalReplayProbe",
+            },
+            |_, _, _| {},
+            settlement,
+        )
+    })
+    .unwrap();
+    let originals = compiled
+        .recovery_products
+        .iter()
+        .filter(|product| {
+            product.owner().unit == "main" && product.owner().module == "CheckedOriginalReplayOwner"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(originals.len(), 1);
+    let original = originals[0];
+    assert!(compiled.certified_groups.iter().any(|group| {
+        group.owner() == original.owner()
+            && group.origin() == tidepool_toolchain::certified_products::ProductOrigin::Fresh
+            && group.group().binders().iter().any(|binder| {
+                binder.unit == "main"
+                    && binder.module == "CheckedOriginalReplayOwner"
+                    && binder.occurrence == "value"
+            })
+    }));
+    let producer = compiled
+        .producer_identity
+        .expect("ordinary compiler endpoint binds the original issuer");
+    let durable = tempfile::tempdir().unwrap();
+    let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+        durable.path(),
+        producer,
+        &compiled.recovery_products,
+    )
+    .unwrap();
+    let interfaces = references
+        .iter()
+        .map(|reference| {
+            reference
+                .module_interface
+                .clone()
+                .expect("native original retains its issued canonical interface")
+        })
+        .collect::<Vec<_>>();
+    assert_original_durability(
+        durable.path(),
+        producer,
+        original,
+        &references,
+        &interfaces,
+        SourceReplay::Available,
+    );
 }
