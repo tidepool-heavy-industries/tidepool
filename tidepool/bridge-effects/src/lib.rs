@@ -33,7 +33,13 @@ impl Backend {
         match name {
             "deepseek" => Ok(Self::DeepSeek),
             "chatgpt_plan" => Ok(Self::OpenAIPlan),
-            _ => Err("unknown inference backend".into()),
+            "codex" => Err(
+                "private Codex credential bridge has been retired; select deepseek or chatgpt_plan"
+                    .into(),
+            ),
+            _ => Err(format!(
+                "unknown inference backend {name:?}; select deepseek or chatgpt_plan"
+            )),
         }
     }
 }
