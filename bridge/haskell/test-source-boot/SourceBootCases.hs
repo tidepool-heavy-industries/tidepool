@@ -2862,7 +2862,8 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     forM_ [("normal", coldProducts), ("withdrawn", settled cold (Set.singleton requestOwner))] $
       \(label,products) -> emit (TList [TString "settlement", TString label,
         TList (map outcomeTerm (preparedModuleProductOutcomes products)),
-        TString (T.pack (show (preparedModuleProductOmissions products)))])
+        TList [TList (ownerTerm owner ++ [TString (T.pack (show omissions))])
+          | (owner,omissions) <- preparedModuleProductOmissions products]])
 
 originalPackageProjection :: IO ()
 originalPackageProjection = withScratch $ \work -> do
