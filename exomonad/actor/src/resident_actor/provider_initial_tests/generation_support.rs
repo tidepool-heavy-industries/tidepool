@@ -200,7 +200,7 @@ impl GenerationSupport {
         let prelude = tidepool_testing::eval_harness::prelude_path()
             .canonicalize()
             .unwrap();
-        let mut paths = effects.include_paths();
+        let mut paths = effects.include_paths().to_vec();
         paths.push(
             prelude
                 .parent()
@@ -251,7 +251,7 @@ impl GenerationSupport {
         let tools = runner
             .compiler_scope(
                 crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                    actor.retained_exit(),
+                    actor.terminal().clone(),
                 ),
             )
             .scope(
@@ -298,7 +298,7 @@ impl GenerationSupport {
                 .runner
                 .compiler_scope(
                     crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                        fixture.actor.retained_exit(),
+                        fixture.actor.terminal().clone(),
                     ),
                 )
                 .scope(ReloadPreparation::prepare(
