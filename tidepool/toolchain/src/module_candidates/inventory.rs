@@ -81,7 +81,10 @@ pub(super) struct InventoryTables {
 
 impl InventoryTables {
     pub(super) fn new<'a>(groups: impl IntoIterator<Item = &'a ProjectedGroup>) -> Option<Self> {
-        Self::from_views(groups.into_iter().map(GroupView::Projected))
+        Self::from_views(groups.into_iter().map(GroupView::Projected)).or_else(|| {
+            tracing::warn!(target: "tidepool_toolchain::module_candidates", "candidate inventory construction refused");
+            None
+        })
     }
 
     #[cfg(test)]
@@ -191,6 +194,7 @@ impl InventoryTables {
             return Some(*entry);
         }
         if self.symbol_rows.len() == TABLE_LIMIT {
+            tracing::warn!(target: "tidepool_toolchain::module_candidates", limit = TABLE_LIMIT, "candidate symbol table limit reached");
             return None;
         }
         let bytes = identity_size(identity)?;
@@ -206,6 +210,7 @@ impl InventoryTables {
             return Some(*entry);
         }
         if self.global_rows.len() == TABLE_LIMIT {
+            tracing::warn!(target: "tidepool_toolchain::module_candidates", limit = TABLE_LIMIT, "candidate global table limit reached");
             return None;
         }
         let (symbol, identity_bytes) = self.intern_symbol(&key.identity)?;
@@ -269,9 +274,14 @@ fn validate_key(key: &GlobalKey) -> Option<()> {
     }
     Some(())
 }
+#[track_caller]
 fn charge(total: &mut usize, bytes: usize) -> Option<()> {
     *total = total.checked_add(bytes)?;
-    (*total <= MANIFEST_LIMIT).then_some(())
+    if *total > MANIFEST_LIMIT {
+        tracing::warn!(target: "tidepool_toolchain::module_candidates", observed = *total, limit = MANIFEST_LIMIT, location = %std::panic::Location::caller(), "candidate expanded inventory limit exceeded");
+        return None;
+    }
+    Some(())
 }
 fn identity_size(identity: &SymbolIdentity) -> Option<usize> {
     let mut bytes = array_size(5);

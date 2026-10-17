@@ -2713,6 +2713,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     let mut by_owner = BTreeMap::new();
     let mut manifest = Vec::new();
     for (key, (mut record, origin, product, _)) in validated {
+        tracing::debug!(target: "tidepool_toolchain::module_candidates", phase = "candidate_manifest_row", unit = %key.0, module = %key.1);
         crate::host_work::checkpoint().ok()?;
         if availability.contains(&key) {
             let captured = match &record.record {
