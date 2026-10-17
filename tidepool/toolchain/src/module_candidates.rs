@@ -17,14 +17,23 @@ mod product_decode_observer;
 #[cfg(test)]
 mod protected_native_availability_tests;
 #[cfg(test)]
-mod publication_observer {
+pub(crate) mod publication_observer {
     use std::cell::RefCell;
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum Stage {
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum Stage {
         BeforeOwner,
         BeforeInterface,
         Completed,
+        ProofEncoded {
+            sha256: String,
+            bytes: u64,
+        },
+        ProofPublished {
+            sha256: String,
+            bytes: u64,
+            path: std::path::PathBuf,
+        },
     }
 
     type Observer = Box<dyn FnMut(Stage)>;
@@ -41,7 +50,7 @@ mod publication_observer {
         });
     }
 
-    pub(super) fn with_observer<T>(
+    pub(crate) fn with_observer<T>(
         observer: impl FnMut(Stage) + 'static,
         action: impl FnOnce() -> T,
     ) -> T {
@@ -1061,7 +1070,7 @@ fn root_shard(producer_dir: &Path, root: &Path) -> PathBuf {
 pub(crate) struct PreparedPublication<'a> {
     endpoint_identity: &'a [u8],
     include: &'a [PathBuf],
-    evidence: &'a DependencyEvidence,
+    evidence: shared_evidence::PublicationEvidence<'a>,
     pub(super) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     records: Vec<Record>,
     group_counts: BTreeMap<(String, String), usize>,
@@ -1082,10 +1091,11 @@ pub(crate) fn prepare_publication<'a>(
     let owners = products.products().len();
     let inventory = Arc::clone(products.operation());
     let mut diagnostics = PublicationDiagnostics::new();
+    let mut evidence = shared_evidence::PublicationEvidence::new(evidence);
     let (products, records) = eligible_records_with_report(
         endpoint_identity,
         include,
-        evidence,
+        &mut evidence,
         products,
         target_source,
         &version_origin,
@@ -1131,7 +1141,7 @@ pub(crate) fn prepare_publication<'a>(
 fn eligible_records_with_report(
     endpoint_identity: &[u8],
     include: &[PathBuf],
-    evidence: &DependencyEvidence,
+    evidence: &mut shared_evidence::PublicationEvidence<'_>,
     parsed: crate::certified_products::ParsedModuleProducts,
     target_source: &str,
     version_origin: &CandidateVersionOrigin,
@@ -1152,8 +1162,8 @@ fn eligible_records_with_report(
     };
     if endpoint_identity.is_empty()
         || endpoint_identity.len() > 4096
-        || !evidence.valid(target_source)
-        || !evidence.selection_complete
+        || !evidence.evidence().valid(target_source)
+        || !evidence.evidence().selection_complete
     {
         reject_all!(PublicationDisposition::InvocationProofRejected);
     }
@@ -1167,10 +1177,10 @@ fn eligible_records_with_report(
         reject_all!(PublicationDisposition::PackageBundleRejected);
     };
     let mut records = Vec::new();
-    let shared_evidence = shared_evidence::SharedEvidence::from(evidence.clone());
-    let Some(evidence_reference) = shared_evidence.reference().cloned() else {
+    let Some((shared_evidence, evidence_reference)) = evidence.capture() else {
         reject_all!(PublicationDisposition::InvocationProofRejected);
     };
+    let evidence = &**shared_evidence;
     for (product, module_bytes) in products.iter().zip(per_module_bytes) {
         let original_bytes = Some(module_bytes.len());
         if generation_dependent(product) {
@@ -1344,9 +1354,7 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Re
     let mut diagnostics = PublicationDiagnostics::new();
     let producer_dir = record_dir(prepared.endpoint_identity);
     // A reference becomes visible only after its complete immutable proof.
-    if !prepared.records.is_empty()
-        && shared_evidence::publish(&producer_dir, prepared.evidence).is_none()
-    {
+    if !prepared.records.is_empty() && prepared.evidence.publish(&producer_dir).is_none() {
         return crate::host_work::checkpoint();
     }
     if !prepared.graphs.is_empty() {
@@ -4183,7 +4191,7 @@ pub(crate) mod tests {
         let (_, records) = eligible_records_with_report(
             &record.endpoint,
             &record.include,
-            &record.evidence,
+            &mut shared_evidence::PublicationEvidence::new(&record.evidence),
             parsed,
             &record.target_source,
             &CandidateVersionOrigin::Ordinary,
@@ -4399,7 +4407,7 @@ pub(crate) mod tests {
         let (_, eligible) = eligible_records_with_report(
             &record.endpoint,
             &record.include,
-            &record.evidence,
+            &mut shared_evidence::PublicationEvidence::new(&record.evidence),
             parsed,
             &record.target_source,
             &CandidateVersionOrigin::Ordinary,
@@ -6044,9 +6052,10 @@ pub(crate) mod tests {
             let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let observed = reached.clone();
             let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let expected_stage = stage.clone();
             let result = publication_observer::with_observer(
                 move |actual| {
-                    if actual == stage {
+                    if actual == expected_stage {
                         observed.store(true, std::sync::atomic::Ordering::SeqCst);
                         stop.cancel();
                     }
