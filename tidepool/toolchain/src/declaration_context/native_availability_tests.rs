@@ -6643,9 +6643,15 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
     let publication = source
         .issue_published_source_original("revision", "input", &entry.descriptor.owner)
         .unwrap();
+    let published_with_fallback = publication
+        .context()
+        .as_ref()
+        .clone()
+        .extend_interface_context(&type_context(std::slice::from_ref(&fallback)))
+        .expect("publication narrows to B; the type owner explicitly admits unrelated C afterward");
     for published in [false, true] {
         let baseline = if published {
-            publication.context().as_ref()
+            &published_with_fallback
         } else {
             &source
         };
