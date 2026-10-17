@@ -136,6 +136,7 @@ struct RequestState {
     active: Option<CellCaptureState>,
     next_cell: u64,
     owners: HashSet<(String, u64, u64)>,
+    capture_group_work: bool,
 }
 
 struct CellCaptureState {
@@ -144,6 +145,7 @@ struct CellCaptureState {
     compiler_requests: Vec<CompilerRequest>,
     host_timings: Vec<HostTimingObservation>,
     dropped_host_timings: u64,
+    group_work: Vec<std::collections::HashMap<String, String>>,
 }
 
 impl CellCaptureState {
@@ -154,6 +156,7 @@ impl CellCaptureState {
             compiler_requests: Vec::new(),
             host_timings: Vec::new(),
             dropped_host_timings: 0,
+            group_work: Vec::new(),
         }
     }
 }
@@ -275,6 +278,7 @@ struct CapturedCell {
     compiler_requests: Vec<CompilerRequest>,
     host_timings: Vec<HostTimingObservation>,
     dropped_host_timings: u64,
+    group_work: Vec<std::collections::HashMap<String, String>>,
 }
 
 struct ActiveCell<'a> {
@@ -400,6 +404,7 @@ fn with_cell_request_capture<T>(
             "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
             "compiler_requests": &captured.compiler_requests,
             "host_timings": &captured.host_timings,
+            "group_work": &captured.group_work,
             "host_timings_dropped": captured.dropped_host_timings,
             "host_timings_complete": captured.dropped_host_timings == 0,
             "completed": matches!(&result, Ok(Ok(_))), "phase": phase,
@@ -426,6 +431,7 @@ impl ActiveCell<'_> {
             compiler_requests: captured.compiler_requests,
             host_timings: captured.host_timings,
             dropped_host_timings: captured.dropped_host_timings,
+            group_work: captured.group_work,
         }
     }
 }
@@ -447,6 +453,23 @@ where
         event: &tracing::Event<'_>,
         _context: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        if self.0.lock().capture_group_work {
+            let mut fields = RequestFields::default();
+            event.record(&mut fields);
+            if matches!(
+                fields.0.get("message").map(String::as_str),
+                Some("native group image association" | "certified group staged")
+            ) {
+                if let Some(active) = self.0.lock().active.as_mut() {
+                    assert!(
+                        active.group_work.len() < 8192,
+                        "bounded exact group observations"
+                    );
+                    active.group_work.push(fields.0);
+                }
+                return;
+            }
+        }
         if matches!(
             event.metadata().target(),
             "exomonad_harness::timing" | "tidepool_extract_cmd::daemon"
@@ -928,6 +951,7 @@ enum AuthorityChecks<'a> {
     PrivateAuthoredLifetime(tidepool_repr::SessionModule),
     SegmentWorkCounts(SegmentWorkShape),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
+    OrdinaryGroupWork(&'a ordinary_demand_history_tests::OriginalExpectation, u32),
 }
 
 #[derive(Clone, Copy)]
@@ -1471,6 +1495,15 @@ where
                     admission.clone(),
                     old_owners,
                 )
+            }
+            AuthorityChecks::OrdinaryGroupWork(expected, demanded) => {
+                tidepool_testing::with_settlement(|settlement| {
+                    compile_cell_program_admitted_inner(
+                        admission.clone(),
+                        CellProgramAudit::OrdinaryGroupWork(expected, demanded),
+                        settlement,
+                    )
+                })
             }
             AuthorityChecks::TypedEntryRefusalBranches(test_name) => {
                 compile_cell_program_admitted_receipt_controls(admission.clone(), test_name)
@@ -4316,3 +4349,6 @@ fn later_cells_retain_more_than_128_distinct_value_owners() {
         "laterOwner <- pure (owner001 + owner128)\nif laterOwner == (129 :: Int) then pure () else error \"lost later capture\"",
         0, &ScalePublication::Ephemeral);
 }
+
+#[path = "ordinary_demand_history_tests.rs"]
+pub(super) mod ordinary_demand_history_tests;

@@ -5100,6 +5100,7 @@ impl PreparedEngine {
                     }
                     PreparedRuntimeError::Install(error)
                 })?;
+            assert_eq!(installed.programs.len(), demanded.len() + 1);
             let target_id = *installed
                 .programs
                 .last()
@@ -5137,6 +5138,19 @@ impl PreparedEngine {
         })();
         match result {
             Ok(mut staged) => {
+                // The producer appends demanded groups in order and the target
+                // last. Check cardinality before associating diagnostic rows;
+                // a zip alone would silently drop a missing batch result.
+                assert_eq!(staged.groups.len(), demanded.len());
+                for (selected, program) in demanded.iter().zip(&staged.groups) {
+                    tracing::debug!(target: "tidepool_runtime::prepared",
+                        group_owner = ?selected.group().owner(),
+                        original_ordinal = selected.group().original_ordinal(),
+                        group_domain = ?selected.domain(),
+                        image_instance = selected.image().image_instance_id(),
+                        program = ?program,
+                        "certified group staged");
+                }
                 staged.domain_leases.extend(late_attachments);
                 staged.leases.extend(new_late_roots);
                 Ok(staged)

@@ -31,6 +31,7 @@ module Tidepool.Timing
   , elapsedMs
   , ReuseStage(..), ReuseDecision(..), ReuseReason(..), ReuseVersionKind(..)
   , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
+  , ProjectionObservation, newProjectionObservation, OriginalGroupWork(..), emitOriginalGroupWork
     -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
   , readMemoTraceEnabled
   , MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
@@ -42,7 +43,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Exception (SomeException, evaluate, try, throwIO)
 import Data.List (intercalate)
 import Data.IORef (IORef, newIORef, atomicModifyIORef')
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
@@ -118,6 +119,50 @@ emitReuse True (ReuseContext cycleId purpose) stage decision reason owner items 
         ,("reason",jsonString (reuseReasonName reason)),("items",show items)
         ,("bytes",maybe "null" show bytes),("observed_ns",show observed)] ++ moduleFields
   hPutStrLn stderr ("tidepool-reuse {" ++ intercalate ","
+    [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")
+
+-- Diagnostic identity of one exact cached projection result. It is not a
+-- semantic owner, cache key or wire field; a cache entry created with timing
+-- disabled intentionally has no retrospective observation identity.
+newtype ProjectionObservation = ProjectionObservation Word64
+
+newProjectionObservation :: Bool -> IO (Maybe ProjectionObservation)
+newProjectionObservation False = pure Nothing
+newProjectionObservation True = Just . ProjectionObservation <$> newTimingRequestIdentity
+
+data OriginalGroupWork = RawProjectionCompleted | RawProjectionAcquired | RawProjectionReused
+  | RawEncodingDemanded | AcceptedOriginalOutput deriving (Eq, Show)
+
+-- Observe groups already consumed by the work owner. Callers must not force
+-- an encoding or an alternative projection merely to populate these fields.
+emitOriginalGroupWork :: Bool -> Maybe ReuseContext -> OriginalGroupWork
+  -> String -> String -> Maybe ProjectionObservation -> [Word32] -> [Word32]
+  -> Maybe FilePath -> Maybe Word64 -> IO ()
+emitOriginalGroupWork False _ _ _ _ _ _ _ _ _ = pure ()
+emitOriginalGroupWork True context stage unit owner observation ordinals refused output bytes = do
+  pid <- getProcessID
+  observed <- getMonotonicTimeNSec
+  let stageName = case stage of
+        RawProjectionCompleted -> "raw_projection"
+        RawProjectionAcquired -> "raw_projection_acquired"
+        RawProjectionReused -> "raw_projection_reuse"
+        RawEncodingDemanded -> "raw_encoding_demand"
+        AcceptedOriginalOutput -> "accepted_output"
+      (cycleId,purpose) = case context of
+        Nothing -> ("null","null")
+        Just (ReuseContext cycle purpose') -> (show cycle,jsonString purpose')
+      token = case observation of
+        Nothing -> "null"
+        Just (ProjectionObservation value) -> show value
+      array values = "[" ++ intercalate "," (map show values) ++ "]"
+      fields = [("schema","1"),("worker_pid",show pid),("cycle",cycleId)
+        ,("purpose",purpose),("stage",jsonString stageName),("unit",jsonString unit)
+        ,("module",jsonString owner),("projection_observation",token)
+        ,("ordinals",array ordinals),("refused_ordinals",array refused)
+        ,("output_path",maybe "null" jsonString output)
+        ,("encoded_bytes",maybe "null" show bytes),("complete","true")
+        ,("observed_ns",show observed)]
+  hPutStrLn stderr ("tidepool-group-work {" ++ intercalate ","
     [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")
 
 -- Required even for zero work. Missing completion means unobserved, not zero.
