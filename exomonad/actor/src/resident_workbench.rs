@@ -18420,7 +18420,7 @@ pub(crate) mod request_tests {
                 entries,
             }))
         };
-        let mut source = source
+        let source = source
             .with_spec("QuotedAgentSpec.agentSpec")
             .bind_preparation(preparation_client.clone());
         let mut compiler_owner = crate::CompilerPreparationOwner::new();
@@ -18528,10 +18528,11 @@ pub(crate) mod request_tests {
             completed_executions,
             "executing the successor native body must not replay its quotation"
         );
-        let reselected = with_test_compiler_owner(|_| {
-            source
+        let reselected = with_test_compiler_owner(|_| async {
+            let selected_source = source
                 .clone()
-                .with_config(|config| config.with_prepared_toolset(Some(fresh.clone())))
+                .with_config(|config| config.with_prepared_toolset(Some(fresh.clone())));
+            selected_source
                 .prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     snapshot(crate::SourceEntryStorage::CompletedOriginal {
@@ -18547,6 +18548,7 @@ pub(crate) mod request_tests {
                     &[],
                     Arc::new(tidepool_runtime::session::ImageRegistry::new()),
                 )
+                .await
         })
         .await
         .unwrap();
