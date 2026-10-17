@@ -2888,13 +2888,15 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'requires this bundle\'s verified catalog'):
                 qualification._native_environment(bundle, contract['native_catalog'])
 
+            catalog_calls_before_drift = verify_catalog.call_count
+            root_calls_before_drift = verify_root.call_count
             source = original / 'lib/Library.hs'
             before = source.read_bytes()
             source.write_text('changed after first verify')
             with self.assertRaisesRegex(ValueError, 'retained catalog sources differ'):
                 qualification.verify(descriptor_path)
-            self.assertEqual(verify_catalog.call_count, 2)
-            self.assertEqual(verify_root.call_count, 3)
+            self.assertEqual(verify_catalog.call_count, catalog_calls_before_drift + 1)
+            self.assertEqual(verify_root.call_count, root_calls_before_drift)
             source.write_bytes(before)
 
     def test_root_entry_requires_current_schema_and_typed_source_selection(self):
