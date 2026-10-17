@@ -926,146 +926,155 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_cancelled_before_checkout_cannot_mint_after_cleanup() {
-        for reserved in [false, true] {
-            let (runner, machines, parent, _captured, _root) = shared_fixture();
-            let placeholder = crate::ActorPlacement {
-                session: SessionId(978),
-                lexical_scope: ScopeId::ROOT,
-                ..parent
-            };
-            let custody = if reserved {
-                ChildPlacementCustody::reserved(placeholder)
-            } else {
-                ChildPlacementCustody::new(placeholder)
-            };
-            let startup = custody.startup_guard();
-            let checkout = machines.checkout_run(parent.session).unwrap();
-            let mut provisioning = Box::pin(runner.provision_fallback_scope(
-                placeholder,
-                parent.session,
-                custody.clone(),
-            ));
-            assert!(futures_util::poll!(&mut provisioning).is_pending());
-            drop(startup);
-            custody.cleanup(&runner, parent.session).await.unwrap();
-            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-            drop(checkout);
-            assert!(provisioning.await.is_err());
-            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-            assert!(machines.kind(placeholder.session).is_none());
-            let mut checkout = machines.checkout_run(parent.session).unwrap();
-            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
-            checkout.restore_suspended(Vec::new());
-        }
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            for reserved in [false, true] {
+                let (runner, machines, parent, _captured, _root) = shared_fixture(source.clone());
+                let placeholder = crate::ActorPlacement {
+                    session: SessionId(978),
+                    lexical_scope: ScopeId::ROOT,
+                    ..parent
+                };
+                let custody = if reserved {
+                    ChildPlacementCustody::reserved(placeholder)
+                } else {
+                    ChildPlacementCustody::new(placeholder)
+                };
+                let startup = custody.startup_guard();
+                let checkout = machines.checkout_run(parent.session).unwrap();
+                let mut provisioning = Box::pin(runner.provision_fallback_scope(
+                    placeholder,
+                    parent.session,
+                    custody.clone(),
+                ));
+                assert!(futures_util::poll!(&mut provisioning).is_pending());
+                drop(startup);
+                custody.cleanup(&runner, parent.session).await.unwrap();
+                assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+                drop(checkout);
+                assert!(provisioning.await.is_err());
+                assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+                assert!(machines.kind(placeholder.session).is_none());
+                let mut checkout = machines.checkout_run(parent.session).unwrap();
+                assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+                checkout.restore_suspended(Vec::new());
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn fallback_cancelled_after_native_publication_keeps_actual_scope_custody() {
-        for reserved in [false, true] {
-            let (runner, machines, parent, _captured, _root) = shared_fixture();
-            let placeholder = crate::ActorPlacement {
-                session: SessionId(979),
-                lexical_scope: ScopeId::ROOT,
-                ..parent
-            };
-            let custody = if reserved {
-                ChildPlacementCustody::reserved(placeholder)
-            } else {
-                ChildPlacementCustody::new(placeholder)
-            };
-            let startup = custody.startup_guard();
-            let task_runner = runner.clone();
-            let task_custody = custody.clone();
-            let (published, observe) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
-                let placement = task_runner
-                    .provision_fallback_scope(placeholder, parent.session, task_custody)
-                    .await
-                    .unwrap();
-                published.send(placement).unwrap();
-                std::future::pending::<()>().await;
-            });
-            let actual = observe.await.unwrap();
-            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
-            assert_eq!(actual.session, parent.session);
-            assert_ne!(actual.lexical_scope, ScopeId::ROOT);
-            drop(startup);
-            task.abort();
-            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-            custody.cleanup(&runner, parent.session).await.unwrap();
-            custody.cleanup(&runner, parent.session).await.unwrap();
-            let mut checkout = machines.checkout_run(parent.session).unwrap();
-            assert!(
-                checkout
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            for reserved in [false, true] {
+                let (runner, machines, parent, _captured, _root) = shared_fixture(source.clone());
+                let placeholder = crate::ActorPlacement {
+                    session: SessionId(979),
+                    lexical_scope: ScopeId::ROOT,
+                    ..parent
+                };
+                let custody = if reserved {
+                    ChildPlacementCustody::reserved(placeholder)
+                } else {
+                    ChildPlacementCustody::new(placeholder)
+                };
+                let startup = custody.startup_guard();
+                let task_runner = runner.clone();
+                let task_custody = custody.clone();
+                let (published, observe) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    let placement = task_runner
+                        .provision_fallback_scope(placeholder, parent.session, task_custody)
+                        .await
+                        .unwrap();
+                    published.send(placement).unwrap();
+                    std::future::pending::<()>().await;
+                });
+                let actual = observe.await.unwrap();
+                assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
+                assert_eq!(actual.session, parent.session);
+                assert_ne!(actual.lexical_scope, ScopeId::ROOT);
+                drop(startup);
+                task.abort();
+                assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+                custody.cleanup(&runner, parent.session).await.unwrap();
+                custody.cleanup(&runner, parent.session).await.unwrap();
+                let mut checkout = machines.checkout_run(parent.session).unwrap();
+                assert!(checkout
                     .machine()
                     .compile_view_in(actual.lexical_scope)
-                    .is_none()
-            );
-            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
-            checkout.restore_suspended(Vec::new());
-            assert!(machines.kind(placeholder.session).is_none());
-        }
+                    .is_none());
+                assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+                checkout.restore_suspended(Vec::new());
+                assert!(machines.kind(placeholder.session).is_none());
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn fallback_cancelled_during_native_mint_publishes_before_reclamation() {
-        for reserved in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let parent = SessionId(980);
-            let placeholder = crate::ActorPlacement {
-                session: SessionId(981),
-                resource_scope: RealmId::fresh(),
-                lexical_scope: ScopeId::ROOT,
-            };
-            let custody = if reserved {
-                ChildPlacementCustody::reserved(placeholder)
-            } else {
-                ChildPlacementCustody::new(placeholder)
-            };
-            let startup = custody.startup_guard();
-            let native_custody = custody.clone();
-            let mut machine = session(parent, root.path());
-            let (started, observe) = tokio::sync::oneshot::channel();
-            let (release, wait) = std::sync::mpsc::channel();
-            let native = tokio::task::spawn_blocking(move || {
-                let placement = native_custody
-                    .provision_fallback_with(placeholder, parent, || {
-                        started.send(()).unwrap();
-                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
-                        machine.mint_isolated_scope()
-                    })
-                    .unwrap();
-                (machine, placement)
-            });
-            observe.await.unwrap();
-            drop(startup);
-            assert!(
-                custody.0.try_lock().is_none(),
-                "mint and publication retain the owner lock"
-            );
-            release.send(()).unwrap();
-            let (machine, actual) = native.await.unwrap();
-            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
-            let machines = Arc::new(Machines::new());
-            machines.insert_idle(parent, Box::new(machine));
-            let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
-            custody.cleanup(&runner, parent).await.unwrap();
-            let mut checkout = machines.checkout_run(parent).unwrap();
-            assert!(
-                checkout
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            for reserved in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let parent = SessionId(980);
+                let placeholder = crate::ActorPlacement {
+                    session: SessionId(981),
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: ScopeId::ROOT,
+                };
+                let custody = if reserved {
+                    ChildPlacementCustody::reserved(placeholder)
+                } else {
+                    ChildPlacementCustody::new(placeholder)
+                };
+                let startup = custody.startup_guard();
+                let native_custody = custody.clone();
+                let mut machine = session(parent, root.path());
+                let (started, observe) = tokio::sync::oneshot::channel();
+                let (release, wait) = std::sync::mpsc::channel();
+                let native = tokio::task::spawn_blocking(move || {
+                    let placement = native_custody
+                        .provision_fallback_with(placeholder, parent, || {
+                            started.send(()).unwrap();
+                            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                            machine.mint_isolated_scope()
+                        })
+                        .unwrap();
+                    (machine, placement)
+                });
+                observe.await.unwrap();
+                drop(startup);
+                assert!(
+                    custody.0.try_lock().is_none(),
+                    "mint and publication retain the owner lock"
+                );
+                release.send(()).unwrap();
+                let (machine, actual) = native.await.unwrap();
+                assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
+                let machines = Arc::new(Machines::new());
+                machines.insert_idle(parent, Box::new(machine));
+                let runner = Runner::new(machines.clone(), source.clone());
+                custody.cleanup(&runner, parent).await.unwrap();
+                let mut checkout = machines.checkout_run(parent).unwrap();
+                assert!(checkout
                     .machine()
                     .compile_view_in(actual.lexical_scope)
-                    .is_none()
-            );
-            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
-            checkout.restore_suspended(Vec::new());
-        }
+                    .is_none());
+                assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+                checkout.restore_suspended(Vec::new());
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn scheduler_refusal_waits_for_original_placement_cleanup() {
         let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
-        let (runner, machines, placement, captured, _root) = shared_fixture();
+        let (runner, machines, placement, captured, _root) =
+            shared_fixture(fixture.environment.runner.preparation_source());
         fixture.environment.runner = runner;
         let custody = ChildPlacementCustody::new(placement);
         let error = ractor::SpawnErr::StartupFailed(
@@ -1137,7 +1146,9 @@ mod tests {
             .is_ok()
     }
 
-    fn shared_fixture() -> (
+    fn shared_fixture(
+        source: crate::BoundActorWorkbenchSource,
+    ) -> (
         Runner,
         Arc<Machines>,
         crate::ActorPlacement,
@@ -1148,7 +1159,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let machines = Arc::new(Machines::new());
         machines.insert_idle(id, Box::new(session(id, root.path())));
-        let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        let runner = Runner::new(machines.clone(), source);
         let (placement, captured) = captured_placement(&machines, id);
         (runner, machines, placement, captured, root)
     }
@@ -1156,7 +1167,8 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_remint_result_loss_keeps_exact_native_cleanup_custody() {
         let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
-        let (runner, machines, parent, checkpoint, _root) = shared_fixture();
+        let (runner, machines, parent, checkpoint, _root) =
+            shared_fixture(fixture.environment.runner.preparation_source());
         fixture.environment.runner = runner.clone();
         let provisional_scope = {
             let mut checkout = machines.checkout_run(parent.session).unwrap();
@@ -1198,137 +1210,137 @@ mod tests {
         assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
         let mut checkout = machines.checkout_run(parent.session).unwrap();
         assert!(checkout.machine().compile_view_in(actual_scope).is_none());
-        assert!(
-            checkout
-                .machine()
-                .compile_view_in(provisional_scope)
-                .is_none()
-        );
-        assert!(
-            checkout
-                .machine()
-                .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
-                .is_ok()
-        );
+        assert!(checkout
+            .machine()
+            .compile_view_in(provisional_scope)
+            .is_none());
+        assert!(checkout
+            .machine()
+            .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
+            .is_ok());
         checkout.restore_suspended(Vec::new());
         fixture.finish().await;
     }
 
     #[tokio::test]
     async fn checkpoint_remint_after_cleanup_started_refuses_native_publication() {
-        let (runner, machines, parent, checkpoint, _root) = shared_fixture();
-        let provisional_scope = {
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            let (runner, machines, parent, checkpoint, _root) = shared_fixture(source.clone());
+            let provisional_scope = {
+                let mut checkout = machines.checkout_run(parent.session).unwrap();
+                let scope = checkout.machine().mint_isolated_scope();
+                checkout.restore_suspended(Vec::new());
+                scope
+            };
+            let placement = crate::ActorPlacement {
+                resource_scope: RealmId::fresh(),
+                lexical_scope: provisional_scope,
+                ..parent
+            };
+            let context = ActorDescriptor::new("remint parent", parent)
+                .session_context(ActorRef::first(crate::ActorId(978)));
+            let custody = ChildPlacementCustody::new(placement);
+            let startup = custody.startup_guard();
+            let checkout = machines.checkout_run(parent.session).unwrap();
+            let mut remint = Box::pin(runner.remint_checkpoint_child_scope_from_lease(
+                context,
+                checkpoint.clone(),
+                provisional_scope,
+                custody.clone(),
+            ));
+            assert!(futures_util::poll!(&mut remint).is_pending());
+            drop(startup);
+            let mut cleanup = Box::pin(custody.cleanup(&runner, parent.session));
+            assert!(futures_util::poll!(&mut cleanup).is_pending());
+            assert_eq!(
+                *custody.0.lock(),
+                ChildPlacementPhase::Reclaiming(placement)
+            );
+            drop(checkout);
+            let (reminted, cleaned) = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(remint, cleanup)
+            })
+            .await
+            .expect("queued native remint and cleanup must settle");
+            assert!(matches!(
+                reminted,
+                Err(ResidentActorWorkbenchError::ActorProtocol(_))
+            ));
+            cleaned.unwrap();
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
             let mut checkout = machines.checkout_run(parent.session).unwrap();
-            let scope = checkout.machine().mint_isolated_scope();
-            checkout.restore_suspended(Vec::new());
-            scope
-        };
-        let placement = crate::ActorPlacement {
-            resource_scope: RealmId::fresh(),
-            lexical_scope: provisional_scope,
-            ..parent
-        };
-        let context = ActorDescriptor::new("remint parent", parent)
-            .session_context(ActorRef::first(crate::ActorId(978)));
-        let custody = ChildPlacementCustody::new(placement);
-        let startup = custody.startup_guard();
-        let checkout = machines.checkout_run(parent.session).unwrap();
-        let mut remint = Box::pin(runner.remint_checkpoint_child_scope_from_lease(
-            context,
-            checkpoint.clone(),
-            provisional_scope,
-            custody.clone(),
-        ));
-        assert!(futures_util::poll!(&mut remint).is_pending());
-        drop(startup);
-        let mut cleanup = Box::pin(custody.cleanup(&runner, parent.session));
-        assert!(futures_util::poll!(&mut cleanup).is_pending());
-        assert_eq!(
-            *custody.0.lock(),
-            ChildPlacementPhase::Reclaiming(placement)
-        );
-        drop(checkout);
-        let (reminted, cleaned) = tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(remint, cleanup)
-        })
-        .await
-        .expect("queued native remint and cleanup must settle");
-        assert!(matches!(
-            reminted,
-            Err(ResidentActorWorkbenchError::ActorProtocol(_))
-        ));
-        cleaned.unwrap();
-        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-        let mut checkout = machines.checkout_run(parent.session).unwrap();
-        assert!(
-            checkout
+            assert!(checkout
                 .machine()
                 .compile_view_in(provisional_scope)
-                .is_none()
-        );
-        assert!(
-            checkout
+                .is_none());
+            assert!(checkout
                 .machine()
                 .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
-                .is_ok()
-        );
-        checkout.restore_suspended(Vec::new());
+                .is_ok());
+            checkout.restore_suspended(Vec::new());
+        })
+        .await;
     }
 
     #[tokio::test]
-    async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement()
-     {
-        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-            crate::RetainedActorExit::new(),
-        )
-        .scope(async {
-            let parent = SessionId(971);
-            let id = SessionId(972);
-            let root = tempfile::tempdir().unwrap();
-            let root_path = root.path().to_path_buf();
-            let machines = Arc::new(Machines::new());
-            let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()))
-                .with_child_session_factory(Arc::new(move |id, _, _settlement| {
-                    Ok(Box::new(session(id, &root_path)))
-                }))
-                .with_child_bootstrap_program(bootstrap_program());
-            let startup = runner
-                .provision_child_session(id, RealmId::fresh(), None, &[])
-                .await
-                .unwrap()
-                .startup_lease;
-            let (placement, captured) = captured_placement(&machines, id);
-            let custody = ChildPlacementCustody::new(placement);
-            let actor = ActorRef::first(crate::ActorId(973));
-            custody.transfer_to_actor(actor, placement).unwrap();
-            startup.admitted();
-            let cleanup = crate::lineage::SpawnCleanupOutcome::Unconfirmed(
-                "child cleanup still retained".into(),
-            );
-            assert!(matches!(
-                cleanup,
-                crate::lineage::SpawnCleanupOutcome::Unconfirmed(_)
-            ));
-            release_failed_launch_placement(&runner, parent, &custody)
+    async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement(
+    ) {
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                crate::RetainedActorExit::new(),
+            )
+            .scope(async {
+                let parent = SessionId(971);
+                let id = SessionId(972);
+                let root = tempfile::tempdir().unwrap();
+                let root_path = root.path().to_path_buf();
+                let machines = Arc::new(Machines::new());
+                let runner = Runner::new(machines.clone(), source.clone())
+                    .with_child_session_factory(Arc::new(move |id, _, _settlement| {
+                        Ok(Box::new(session(id, &root_path)))
+                    }))
+                    .with_child_bootstrap_program(bootstrap_program());
+                let startup = runner
+                    .provision_child_session(id, RealmId::fresh(), None, &[])
+                    .await
+                    .unwrap()
+                    .startup_lease;
+                let (placement, captured) = captured_placement(&machines, id);
+                let custody = ChildPlacementCustody::new(placement);
+                let actor = ActorRef::first(crate::ActorId(973));
+                custody.transfer_to_actor(actor, placement).unwrap();
+                startup.admitted();
+                let cleanup = crate::lineage::SpawnCleanupOutcome::Unconfirmed(
+                    "child cleanup still retained".into(),
+                );
+                assert!(matches!(
+                    cleanup,
+                    crate::lineage::SpawnCleanupOutcome::Unconfirmed(_)
+                ));
+                release_failed_launch_placement(&runner, parent, &custody)
+                    .await
+                    .unwrap();
+                release_failed_launch_placement(&runner, parent, &custody)
+                    .await
+                    .unwrap();
+                assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+                assert!(capture_is_live(&machines, placement, &captured));
+                assert_eq!(*custody.0.lock(), ChildPlacementPhase::ActorOwned(actor));
+                // The retained child actor, rather than parent launch failure, owns retirement.
+                runner.retire_root_placement(placement).await.unwrap();
+                assert!(!capture_is_live(&machines, placement, &captured));
+                runner.retire_child_session(id, false).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while machines.kind(id).is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
                 .await
                 .unwrap();
-            release_failed_launch_placement(&runner, parent, &custody)
-                .await
-                .unwrap();
-            assert_eq!(machines.kind(id), Some(SlotKind::Idle));
-            assert!(capture_is_live(&machines, placement, &captured));
-            assert_eq!(*custody.0.lock(), ChildPlacementPhase::ActorOwned(actor));
-            // The retained child actor, rather than parent launch failure, owns retirement.
-            runner.retire_root_placement(placement).await.unwrap();
-            assert!(!capture_is_live(&machines, placement, &captured));
-            runner.retire_child_session(id, false).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while machines.kind(id).is_some() {
-                    tokio::task::yield_now().await;
-                }
             })
-            .await
-            .unwrap();
+            .await;
         })
         .await;
     }
@@ -1336,7 +1348,8 @@ mod tests {
     #[tokio::test]
     async fn dropped_owned_launch_completion_is_reclaimed_by_retained_journal() {
         let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
-        let (runner, machines, placement, captured, _root) = shared_fixture();
+        let (runner, machines, placement, captured, _root) =
+            shared_fixture(fixture.environment.runner.preparation_source());
         fixture.environment.runner = runner;
         let actor = fixture.actor.identity();
         let descriptor = ActorDescriptor::new("abandoned launch", placement);
@@ -1389,7 +1402,8 @@ mod tests {
     #[tokio::test]
     async fn construction_journal_leaves_transferred_actor_placement_live() {
         let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
-        let (runner, machines, placement, captured, _root) = shared_fixture();
+        let (runner, machines, placement, captured, _root) =
+            shared_fixture(fixture.environment.runner.preparation_source());
         fixture.environment.runner = runner;
         let actor = fixture.actor.identity();
         let context = ActorDescriptor::new("transferred launch", placement).session_context(actor);
@@ -1430,8 +1444,10 @@ mod tests {
             lexical_scope: captured.scope(),
         };
         let machines = Arc::new(Machines::new());
-        fixture.environment.runner =
-            Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        fixture.environment.runner = Runner::new(
+            machines.clone(),
+            fixture.environment.runner.preparation_source(),
+        );
         let context = ActorDescriptor::new("retained launch", placement).session_context(actor);
         let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
         let scope_owner = work.new_scope().unwrap();
@@ -1445,11 +1461,9 @@ mod tests {
         );
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
-        assert!(
-            scope_owner
-                .retain_launch_placement(&context, custody)
-                .is_err()
-        );
+        assert!(scope_owner
+            .retain_launch_placement(&context, custody)
+            .is_err());
         drop(startup);
         let first = work.cleanup(&fixture.environment, &fixture.kernel).await;
         assert!(first.uncertainty().is_some());
@@ -1465,7 +1479,8 @@ mod tests {
     async fn late_launch_retention_fences_concurrent_root_and_nested_cleanup_proofs() {
         for nested in [false, true] {
             let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
-            let (runner, machines, placement, captured, _root) = shared_fixture();
+            let (runner, machines, placement, captured, _root) =
+                shared_fixture(fixture.environment.runner.preparation_source());
             fixture.environment.runner = runner;
             let actor = fixture.actor.identity();
             let context =
@@ -1507,11 +1522,9 @@ mod tests {
                 *custody.0.lock(),
                 ChildPlacementPhase::Reclaiming(placement)
             );
-            assert!(
-                owner
-                    .retain_launch_placement(&context, late_custody)
-                    .is_err()
-            );
+            assert!(owner
+                .retain_launch_placement(&context, late_custody)
+                .is_err());
             drop(late_startup);
             drop(checkout);
             assert!(cleanup.await.uncertainty().is_some());
@@ -1530,91 +1543,95 @@ mod tests {
 
     #[tokio::test]
     async fn failed_preactor_cleanup_keeps_exact_placement_for_confirmed_retry() {
-        let id = SessionId(976);
-        let root = tempfile::tempdir().unwrap();
-        let mut machine = session(id, root.path());
-        let scope = machine.mint_isolated_scope();
-        let captured = machine.retain_lexical_scope(scope).unwrap();
-        machine.retire_scope(scope);
-        let placement = crate::ActorPlacement {
-            session: id,
-            resource_scope: RealmId::fresh(),
-            lexical_scope: captured.scope(),
-        };
-        let machines = Arc::new(Machines::new());
-        let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
-        let custody = ChildPlacementCustody::new(placement);
-        assert!(
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            let id = SessionId(976);
+            let root = tempfile::tempdir().unwrap();
+            let mut machine = session(id, root.path());
+            let scope = machine.mint_isolated_scope();
+            let captured = machine.retain_lexical_scope(scope).unwrap();
+            machine.retire_scope(scope);
+            let placement = crate::ActorPlacement {
+                session: id,
+                resource_scope: RealmId::fresh(),
+                lexical_scope: captured.scope(),
+            };
+            let machines = Arc::new(Machines::new());
+            let runner = Runner::new(machines.clone(), source.clone());
+            let custody = ChildPlacementCustody::new(placement);
+            assert!(release_failed_launch_placement(&runner, id, &custody)
+                .await
+                .is_err());
+            assert_eq!(
+                *custody.0.lock(),
+                ChildPlacementPhase::CleanupRetained(placement)
+            );
+            assert!(custody
+                .transfer_to_actor(ActorRef::first(crate::ActorId(977)), placement)
+                .is_err());
+            machines.insert_idle(id, Box::new(machine));
+            assert!(capture_is_live(&machines, placement, &captured));
             release_failed_launch_placement(&runner, id, &custody)
                 .await
-                .is_err()
-        );
-        assert_eq!(
-            *custody.0.lock(),
-            ChildPlacementPhase::CleanupRetained(placement)
-        );
-        assert!(
-            custody
-                .transfer_to_actor(ActorRef::first(crate::ActorId(977)), placement)
-                .is_err()
-        );
-        machines.insert_idle(id, Box::new(machine));
-        assert!(capture_is_live(&machines, placement, &captured));
-        release_failed_launch_placement(&runner, id, &custody)
-            .await
-            .unwrap();
-        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-        assert!(!capture_is_live(&machines, placement, &captured));
-        assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+                .unwrap();
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+            assert!(!capture_is_live(&machines, placement, &captured));
+            assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn preactor_refusal_retires_shared_capture_and_refuses_late_transfer() {
-        let (runner, machines, placement, captured, _root) = shared_fixture();
-        let custody = ChildPlacementCustody::new(placement);
-        assert!(capture_is_live(&machines, placement, &captured));
-        release_failed_launch_placement(&runner, placement.session, &custody)
-            .await
-            .unwrap();
-        assert!(!capture_is_live(&machines, placement, &captured));
-        assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
-        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
-        assert!(
-            custody
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            let (runner, machines, placement, captured, _root) = shared_fixture(source.clone());
+            let custody = ChildPlacementCustody::new(placement);
+            assert!(capture_is_live(&machines, placement, &captured));
+            release_failed_launch_placement(&runner, placement.session, &custody)
+                .await
+                .unwrap();
+            assert!(!capture_is_live(&machines, placement, &captured));
+            assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+            assert!(custody
                 .transfer_to_actor(ActorRef::first(crate::ActorId(974)), placement)
-                .is_err()
-        );
-        release_failed_launch_placement(&runner, placement.session, &custody)
-            .await
-            .unwrap();
+                .is_err());
+            release_failed_launch_placement(&runner, placement.session, &custody)
+                .await
+                .unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn fallback_refusal_retires_actual_shared_scope_instead_of_fresh_placeholder() {
-        let (runner, machines, placement, captured, _root) = shared_fixture();
-        let placeholder = crate::ActorPlacement {
-            session: SessionId(975),
-            lexical_scope: ScopeId::ROOT,
-            ..placement
-        };
-        let custody = ChildPlacementCustody::new(placeholder);
-        custody.update(placement);
-        release_failed_launch_placement(&runner, placement.session, &custody)
-            .await
-            .unwrap();
-        assert!(!capture_is_live(&machines, placement, &captured));
-        assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
-        assert!(machines.kind(placeholder.session).is_none());
-        assert!(
-            custody
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation);
+            let (runner, machines, placement, captured, _root) = shared_fixture(source.clone());
+            let placeholder = crate::ActorPlacement {
+                session: SessionId(975),
+                lexical_scope: ScopeId::ROOT,
+                ..placement
+            };
+            let custody = ChildPlacementCustody::new(placeholder);
+            custody.update(placement);
+            release_failed_launch_placement(&runner, placement.session, &custody)
+                .await
+                .unwrap();
+            assert!(!capture_is_live(&machines, placement, &captured));
+            assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
+            assert!(machines.kind(placeholder.session).is_none());
+            assert!(custody
                 .transfer_to_actor(ActorRef::first(crate::ActorId(976)), placement)
-                .is_err()
-        );
+                .is_err());
+        })
+        .await;
     }
     fn bootstrap_program() -> Arc<tidepool_runtime::session::CompiledTurn> {
         use tidepool_repr::execution_schema::{
-            Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout, Group,
-            HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef, testing,
+            testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
+            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
         };
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);

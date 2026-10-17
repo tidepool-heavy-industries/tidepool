@@ -1423,34 +1423,41 @@ fn config(name: &'static str) -> Config {
 
 #[tokio::test]
 async fn generated_request_activation_matches_native_evidence() {
-    // Registry histories share their original checked input. This family never
-    // mutates run readiness; fence integration has independent owner epochs.
-    let setup = std::time::Instant::now();
-    eprintln!("ready-only fixture construction begin");
-    let fixture =
-        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
-    eprintln!(
-        "ready-only fixture construction complete in {:?}",
-        setup.elapsed()
-    );
-    let coverage = RefCell::new(Coverage::default());
-    TestRunner::new(config(concat!(
-        module_path!(),
-        "::generated_request_activation_matches_native_evidence"
-    )))
-    .run(&histories(false), |history| {
-        run_history(&history, &fixture, false, &mut coverage.borrow_mut())
+    crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+        // Registry histories share their original checked input. This family never
+        // mutates run readiness; fence integration has independent owner epochs.
+        let setup = std::time::Instant::now();
+        eprintln!("ready-only fixture construction begin");
+        let fixture =
+            crate::resident_workbench::request_tests::activation_publication_phase_fixture(
+                preparation.clone(),
+            )
+            .await;
+        eprintln!(
+            "ready-only fixture construction complete in {:?}",
+            setup.elapsed()
+        );
+        let coverage = RefCell::new(Coverage::default());
+        TestRunner::new(config(concat!(
+            module_path!(),
+            "::generated_request_activation_matches_native_evidence"
+        )))
+        .run(&histories(false), |history| {
+            run_history(&history, &fixture, false, &mut coverage.borrow_mut())
+        })
+        .unwrap();
+        assert_eq!(coverage.borrow().owner_fences, 0);
+        assert_eq!(coverage.borrow().tentative_claims_after_fence, 0);
+        eprintln!(
+            "ready-only activation histories (FenceOwner excluded): {:#?}",
+            coverage.borrow()
+        );
     })
-    .unwrap();
-    assert_eq!(coverage.borrow().owner_fences, 0);
-    assert_eq!(coverage.borrow().tentative_claims_after_fence, 0);
-    eprintln!(
-        "ready-only activation histories (FenceOwner excluded): {:#?}",
-        coverage.borrow()
-    );
+    .await;
 }
 
 fn run_fence_partition(
+    preparation: crate::CompilerPreparationClient,
     cfg: Config,
     initially_pending: bool,
     result_history: Arc<parking_lot::Mutex<()>>,
@@ -1464,7 +1471,7 @@ fn run_fence_partition(
             let setup = std::time::Instant::now();
             eprintln!("fresh-owner attempt {attempt}, initially_pending={initially_pending}, operations={}: fixture construction begin", history.len());
             let fixture = tokio::runtime::Handle::current().block_on(
-                crate::resident_workbench::request_tests::activation_publication_phase_fixture(),
+                crate::resident_workbench::request_tests::activation_publication_phase_fixture(preparation.clone()),
             );
             eprintln!("fresh-owner initially_pending={initially_pending}, attempt {attempt}: fixture construction complete in {:?}", setup.elapsed());
             // The result fixture resets one mutable machine between histories.
@@ -1486,47 +1493,52 @@ fn run_fence_partition(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_run_fences_preserve_publication_receipts() {
-    let mut cfg = config(concat!(
-        module_path!(),
-        "::generated_run_fences_preserve_publication_receipts"
-    ));
-    // These histories compile and admit a fresh native machine per replay.
-    // Four cases in each initial-readiness partition bound compiler work;
-    // the inexpensive registry family keeps the full 96-case search above.
-    if std::env::var_os("PROPTEST_CASES").is_none() {
-        cfg.cases = 4;
-    }
-    // Replaying a real owner compiles and admits native input again. The broad
-    // ready-only family keeps full shrinking; this family bounds expensive
-    // counterexample replay while preserving the original failing history.
-    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
-        cfg.max_shrink_iters = 4;
-    }
-    // Readiness partitions prepare independent machines and recovery owners.
-    // They share immutable phase code and serialize the result fixture's mutable
-    // custody lifetime. Each generator still replays and shrinks serially.
-    let result_history = Arc::new(parking_lot::Mutex::new(()));
-    let partitions = [false, true].map(|initially_pending| {
-        let cfg = cfg.clone();
-        let result_history = result_history.clone();
-        tokio::task::spawn_blocking(move || {
-            run_fence_partition(cfg, initially_pending, result_history)
-        })
-    });
-    // Retain both workers until completion, including when one partition panics.
-    let outcomes = futures_util::future::join_all(partitions).await;
-    for outcome in outcomes {
-        outcome.unwrap();
-    }
+    crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+        let mut cfg = config(concat!(
+            module_path!(),
+            "::generated_run_fences_preserve_publication_receipts"
+        ));
+        // These histories compile and admit a fresh native machine per replay.
+        // Four cases in each initial-readiness partition bound compiler work;
+        // the inexpensive registry family keeps the full 96-case search above.
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            cfg.cases = 4;
+        }
+        // Replaying a real owner compiles and admits native input again. The broad
+        // ready-only family keeps full shrinking; this family bounds expensive
+        // counterexample replay while preserving the original failing history.
+        if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+            cfg.max_shrink_iters = 4;
+        }
+        // Readiness partitions prepare independent machines and recovery owners.
+        // They share immutable phase code and serialize the result fixture's mutable
+        // custody lifetime. Each generator still replays and shrinks serially.
+        let result_history = Arc::new(parking_lot::Mutex::new(()));
+        let partitions = [false, true].map(|initially_pending| {
+            let cfg = cfg.clone();
+            let result_history = result_history.clone();
+            let preparation = preparation.clone();
+            tokio::task::spawn_blocking(move || {
+                run_fence_partition(preparation, cfg, initially_pending, result_history)
+            })
+        });
+        // Retain both workers until completion, including when one partition panics.
+        let outcomes = futures_util::future::join_all(partitions).await;
+        for outcome in outcomes {
+            outcome.unwrap();
+        }
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn request_activation_phase_support_covers_contract_partitions() {
+    crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
     let mut coverage = Coverage::default();
     let setup = std::time::Instant::now();
     eprintln!("partition ready-only fixture construction begin");
     let ready_fixture =
-        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+        crate::resident_workbench::request_tests::activation_publication_phase_fixture(preparation.clone()).await;
     eprintln!(
         "partition ready-only fixture construction complete in {:?}",
         setup.elapsed()
@@ -1555,7 +1567,7 @@ async fn request_activation_phase_support_covers_contract_partitions() {
         let setup = std::time::Instant::now();
         eprintln!("partition mode={mode}, initially_pending={initially_pending}, cancel_native={cancel_native}: fixture construction begin");
         let fixture =
-            crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+            crate::resident_workbench::request_tests::activation_publication_phase_fixture(preparation.clone()).await;
         eprintln!(
             "partition fixture construction complete in {:?}",
             setup.elapsed()
@@ -1601,4 +1613,6 @@ async fn request_activation_phase_support_covers_contract_partitions() {
         );
     }
     eprintln!("activation phase deterministic coverage: {coverage:#?}");
+
+    }).await;
 }
