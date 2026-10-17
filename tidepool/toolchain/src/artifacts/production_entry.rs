@@ -960,11 +960,14 @@ mod source_selection_tests {
                 ),
             "compatible selected catalog originals cannot be freshly rebuilt"
         );
-        let fresh =
-            decode_fresh_products(&std::fs::read(output.join("raw/module-products.cbor")).unwrap())
-                .unwrap();
+        let fresh = certified_products::ParsedModuleProducts::decode(
+            &std::fs::read(output.join("raw/module-products.cbor")).unwrap(),
+            &std::fs::read(output.join("raw/module-package-imports.cbor")).unwrap(),
+        )
+        .unwrap();
         assert!(
             fresh
+                .products()
                 .iter()
                 .all(|product| !linked_modules.contains(product.module.as_str())),
             "entry-owned bytes exclude linked catalog original products"
