@@ -253,6 +253,7 @@
     "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs",
     "exomonad/host/src/actor_host/fixtures/notebook_jev_agent_spec.hs",
     "exomonad/host/src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
+    "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
     "exomonad/host/src/actor_host/fixtures/oversized_dispatch_spec.hs",
     "exomonad/host/src/actor_host/fixtures/persona_file_tools_reply_bypass.hs",
     "exomonad/host/src/actor_host/fixtures/persona_file_tools_request.hs",

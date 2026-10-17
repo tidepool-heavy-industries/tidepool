@@ -2804,10 +2804,6 @@ enum CellProgramAudit<'a> {
     Receipts(&'static str),
     PublicationRefusal(&'a Path),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
-    OrdinaryGroupWork(
-        &'a scaling_tests::ordinary_demand_history_tests::OriginalExpectation,
-        u32,
-    ),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
 
@@ -3105,21 +3101,6 @@ fn compile_cell_program_admitted_inner(
         (audit, &result, &evidence)
     {
         scaling_tests::assert_compiler_work(program, stderr, expected_shape);
-    }
-    #[cfg(test)]
-    if let (
-        CellProgramAudit::OrdinaryGroupWork(expected, demanded),
-        Ok((_, program)),
-        Some((root, stderr)),
-    ) = (audit, &result, &evidence)
-    {
-        scaling_tests::ordinary_demand_history_tests::observe_compiler_work(
-            program,
-            root.path(),
-            stderr,
-            expected,
-            demanded,
-        );
     }
     result
 }

@@ -949,7 +949,9 @@ impl HostedTestRuntime {
         self.startup_readiness_elapsed.as_nanos()
     }
 
-    pub(super) async fn assert_prepared_workspace_original_handoff(&self) {
+    pub(super) async fn assert_prepared_workspace_original_handoff(
+        &self,
+    ) -> tidepool_toolchain::artifacts::ProductionEntryOutput {
         let installation = self
             .context
             .observer
@@ -1069,6 +1071,7 @@ impl HostedTestRuntime {
             before,
             "checking selected original custody must not submit compilation"
         );
+        original_output
     }
 
     /// A barrier requiring the existing production host must fail on its own
