@@ -603,9 +603,13 @@ async fn start_with_spec_and_model(
             }
         }
         crate::exomonad::write_fixture_project_config(&authored, initial_model, |project| {
-            project
-                .models
-                .insert("executor".into(), "gpt-6.1-sol".into());
+            project.models.insert(
+                "executor".into(),
+                exomonad_actor::Model::for_backend(
+                    exomonad_actor::Backend::OpenAIPlan,
+                    "gpt-6.1-sol",
+                ),
+            );
             if spec.is_some() {
                 project.haskell.source_roots = vec![".".into()];
                 project.haskell.spec = Some("AgentSpec.agentSpec".into());

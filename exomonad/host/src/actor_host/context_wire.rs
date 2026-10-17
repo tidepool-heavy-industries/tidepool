@@ -326,6 +326,9 @@ fn text_from_wire(text: WireVisibleText) -> Result<ContextVisibleText, ContextEr
             WireTextSelector::MessageText { part } => ContextTextSelector::MessageText {
                 part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
             },
+            WireTextSelector::ReasoningText { part } => ContextTextSelector::ReasoningText {
+                part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
+            },
             WireTextSelector::ToolResultText => ContextTextSelector::ToolResultText,
         },
         text: text.text,

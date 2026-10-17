@@ -682,6 +682,7 @@ impl TestCampaign {
             self.session_root.path(),
             settings,
             Arc::clone(&self.host_incarnation),
+            None,
         )
         .await
     }
