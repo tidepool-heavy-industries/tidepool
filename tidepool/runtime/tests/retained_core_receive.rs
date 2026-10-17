@@ -1,4 +1,4 @@
-//! Genuine source-only originals gain native groups through exact consumption.
+//! A canonical/Core-only consumer gains native groups after original source removal.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
             settlement,
         )
     })
-    .expect("production entry issuer finalizes import-only originals");
+    .expect("production entry issuer seals the original consumed homes");
     let products = original.products();
     let (interfaces, execution) = products
         .original_compile_input
@@ -86,15 +86,9 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         let interface = original_seals
             .iter()
             .find(|descriptor| descriptor.owner == *expected)
-            .expect("source-only original has its issued canonical interface");
+            .expect("original entry has its issued canonical interface");
         assert_eq!(interface.kind, ArtifactKind::CanonicalModuleInterface);
         assert!(interface.product_sha256.is_none());
-        assert!(!products.recovery_products.iter().any(|product| {
-            product.owner().unit == expected.unit && product.owner().module == expected.module
-        }));
-        assert!(!products.certified_groups.iter().any(|group| {
-            group.owner().unit == expected.unit && group.owner().module == expected.module
-        }));
     }
 
     // Retain the original consumed home-import graph. A lexical selection is
@@ -119,28 +113,61 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         descriptor.kind == ArtifactKind::CanonicalModuleInterface
             && descriptor.product_sha256.is_none()
     }));
-    let context = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .extend_interface_context(&interfaces)
-        .unwrap()
-        .extend(&[], &[], lexical.values().cloned().collect())
-        .unwrap();
-    assert!(context.recovery_products().is_empty());
-
-    // Recover the real support interfaces while omitting the requested owner.
-    // Its lexical graph still requires that owner's own canonical proof.
+    // The complete entry may retain native originals. Recover the consumer
+    // independently from only its sealed canonical interfaces and Core.
     let durable = tempfile::tempdir().unwrap();
-    let support_interfaces = interfaces
+    let canonical_interfaces = interfaces
         .materialize_module_interfaces(durable.path())
         .unwrap()
         .into_iter()
         .filter(|reference| {
-            let selected = ExactModuleIdentity {
+            lexical.contains_key(&ExactModuleIdentity {
                 unit: reference.interface.unit.clone(),
                 module: reference.interface.module.clone(),
-            };
-            selected != owner && lexical.contains_key(&selected)
+            })
         })
+        .collect::<Vec<_>>();
+    let context = ExactDeclarationContext::capture_recovery(
+        durable.path(),
+        &[],
+        &canonical_interfaces,
+        &[],
+        lexical.values().cloned().collect(),
+    )
+    .unwrap();
+    assert!(context.recovery_products().is_empty());
+    assert!(context
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(context.artifact_view().selected_native_groups().is_empty());
+    assert!(context
+        .artifact_view()
+        .capture_graph_selection()
+        .native_groups
+        .is_empty());
+    let consumer_seals = context.artifact_view().descriptors();
+    assert_eq!(consumer_seals.len(), lexical.len());
+    assert!(consumer_seals.iter().all(|descriptor| {
+        descriptor.kind == ArtifactKind::CanonicalModuleInterface
+            && descriptor.product_sha256.is_none()
+    }));
+    for expected in [&owner, &support] {
+        let original_seal = original_seals
+            .iter()
+            .find(|descriptor| descriptor.owner == *expected)
+            .unwrap();
+        assert!(consumer_seals.contains(original_seal));
+    }
+
+    // Recover the real support interfaces while omitting the requested owner.
+    // Its lexical graph still requires that owner's own canonical proof.
+    let support_interfaces = canonical_interfaces
+        .iter()
+        .filter(|reference| {
+            reference.interface.unit != owner.unit || reference.interface.module != owner.module
+        })
+        .cloned()
         .collect::<Vec<_>>();
     let missing = ExactDeclarationContext::capture_recovery(
         durable.path(),
@@ -168,10 +195,14 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .to_string()
         .contains("selected lexical owner lacks its interface main:RetainedReceiveOwner"));
 
+    drop(original);
+    drop(execution);
+    drop(interfaces);
+    drop(frozen);
+    retained.close().unwrap();
     std::fs::remove_file(&owner_source).unwrap();
     std::fs::remove_file(&support_source).unwrap();
     assert!(!owner_source.exists() && !support_source.exists());
-    drop(original);
     let mut compiled = tidepool_testing::with_settlement(|settlement| {
         compile_invocation_in_context(
             &CompileInvocation {
