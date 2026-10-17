@@ -760,6 +760,11 @@ struct AuthenticatedOriginalGroup {
     imports: Arc<[PendingImportOwner]>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static ADMITTED_ORIGINAL_GROUP_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl AuthenticatedOriginalGroup {
     fn group(&self) -> &ProjectedGroup {
         &self.group
@@ -771,6 +776,8 @@ impl AuthenticatedOriginalGroup {
 
     /// The caller has checked this group's selected dependency closure.
     fn admitted(&self) -> PendingCertifiedGroup {
+        #[cfg(test)]
+        ADMITTED_ORIGINAL_GROUP_ROWS.with(|count| count.set(count.get() + 1));
         PendingCertifiedGroup {
             origin: ProductOrigin::Cached,
             owner: self.owner.clone(),
@@ -2440,10 +2447,8 @@ impl SelectedOriginalClosure {
         &self,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<(), crate::CompileError> {
-        crate::declaration_context::certify_artifact_view_groups_with_validation(
+        crate::declaration_context::validate_artifact_view_groups_with_validation(
             &self.native_closure,
-            &[],
-            &[],
             validation,
         )?;
         Ok(())
@@ -6183,6 +6188,27 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
         OriginalNativeUse::SelectedGroups,
         None,
     )
+}
+
+/// Check selected native closure without issuing executable group rows.
+#[track_caller]
+pub(crate) fn validate_selected_owned_products_in_context_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    validate_selected_originals_with_validation(
+        available,
+        &[],
+        selected,
+        validation,
+        OriginalNativeUse::Availability,
+        None,
+    )
+    .map(|_| ())
 }
 
 #[track_caller]
@@ -10280,6 +10306,172 @@ pub(crate) mod tests {
         )])
         .remove(0)
         .product
+    }
+
+    #[test]
+    fn selected_closure_validation_preserves_refusals_without_materializing_groups() {
+        use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
+
+        let child = full_native_fixture("ValidationChild", vec![(5, vec![])], 7);
+        let import = |binder| PendingImportOwner::Source {
+            owner: child.owner().clone(),
+            original_ordinal: 5,
+            binder,
+        };
+        let root = full_native_fixture(
+            "ValidationRoot",
+            vec![(
+                11,
+                vec![import(testing::identity("ValidationChild", "entry_5"))],
+            )],
+            7,
+        );
+        let wrong_binder = full_native_fixture(
+            "ValidationRoot",
+            vec![(
+                11,
+                vec![import(testing::identity("ValidationChild", "missing"))],
+            )],
+            7,
+        );
+        let package_unit = "validation-package";
+        let package_child = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_in_unit_with_sites(
+                package_unit,
+                "ValidationChild",
+                vec![(5, vec![])],
+                7,
+                &BTreeMap::new(),
+                b"external unit child".to_vec(),
+                &BTreeMap::new(),
+                &[],
+            ),
+            [1; 32],
+        )])
+        .remove(0)
+        .product;
+        let package_root = tempfile::tempdir().unwrap();
+        let package_path = package_root.path().join("ValidationChild.hi");
+        std::fs::write(&package_path, b"validation package").unwrap();
+        let package_digest = sha(b"validation package");
+        let packages = BTreeMap::from([(
+            (package_unit.into(), package_child.owner().module.clone()),
+            PackageInterfaceWitness {
+                selected_path: package_path,
+                sha256: package_digest,
+            },
+        )]);
+        let package_downgrade = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture(
+                "ValidationRoot",
+                vec![(
+                    11,
+                    vec![PendingImportOwner::Package {
+                        unit: package_unit.into(),
+                        module: package_child.owner().module.clone(),
+                        binder: SymbolIdentity {
+                            unit: package_unit.into(),
+                            ..testing::identity("ValidationChild", "entry_5")
+                        },
+                        interface_digest: package_digest,
+                    }],
+                )],
+                7,
+                &packages,
+            ),
+            [1; 32],
+        )])
+        .remove(0)
+        .product;
+        let other_child = full_native_fixture("ValidationChild", vec![(5, vec![])], 9);
+        let root_id = ArtifactId([1; 32]);
+        let child_id = ArtifactId([2; 32]);
+        let root_key = NativeGroupKey {
+            artifact: root_id,
+            original_ordinal: 11,
+        };
+        let child_key = NativeGroupKey {
+            artifact: child_id,
+            original_ordinal: 5,
+        };
+        let complete = BTreeSet::from([root_key, child_key]);
+        let root_only = BTreeSet::from([root_key]);
+        let empty = BTreeSet::new();
+        assert!(matches!(
+            validate_selected_owned_products_in_context_with_validation(
+                &BTreeMap::from([(root_id, &package_downgrade), (child_id, &package_child)]),
+                &complete,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "home owner downgraded to package"
+            ))
+        ));
+        for (available, selected, expected) in [
+            (
+                BTreeMap::from([(root_id, &root), (child_id, &child)]),
+                &complete,
+                true,
+            ),
+            (
+                BTreeMap::from([(root_id, &root), (child_id, &child)]),
+                &empty,
+                true,
+            ),
+            (
+                BTreeMap::from([(root_id, &package_downgrade), (child_id, &package_child)]),
+                &complete,
+                false,
+            ),
+            (
+                BTreeMap::from([(root_id, &root), (child_id, &child)]),
+                &root_only,
+                false,
+            ),
+            (
+                BTreeMap::from([(root_id, &wrong_binder), (child_id, &child)]),
+                &complete,
+                false,
+            ),
+            (
+                BTreeMap::from([(root_id, &root), (child_id, &other_child)]),
+                &complete,
+                false,
+            ),
+            (BTreeMap::from([(root_id, &root)]), &complete, false),
+        ] {
+            let before = ADMITTED_ORIGINAL_GROUP_ROWS.with(std::cell::Cell::get);
+            let checked = validate_selected_owned_products_in_context_with_validation(
+                &available,
+                selected,
+                &mut PackageInterfaceValidation::default(),
+            );
+            assert_eq!(checked.is_ok(), expected);
+            assert_eq!(
+                ADMITTED_ORIGINAL_GROUP_ROWS.with(std::cell::Cell::get),
+                before
+            );
+            let admitted = certify_selected_owned_products_in_context_with_validation(
+                &available,
+                &[],
+                selected,
+                &mut PackageInterfaceValidation::default(),
+            );
+            assert_eq!(admitted.is_ok(), expected);
+            match (checked, admitted) {
+                (Ok(()), Ok(groups)) => {
+                    assert_eq!(groups.len(), selected.len());
+                    assert_eq!(
+                        ADMITTED_ORIGINAL_GROUP_ROWS.with(std::cell::Cell::get),
+                        before + selected.len()
+                    );
+                }
+                (Err(checked), Err(admitted)) => {
+                    assert_eq!(checked.to_string(), admitted.to_string())
+                }
+                _ => unreachable!("validation and materialization disagree"),
+            }
+        }
     }
 
     #[test]

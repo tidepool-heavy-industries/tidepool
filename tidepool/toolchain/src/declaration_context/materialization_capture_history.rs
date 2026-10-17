@@ -1,3 +1,24 @@
+fn assert_warm_clone_prepares_without_encoding(
+    context: &Arc<ExactDeclarationContext>,
+    producer: &[u8],
+    scratch: &Path,
+) -> usize {
+    let digest = context.semantic_sha256();
+    let bytes = context.observation().semantics.len();
+    let before = CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get);
+    let cloned = Arc::new(context.as_ref().clone());
+    let request = cloned.prepare_compilation(scratch, producer).unwrap();
+    assert_eq!(request.semantic_sha256, digest);
+    assert_eq!(cloned.semantic_sha256(), digest);
+    assert_context_observation_wire(&cloned);
+    assert_eq!(
+        CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get),
+        before,
+        "preparing a warm immutable clone must not encode semantic facts again"
+    );
+    bytes
+}
+
 fn private_directory_census(root: &Path) -> (usize, u64) {
     let mut pending = vec![root.to_path_buf()];
     let mut files = 0;
@@ -18,6 +39,29 @@ fn private_directory_census(root: &Path) -> (usize, u64) {
         }
     }
     (files, bytes)
+}
+
+fn private_directory_file_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeMap::new();
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(!metadata.is_symlink());
+        if metadata.is_dir() {
+            pending.extend(
+                std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else {
+            assert!(metadata.is_file());
+            files.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                std::fs::read(path).unwrap(),
+            );
+        }
+    }
+    files
 }
 
 fn captured_materialization_context(
@@ -44,6 +88,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
     let base = context
         .prepare_compilation(&scratch.path().join("base"), &producer)
         .unwrap();
+    let mut issued_row_counts = vec![base.materialization.as_ref().unwrap().rows.len()];
     let mut owners = vec![Arc::downgrade(base.materialization.as_ref().unwrap())];
     let mut directories = vec![base
         .materialization
@@ -53,20 +98,50 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         .path()
         .to_path_buf()];
     drop(base);
+    let mut avoided_bytes = assert_warm_clone_prepares_without_encoding(
+        &context,
+        &producer,
+        &scratch.path().join("base-clone"),
+    );
     let mut ids = Vec::new();
     for index in 0..length {
         let module = format!("CaptureHistory{index}");
         let product = crate::certified_products::fixture_finalized_product(
             support_product(&module),
-            context.facts.producer,
+            context.owner.facts.producer,
         );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&product),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), product.owner());
+        assert_eq!(recovered.interface_bytes(), product.interface_bytes());
+        assert_eq!(recovered.product_bytes(), product.product_bytes());
+        assert_eq!(
+            recovered.certification_bytes(),
+            product.certification_bytes()
+        );
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "empty originals still need an authenticated availability census"
+        );
+        let parent = Arc::clone(&context);
+        let parent_digest = parent.semantic_sha256();
         context = Arc::new(
             context
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(context.facts.producer, &[product])
+                .extend_checked_original_products(context.owner.facts.producer, &[recovered])
                 .unwrap(),
         );
+        assert_eq!(parent.semantic_sha256(), parent_digest);
+        assert_ne!(context.semantic_sha256(), parent_digest);
+        assert_context_observation_wire(&parent);
+        assert_context_observation_wire(&context);
         ids.push(
             context.compiler_metadata_snapshot().unwrap().entries[&identity("fixture", &module)]
                 .descriptor
@@ -82,17 +157,29 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
             "growing contexts still store one new row"
         );
         assert_eq!(owner._parents.len(), 1, "full-context deltas remain shared");
+        issued_row_counts.push(owner.rows.len());
         owners.push(Arc::downgrade(owner));
         directories.push(owner.directory().path().to_path_buf());
+        avoided_bytes += assert_warm_clone_prepares_without_encoding(
+            &context,
+            &producer,
+            &scratch.path().join(format!("clone-{index}")),
+        );
     }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "kind": "context_observation_clone_work",
+            "warm_clone_preparations": length + 1,
+            "additional_semantic_encodings": 0,
+            "semantic_bytes_reused": avoided_bytes,
+        })
+    );
     let before = directories
         .iter()
         .map(|root| private_directory_census(root))
         .fold((0, 0), |left, right| (left.0 + right.0, left.1 + right.1));
-    let history_rows = owners
-        .iter()
-        .map(|owner| owner.upgrade().unwrap().rows.len())
-        .sum::<usize>();
+    let issued_rows = issued_row_counts.iter().sum::<usize>();
     let captured = captured_materialization_context(&context, vec![ids[first], ids[second]]);
     let expected = context
         .prepare_compilation(&scratch.path().join("expected"), &producer)
@@ -129,7 +216,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         serde_json::json!({
             "kind": "retained_materialization_capture_census", "history_length": length,
             "capture_roots": [first, second], "materialized_before_reselection": warm,
-            "before": { "directories": directories.len(), "files": before.0, "bytes": before.1, "retained_rows": history_rows },
+            "before": { "directories": directories.len(), "files": before.0, "bytes": before.1, "issued_rows": issued_rows },
             "captured": { "directories": directories.iter().filter(|root| root.is_dir()).count(), "files": selected_census.0, "bytes": selected_census.1 },
             "required_directories": selected_directories.len(),
             "historical_materialization_owners_alive": owners.iter().filter(|owner| owner.upgrade().is_some()).count(),
@@ -212,6 +299,7 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
         .path()
         .to_path_buf();
     let before = private_directory_census(&directory);
+    let before_files = private_directory_file_bytes(&directory);
     let selected = context.compiler_metadata_snapshot().unwrap().entries
         [&identity("fixture", "Beta")]
         .descriptor
@@ -221,6 +309,7 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
     drop(request);
     drop(context);
     assert!(weak.upgrade().is_none());
+    assert_eq!(private_directory_file_bytes(&directory), before_files);
     assert_eq!(
         private_directory_census(&directory),
         before,
@@ -231,6 +320,13 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
         .unwrap();
     assert_eq!(request.artifacts.len(), 1);
     assert!(request.artifacts[0].interface.path.starts_with(&directory));
+    let interface = &request.artifacts[0].interface.path;
+    assert_eq!(
+        std::fs::read(interface).unwrap(),
+        before_files[interface.strip_prefix(&directory).unwrap()],
+        "selected files remain readable after historical metadata is dropped"
+    );
+    assert_eq!(private_directory_file_bytes(&directory), before_files);
     assert_eq!(
         request
             .materialization
@@ -275,6 +371,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let materialize = |context: &Arc<ExactDeclarationContext>| {
         let metadata = context.compiler_metadata_snapshot().unwrap();
         context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -297,11 +394,30 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         support_product("UnrelatedGraphHistory"),
         [7; 32],
     );
+    let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+        std::slice::from_ref(&unrelated),
+    )
+    .remove(0)
+    .product;
+    assert_eq!(recovered.owner(), unrelated.owner());
+    assert_eq!(recovered.interface_bytes(), unrelated.interface_bytes());
+    assert_eq!(recovered.product_bytes(), unrelated.product_bytes());
+    assert_eq!(
+        recovered.certification_bytes(),
+        unrelated.certification_bytes()
+    );
+    assert_eq!(
+        crate::certified_products::original_available_groups(&recovered)
+            .unwrap()
+            .count(),
+        0,
+        "unrelated fixture history still needs an authenticated empty census"
+    );
     context = Arc::new(
         context
             .as_ref()
             .clone()
-            .extend_checked_original_products([7; 32], &[unrelated])
+            .extend_checked_original_products([7; 32], &[recovered])
             .unwrap(),
     );
     let unrelated = materialize(&context);
@@ -413,36 +529,43 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     // These existing graph fixtures carry a test producer digest. Exercise
     // the production host input/materialization owners without pretending to
     // qualify a compiler endpoint whose producer bytes cannot match it.
-    let ancestor = Arc::new(
-        ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products(
-                [7; 32],
-                &[crate::certified_products::fixture_finalized_product(
-                    support_product("PrivateBase"),
-                    [7; 32],
-                )],
-            )
-            .unwrap(),
-    );
     let extend = |context: &Arc<ExactDeclarationContext>, module: &str| {
+        let product = crate::certified_products::fixture_finalized_product(
+            support_product(module),
+            [7; 32],
+        );
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(&product),
+        )
+        .remove(0)
+        .product;
+        assert_eq!(recovered.owner(), product.owner());
+        assert_eq!(recovered.interface_bytes(), product.interface_bytes());
+        assert_eq!(recovered.product_bytes(), product.product_bytes());
+        assert_eq!(recovered.certification_bytes(), product.certification_bytes());
+        assert_eq!(
+            crate::certified_products::original_available_groups(&recovered)
+                .unwrap()
+                .count(),
+            0,
+            "private fixture history needs an authenticated empty census"
+        );
         Arc::new(
             context
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(
-                    [7; 32],
-                    &[crate::certified_products::fixture_finalized_product(
-                        support_product(module),
-                        [7; 32],
-                    )],
-                )
+                .extend_checked_original_products([7; 32], &[recovered])
                 .unwrap(),
         )
     };
+    let ancestor = extend(
+        &Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
+        "PrivateBase",
+    );
     let materialize = |context: &Arc<ExactDeclarationContext>,
                        metadata: &CompilerArtifactMetadata| {
         context
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -459,11 +582,15 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         // AllGroups is the existing issuer of exact native roots, not an
         // inference from available code or a test certificate constructor.
         let artifacts = context
+            .owner
             .facts
             .compiler_support
             .artifacts()
             .inventory()
-            .admit_shared(context.facts.compiler_support.artifacts(), entries.clone())
+            .admit_shared(
+                context.owner.facts.compiler_support.artifacts(),
+                entries.clone(),
+            )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
@@ -565,6 +692,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     let captured = Arc::new(captured);
     let payload = Arc::downgrade(
         &captured
+            .owner
             .facts
             .compiler_support
             .artifacts()
@@ -573,6 +701,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     );
     let proof = Arc::clone(
         captured
+            .owner
             .facts
             .compiler_support
             .artifacts()
