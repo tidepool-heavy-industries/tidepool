@@ -133,6 +133,15 @@ pub struct HostedLookupBatch {
 }
 
 impl HostedLookupBatch {
+    /// Validate domain shape before source generation or endpoint I/O; grants no scope authority.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.valid() {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidHostedLookup)
+        }
+    }
+
     fn valid(&self) -> bool {
         let mut primary = BTreeSet::new();
         let mut references = BTreeSet::new();

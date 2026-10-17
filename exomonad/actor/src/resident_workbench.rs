@@ -7786,16 +7786,12 @@ where
                         &prepared.injected,
                         &source.workspace_modules,
                         usage,
-                        |queries| {
-                            if queries.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                Err(crate::lookup::LookupInspectionError::Compiler(
-                                    CompileError::ExtractFailed(
-                                        "lookup inspection was not admitted".into(),
-                                    ),
-                                ))
-                            }
+                        |_| {
+                            Err(crate::lookup::LookupInspectionError::Compiler(
+                                CompileError::ExtractFailed(
+                                    "lookup inspection was not admitted".into(),
+                                ),
+                            ))
                         },
                     );
                     if !request_pending {
@@ -7868,7 +7864,7 @@ where
                             &workspace_modules,
                             usage,
                             |queries| {
-                                inspect_lookup_queries(
+                                inspect_hosted_lookup(
                                     &inspection_view,
                                     Some(&inspection_values),
                                     &preamble,
@@ -7916,16 +7912,10 @@ where
                 &prepared.injected,
                 &source.workspace_modules,
                 usage,
-                |queries| {
-                    if queries.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        Err(crate::lookup::LookupInspectionError::Compiler(
-                            CompileError::ExtractFailed(
-                                "lookup inspection was not admitted".into(),
-                            ),
-                        ))
-                    }
+                |_| {
+                    Err(crate::lookup::LookupInspectionError::Compiler(
+                        CompileError::ExtractFailed("lookup inspection was not admitted".into()),
+                    ))
                 },
             )
         };
@@ -13514,6 +13504,51 @@ fn structured_introspection_answer(
     }
 }
 
+fn inspect_hosted_lookup(
+    view: &crate::ActorCompileView,
+    values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
+    preamble: &str,
+    imports: &str,
+    include: &[PathBuf],
+    injected: &[String],
+    effects: &tidepool_runtime::session::HaskellTypeSource,
+    batch: &tidepool_runtime::session::inspection::HostedLookupBatch,
+    timing: Option<&crate::call_timing::CallTimingRegistration>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<
+    tidepool_runtime::session::inspection::HostedLookupOutput,
+    crate::lookup::LookupInspectionError,
+> {
+    use tidepool_runtime::session::inspection::{
+        run_admitted_hosted_lookup, run_hosted_lookup, HostedLookupRequest,
+    };
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let mut inspect = || {
+        let request = HostedLookupRequest {
+            exact_context: view.exact_compile_context(),
+            preamble,
+            imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: injected,
+            batch,
+            effects: Some(effects),
+        };
+        match values {
+            Some(inputs) => {
+                run_admitted_hosted_lookup(request, view.session_view(), inputs, settlement)
+            }
+            None => run_hosted_lookup(request, settlement),
+        }
+        .map_err(crate::lookup::LookupInspectionError::Compiler)
+    };
+    match timing {
+        Some(timing) => timing.timed_compile_sync(inspect),
+        None => inspect(),
+    }
+}
+
+#[cfg(test)]
 fn inspect_lookup_queries(
     view: &crate::ActorCompileView,
     values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
@@ -16809,7 +16844,7 @@ pub(crate) mod request_tests {
             |queries| {
                 calls.set(calls.get() + 1);
                 let result = tidepool_testing::with_settlement(|settlement| {
-                    inspect_lookup_queries(
+                    inspect_hosted_lookup(
                         &view,
                         Some(&inputs),
                         &prepared.preamble,
