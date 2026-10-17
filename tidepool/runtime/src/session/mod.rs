@@ -74,10 +74,10 @@ pub use dialect::{
 
 pub use inspection::{
     run_admitted_inspections, run_inspections, AdmittedInspectionInputs, ClassMethodInfo,
-    ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo, IdentifierNamespace,
-    IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery, InspectionRequest,
-    InspectionResult, NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
-    TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
+    ConstructorInfo, DeclarationInfo, ExactNameQuery, FieldInfo, IdentifierInfo,
+    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
+    InspectionRequest, InspectionResult, LookupAnswer, LookupNameMode, NameNamespace, NameQuery,
+    NameScope, QueryError, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
 };
 
 pub use persistent::{
