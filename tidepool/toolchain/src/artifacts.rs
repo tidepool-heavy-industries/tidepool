@@ -2027,7 +2027,7 @@ impl ModuleCandidateOffer {
         Ok(request
             .validate_outputs(source_directory)?
             .into_iter()
-            .map(|source| source.witness)
+            .map(|source| source.into_witness())
             .collect())
     }
 
@@ -2517,7 +2517,7 @@ impl SelectedModuleCandidateOffer {
             .admissions()
             .iter()
             .filter(|source| source.generated_source_owner().is_ok())
-            .map(|source| source.witness.source_path())
+            .map(|source| source.witness().source_path())
             .collect::<BTreeSet<_>>();
         let source_paths = source_paths.into_iter().collect::<Vec<_>>();
         let source_path = match source_paths.as_slice() {
@@ -2547,18 +2547,16 @@ impl SelectedModuleCandidateOffer {
         )
         .map_err(compiler_evidence_failure)?;
         let inventory = validation.inventory.clone();
-        let source_admission = SourceEvidenceAdmission::from_exact(segment.product_admission(
-            request,
-            &source_path,
-            &source,
-            &evidence,
-            &inventory,
-        )?);
-        ensure_ready_module_inventory(&receipt.modules, source_admission.completed())?;
+        let source_admission =
+            segment.product_admission(request, &source_path, &source, &evidence, &inventory)?;
+        ensure_ready_module_inventory(
+            &receipt.modules,
+            &source_admission.exact().source.evidence(),
+        )?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
-            &source_admission,
+            source_admission,
             root,
             &self.producer,
             &self.include,
@@ -2588,11 +2586,11 @@ impl SelectedModuleCandidateOffer {
             .ok_or_else(|| {
                 CompileError::ExtractFailed("segment publication lacks generated source".into())
             })?;
-        let bytes = std::fs::read_to_string(source.witness.source_path())?;
+        let bytes = std::fs::read_to_string(source.witness().source_path())?;
         if !source
-            .witness
-            .matches_source(source.witness.source_path(), &bytes)
-            || source.evidence.revalidate(&bytes).is_err()
+            .witness()
+            .matches_source(source.witness().source_path(), &bytes)
+            || source.evidence().revalidate(&bytes).is_err()
         {
             return Err(CompileError::ExtractFailed(
                 "segment source changed before publication".into(),
@@ -2606,7 +2604,7 @@ impl SelectedModuleCandidateOffer {
             let (_, publication) = module_candidates::prepare_publication(
                 &self.producer,
                 &self.include,
-                &source.evidence,
+                source.evidence(),
                 parsed,
                 &bytes,
                 module_candidates::CandidateVersionOrigin::Exact {
@@ -3382,7 +3380,7 @@ fn seal_turn_outputs_with_validation(
         .or_else(|| {
             segment_exact
                 .as_ref()
-                .map(|exact| exact.source.evidence.as_ref())
+                .map(|exact| exact.source.evidence().as_ref())
         });
     let fresh_products = segment_originals
         .map(|originals| originals.raw())
@@ -4423,7 +4421,7 @@ impl<'a> SourceEvidenceAdmission<'a> {
     pub(crate) fn completed(&self) -> &cache::CompletedSourceEvidence {
         match &self.completion {
             SourceEvidenceCompletion::Ordinary(completed) => completed,
-            SourceEvidenceCompletion::Exact(exact) => exact.source.evidence.as_ref(),
+            SourceEvidenceCompletion::Exact(exact) => exact.source.evidence().as_ref(),
         }
     }
 
@@ -5474,7 +5472,6 @@ fn compile_invocation_inner(
         artifacts.certified_groups = certified.groups.to_vec();
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
-        artifacts.exact_source_admission = exact_source;
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
         })?);
@@ -5493,6 +5490,7 @@ fn compile_invocation_inner(
                 publication,
             )?;
         }
+        artifacts.exact_source_admission = exact_source;
         if exact_request.is_none()
             && !matches!(
                 &policy,
@@ -8753,8 +8751,10 @@ mod module_product_tests {
             }));
             if exact {
                 let admission = compiled.exact_source_admission.as_ref().unwrap();
-                assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
-                assert!(admission.evidence.revalidate(source).is_ok());
+                assert!(
+                    !admission.evidence().cache_safe && !admission.evidence().selection_complete
+                );
+                assert!(admission.evidence().revalidate(source).is_ok());
                 let request = Arc::new(context.clone())
                     .prepare_compilation(
                         &root.path().join("original-execution-scope"),
@@ -8819,7 +8819,7 @@ mod module_product_tests {
                 // does not issue a replay recipe or a hermetic build artifact.
                 let consumer = root.path().join("QuotedConsumer.hs");
                 std::fs::write(&consumer, source).unwrap();
-                let mut observations = (*admission.evidence).clone().into_evidence();
+                let mut observations = admission.evidence().as_ref().clone().into_evidence();
                 for consumed in &mut observations.sources {
                     if consumed.path == Path::new(cache::GENERATED_SOURCE) {
                         consumed.path = consumer.clone();

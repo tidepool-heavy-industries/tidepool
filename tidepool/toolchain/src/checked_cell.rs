@@ -4002,26 +4002,26 @@ pub(crate) fn admit_checked_cell<'a>(
         admissions
             .into_iter()
             .map(|admitted| {
-                let source = std::fs::read_to_string(admitted.witness.source_path())?;
+                let source = std::fs::read_to_string(admitted.witness().source_path())?;
                 if !admitted
-                    .witness
-                    .matches_source(admitted.witness.source_path(), &source)
-                    || admitted.evidence.revalidate(&source).is_err()
+                    .witness()
+                    .matches_source(admitted.witness().source_path(), &source)
+                    || admitted.evidence().revalidate(&source).is_err()
                 {
                     return Err(failure("compiled program source evidence changed"));
                 }
-                Ok((source, admitted.evidence.clone()))
+                Ok((source, admitted.evidence().clone()))
             })
             .collect::<Result<Vec<_>, CompileError>>()?
     } else {
         let source = admissions
             .into_iter()
             .find(|source| {
-                source.witness.source_sha256()
+                source.witness().source_sha256()
                     == &<[u8; 32]>::from(Sha256::digest(checked_source.as_bytes()))
             })
             .ok_or_else(|| failure("cell has no exact final source witness"))?;
-        vec![(checked_source.clone(), source.evidence.clone())]
+        vec![(checked_source.clone(), source.evidence().clone())]
     };
     let signatures = list(&header[8], 65536)?
         .iter()

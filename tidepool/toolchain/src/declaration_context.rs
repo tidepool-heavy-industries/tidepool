@@ -3892,15 +3892,15 @@ impl<'a> ExactRequestIdentity<'a> {
 
 pub(crate) struct ExactSourceAdmission {
     request_identity: ExactRequestIdentity<'static>,
-    pub(crate) witness: ExactSourceWitness,
-    pub(crate) evidence: Arc<crate::cache::CompletedSourceEvidence>,
-    pub(crate) evidence_bytes: Vec<u8>,
-    pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    witness: ExactSourceWitness,
+    evidence: Arc<crate::cache::CompletedSourceEvidence>,
+    evidence_bytes: Vec<u8>,
+    exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     // Roots accepted by each retained typed protected-recipe authority.
     scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>>,
-    pub(crate) exact_source_imports:
+    exact_source_imports:
         BTreeMap<ExactModuleIdentity, Vec<crate::certified_products::CanonicalSourceImport>>,
-    pub(crate) selected_originals:
+    selected_originals:
         BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
 }
 
@@ -4044,6 +4044,10 @@ pub(crate) struct MatchedExactProductAdmission<'a> {
 }
 
 impl<'a> MatchedExactProductAdmission<'a> {
+    pub(crate) fn exact(&self) -> &ExactProductAdmission<'a> {
+        &self.exact
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -4131,6 +4135,32 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn evidence_bytes(&self) -> &[u8] {
+        &self.evidence_bytes
+    }
+    pub(crate) fn selected_originals(
+        &self,
+    ) -> &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal> {
+        &self.selected_originals
+    }
+    pub(crate) fn witness(&self) -> &ExactSourceWitness {
+        &self.witness
+    }
+    pub(crate) fn into_witness(self) -> ExactSourceWitness {
+        self.witness
+    }
+    pub(crate) fn evidence(&self) -> &Arc<crate::cache::CompletedSourceEvidence> {
+        &self.evidence
+    }
+    pub(crate) fn exact_imports(&self) -> &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> {
+        &self.exact_imports
+    }
+    pub(crate) fn exact_source_imports(
+        &self,
+    ) -> &BTreeMap<ExactModuleIdentity, Vec<crate::certified_products::CanonicalSourceImport>> {
+        &self.exact_source_imports
+    }
+
     pub(crate) fn match_product<'a>(
         &'a self,
         request: &'a ExactCompilationRequest,
@@ -5697,6 +5727,10 @@ impl ExactCompilationRequest {
         if seen != source_owners {
             return Err(failure("exact import witness omits a fresh source module"));
         }
+        validation
+            .inventory
+            .charge(self.request_sha256.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(ExactSourceAdmission {
             request_identity: ExactRequestIdentity::from_request(self).into_owned(),
             witness: ExactSourceWitness {
@@ -15332,7 +15366,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (old_request, old_context, receipt) =
             source_selected_receipt(directory.path(), false, None);
-        let mut admission = old_request
+        let admission = old_request
             .validate_receipt(&receipt, None, &old_context)
             .unwrap();
         let historical = admission.selected_originals.clone();
@@ -15386,11 +15420,6 @@ mod tests {
         let mut request = program_request(directory.path(), context.clone())
             .with_checked_value_imports(inputs.import_authority());
         request.producer_sha256 = [7; 32];
-        admission
-            .exact_imports
-            .get_mut(&identity("main", "Consumer"))
-            .unwrap()
-            .push(mounted.clone());
         let evidence = DependencyEvidence {
             version: 4,
             cache_safe: true,
@@ -15421,38 +15450,34 @@ mod tests {
             }],
             packages: vec![],
         };
-        let exact = context
-            .compiler_metadata_snapshot()
+        // Change the raw producer receipt before admission. The current
+        // request's real validator owns both the selected-source proof and
+        // its exact import graph; no issued source proof is amended.
+        let mut receipt_value = read_receipt(&receipt);
+        let fields = receipt_value.as_array_mut().unwrap();
+        fields[2] = text(&request.request_sha256);
+        fields[3] = text(hex(&request.semantic_sha256));
+        fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[3]
+            .as_array_mut()
             .unwrap()
-            .entries
-            .into_iter()
-            .map(|(owner, entry)| (owner, entry.descriptor.interface_sha256))
-            .collect();
-        let independent = BTreeSet::from([mounted.clone()]);
-        admission.selected_originals = crate::execution_source::validate_source_selected_originals(
-            vec![crate::execution_source::SourceSelectedOriginalClaim {
-                owner: identity("main", "A"),
-                certificate_sha256: Sha256::digest(canonical.certificate_bytes()).into(),
-                interface_sha256: canonical.interface_sha256(),
-                source_sha256: canonical.source_sha256(),
-            }],
-            &evidence,
-            crate::execution_source::SourceSelectionContext {
-                producer: [7; 32],
-                interfaces: &[canonical],
-                exact_interfaces: &exact,
-                include: &[directory.path().to_path_buf()],
-                fresh: &admission.evidence,
-                roots: &[(
-                    identity("main", "Consumer"),
-                    ImportQualifier::Unqualified,
-                    identity("main", "A"),
-                )],
-                independent: &independent,
-                source_less: &independent,
-            },
-        )
-        .unwrap();
+            .push(Value::Array(vec![
+                text("none"),
+                text(&mounted.module),
+                Value::Bool(false),
+                text(&mounted.unit),
+            ]));
+        fields[9] = Value::Array(vec![
+            Value::Array(vec![Value::Array(vec![
+                text("main"),
+                text("A"),
+                text(sha256(canonical.certificate_bytes())),
+                text(hex(&canonical.interface_sha256())),
+                text(hex(&canonical.source_sha256())),
+            ])]),
+            text(serde_json::to_string(&evidence).unwrap()),
+        ]);
+        write_receipt(&receipt, &receipt_value);
+        let mut admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let artifacts = context
             .artifact_view()
             .merge_fixture_selections(&support_view(&[scaffold_native_fixture(
@@ -15491,6 +15516,8 @@ mod tests {
             .is_ok(),
             "complete inherited instance graphs must project shared rows before comparison"
         );
+        // Owner-local negative corruption: a historical selection is not
+        // an admission and must not satisfy the selected-owner consumer.
         admission.selected_originals = historical;
         assert!(
             ExactProductAdmission {
@@ -17025,37 +17052,49 @@ mod tests {
             .unwrap();
         let path = directory.path().join("Additional.hs");
         std::fs::write(&path, b"module Additional where\n").unwrap();
-        let mut later = support_admission(directory.path());
-        let mut evidence = Arc::unwrap_or_clone(later.evidence).into_evidence();
-        evidence.modules = vec![crate::cache::ModuleEvidence {
-            unit: "fixture".into(),
-            module: "Additional".into(),
-            boot: false,
-            source: path.clone(),
-            imports: vec![],
-            product: crate::cache::ProductAvailability::Ready,
-        }];
-        evidence.sources = vec![crate::cache::SourceEvidence {
-            path: path.clone(),
-            sha256: sha256(b"module Additional where\n"),
-        }];
-        evidence.resolutions.clear();
-        later.witness = ExactSourceWitness {
-            source_path: path.clone(),
-            source_sha256: Sha256::digest(b"module Additional where\n").into(),
+        let receipt = support_receipt(directory.path(), &request);
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let snapshot = PathBuf::from(fields[6].as_text().unwrap());
+        let source = "module Additional where\n";
+        std::fs::write(&snapshot, source).unwrap();
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![crate::cache::SourceEvidence {
+                path: path.clone(),
+                sha256: sha256(source.as_bytes()),
+            }],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![crate::cache::ModuleEvidence {
+                unit: "fixture".into(),
+                module: "Additional".into(),
+                boot: false,
+                source: path.clone(),
+                imports: vec![],
+                product: crate::cache::ProductAvailability::Ready,
+            }],
         };
-        later.evidence_bytes = serde_json::to_vec(&evidence).unwrap();
-        later.evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
-            evidence,
-            &path,
-            "module Additional where\n",
-        )
-        .unwrap()
-        .into();
-        later.exact_imports.insert(
-            identity("fixture", "Additional"),
-            vec![identity("fixture", "InstanceRelay")],
-        );
+        fields[4] = path_value(&path).unwrap();
+        fields[5] = text(sha256(source.as_bytes()));
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        fields[8] = Value::Array(vec![Value::Array(vec![
+            text("fixture"),
+            text("Additional"),
+            Value::Bool(false),
+            Value::Array(vec![Value::Array(vec![
+                text("none"),
+                text("InstanceRelay"),
+                Value::Bool(false),
+                text("fixture"),
+            ])]),
+        ])]);
+        write_receipt(&receipt, &value);
+        let later = request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap();
         let context = request
             .admit_fixture_support(
                 context,
@@ -17239,19 +17278,41 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
-        let mut admission = support_admission(directory.path());
-        let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();
-        evidence.modules.truncate(1);
-        let source = &mut evidence.modules[0];
-        source.unit = "main".into();
-        source.module = "Tidepool.Internal.Resume".into();
-        source.imports.clear();
-        admission.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
-            evidence,
-            "module Target where\n",
-        )
-        .unwrap()
-        .into();
+        let receipt = support_receipt(directory.path(), &request);
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        let path = directory.path().join("Resume.hs");
+        let source = "module Tidepool.Internal.Resume where\n";
+        std::fs::write(&path, source).unwrap();
+        evidence
+            .sources
+            .retain(|source| source.path == directory.path().join("Target.hs"));
+        evidence.sources.push(crate::cache::SourceEvidence {
+            path: path.clone(),
+            sha256: sha256(source.as_bytes()),
+        });
+        evidence.modules = vec![crate::cache::ModuleEvidence {
+            unit: "main".into(),
+            module: "Tidepool.Internal.Resume".into(),
+            boot: false,
+            source: path,
+            imports: vec![],
+            product: crate::cache::ProductAvailability::Ready,
+        }];
+        evidence.resolutions.clear();
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        fields[8] = Value::Array(vec![Value::Array(vec![
+            text("main"),
+            text("Tidepool.Internal.Resume"),
+            Value::Bool(false),
+            Value::Array(vec![]),
+        ])]);
+        write_receipt(&receipt, &value);
+        let admission = request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap();
         let context = request
             .admit_fixture_support(
                 baseline,

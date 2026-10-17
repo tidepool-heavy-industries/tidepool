@@ -154,7 +154,7 @@ fn admit_authored_artifact_closure_inner(
             }
             if let Some(admitted) = source_admission {
                 let exact = admitted
-                    .exact_imports
+                    .exact_imports()
                     .get(&identity)
                     .ok_or_else(|| contract("fresh authored module lacks exact import witness"))?;
                 imports.extend_from_slice(exact);
@@ -238,28 +238,28 @@ fn admit_authored_artifact_closure_inner(
                 tracing::Level::DEBUG
             )
         }) {
-            let witness_source = bounded_source_path(admitted.witness.source_path());
+            let witness_source = bounded_source_path(admitted.witness().source_path());
             let source_owner = admitted
-                .evidence
+                .evidence()
                 .modules
                 .iter()
                 .find(|module| {
-                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                    !module.boot && module.source.as_path() == admitted.witness().source_path()
                 })
                 .map(|module| ExactModuleIdentity {
                     unit: module.unit.clone(),
                     module: module.module.clone(),
                 });
             let witness_source_owner_count = admitted
-                .evidence
+                .evidence()
                 .modules
                 .iter()
                 .filter(|module| {
-                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                    !module.boot && module.source.as_path() == admitted.witness().source_path()
                 })
                 .count();
             let evidence_source_owners = admitted
-                .evidence
+                .evidence()
                 .modules
                 .iter()
                 .take(64)
@@ -272,9 +272,9 @@ fn admit_authored_artifact_closure_inner(
                     )
                 })
                 .collect::<Vec<_>>();
-            let exact_import_owners = admitted.exact_imports.keys().take(64).collect::<Vec<_>>();
+            let exact_import_owners = admitted.exact_imports().keys().take(64).collect::<Vec<_>>();
             let selected_original_owners = admitted
-                .selected_originals
+                .selected_originals()
                 .keys()
                 .take(64)
                 .collect::<Vec<_>>();
@@ -337,13 +337,13 @@ fn admit_authored_artifact_closure_inner(
                 witness_source = %witness_source,
                 source_owner = ?source_owner,
                 witness_source_owner_count,
-                evidence_source_owner_count = admitted.evidence.modules.len(),
+                evidence_source_owner_count = admitted.evidence().modules.len(),
                 evidence_source_owners = ?evidence_source_owners,
-                evidence_source_owners_omitted = admitted.evidence.modules.len().saturating_sub(64),
+                evidence_source_owners_omitted = admitted.evidence().modules.len().saturating_sub(64),
                 exact_import_owners = ?exact_import_owners,
-                exact_import_owners_omitted = admitted.exact_imports.len().saturating_sub(64),
+                exact_import_owners_omitted = admitted.exact_imports().len().saturating_sub(64),
                 selected_original_owners = ?selected_original_owners,
-                selected_original_owners_omitted = admitted.selected_originals.len().saturating_sub(64),
+                selected_original_owners_omitted = admitted.selected_originals().len().saturating_sub(64),
                 available_owner_count = available_owners.len(),
                 available_owner_keys = ?available_owner_keys,
                 available_owner_keys_omitted = available_owners.len().saturating_sub(64),
@@ -657,7 +657,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     let source_admission = admission.source;
     let module_name = module.module_name();
-    let source_path = source_admission.witness.source_path();
+    let source_path = source_admission.witness().source_path();
     let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
@@ -665,7 +665,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         || includes.is_empty()
         || !source_path.is_absolute()
         || !source_admission
-            .witness
+            .witness()
             .matches_source(source_path, normalized_source)
         || std::fs::read(source_path)? != normalized_source.as_bytes()
     {
@@ -690,7 +690,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     }
     let inventory: PlannedInventory = serde_json::from_slice(inventory_json)
         .map_err(|error| contract(format!("invalid planned inventory receipt: {error}")))?;
-    let evidence = &source_admission.evidence.modules;
+    let evidence = source_admission.evidence().modules;
     let candidates = evidence
         .iter()
         .filter(|row| row.module == module_name)
