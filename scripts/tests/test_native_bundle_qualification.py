@@ -198,6 +198,107 @@ def captured_execution(execution, profile="minimal"):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_private_receipt_publish_replaces_atomically_and_removes_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'owner.json'
+            path.write_text('previous receipt')
+            qualification.write_private_json(path, {'published': 'actual Unicode λ'})
+            self.assertEqual(json.loads(path.read_text()), {'published': 'actual Unicode λ'})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(root.iterdir()), [path])
+
+    def test_private_receipt_preserves_write_and_unlink_failures(self):
+        for primary in (OSError(errno.ENOSPC, 'actual fsync failed'),
+                        KeyboardInterrupt('original publisher interruption')):
+            with self.subTest(primary=type(primary).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'owner.json'
+                path.write_text('previous receipt')
+                unlink_error = OSError(errno.EACCES, 'temporary unlink refused')
+                with patch.object(qualification.os, 'fsync', side_effect=primary), \
+                        patch.object(qualification.os, 'unlink', side_effect=unlink_error):
+                    try:
+                        qualification.write_private_json(path, {'body': 'written before fsync'})
+                    except BaseException as error:
+                        failure = error
+                    else:
+                        self.fail('required publication must refuse')
+                self.assertIs(failure, primary)
+                self.assertEqual(failure.__cause__.exceptions, (unlink_error,))
+                self.assertEqual(unlink_error.__notes__,
+                                 ['private receipt cleanup stage: unlink temporary output'])
+                self.assertEqual(path.read_text(), 'previous receipt')
+                temporary, = root.glob('.owner.json.*')
+                self.assertEqual(json.loads(temporary.read_text()), {'body': 'written before fsync'})
+                temporary.unlink()
+
+    def test_private_receipt_never_closes_reused_transferred_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'owner.json'
+            sentinel = root / 'sentinel'
+            sentinel.write_text('external descriptor remains usable')
+            original = OSError(errno.EIO, 'actual replace failed')
+            reused = []
+            original_fdopen = qualification.os.fdopen
+            transferred = []
+            def own_output(fd, *args, **kwargs):
+                transferred.append(fd)
+                return original_fdopen(fd, *args, **kwargs)
+            def replace(*args):
+                reused.append(os.open(sentinel, os.O_RDONLY))
+                self.assertEqual(reused[0], transferred[0])
+                raise original
+            try:
+                with patch.object(qualification.os, 'fdopen', side_effect=own_output), \
+                        patch.object(qualification.os, 'replace', side_effect=replace):
+                    with self.assertRaises(OSError) as caught:
+                        qualification.write_private_json(path, {'body': 'complete'})
+                self.assertIs(caught.exception, original)
+                self.assertEqual(os.read(reused[0], 100), b'external descriptor remains usable')
+                self.assertFalse(path.exists())
+                self.assertEqual(list(root.glob('.owner.json.*')), [])
+            finally:
+                for fd in reused:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+    def test_private_receipt_attempts_unlink_after_close_failure_without_losing_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = OSError(errno.ENOSPC, 'fsync failed')
+            close_error = OSError(errno.EIO, 'close failed after releasing descriptor')
+            unlink_error = OSError(errno.EACCES, 'unlink refused')
+            actual_fdopen = qualification.os.fdopen
+            class FailingClose:
+                def __init__(self, output):
+                    self.output = output
+                def __getattr__(self, name):
+                    return getattr(self.output, name)
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    self.close()
+                def close(self):
+                    self.output.close()
+                    raise close_error
+            with patch.object(qualification.os, 'fdopen',
+                              side_effect=lambda *args: FailingClose(actual_fdopen(*args))), \
+                    patch.object(qualification.os, 'fsync', side_effect=primary), \
+                    patch.object(qualification.os, 'unlink', side_effect=unlink_error) as unlink:
+                with self.assertRaises(OSError) as caught:
+                    qualification.write_private_json(root / 'owner.json', {'actual': 'file bytes'})
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(primary.__cause__.exceptions, (close_error, unlink_error))
+            self.assertEqual(close_error.__notes__,
+                             ['private receipt cleanup stage: close temporary output'])
+            unlink.assert_called_once()
+            temporary, = root.glob('.owner.json.*')
+            temporary.unlink()
+
     def test_declared_recipe_package_matches_the_source_snapshot(self):
         source = SCRIPT.parents[2] / qualification.RECIPE_WORKSPACE_SOURCE
         inputs = {qualification.RECIPE_WORKSPACE_SOURCE + '/' + path.relative_to(source).as_posix():
@@ -1956,6 +2057,130 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(receipt['cancellation_requests'][0]['forwarding_status'], 'runner_already_exited')
             self.assertEqual(receipt['confirmed_interruptions'], [])
 
+    def real_runner_with_failed_final_receipt(self, exit_code, *, fallback_fails, interrupt=None):
+        self._owned_runner_patch.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'descriptor.json'; descriptor_path.write_text('{}')
+            output = root / 'output'; output.mkdir(mode=0o700)
+            receipt_path = output / 'run-owner.json'
+            first = interrupt or OSError(errno.ENOSPC, 'first reaped receipt publication failed')
+            fallback = OSError(errno.EACCES, 'fallback receipt publication failed')
+            writer = qualification.write_private_json
+            snapshots, processes = [], []
+            actual_popen = qualification.subprocess.Popen
+            def launch(*args, **kwargs):
+                process = actual_popen(*args, **kwargs)
+                processes.append(process)
+                return process
+            def publish(path, value):
+                snapshots.append(json.loads(json.dumps(value)))
+                if value.get('runner_reaped'):
+                    if 'error' in value:
+                        if fallback_fails:
+                            raise fallback
+                    elif value.get('owner_state') == 'reaped':
+                        raise first
+                return writer(path, value)
+            descriptor = {'source_oid': 'a' * 40, 'harness_revision': 'b' * 40}
+            with (output / 'stdout').open('wb') as stdout, (output / 'stderr').open('wb') as stderr, \
+                    patch.object(qualification.subprocess, 'Popen', side_effect=launch), \
+                    patch.object(qualification, 'write_private_json', side_effect=publish), \
+                    patch.object(qualification, '_forward_runner_signal', wraps=qualification._forward_runner_signal) as forward:
+                try:
+                    qualification.run_owned_qualification_runner(
+                        [sys.executable, '-c', 'import sys; print("actual runner body"); sys.exit(' + str(exit_code) + ')'],
+                        {}, stdout, stderr, receipt_path, descriptor_path, descriptor, 'fixture')
+                except BaseException as error:
+                    failure = error
+                else:
+                    self.fail('required final publication failure cannot report successful delivery')
+            self.assertIs(failure, first)
+            self.assertEqual(len(processes), 1)
+            self.assertEqual(processes[0].returncode, exit_code)
+            self.assertFalse(Path('/proc/' + str(processes[0].pid)).exists())
+            forward.assert_not_called()
+            final = snapshots[-1]
+            self.assertTrue(final['runner_reaped'])
+            self.assertEqual(final['runner_exit_code'], exit_code)
+            self.assertEqual(final['owner_state'], 'reaped')
+            self.assertEqual(final['status'], 'finished')
+            self.assertEqual(final['failure_stage'], 'receipt_publication')
+            self.assertEqual(final['receipt_publication_error']['observed_owner_state'], 'reaped')
+            self.assertEqual((output / 'stdout').read_text(), 'actual runner body\n')
+            if fallback_fails:
+                self.assertEqual(failure.__cause__.exceptions, (fallback,))
+            else:
+                self.assertIsNone(failure.__cause__)
+                self.assertEqual(json.loads(receipt_path.read_text()), final)
+
+    def test_reaped_real_success_keeps_actual_exit_when_receipt_publication_fails(self):
+        self.real_runner_with_failed_final_receipt(0, fallback_fails=False)
+
+    def test_reaped_real_failure_preserves_first_and_secondary_publication_causes(self):
+        self.real_runner_with_failed_final_receipt(23, fallback_fails=True)
+
+    def test_reaped_real_runner_keeps_cancellation_identity_through_publication_failure(self):
+        self.real_runner_with_failed_final_receipt(0, fallback_fails=True,
+                                                  interrupt=KeyboardInterrupt('original cancellation'))
+
+    def test_reaped_real_runner_retains_nested_publisher_cleanup_causes(self):
+        self._owned_runner_patch.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'descriptor.json'; descriptor_path.write_text('{}')
+            output = root / 'output'; output.mkdir(mode=0o700)
+            receipt_path = output / 'run-owner.json'
+            first = KeyboardInterrupt('original reaped publication cancellation')
+            later = OSError(errno.ENOSPC, 'failure receipt fsync refused')
+            first_unlink = OSError(errno.EACCES, 'original temporary unlink refused')
+            later_unlink = OSError(errno.EACCES, 'failure receipt temporary unlink refused')
+            writer = qualification.write_private_json
+            real_fsync, real_unlink = qualification.os.fsync, qualification.os.unlink
+            current, processes = [], []
+            actual_popen = qualification.subprocess.Popen
+            def launch(*args, **kwargs):
+                process = actual_popen(*args, **kwargs)
+                processes.append(process)
+                return process
+            def publish(path, value):
+                if value.get('runner_reaped'):
+                    current[:] = [later, later_unlink] if 'error' in value else [first, first_unlink]
+                return writer(path, value)
+            def fsync(fd):
+                if current:
+                    raise current[0]
+                return real_fsync(fd)
+            def unlink(path, *args, **kwargs):
+                if current:
+                    raise current[1]
+                return real_unlink(path, *args, **kwargs)
+            descriptor = {'source_oid': 'a' * 40, 'harness_revision': 'b' * 40}
+            with (output / 'stdout').open('wb') as stdout, (output / 'stderr').open('wb') as stderr, \
+                    patch.object(qualification.subprocess, 'Popen', side_effect=launch), \
+                    patch.object(qualification, 'write_private_json', side_effect=publish), \
+                    patch.object(qualification.os, 'fsync', side_effect=fsync), \
+                    patch.object(qualification.os, 'unlink', side_effect=unlink), \
+                    patch.object(qualification, '_forward_runner_signal') as forward:
+                try:
+                    qualification.run_owned_qualification_runner(
+                        [sys.executable, '-c', 'print("actual completed body")'], {},
+                        stdout, stderr, receipt_path, descriptor_path, descriptor, 'fixture')
+                except BaseException as error:
+                    failure = error
+                else:
+                    self.fail('required publication failure cannot pass')
+            self.assertIs(failure, first)
+            original_cleanup, fallback = failure.__cause__.exceptions
+            self.assertEqual(original_cleanup.exceptions, (first_unlink,))
+            self.assertIs(fallback, later)
+            self.assertEqual(fallback.__cause__.exceptions, (later_unlink,))
+            self.assertEqual(len(processes), 1)
+            self.assertEqual(processes[0].returncode, 0)
+            self.assertFalse(Path('/proc/' + str(processes[0].pid)).exists())
+            forward.assert_not_called()
+            self.assertEqual((output / 'stdout').read_text(), 'actual completed body\n')
+
     def test_runner_spawn_failure_retains_private_owner_receipt(self):
         self._owned_runner_patch.stop()
         with tempfile.TemporaryDirectory() as directory:
@@ -3278,7 +3503,7 @@ class CatalogSourceTests(unittest.TestCase):
         secondary = OSError(errno.ENOSPC, 'actual outcome publication unavailable')
         secondary.add_note('catalog invocation outcome publication failed')
         primary.__cause__ = BaseExceptionGroup('catalog invocation secondary failures', [secondary])
-        arguments = ['inspect-catalog']
+        arguments = ['inspect-catalog', '--timeout', '900']
         for name in ('snapshot', 'source-root', 'declared-source-root', 'retention-record',
                      'retention-record-origin', 'runtime-tools', 'producer', 'frontend',
                      'worker', 'deployment', 'ghc-libdir', 'libraries', 'output'):
