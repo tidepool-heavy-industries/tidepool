@@ -721,6 +721,7 @@ mod tests {
             .iter()
             .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
         let transport = NativeCompilerTransport::issue(
+            context.compiler_input_projection(),
             &context.compiler_metadata_snapshot().unwrap(),
             context.artifact_view(),
             offers,

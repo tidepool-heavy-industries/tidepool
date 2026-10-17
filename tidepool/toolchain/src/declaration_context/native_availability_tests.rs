@@ -1305,6 +1305,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .project_metadata(base.metadata_snapshot())
         .unwrap();
     let transport = NativeCompilerTransport::issue(
+        &projection,
         &metadata,
         &full,
         &[
@@ -2058,8 +2059,8 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     )
     .unwrap();
     assert!(complete.is_full());
-    let no_demand = CompilerInputProjection::from_issued_entries(&[entry.clone()])
-        .unwrap()
+    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let no_demand = projection
         .project_metadata(base.metadata_snapshot())
         .unwrap();
     for other in [false, true] {
@@ -2067,7 +2068,8 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         if other {
             offers.push(complete.clone());
         }
-        let transport = NativeCompilerTransport::issue(&no_demand, &full, &offers).unwrap();
+        let transport =
+            NativeCompilerTransport::issue(&projection, &no_demand, &full, &offers).unwrap();
         assert_eq!(
             transport.availability[&entry.descriptor.id].permits(7),
             other
@@ -2077,7 +2079,8 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     let empty_offer =
         crate::artifact_inventory::IssuedNativeOffer::issue(entry.descriptor.id, &full, None)
             .unwrap();
-    let empty = NativeCompilerTransport::issue(&no_demand, &full, &[empty_offer]).unwrap();
+    let empty =
+        NativeCompilerTransport::issue(&projection, &no_demand, &full, &[empty_offer]).unwrap();
     assert!(!empty.availability[&entry.descriptor.id].permits(7));
 }
 
@@ -2151,12 +2154,14 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
             continue;
         }
         let view = merged.unwrap();
-        let metadata =
+        let projection =
             CompilerInputProjection::from_issued_entries(&[entries[1].clone(), entries[2].clone()])
-                .unwrap()
-                .project_metadata(view.metadata_snapshot())
                 .unwrap();
+        let metadata = projection
+            .project_metadata(view.metadata_snapshot())
+            .unwrap();
         let error = NativeCompilerTransport::issue(
+            &projection,
             &metadata,
             &view,
             &[crate::artifact_inventory::IssuedNativeOffer::issue(

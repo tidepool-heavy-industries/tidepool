@@ -343,11 +343,8 @@ impl CompilerSourceSupport {
                     .flat_map(|fragment| fragment.issued_offers().iter()),
             )
             .cloned();
-        let offers = offers
-            .map(|offer| offer.within_projection(&projection, &artifacts))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten();
+        // Availability is retained evidence. The request transport below owns
+        // which exact own roots or dependency subclosures it consumes.
         Self::new(projection, artifacts, offers)
     }
 

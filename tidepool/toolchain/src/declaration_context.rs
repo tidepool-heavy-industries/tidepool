@@ -497,8 +497,12 @@ impl OriginalCompilerInputs {
         let metadata = issued
             .projection
             .project_metadata(issued.artifacts.metadata_snapshot())?;
-        let transport =
-            NativeCompilerTransport::issue(&metadata, &issued.artifacts, &issued.native_offers)?;
+        let transport = NativeCompilerTransport::issue(
+            &issued.projection,
+            &metadata,
+            &issued.artifacts,
+            &issued.native_offers,
+        )?;
         selection
             .finish_new_product_availability(&metadata.retained, &transport.availability)
             .map_err(compiler_evidence_failure)
@@ -1160,6 +1164,7 @@ impl NativeCompilerTransport {
     }
 
     fn issue(
+        roles: &CompilerInputProjection,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
@@ -1193,6 +1198,14 @@ impl NativeCompilerTransport {
             {
                 continue;
             }
+            let consumed = if offered_roots.contains(&offer.original()) {
+                offer
+                    .within_projection(roles, artifacts)?
+                    .ok_or_else(|| failure("selected native offer has no request contribution"))?
+            } else {
+                offer.clone()
+            };
+            let offer = &consumed;
             if offered_roots.contains(&offer.original()) {
                 let sources = issuance.entry(offer.original()).or_default();
                 if !sources.contains(offer) {
@@ -1384,7 +1397,7 @@ impl ProtectedScaffoldRequirements {
         let native_offers = support.native_offers();
         let metadata = projection.project_metadata(artifacts.metadata_snapshot())?;
         let native_transport =
-            NativeCompilerTransport::issue(&metadata, &artifacts, &native_offers)?;
+            NativeCompilerTransport::issue(&projection, &metadata, &artifacts, &native_offers)?;
         Ok(RequestCompilerInputs {
             projection,
             metadata,
