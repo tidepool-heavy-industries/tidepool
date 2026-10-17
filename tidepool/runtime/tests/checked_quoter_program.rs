@@ -1,5 +1,5 @@
-//! The real parser, whole-program worker, and sequential Rust certifier share
-//! fresh originals across slots before any native effect can execute.
+//! Reexported quotation compiles across checked slots, and the fixture-owned
+//! runtime original preserves its durable source recipe before native execution.
 
 use std::sync::Arc;
 
@@ -156,10 +156,35 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .original_interface_context(compiled.prepared(), compiled.table(), compiled.sites())
             .unwrap();
         let products = &sealed.recovery_products;
-        let original = products
+        let originals = products
             .iter()
-            .find(|product| product.owner().module == "Tidepool.QQ.Bash")
-            .expect("first ordinary item must retain the defining quoter owner");
+            .filter(|product| {
+                product.owner().unit == "main" && product.owner().module == "CheckedQuoterFacade"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(originals.len(), 1);
+        let original = originals[0];
+        // Quotation expands during compilation. The fixture's opaque runtime
+        // wrapper independently supplies a fresh original for durable recovery.
+        assert!(sealed.certified_groups.iter().any(|group| {
+            group.owner() == original.owner()
+                && group.group().binders().iter().any(|binder| {
+                    binder.unit == "main"
+                        && binder.module == "CheckedQuoterFacade"
+                        && binder.occurrence == "describe"
+                })
+        }));
+        assert!(program.items()[1]
+            .native()
+            .unwrap()
+            .target_owned()
+            .globals()
+            .iter()
+            .any(|global| {
+                global.identity.unit == "main"
+                    && global.identity.module == "CheckedQuoterFacade"
+                    && global.identity.occurrence == "describe"
+            }));
         let durable = tempfile::tempdir().unwrap();
         let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             durable.path(),
@@ -172,7 +197,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .unwrap();
         let reference = references
             .iter()
-            .find(|reference| reference.module == "Tidepool.QQ.Bash")
+            .find(|reference| reference.unit == "main" && reference.module == "CheckedQuoterFacade")
             .unwrap();
         assert!(reference.execution_source.is_some());
         let recovered =
@@ -187,7 +212,9 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let recovered_products = recovered.recovery_products();
         let recovered_original = recovered_products
             .iter()
-            .find(|product| product.owner().module == "Tidepool.QQ.Bash")
+            .find(|product| {
+                product.owner().unit == "main" && product.owner().module == "CheckedQuoterFacade"
+            })
             .unwrap();
         // Recovery preserves durable authority, but does not reissue the fresh
         // source witness used to admit declarations in the original transaction.
@@ -206,7 +233,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .unwrap();
         let recovered_reference = recovered_references
             .iter()
-            .find(|reference| reference.module == "Tidepool.QQ.Bash")
+            .find(|reference| reference.unit == "main" && reference.module == "CheckedQuoterFacade")
             .unwrap();
         assert_eq!(reference, recovered_reference);
         let graph = &reference.execution_source.as_ref().unwrap().path;
