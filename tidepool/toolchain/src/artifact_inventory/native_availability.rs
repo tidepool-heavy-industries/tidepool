@@ -1,5 +1,138 @@
 use super::*;
 
+/// Fresh bodies can depend on an available group without selecting it for
+/// execution. Resolve only their certified imports from the supplied offers;
+/// proof roots remain separate from these dependency choices.
+pub(super) fn bind_fresh_product_dependencies(
+    state: &InventoryState,
+    parent: &ArtifactView,
+    consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    fresh: &BTreeSet<NativeGroupKey>,
+    offers: &[IssuedNativeOffer],
+    required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
+) -> Result<(), CompileError> {
+    let namespace = parent.namespace();
+    let projection = parent.read_projection(state);
+    let mut wanted = BTreeSet::new();
+    for group in fresh {
+        let entry = &entries[&group.artifact];
+        for (owner, dependency) in entry.native_requirements_for(group.original_ordinal) {
+            let ArtifactDependency::NativeGroup {
+                required_ordinal, ..
+            } = dependency
+            else {
+                continue;
+            };
+            let Some(owner) = entry.native_owners.get(owner) else {
+                continue;
+            };
+            let mut matching = entries.values().filter(|entry| {
+                matches!(&entry.payload, ArtifactPayload::Original(product)
+                    if NativeOwnerKey::from_owner(product.owner()) == *owner)
+            });
+            let Some(target) = matching.next() else {
+                continue;
+            };
+            if matching.next().is_some() {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: target.descriptor.id,
+                    },
+                ));
+            }
+            let target = NativeGroupKey {
+                artifact: target.descriptor.id,
+                original_ordinal: *required_ordinal,
+            };
+            if !fresh.contains(&target) && !required.contains_key(&target) {
+                wanted.insert(target);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let mut offered = imbl::OrdSet::new();
+    for offer in offers {
+        let Some(proof) = offer.proof() else { continue };
+        let graph = proof.selection.graph_selection();
+        validate_issued_selection(state, &projection.nodes, graph)?;
+        offered.extend(graph.native_groups.iter().filter_map(|group| {
+            wanted
+                .contains(&NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                })
+                .then_some(InventoryNodeKey::Group(*group))
+        }));
+    }
+    let index = NativeSelectionIndex::build(state, &offered);
+    for key in wanted {
+        let mut candidates = BTreeSet::new();
+        let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
+            unreachable!("certified native dependency has an original owner")
+        };
+        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+        if let Some(binding) = namespace.get(&canonical) {
+            for (carrier, ordinal) in index.groups.keys() {
+                if carrier.artifact != key.artifact
+                    || *ordinal != key.original_ordinal
+                    || namespace
+                        .get(&key.artifact)
+                        .is_some_and(|selected| selected != carrier)
+                {
+                    continue;
+                }
+                if state
+                    .outgoing(InventoryNodeKey::Artifact(*carrier))
+                    .any(|(target, edge)| {
+                        target == InventoryNodeKey::Artifact(*binding)
+                            && *edge == ArtifactDependency::Interface
+                    })
+                {
+                    candidates.insert(index.resolve(*carrier, *ordinal)?);
+                }
+            }
+        }
+        let Some(group) = candidates.first().copied() else {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: key.artifact,
+                    original_ordinal: key.original_ordinal,
+                },
+            ));
+        };
+        if candidates.len() != 1 {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: key.artifact,
+                },
+            ));
+        }
+        // This group's immutable edges own its historical children. Do not
+        // resolve each child again against the receiving namespace.
+        for node in admitted_closure(state, [InventoryNodeKey::Group(group)]) {
+            if let InventoryNodeKey::Group(group) = node {
+                validate_consumed_native_namespace(
+                    &entries[&group.binding.artifact()],
+                    consumed_namespace,
+                )?;
+                required
+                    .entry(NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    })
+                    .or_default()
+                    .insert(group);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Consuming exact native support must respect a selected compiler role. An
 /// absent role grants no namespace intent; an incompatible selected role cannot
 /// be bypassed by retaining a historical implementation beside it.

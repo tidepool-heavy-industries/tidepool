@@ -848,16 +848,31 @@ impl CompilerInputProjection {
             .admit_projected_with_native_offers(parent, entries, self, &contributions)
     }
 
+    #[cfg(test)]
     pub(crate) fn admit_complete_native_products(
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         offers: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
+        self.admit_complete_native_products_with_dependencies(parent, entries, offers, &[])
+    }
+
+    pub(crate) fn admit_complete_native_products_with_dependencies(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        offers: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
+    ) -> Result<ArtifactView, CompileError> {
         let contributions = self.native_offer_contributions(parent, offers)?;
-        parent
-            .inventory()
-            .admit_private_complete_products(parent, entries, self, &contributions)
+        parent.inventory().admit_private_complete_products(
+            parent,
+            entries,
+            self,
+            &contributions,
+            dependencies,
+        )
     }
 
     /// Narrow one issued namespace to authenticated source owners and their

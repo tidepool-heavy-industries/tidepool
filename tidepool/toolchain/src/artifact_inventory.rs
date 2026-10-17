@@ -927,7 +927,11 @@ enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
     Projected(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
-    PrivateAvailability(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
+    PrivateAvailability {
+        projection: &'a CompilerInputProjection,
+        selected: &'a [IssuedNativeOffer],
+        dependencies: &'a [IssuedNativeOffer],
+    },
     Offered(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
 }
 
@@ -935,7 +939,10 @@ impl ArtifactRootIntent<'_> {
     fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
-            Self::PrivateAvailability(_, offers) | Self::Offered(_, offers) => {
+            Self::PrivateAvailability {
+                selected: offers, ..
+            }
+            | Self::Offered(_, offers) => {
                 let mut requirements = Vec::new();
                 for proof in offers.iter().filter_map(IssuedNativeOffer::proof) {
                     if !requirements.contains(proof) {
@@ -3375,6 +3382,7 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
         availability: &[IssuedNativeOffer],
+        dependencies: &[IssuedNativeOffer],
     ) -> Result<ArtifactView, CompileError> {
         let offered = projection
             .roles()
@@ -3399,7 +3407,11 @@ impl ArtifactInventory {
             parent,
             entries,
             NativeArtifactDemand::AllGroups,
-            ArtifactRootIntent::PrivateAvailability(projection, availability),
+            ArtifactRootIntent::PrivateAvailability {
+                projection,
+                selected: availability,
+                dependencies,
+            },
         )
         .map(|admission| admission.artifacts)
     }
@@ -3579,11 +3591,12 @@ impl ArtifactInventory {
             ),
             ArtifactRootIntent::Projected(projection, _)
             | ArtifactRootIntent::Offered(projection, _)
-            | ArtifactRootIntent::PrivateAvailability(projection, _) => {
+            | ArtifactRootIntent::PrivateAvailability { projection, .. } => {
                 let namespace = projection.entries_from_artifacts(&selected)?;
                 if matches!(
                     root_intent,
-                    ArtifactRootIntent::Offered(..) | ArtifactRootIntent::PrivateAvailability(..)
+                    ArtifactRootIntent::Offered(..)
+                        | ArtifactRootIntent::PrivateAvailability { .. }
                 ) {
                     consumed_namespace = Some(namespace);
                 }
@@ -3629,7 +3642,7 @@ impl ArtifactInventory {
             let support_only = matches!(
                 root_intent,
                 ArtifactRootIntent::Offered(..)
-                    | ArtifactRootIntent::PrivateAvailability(..)
+                    | ArtifactRootIntent::PrivateAvailability { .. }
                     | ArtifactRootIntent::Certified(..)
             ) && namespace_ids
                 .as_ref()
@@ -3687,6 +3700,19 @@ impl ArtifactInventory {
                         .insert(*group);
                 }
             }
+        }
+        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
+            native_availability::bind_fresh_product_dependencies(
+                &state,
+                parent,
+                consumed_namespace
+                    .as_ref()
+                    .expect("private compiler namespace"),
+                &selected,
+                &groups,
+                dependencies,
+                &mut required_groups,
+            )?;
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut historical_groups = BTreeSet::new();
@@ -3811,7 +3837,7 @@ impl ArtifactInventory {
             }
         }
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
-        if matches!(root_intent, ArtifactRootIntent::PrivateAvailability(..)) {
+        if matches!(root_intent, ArtifactRootIntent::PrivateAvailability { .. }) {
             let (_, complete_closure) =
                 owners.planned_edges(&state, &selected, &groups, NativeClosureStage::Admission)?;
             for external in complete_closure.difference(&groups) {

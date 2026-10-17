@@ -663,7 +663,7 @@ impl OriginalCompilerInputs {
             producer.sha256(),
             &fresh,
             &[],
-            Some(context.facts.compiler_support.artifacts()),
+            Some(&context.facts.compiler_support),
         )?;
         Ok(Some(match carried {
             Some(carried) => carried.merge(&configured)?,
@@ -794,7 +794,7 @@ impl OriginalCompilerInputs {
         producer_sha256: [u8; 32],
         products: &[CertifiedRecoveryProduct],
         availability: &[crate::artifact_inventory::NativeOriginalRequirement],
-        selected_source: Option<&ArtifactView>,
+        selected_source: Option<&crate::artifact_inventory::CompilerSourceSupport>,
     ) -> Result<Self, CompileError> {
         let selected = baseline.project_metadata(inventory.metadata_snapshot())?;
         let retained = inventory.metadata_snapshot();
@@ -842,7 +842,8 @@ impl OriginalCompilerInputs {
                 .filter_map(|role| role.original())
                 .map(|original| {
                     crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original, source,
+                        original,
+                        source.artifacts(),
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -883,10 +884,11 @@ impl OriginalCompilerInputs {
             entries.clone(),
             &dependency_offers,
         )?;
-        let issued = effective.admit_complete_native_products(
+        let issued = effective.admit_complete_native_products_with_dependencies(
             &artifacts,
             entries.clone(),
             &dependency_offers,
+            selected_source.map_or(&[], |source| source.native_offers()),
         )?;
         for entry in &entries {
             if entry.native_group_ordinals.is_empty() {
