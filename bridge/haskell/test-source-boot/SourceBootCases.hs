@@ -134,14 +134,14 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedCore, revalidateLocalFinalizedAdmissionWith )
 import Tidepool.BoundedRead (withFileObservations, observeFile)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
+import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput, projectedGroupEncodingBytes)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
+import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, rawOriginalGroupEncodings, preparedModuleProductOmissions)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
   , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
@@ -2657,6 +2657,13 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       requestOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextRequest")
   context <- prepareCompilerProjectionContext produced Map.empty entryOwner "sitedResult" [] Nothing
   (modules, _) <- prepareOriginalProducts env Nothing interfaces context Set.empty (pprModules produced)
+  -- Both runs lower the same issued prepared inputs through independent caches.
+  -- The timing-disabled production result supplies the semantic comparison.
+  disabledCache <- newOriginalProjectionCollector
+  disabled <- bracket (lookupEnv "TIDEPOOL_TIMING")
+    (maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING")) $ \_ -> do
+      setEnv "TIDEPOOL_TIMING" "0"
+      forM modules (projectCachedOriginalHomeModuleProducts disabledCache env interfaces context)
   cache <- newOriginalProjectionCollector
   cold <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
   warm <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
@@ -2665,6 +2672,9 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   let settled rows withdrawn = fst (settleOriginalHomeModuleProductsWithoutOwners env Set.empty withdrawn (map snd rows))
       coldProducts = settled cold Set.empty
       warmProducts = settled warm Set.empty
+      encoded rows = map (Map.map projectedGroupEncodingBytes . rawOriginalGroupEncodings . snd) rows
+      observations products = (preparedModuleProductOutcomes products,
+        preparedModuleProductOmissions products)
       check label products = do
         cons <- either (fail . show) pure (preparedModuleProductConstructors products)
         rows <- either (fail . show) pure (metadataForConstructors cons)
@@ -2676,6 +2686,11 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
         unless (Set.union declared (Set.fromList (map dcmId wired)) == issued) $
           fail (label ++ " metadata omitted an actual executable original constructor")
         pure (cons,rows)
+  unless (all (not . fst) disabled && encoded disabled == encoded cold) $
+    fail "timing changed canonical original group encodings or reused a comparison cache"
+  forM_ [Set.empty, Set.singleton requestOwner] $ \withdrawn ->
+    unless (observations (settled disabled withdrawn) == observations (settled cold withdrawn)) $
+      fail "timing changed actual original product outcomes or omissions"
   target <- either (fail . show) pure (projectPrepared context (filter ((== entryOwner) . pmModule) modules))
   unless (null (programSites target) && any (\global ->
       globalIdentity global == SymbolIdentity "main" "OriginalTextRequest" "value" "siteRequest" Nothing)
