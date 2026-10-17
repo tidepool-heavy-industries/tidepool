@@ -25,7 +25,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as T
 import Tidepool.ArtifactBytes (checkArtifactSeal)
-import Tidepool.RequestInputs (RequestOriginalInputs, captureRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
+import Tidepool.RequestInputs (RequestOriginalInputs, withCapturedRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.BoundedRead (readFileAtMost)
 import System.FilePath (isAbsolute)
@@ -157,7 +157,7 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
                 either fail pure (validateCandidateImages producer candidates descriptors references images)
                 base <- continueRequestInputs emptyCapturedOriginalContent
                   [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
-                (graphs,custody) <- captureRequestInputTokens (Just base) $ \readToken -> do
+                (graphs,custody) <- withCapturedRequestInputTokens base $ \readToken -> do
                   forM_ candidates $ \candidate -> forM_ (candidateParts candidate) $ \(_,artifact,sha,bound) -> do
                     token <- readToken artifact bound
                     either fail pure (checkArtifactSeal sha token)
