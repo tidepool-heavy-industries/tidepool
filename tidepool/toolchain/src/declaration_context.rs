@@ -8443,6 +8443,9 @@ pub(crate) use native_availability_tests::assert_selected_authored_private_input
 mod native_availability_tests;
 
 #[cfg(test)]
+mod candidate_offer_history_tests;
+
+#[cfg(test)]
 pub(crate) fn issue_fixture_compiler_support(
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
