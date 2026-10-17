@@ -14,8 +14,8 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, SomeException
-  , toException, IOException )
+  ( evaluate, try, throwIO, mask, SomeException
+  , IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (intercalate, nub, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
@@ -100,14 +100,17 @@ import Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( SourceRejection(..), InputRejection(..) )
+  ( Diag, SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
   ( validateCheckedCellAdmission, validateCheckedItemAdmission )
 import Tidepool.CheckedRecipe
   ( checkedItemCompilePurpose, checkedRecipeSourceWithLineOffset, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
+import Tidepool.RequestCompletion
+  ( Completion, PhaseSink, BodyOutcome(..), CleanupStage(CompilerScopeRestore), captureCompletion
+  , flattenCompletion, completionResult, completionFailures, appendCleanupFailures, asCleanupFailures )
 import Tidepool.WorkerDiagnostics
-  ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
+  ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest (RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
@@ -174,47 +177,55 @@ main = do
       withResidentCompilerScopes [] $ \runRequest ->
         WorkerServer.runWorkerLoop $ \serveTransaction ->
           runRequest (pure ()) $ \scope ->
-            serveTransaction (\cwd argv ->
-              setCurrentDirectory cwd >> runWorkerInvocation scope argv)
+            serveTransaction (\sink cwd argv ->
+              setCurrentDirectory cwd >> runWorkerInvocation sink scope argv)
     else do
       hSetEncoding stdout utf8
       -- Direct transport boots the same compiler owner once for all helpers.
-      result <- withResidentCompilerScopes [] $ \runRequest ->
-        runRequest (pure ()) $ \scope ->
-          runWorkerInvocation scope rawWorkerRequest
+      result <- WorkerServer.runDirectRequest (runDirectInvocation rawWorkerRequest)
       exitWith result
 
--- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
--- the same versioned payload and therefore the same dispatch path.
-runWorkerInvocation
-  :: CompilerScope -> [String] -> IO ExitCode
-runWorkerInvocation compilerScope rawWorkerRequest = do
-  parsedWorkerRequest <- case workerRequestFromArgv rawWorkerRequest of
-    Left err -> hPutStrLn stderr err >> pure Nothing
-    Right (Just request) -> pure (Just request)
-    Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
-  case parsedWorkerRequest of
-    Nothing -> pure (ExitFailure 2)
-    Just request -> runParsedInvocation compilerScope request
+-- Retain the issued request result while the outer GHC scope and interpreter
+-- release. A failure before issuance remains an independent operation failure.
+runDirectInvocation :: [String] -> PhaseSink -> IO (Completion [Diag])
+runDirectInvocation raw sink = do
+  issued <- newIORef Nothing
+  outer <- captureCompletion $ withResidentCompilerScopes [] $ \runRequest ->
+    runRequest (pure ()) $ \scope -> mask $ \restore -> do
+      completed <- restore (runWorkerInvocation sink scope raw)
+      writeIORef issued (Just completed)
+      pure completed
+  known <- readIORef issued
+  pure $ case known of
+    Nothing -> flattenCompletion outer
+    Just completed -> appendCleanupFailures completed $ case completionResult outer of
+      BodySucceeded _ -> completionFailures outer
+      _ -> asCleanupFailures CompilerScopeRestore outer
 
-runParsedInvocation :: CompilerScope -> WorkerRequest -> IO ExitCode
-runParsedInvocation compilerScope parsed = do
+-- Direct and resident transports decode the same versioned worker payload.
+runWorkerInvocation :: PhaseSink -> CompilerScope -> [String] -> IO (Completion [Diag])
+runWorkerInvocation sink compilerScope raw = case workerRequestFromArgv raw of
+  Left failure -> captureCompletion (throwIO (InvalidWorkerRequest failure))
+  Right Nothing -> captureCompletion (throwIO (InvalidWorkerRequest "worker requires a versioned request"))
+  Right (Just request) -> runParsedInvocation sink compilerScope request
+
+runParsedInvocation :: PhaseSink -> CompilerScope -> WorkerRequest -> IO (Completion [Diag])
+runParsedInvocation sink compilerScope parsed = flattenCompletion <$> captureCompletion (do
   timing <- readTimingEnabled
-  admitted <- trySynchronous (withBoundCompilerRequest compilerScope parsed (dispatch timing))
-  either (reportDiags . Left) pure admitted
+  withBoundCompilerRequest sink compilerScope parsed (dispatch timing))
 
 -- Mode selection, normalized arguments and exact admission come from one owner.
-dispatch :: Bool -> BoundCompilerRequest -> IO ExitCode
+dispatch :: Bool -> BoundCompilerRequest -> IO [Diag]
 dispatch timing bound =
   let args = boundWorkerRequest bound
   in case boundRequestOperation bound of
     DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
     _ -> case requestFiles args of
-      [] -> reportDiags (Left (toException (userError "worker request contains no input")))
+      [] -> fail "worker request contains no input"
       (file : _)
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
-          -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
+          -> fail "inspection type batch requires at least two type queries and no other query kinds"
         | otherwise -> case boundRequestOperation bound of
             ActivationPreviewOperation -> runActivationPreviewMode bound file
             SourceCheckOperation -> runSourceCheckMode bound file
@@ -227,7 +238,7 @@ dispatch timing bound =
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
-runActivationPreviewMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runActivationPreviewMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runActivationPreviewMode bound path = do
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
@@ -315,18 +326,18 @@ runActivationPreviewMode bound path = do
     Left _ -> readIORef lastAttempt >>= mapM_ (\(output, source) -> do
       void (try (writeFile output source) :: IO (Either IOException ())))
     Right _ -> pure ()
-  reportDiags result
+  either throwIO (const (pure [])) result
 
-runSourceCheckMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runSourceCheckMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runSourceCheckMode bound path = do
   let args = boundWorkerRequest bound
   checked <- trySynchronous $ do
     compiled <- compileBoundRequest bound (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
       Set.empty GeneralCompile Nothing path
     pure (crWarnings compiled)
-  reportDiagsWithWarnings checked
+  either throwIO pure checked
 
-runDeclarationOperation :: BoundCompilerRequest -> FilePath -> FilePath -> IO ExitCode
+runDeclarationOperation :: BoundCompilerRequest -> FilePath -> FilePath -> IO [Diag]
 runDeclarationOperation bound manifest out = do
   result <- trySynchronous $ do
     operation <- readDeclarationOperation manifest
@@ -357,9 +368,9 @@ runDeclarationOperation bound manifest out = do
             <> encodeString (T.pack (shaHex packages))
             <> encodeString (T.pack (shaHex requirements))
             <> encodeBindingInterfacePurpose issuedPurpose)
-  reportDiags result
+  either throwIO (const (pure [])) result
 
-runInspectionMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runInspectionMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runInspectionMode bound _path = do
   let args = boundWorkerRequest bound
   res <- trySynchronous $ do
@@ -374,7 +385,7 @@ runInspectionMode bound _path = do
           (crInspectionProbes successful) requests
     results <- runInspectionRequests args compile inspect
     BS.writeFile out (encodeInspectionResults results)
-  reportDiags res
+  either throwIO (const (pure [])) res
 
 
 -- | Whether a generic extraction needs stable session values in scope.
@@ -393,7 +404,7 @@ scopeFromWorkerRequest args = SessionScope
   }
 
 processFile
-  :: BoundCompilerRequest -> Bool -> FilePath -> IO ExitCode
+  :: BoundCompilerRequest -> Bool -> FilePath -> IO [Diag]
 processFile bound timing path = do
   let args = boundWorkerRequest bound
   let mOutDir = requestOutDir args
@@ -439,7 +450,7 @@ processFile bound timing path = do
     void $ timePhase timing "module_products" $
       writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
 
-  reportDiags res
+  either throwIO (const (pure [])) res
 
 -- Every completed worker product carries its original input evidence. Exact
 -- and session requests use their separate retained authority instead.
@@ -525,7 +536,7 @@ writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runTurnMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runTurnMode bound path = do
   let args = boundWorkerRequest bound
   timing <- readTimingEnabled
@@ -583,7 +594,7 @@ runTurnMode bound path = do
         _ <- try (writeFile output source) :: IO (Either IOException ())
         pure ()
     Right _ -> pure ()
-  reportDiags res
+  either throwIO (const (pure [])) res
 
 -- | Write @spliced@ (a fully-rendered module source) to a scratch file under
 -- 'outDir', named for its own @module X where@ header, and retain it in
@@ -827,10 +838,10 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
 -- block into decl runs before compiling any item and so needs every verdict
 -- up front — one spawn for the whole block instead of one classify spawn per
 -- item.
-runClassifyMode :: DynFlags -> Bool -> WorkerRequest -> IO ExitCode
+runClassifyMode :: DynFlags -> Bool -> WorkerRequest -> IO [Diag]
 runClassifyMode parserFlags timing args =
   timePhase timing "total" $
-    try
+    trySynchronous
       ( do
           out      <- requireArg "--classify-out" (requestClassifyOut args)
           srcs     <- mapM readFile (requestFiles args)
@@ -838,14 +849,14 @@ runClassifyMode parserFlags timing args =
           writeFile out (renderVerdictsJson verdicts)
           hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
      )
-      >>= reportDiags
+      >>= either throwIO (const (pure []))
 
 -- | Split, classify, and typecheck one notebook cell in a single worker
 -- request. Rust authors the module template (scope/import/effect-row policy);
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
 -- Parsing chooses execution ordinals before runtime reserves original owners.
 -- The emitted receipt contains no checked pins, prepared bodies or live values.
-runCellPlanMode :: DynFlags -> WorkerRequest -> FilePath -> IO ExitCode
+runCellPlanMode :: DynFlags -> WorkerRequest -> FilePath -> IO [Diag]
 runCellPlanMode parserFlags args cellPath = do
   result <- trySynchronous $ do
     source <- readFile cellPath
@@ -876,16 +887,16 @@ runCellPlanMode parserFlags args cellPath = do
           Nothing -> "none"
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out (toStrictByteString receipt)
-  reportDiags result
+  either throwIO (const (pure [])) result
 
-runCellMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runCellMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runCellMode bound cellPath = do
   let exact = boundRequestExactScope bound
   case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
     Just (scope, planned) -> runCellProgramMode bound cellPath scope planned
     Nothing -> runLegacyCellMode bound cellPath
 
-runLegacyCellMode :: BoundCompilerRequest -> FilePath -> IO ExitCode
+runLegacyCellMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runLegacyCellMode bound cellPath = do
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
@@ -981,12 +992,12 @@ runLegacyCellMode bound cellPath = do
         _ <- try (BS.writeFile out (encodeCellOut plan [] [] rendered)) :: IO (Either IOException ())
         pure ()
     Right _ -> pure ()
-  reportDiagsWithWarnings res
+  either throwIO pure res
 
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
 runCellProgramMode :: BoundCompilerRequest -> FilePath
-  -> ExactScope -> PlannedCellAdmission -> IO ExitCode
+  -> ExactScope -> PlannedCellAdmission -> IO [Diag]
 runCellProgramMode bound cellPath exact planned = do
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
@@ -1037,7 +1048,7 @@ runCellProgramMode bound cellPath exact planned = do
       (BS.writeFile out observations >> BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt))
       completedBatches
     pure []
-  reportDiagsWithWarnings attempted
+  either throwIO pure attempted
   where
     compileSegment parserFlags timing admission template outDir batches state (segmentIndex, segment) = do
       let offset = programItemOffset state

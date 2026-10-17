@@ -49,7 +49,8 @@ data ReportOutcome
 
 -- Compiler-request authority errors occur before GHC source checking.
 data InputRejection
-  = SearchInputsChanged
+  = InvalidWorkerRequest String
+  | SearchInputsChanged
   | CheckedPurposeMismatch
   | InvalidCheckingWrapper String
   | InvalidDeclarationReservation

@@ -3,9 +3,11 @@
 
 module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
 
+import Tidepool.RequestCompletion (finishCompletion)
+
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Monad (foldM, forM, forM_, unless, void, when)
+import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -438,7 +440,7 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
   forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   grant <- either fail pure (compilerExecutionGrant 2)
-  (_,diagnostics) <- captureDiagnostics $ withCompilerExecutor grant $ \executor -> do
+  (_,diagnostics) <- captureDiagnostics $ (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
     let finishFallback owner prepared = do
           cache <- newPreparedBodyCache
           context <- prepareCompilerProjectionContext prepared Map.empty
@@ -482,12 +484,12 @@ compilerTaskAttemptHistories = do
   grant <- either fail pure (compilerExecutionGrant 3)
   result <- quickCheckWithResult stdArgs {maxSuccess=100,maxSize=8,replay=Just (mkQCGen 710117,0)} $
     forAllShrink (resize 8 (listOf (chooseInt (0,5)))) shrink $ \batches -> ioProperty $ do
-      withCompilerExecutor grant $ \executor -> do
+      (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
         attempts <- fmap concat $ forM batches $ \count ->
           runCompilerTasksWithAttempt executor
             (\(TaskAttempt issuer ordinal) input -> pure (issuer,ordinal,input))
             (\_ _ -> pure ()) (replicate count "same-owned-input")
-        later <- withCompilerExecutor grant $ \other -> runCompilerTasksWithAttempt other
+        later <- (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \other -> runCompilerTasksWithAttempt other
           (\(TaskAttempt issuer ordinal) _ -> pure (issuer,ordinal))
           (\_ _ -> pure ()) [()]
         issued <- runCompilerTasksWithAttempt executor

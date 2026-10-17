@@ -3,6 +3,8 @@
 
 module Main (main, tests) where
 
+import Tidepool.RequestCompletion (finishCompletion)
+
 import Test.QuickCheck qualified as QC
 import CompilerExecutionTest (compilerExecutionTests)
 import RecoveryEntryScopeTest (entryScopeTests)
@@ -10,7 +12,7 @@ import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (bracket, evaluate, finally, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad ((>=>), forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
 import Data.List.NonEmpty qualified as NE
@@ -1419,7 +1421,7 @@ scenario = do
           else pure (cache, ownerCache, bodyCache)
         grant <- either fail pure (compilerExecutionGrant jobCount)
         waves <- newIORef []
-        withCompilerExecutor grant $ \executor -> do
+        (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
           let demand _ packageRoots closed = do
                 let currentRoots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
                 modifyIORef' waves (++ [Set.fromList currentRoots])
@@ -1516,7 +1518,7 @@ scenario = do
               (closureModules closed) >>= projectSelected
       forM_ [1,2] $ \jobCount -> do
         grant <- either fail pure (compilerExecutionGrant jobCount)
-        withCompilerExecutor grant $ \executor -> do
+        (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
           setEnv "TIDEPOOL_RECOVERY_CHECK" "1"
           historyFactory <- newPreparedRecoveryWithDemand (Just executor) (\_ _ _ -> pure [])
             hsc cache ownerCache bodyCache fixtureContext [subset] []

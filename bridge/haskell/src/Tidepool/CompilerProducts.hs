@@ -22,11 +22,13 @@ module Tidepool.CompilerProducts
   , currentReconciledOriginalProducts
   ) where
 
+import Tidepool.RequestCompletion (finishCompletion)
+
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
 import Control.Exception (throwIO, evaluate)
-import Control.Monad (foldM, forM, forM_, unless, when)
+import Control.Monad ((>=>), foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
@@ -337,7 +339,7 @@ prepareOriginalProducts
   -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
 prepareOriginalProducts env exact interfaces context external initial =
-  withCompilerExecutor serialCompilerExecutionGrant $ \executor ->
+  (withCompilerExecutor (const (pure ())) serialCompilerExecutionGrant >=> finishCompletion) $ \executor ->
     prepareOriginalProductsWithExecutor executor env exact interfaces context external initial
 
 prepareOriginalProductsWithExecutor

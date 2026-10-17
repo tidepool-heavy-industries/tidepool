@@ -4,21 +4,51 @@
 -- releases still owed by its enclosing compiler and output owners.
 module Tidepool.RequestCompletion
   ( Completion, CleanupStage(..), CleanupFailure, cleanupStage, cleanupException
-  , captureCompletion, withCompletionRelease, appendCleanupFailures
-  , attemptReleases, BodyOutcome(..), completionResult, completionFailures, completionAsync
+  , captureCompletion, flattenCompletion, withCompletionRelease, appendCleanupFailures
+  , attemptReleases, asCleanupFailures, BodyOutcome(..), completionResult, completionFailures, completionAsync
+  , CompletionPhase(..), PhaseSink, emitPhase, releaseWithPhase
   , finishCompletion, RequestReleaseFailure
   ) where
 
 import Control.Exception
-  ( Exception, SomeException, SomeAsyncException, fromException, mask, throwIO, try )
-import Data.Maybe (listToMaybe, mapMaybe)
+  ( Exception(..), SomeException(..), SomeAsyncException, mask, throwIO, try, catch
+  , asyncExceptionFromException, asyncExceptionToException )
+import Data.Maybe (listToMaybe, mapMaybe, isJust)
+import Data.Typeable (cast)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 
 data CleanupStage
-  = ExecutorStop | CapabilitiesRestore | OutputRestore
+  = ExecutorStop | CapabilitiesRestore | CompilerScopeRestore | OutputRestore
   | CaptureClose | CaptureRead | CaptureRemove
   deriving (Eq, Show)
+
+-- Closed, context-free records written only to the retained diagnostic channel.
+-- The sink carries observation, never request or cleanup authority.
+data CompletionPhase
+  = BodyStarted | BodyFinished | CleanupStarted CleanupStage
+  | CleanupFinished CleanupStage | RenderingResponse | DeliveringResponse | ResponseDelivered
+  deriving Show
+
+type PhaseSink = CompletionPhase -> IO ()
+
+emitPhase :: PhaseSink -> CompletionPhase -> IO ()
+emitPhase sink phase = sink phase `catch` \(failure :: SomeException) ->
+  case fromException failure :: Maybe SomeAsyncException of
+    Just _ -> throwIO failure
+    Nothing -> pure ()
+
+-- An interrupted observer cannot skip its release. Each observer and the real
+-- release is attempted once; only synchronous observation failure is ignored.
+releaseWithPhase :: PhaseSink -> CleanupStage -> IO () -> IO ()
+releaseWithPhase sink stage release = do
+  failures <- attemptReleases
+    [ (stage, emitPhase sink (CleanupStarted stage))
+    , (stage, release)
+    , (stage, emitPhase sink (CleanupFinished stage))
+    ]
+  completed <- captureCompletion (pure ())
+  finishCompletion (appendCleanupFailures completed failures)
 
 data CleanupFailure = CleanupFailure CleanupStage SomeException
   deriving Show
@@ -48,6 +78,11 @@ captureCompletion :: IO a -> IO (Completion a)
 captureCompletion action = do
   result <- try action
   pure (fromResult result)
+
+flattenCompletion :: Completion (Completion a) -> Completion a
+flattenCompletion (Completion (Right inner) failures) = appendCleanupFailures inner failures
+flattenCompletion (Completion (Left failure) failures) = Completion (Left failure) failures
+flattenCompletion (AbortedByCleanup failures) = AbortedByCleanup failures
 
 -- Exception-based compiler helpers can finish an inner owner before returning
 -- to an enclosing request. Keep its typed release assessment when the outer
@@ -108,6 +143,13 @@ withCompletionRelease stage acquire release use = mask $ \restore -> do
       failures <- attemptReleases [(stage, release resource)]
       pure (appendCleanupFailures completed failures)
 
+-- Reclassify a failed owned IO extent as release evidence while retaining
+-- nested stages; a successful extent contributes only its actual release facts.
+asCleanupFailures :: CleanupStage -> Completion a -> [CleanupFailure]
+asCleanupFailures stage (Completion result failures) =
+  either (releaseFailures stage) (const []) result ++ failures
+asCleanupFailures _ (AbortedByCleanup failures) = NE.toList failures
+
 -- Cancellation keeps its actual exception identity, whether it interrupted
 -- the body or an interruptible release. It is never a source diagnostic.
 completionAsync :: Completion a -> Maybe SomeException
@@ -127,7 +169,14 @@ completionAsync completed =
 -- release failures. Reporting owners retain Completion until terminal output.
 data RequestReleaseFailure = RequestReleaseFailure (Maybe SomeException) (NonEmpty CleanupFailure)
   deriving Show
-instance Exception RequestReleaseFailure
+instance Exception RequestReleaseFailure where
+  toException failure@(RequestReleaseFailure primary failures)
+    | isJust (completionAsync (Completion (maybe (Right ()) Left primary) (NE.toList failures))) =
+        asyncExceptionToException failure
+    | otherwise = SomeException failure
+  fromException failure@(SomeException actual) = case cast actual of
+    Just known -> Just known
+    Nothing -> asyncExceptionFromException failure
 
 finishCompletion :: Completion a -> IO a
 finishCompletion (Completion result []) = either throwIO pure result

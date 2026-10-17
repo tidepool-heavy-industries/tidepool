@@ -20,9 +20,13 @@ import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
 import Tidepool.WorkerServer (runWorkerLoop)
+import Tidepool.RequestCompletion (captureCompletion)
 
 limit :: Int
 limit = 16777216
+
+successReport :: BS.ByteString
+successReport = BSC.pack "{\"version\":2,\"outcome\":\"success\",\"diagnostics\":[]}\n"
 
 workerChild :: Bool -> FilePath -> IO ()
 workerChild oneFreeFd scratch = do
@@ -37,22 +41,22 @@ workerChild oneFreeFd scratch = do
           else transaction handler `catch` catchThreadKilled
     else runWorkerLoop (\transaction -> transaction handler `catch` catchThreadKilled)
   where
-    handler _ args = do
+    handler _ _ args = captureCompletion $ do
       case args of
         ["stdout-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
         ["exact-aggregate"] -> do
           BS.hPut stdout (BS.replicate (limit `div` 2) 111)
-          BS.hPut stderr (BS.replicate (limit `div` 2) 101)
+          BS.hPut stderr (BS.replicate (limit - limit `div` 2 - BS.length successReport) 101)
         ["aggregate-overflow"] -> do
           BS.hPut stdout (BS.replicate (limit `div` 2) 111)
-          BS.hPut stderr (BS.replicate (limit `div` 2 + 1) 101)
+          BS.hPut stderr (BS.replicate (limit - limit `div` 2 - BS.length successReport + 1) 101)
         ["throw"] -> do
           BSC.hPutStr stdout "before-async-exception"
           BSC.hPutStr stderr "before-async-exception"
           throwIO ThreadKilled
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
-      pure ExitSuccess
+      pure []
 
 check :: FilePath -> IO ()
 check scratch = do
@@ -69,18 +73,20 @@ check scratch = do
       ack <- exact output 1
       unless (ack == BS.singleton 1) (fail "missing transaction acknowledgement")
       forRequest input output "stdout-overflow" $ \code out err -> do
-        unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.null err)
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.length err < 1024)
           (fail "oversized stdout did not produce bounded infrastructure failure")
         unless (BS.length out < 1024) (fail "overflow diagnostic is not bounded")
       forRequest input output "exact-aggregate" $ \code out err ->
-        unless (code == 0 && out == BS.replicate (limit `div` 2) 111
-            && err == BS.replicate (limit `div` 2) 101)
+        unless (code == 0 && out == successReport
+            && err == BS.replicate (limit `div` 2) 111
+              <> BS.replicate (limit - limit `div` 2 - BS.length successReport) 101
+            && BS.length out + BS.length err == limit)
           (fail "exact aggregate boundary was truncated or refused")
       forRequest input output "aggregate-overflow" $ \code out err ->
-        unless (code == 1 && BSC.isInfixOf "capture exceeds" out && BS.null err)
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.length out < 1024 && BS.null err)
           (fail "aggregate capture overflow was not refused")
       forRequest input output "next-request" $ \code out err ->
-        unless (code == 0 && out == "complete-next-request" && BS.null err)
+        unless (code == 0 && out == successReport && err == "complete-next-request")
           (fail "worker did not continue after oversized capture")
       BS.hPut input (BS.singleton 0)
       hFlush input
@@ -102,7 +108,7 @@ check scratch = do
       ackRecovered <- exact output 1
       unless (ackRecovered == BS.singleton 1) (fail "worker did not accept a later transaction")
       forRequest input output "next-request" $ \code out err ->
-        unless (code == 0 && out == "complete-next-request" && BS.null err)
+        unless (code == 0 && out == successReport && err == "complete-next-request")
           (fail "capture was not restored after an async handler exception")
       BS.hPut input (BS.singleton 0)
       hFlush input
@@ -129,8 +135,9 @@ checkPartialAcquisition scratch = do
       hFlush input
       ack <- exact output 1
       unless (ack == BS.singleton 1) (fail "missing limited transaction acknowledgement")
-      BS.hPut input (BS.singleton 1 <> frame "." <> put32 1 <> frame "partial-open")
-      hFlush input
+      forRequest input output "partial-open" $ \code out _ ->
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out)
+          (fail "partial capture acquisition did not deliver its single failure report")
       ackPartial <- timeout 10000000 (exact output 1)
       unless (ackPartial == Just (BS.singleton 1))
         (fail "second tempfile acquisition did not unwind the transaction")
@@ -139,7 +146,7 @@ checkPartialAcquisition scratch = do
       ackNext <- exact output 1
       unless (ackNext == BS.singleton 1) (fail "worker did not accept a later transaction")
       forRequest input output "next-request" $ \code out err ->
-        unless (code == 0 && out == "complete-next-request" && BS.null err)
+        unless (code == 0 && out == successReport && err == "complete-next-request")
           (fail "partial capture acquisition leaked resources")
       BS.hPut input (BS.singleton 0)
       hFlush input

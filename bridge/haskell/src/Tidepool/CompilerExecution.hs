@@ -14,13 +14,16 @@ import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
   (MVar, newMVar, newEmptyMVar, modifyMVar, modifyMVar_, putMVar, readMVar, tryPutMVar)
 import Control.Exception
-  (SomeException, SomeAsyncException, AsyncException(ThreadKilled), bracket, mask
-  , fromException, onException, throwIO, toException, try)
+  (SomeException, SomeAsyncException, AsyncException(ThreadKilled), mask
+  , fromException, throwIO, toException, try)
 import Control.Monad (forM_, when)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Word (Word64)
 import Tidepool.Timing (TaskAttempt(..), newTimingRequestIdentity)
+import Tidepool.RequestCompletion
+  ( Completion, CleanupStage(ExecutorStop), captureCompletion, withCompletionRelease
+  , attemptReleases, appendCleanupFailures, finishCompletion, PhaseSink, releaseWithPhase )
 
 -- | Positive, explicitly admitted module jobs. Ordinary callers stay serial
 -- until the enclosing owner supplies a qualified allocation.
@@ -51,8 +54,8 @@ requireCompilerExecutorOpen (CompilerExecutor _ _ state) = do
   ExecutorState closed _ _ <- readMVar state
   when closed (throwIO ThreadKilled)
 
-withCompilerExecutor :: CompilerExecutionGrant -> (CompilerExecutor -> IO a) -> IO a
-withCompilerExecutor grant use = mask $ \restore -> do
+withCompilerExecutor :: PhaseSink -> CompilerExecutionGrant -> (CompilerExecutor -> IO a) -> IO (Completion a)
+withCompilerExecutor sink grant use = mask $ \restore -> do
   queue <- newChan
   state <- newMVar (ExecutorState False 0 Map.empty)
   identity <- newTimingRequestIdentity
@@ -64,20 +67,34 @@ withCompilerExecutor grant use = mask $ \restore -> do
         when (not closed) (readChan queue >>= id >> worker)
       start = do
         done <- newEmptyMVar
-        thread <- forkFinally (restore worker) (const (putMVar done ()))
+        thread <- forkFinally (restore worker) (putMVar done)
         pure (thread, done)
       stop workers = do
-        pending <- modifyMVar state $ \(ExecutorState _ next known) ->
+        pending <- try $ modifyMVar state $ \(ExecutorState _ next known) ->
           pure (ExecutorState True next Map.empty, Map.elems known)
-        forM_ pending ($ toException ThreadKilled)
-        forM_ workers (killThread . fst)
-        forM_ workers (readMVar . snd)
+        let settle = case pending of
+              Left (failure :: SomeException) -> [throwIO failure]
+              Right callbacks -> map ($ toException ThreadKilled) callbacks
+            joined (_, done) = readMVar done >>= \outcome -> case outcome of
+              Right () -> pure ()
+              Left failure -> case fromException failure of
+                Just ThreadKilled -> pure ()
+                _ -> throwIO failure
+        failures <- attemptReleases
+          [(ExecutorStop, operation) | operation <- settle
+            ++ map (killThread . fst) workers ++ map joined workers]
+        completed <- captureCompletion (pure ())
+        finishCompletion (appendCleanupFailures completed failures)
       spawn 0 known = pure known
       spawn remaining known = do
-        worker' <- start `onException` stop known
-        spawn (remaining - 1) (worker' : known)
-  bracket (spawn (compilerModuleJobs grant) []) stop
-    (const (restore (use executor)))
+        started <- try start
+        case started of
+          Right worker' -> spawn (remaining - 1) (worker' : known)
+          Left (failure :: SomeException) ->
+            withCompletionRelease ExecutorStop (pure known) (releaseWithPhase sink ExecutorStop . stop)
+              (const (captureCompletion (throwIO failure))) >>= finishCompletion
+  withCompletionRelease ExecutorStop (spawn (compilerModuleJobs grant) []) (releaseWithPhase sink ExecutorStop . stop)
+    (const (captureCompletion (restore (use executor))))
 
 -- | Run task bodies on the shared allowance. Completion callbacks run on the
 -- coordinator as soon as a result arrives and may enqueue further work on
