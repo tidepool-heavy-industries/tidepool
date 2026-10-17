@@ -1221,6 +1221,22 @@ requestInputBoundaries = withScratch $ \directory ->
     unless (stableAlias == bytes) (fail "deleted durable alias changed captured consumption")
     BS.writeFile copy bytes
     revalidateRequestInputs transferredAlias >>= either fail pure
+    removeFile path
+    removeFile copy
+    let purpose = directory </> "protected-purpose-interface"
+    relocated <- either fail pure (aliasRequestInputs [(purpose,path,digest bytes)] owner)
+    (body,continued) <- withCapturedRequestInputTokens relocated (\reader -> reader purpose 3)
+    originalBody <- capturedRequestInputToken owner path (digest bytes)
+    unless (BSI.toForeignPtr (artifactBytes body) == BSI.toForeignPtr (artifactBytes originalBody)
+        && requestInputBytes continued == requestInputBytes owner)
+      (fail "new purpose path reopened a deleted source or copied its captured payload")
+    BS.writeFile other (BS.singleton 9)
+    (_,conflicting) <- captureRequestInputs (Just owner) (\reader -> reader other 3)
+    unless (case aliasRequestInputs [(other,path,digest bytes)] conflicting of Left _ -> True; _ -> False)
+      (fail "purpose alias replaced another captured path")
+    BS.writeFile path bytes
+    BS.writeFile copy bytes
+    BS.writeFile other bytes
     let config = "TIDEPOOL_REQUEST_CAPTURE_BYTES"
         restore Nothing = unsetEnv config
         restore (Just value) = setEnv config value
