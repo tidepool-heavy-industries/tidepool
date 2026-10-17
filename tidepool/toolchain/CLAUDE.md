@@ -60,6 +60,16 @@ its eligibility flags. Cache publication, source replay recipes and sealed
 compile-input reuse keep their stricter eligibility gates. Build actions also
 require the declared input closure; completed runtime output does not establish
 a hermetic build input proof.
+Prepared-fixture and completed-corpus source admission share the caller's
+`InventoryOperation`. The private parsed observation owner charges the existing
+length-times-64 decode allowance before serde, then lends structural facts to
+source-closure checks and consumes them through `CompletedSourceEvidence`.
+Parsed facts alone do not authenticate consumed bytes or negative witnesses.
+Build actions retain separate checks of the physical input and captured invocation
+text; exact receipts and later product certification retain their own boundaries.
+Standalone corpus validation creates one operation at its action boundary rather
+than resetting a budget for each validation.
+
 The native Suite corpus integration test uses completed source observations
 and the same declared-source-tree guard for its run-owned output. This checks
 observed Haskell bytes and import choices without converting compile-time

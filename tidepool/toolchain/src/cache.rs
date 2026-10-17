@@ -503,6 +503,7 @@ pub(crate) struct DependencyEvidenceWork {
 impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
+    #[cfg(test)]
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
         let completed = CompletedSourceEvidence::from_worker(bytes, input, source).ok()?;
         completed.cache_safe.then(|| completed.into_evidence())

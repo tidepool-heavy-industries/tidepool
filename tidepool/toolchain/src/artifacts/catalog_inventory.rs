@@ -208,7 +208,14 @@ mod tests {
             Phase::SourceEvidenceValidation,
         )
         .unwrap();
-        let result = crate::artifacts::validate_prepared_fixture_sources(&evidence, &source, &[]);
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let result = crate::artifacts::validate_prepared_fixture_sources(
+            &operation,
+            &evidence,
+            &source,
+            &[],
+        );
         assert!(result.is_err());
         let path = outcome(output.path(), &result).unwrap();
         let report: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -257,7 +264,14 @@ mod tests {
             Phase::SourceEvidenceValidation,
         )
         .unwrap();
-        let result = crate::artifacts::validate_prepared_fixture_sources(&evidence, &source, &[]);
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let result = crate::artifacts::validate_prepared_fixture_sources(
+            &operation,
+            &evidence,
+            &source,
+            &[],
+        );
         assert!(
             matches!(&result, Err(CompileError::ExtractFailed(message)) if message.contains("undeclared source"))
         );
