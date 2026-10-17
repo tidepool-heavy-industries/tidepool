@@ -821,6 +821,19 @@ fn publication_offer_references_require_exact_owners_through_snapshot_recovery()
         .unwrap()
         .snapshot_facts();
     assert!(!root_ids.contains(&later_root.identity().unwrap()));
+    let mut both = snapshot.clone();
+    both.offers
+        .insert(later_root.identity().unwrap(), later_root.clone());
+    let both_restored = restore_snapshot(published, &both).unwrap();
+    assert_eq!(
+        both_restored
+            .published_source_original_selections()
+            .unwrap()[0]
+            .context()
+            .semantic_sha256(),
+        published.semantic_sha256(),
+        "the same later offer restores successfully while the saved original owner remains"
+    );
     let mut substitute = missing;
     substitute
         .offers
