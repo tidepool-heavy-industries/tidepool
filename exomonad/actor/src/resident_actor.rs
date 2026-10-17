@@ -17413,8 +17413,8 @@ mod tests {
             crate::ContextReq::StageContextWith(tidepool_bridge_effects::ContextPatch {
                 changes: Vec::new(),
             }),
-            crate::ContextReq::SetNextModelWith("next-model".into()),
-            crate::ContextReq::SetNextEffortWith(crate::Reasoning::OpenAIReasoning(
+            crate::ContextReq::SetNextModelWith(crate::Model::CustomModel(crate::Backend::OpenAIPlan, "next-model".into())),
+            crate::ContextReq::SetNextReasoningWith(crate::Reasoning::OpenAIReasoning(
                 crate::OpenAIReasoning::OpenAIHigh,
             )),
         ];
