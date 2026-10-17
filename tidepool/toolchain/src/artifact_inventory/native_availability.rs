@@ -1,15 +1,80 @@
 use super::*;
 
+/// Exact dependency grants remain attached to their issuing owner. Request
+/// rows retain narrower per-original permissions than their supporting proofs.
+pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
+
+enum DependencyGrantSource<'a> {
+    Source(Vec<IssuedNativeOffer>),
+    Request(&'a [Arc<crate::declaration_context::NativeTransportAvailability>]),
+    #[cfg(test)]
+    Fixture(&'a [IssuedNativeOffer]),
+}
+
+impl<'a> NativeDependencyCatalog<'a> {
+    pub(crate) fn from_request(
+        rows: &'a [Arc<crate::declaration_context::NativeTransportAvailability>],
+    ) -> Self {
+        Self(DependencyGrantSource::Request(rows))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_fixture(offers: &'a [IssuedNativeOffer]) -> Self {
+        Self(DependencyGrantSource::Fixture(offers))
+    }
+
+    pub(crate) fn from_source(source: &CompilerSourceSupport) -> Result<Self, CompileError> {
+        let consumed = source
+            .native_offers()
+            .iter()
+            .map(|offer| offer.within_projection(source.projection(), source.artifacts()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(Self(DependencyGrantSource::Source(consumed)))
+    }
+
+    fn groups(
+        &self,
+        key: NativeGroupKey,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
+        let mut groups = imbl::OrdSet::new();
+        match &self.0 {
+            DependencyGrantSource::Request(rows) => {
+                for row in *rows {
+                    if let Some(support) = row.dependency_support(key, owner) {
+                        groups.extend(support.groups());
+                    }
+                }
+            }
+            DependencyGrantSource::Source(offers) => {
+                for offer in offers {
+                    groups.extend(offer.group_bindings(key));
+                }
+            }
+            #[cfg(test)]
+            DependencyGrantSource::Fixture(offers) => {
+                for offer in *offers {
+                    groups.extend(offer.group_bindings(key));
+                }
+            }
+        }
+        Ok(groups)
+    }
+}
+
 /// Fresh bodies can depend on an available group without selecting it for
 /// execution. Resolve only their certified imports from the supplied offers;
 /// proof roots remain separate from these dependency choices.
-pub(super) fn bind_fresh_product_dependencies<'a>(
+pub(super) fn bind_fresh_product_dependencies(
     state: &InventoryState,
     parent: &ArtifactView,
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
-    offers: impl IntoIterator<Item = &'a IssuedNativeOffer>,
+    dependencies: &NativeDependencyCatalog<'_>,
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<(), CompileError> {
     let namespace = parent.namespace();
@@ -53,17 +118,30 @@ pub(super) fn bind_fresh_product_dependencies<'a>(
         return Ok(());
     }
     let mut offered = imbl::OrdSet::new();
-    for offer in offers {
-        for key in &wanted {
-            for group in offer.group_bindings(*key) {
-                let node = InventoryNodeKey::Group(group);
-                if !state.contains_node(&node) {
-                    return Err(failure(
-                        "issued dependency scope is outside receiving inventory",
-                    ));
-                }
-                offered.insert(node);
-            }
+    for key in &wanted {
+        let ArtifactPayload::Original(product) = &entries[&key.artifact].payload else {
+            unreachable!("certified dependency has an original owner")
+        };
+        offered.extend(
+            dependencies
+                .groups(*key, product.owner())?
+                .into_iter()
+                .map(InventoryNodeKey::Group),
+        );
+    }
+    // Issued bindings must still be in this admission's retained custody.
+    // Following their immutable edges does not choose another historical offer.
+    for node in &offered {
+        if !state.contains_node(node)
+            || admitted_closure(state, [*node].into_iter())
+                .iter()
+                .any(|node| !projection.nodes.contains(node))
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: node.artifact(),
+                },
+            ));
         }
     }
     let index = NativeSelectionIndex::build(state, &offered);
@@ -284,6 +362,15 @@ impl NativeOfferContribution {
 
     pub(crate) fn originals(&self) -> &BTreeSet<ArtifactId> {
         &self.originals
+    }
+
+    pub(crate) fn groups(
+        &self,
+        key: NativeGroupKey,
+    ) -> impl Iterator<Item = NativeGroupBinding> + '_ {
+        self.offer
+            .group_bindings(key)
+            .filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group)))
     }
 
     pub(crate) fn permits(&self, key: NativeGroupKey) -> bool {
@@ -1024,6 +1111,25 @@ impl IssuedNativeOffer {
             })
     }
 
+    /// Consume this issuer's complete private body beside an exact type role.
+    /// Body availability does not select an original or executable roots.
+    pub(crate) fn qualified_private_availability(
+        &self,
+        projection: &CompilerInputProjection,
+        namespace: &ArtifactView,
+    ) -> Option<&QualifiedNativeAvailability> {
+        let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
+            return None;
+        };
+        let role = projection.snapshot_roles().get(&self.0.owner)?;
+        (role.interface() == self.0.interface
+            && role
+                .original()
+                .is_none_or(|original| original == self.0.original)
+            && qualification.matches_namespace(namespace))
+        .then_some(qualification)
+    }
+
     pub(crate) fn issued_group_carriers(
         &self,
     ) -> Result<BTreeMap<NativeGroupBinding, ArtifactBinding>, CompileError> {
@@ -1240,6 +1346,12 @@ impl IssuedNativeOffer {
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
+        if self
+            .qualified_private_availability(projection, namespace)
+            .is_some()
+        {
+            return Ok(Some(self.clone()));
+        }
         // Matching roles propagate the existing opaque issuance directly.
         // Only a different or absent role needs dependency relevance.
         let contributes = || -> Result<bool, CompileError> {

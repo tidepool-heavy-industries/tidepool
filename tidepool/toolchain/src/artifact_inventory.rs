@@ -21,7 +21,8 @@ pub(crate) use compiler_projection::{
     CompilerSourceSupport, IssuedInputNativeDecisions, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
-    validate_consumed_native_namespace, IssuedNativeOffer, NativeOfferContribution,
+    validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
+    NativeOfferContribution,
 };
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
@@ -983,7 +984,7 @@ enum ArtifactRootIntent<'a> {
     PrivateAvailability {
         projection: &'a CompilerInputProjection,
         selected: &'a [IssuedNativeOffer],
-        dependencies: &'a [IssuedNativeOffer],
+        dependencies: &'a NativeDependencyCatalog<'a>,
     },
     Offered(&'a CompilerInputProjection, &'a [IssuedNativeOffer]),
 }
@@ -3372,8 +3373,9 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        offers: &[IssuedNativeOffer],
+        contributions: &compiler_projection::NativeNamespaceContributions,
     ) -> Result<ArtifactView, CompileError> {
+        let offers = contributions.offers();
         let offered = projection
             .roles()
             .iter()
@@ -3403,9 +3405,10 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        availability: &[IssuedNativeOffer],
-        dependencies: &[IssuedNativeOffer],
+        contributions: &compiler_projection::NativeNamespaceContributions,
+        dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<native_availability::CheckedNativeAvailability, CompileError> {
+        let availability = contributions.offers();
         self.check_complete_availability_offers(projection, availability)?;
         let groups = entries
             .iter()
@@ -3466,9 +3469,10 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
-        availability: &[IssuedNativeOffer],
-        dependencies: &[IssuedNativeOffer],
+        contributions: &compiler_projection::NativeNamespaceContributions,
+        dependencies: &NativeDependencyCatalog<'_>,
     ) -> Result<ArtifactView, CompileError> {
+        let availability = contributions.offers();
         self.check_complete_availability_offers(projection, availability)?;
         self.admit_shared_with_intent(
             parent,
@@ -3787,12 +3791,7 @@ impl ArtifactInventory {
                 }
             }
         }
-        if let ArtifactRootIntent::PrivateAvailability {
-            selected: availability,
-            dependencies,
-            ..
-        } = root_intent
-        {
+        if let ArtifactRootIntent::PrivateAvailability { dependencies, .. } = root_intent {
             native_availability::bind_fresh_product_dependencies(
                 &state,
                 parent,
@@ -3801,7 +3800,7 @@ impl ArtifactInventory {
                     .expect("private compiler namespace"),
                 &selected,
                 &groups,
-                availability.iter().chain(dependencies),
+                dependencies,
                 &mut required_groups,
             )?;
         }
