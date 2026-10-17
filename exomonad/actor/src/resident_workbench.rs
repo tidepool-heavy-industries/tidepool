@@ -1665,7 +1665,7 @@ pub(crate) struct ActorGeneration {
     pub(crate) durable: Option<tidepool_runtime::session::ActiveNotebookGeneration>,
 }
 
-pub(crate) enum PreparedGenerationCommit {
+enum PreparedGenerationCommit {
     Restored {
         selected: tidepool_runtime::session::ActiveNotebookGeneration,
         readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
@@ -1680,13 +1680,160 @@ pub(crate) enum PreparedGenerationCommit {
     },
 }
 
+/// One owner-issued generation selection, consumed by publication.
+/// Preparation binds immutable facts; publication still checks the live actor,
+/// current snapshot, native readiness and cancellation claim under its fence.
 pub(crate) struct PreparedActorGeneration {
+    checkout_context: crate::ActorSessionContext,
+    expected: ActorRequestSnapshot,
+    prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    configuration_digest: [u8; 32],
+    reload_report: Option<PreparedReloadReport>,
     installation: InstalledToolLease,
     context: crate::ActorSessionContext,
     scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     commit: PreparedGenerationCommit,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
 }
+
+static_assertions::assert_not_impl_any!(PreparedActorGeneration: Clone, Copy);
+
+/// Immutable rendering evidence, never publication authority.
+#[derive(Clone)]
+pub(crate) struct PreparedReloadReport {
+    pub(crate) previous: tidepool_bridge_effects::SrRevision,
+    pub(crate) candidate: tidepool_bridge_effects::SrRevision,
+    pub(crate) changed_modules: Vec<String>,
+    pub(crate) surface: tidepool_bridge_effects::RlSurfaceDiff,
+}
+
+impl PreparedActorGeneration {
+    pub(crate) fn reload_report(&self) -> Option<&PreparedReloadReport> {
+        self.reload_report.as_ref()
+    }
+}
+
+/// The existing actor issuance fence and machine owner, with no source issuer.
+pub(crate) struct ActorGenerationPublisher<H, O> {
+    access: ResidentMachineAccess<H, O>,
+    state: Arc<InstalledToolsState>,
+}
+
+impl<H, O> ActorGenerationPublisher<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    pub(crate) async fn publish(
+        &self,
+        prepared: PreparedActorGeneration,
+        publication: Arc<tidepool_runtime::session::PublicationDecision>,
+        publication_kind: ActorGenerationPublication,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let state = self.state.clone();
+        self.access.with_machine(prepared.checkout_context.clone(), move |session, _, _| {
+            let mut current = state.0.lock();
+            let same = match (&*current, &prepared.expected) {
+                (InstalledToolsAvailability::Generation(active), ActorRequestSnapshot::Generation(expected)) => Arc::ptr_eq(active,expected),
+                (InstalledToolsAvailability::Available(active), ActorRequestSnapshot::Bootstrap(expected)) => active.actor() == expected.actor()
+                    && active.source().same_revision(expected.source())
+                    && match (&active.tools, &expected.tools) { (Some(a),Some(b))=>Arc::ptr_eq(a,b),(None,None)=>true,_=>false },
+                _ => false,
+            };
+            if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
+            let PreparedActorGeneration { installation, context, scope, commit, public_owner, prompts, configuration_digest, .. } = prepared;
+            let mut visible = None;
+            match commit {
+                PreparedGenerationCommit::Restored { selected, readiness } => {
+                    let canonical = selected.owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL);
+                    let observed = session.active_notebook_generation(&canonical).map_err(ResidentError::Session)?;
+                    if observed.as_ref() != Some(&selected) || !readiness.is_current() {
+                        return Ok(ActorGenerationCommit::Refused("restored generation changed before adoption".into()));
+                    }
+                    installation.verify_recovered_generation(&selected.references).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                    if prompts != selected.references.prompts {
+                        return Ok(ActorGenerationCommit::Refused("restored prompt snapshot changed before adoption".into()));
+                    }
+                    let owner = public_owner.bind(Some(readiness));
+                    let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
+                    *current = InstalledToolsAvailability::Generation(generation.clone());
+                    visible=Some((generation, false));
+                },
+                PreparedGenerationCommit::Ephemeral { id, source } => {
+                    let owner = public_owner.bind(None);
+                    let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
+                    if let Some(source) = source {
+                        if let Err(error) = session.publish_source_originals(source) {
+                            claim.before_rename_failure();
+                            return Err(error.into());
+                        }
+                    }
+                    let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
+                    *current = InstalledToolsAvailability::Generation(generation.clone());
+                    let cancellation_pending = match publication_kind {
+                        ActorGenerationPublication::Terminal => claim.published(),
+                        ActorGenerationPublication::Continuing => claim.published_continuing(),
+                    };
+                    visible = Some((generation, cancellation_pending));
+                },
+                PreparedGenerationCommit::Durable { prepared, selected } => {
+                    let on_visible = |readiness| {
+                        let owner = public_owner.bind(Some(readiness));
+                        let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
+                        *current = InstalledToolsAvailability::Generation(generation.clone());
+                        visible = Some((generation, false));
+                    };
+                    let result = match publication_kind {
+                        ActorGenerationPublication::Terminal => session
+                            .commit_notebook_generation(prepared, &publication, on_visible),
+                        ActorGenerationPublication::Continuing => session
+                            .commit_notebook_generation_continuing(prepared, &publication, on_visible),
+                    };
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
+                            if let InstalledToolsAvailability::Generation(generation) = &*current {
+                                *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                            }
+                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                        },
+                        Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
+                    };
+                    match result {
+                        tidepool_runtime::session::DurablePublicOwnerPublication::CommittedContinuing { cancellation_pending, .. } => {
+                            visible = visible.map(|(generation, _)| (generation, cancellation_pending));
+                        },
+                        tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
+                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),
+                        tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
+                            if let InstalledToolsAvailability::Generation(generation) = &*current {
+                                *current = InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                            }
+                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                        },
+                    }
+                },
+            }
+            match visible {
+                Some((generation, cancellation_pending)) => Ok(ActorGenerationCommit::Published {
+                    generation,
+                    cancellation_pending,
+                }),
+                None => {
+                    if let InstalledToolsAvailability::Generation(generation)=&*current {
+                        *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                    }
+                    Ok(ActorGenerationCommit::Unconfirmed("native publication confirmed without its live generation; admission requires reconciliation".into()))
+                },
+            }
+        }).await
+    }
+}
+
+mod reload_preparation;
+pub(crate) use reload_preparation::{
+    HasReloadPreparation, ReloadPreparationOutcome, ReloadPreparationServices,
+};
 
 pub(crate) enum ActorGenerationCommit {
     Published {
@@ -1860,10 +2007,6 @@ impl InstalledToolsState {
         self.snapshot()?.generation().cloned()
     }
 
-    pub(crate) fn publish_generation(&self, generation: Arc<ActorGeneration>) {
-        *self.0.lock() = InstalledToolsAvailability::Generation(generation);
-    }
-
     /// Publish against the exact admitted implementation. Accepted calls retain
     /// their immutable lease, including when this actor replaces its own tools.
     pub(crate) fn replace_explicit(
@@ -1986,14 +2129,56 @@ where
             .await
     }
 
-    pub(crate) async fn prepare_actor_generation(
+    /// Startup preparation derives its expected bootstrap from the actual owner.
+    /// Reload preparation uses its separately admitted immutable generation.
+    pub(crate) async fn prepare_initial_generation(
+        &self,
+        state: Arc<InstalledToolsState>,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        installation: InstalledToolLease,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
+        let expected = state.snapshot().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "initial generation lost bootstrap source custody".into(),
+            )
+        })?;
+        if !matches!(expected, ActorRequestSnapshot::Bootstrap(_)) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "initial generation already published".into(),
+            ));
+        }
+        self.prepare_actor_generation(context, descriptor, expected, installation, prompts)
+            .await
+    }
+
+    async fn prepare_actor_generation(
         &self,
         context: crate::ActorSessionContext,
         descriptor: crate::ActorDescriptor,
-        expected: Option<Arc<ActorGeneration>>,
-        references: tidepool_runtime::session::DurableGenerationReferences,
+        expected_snapshot: ActorRequestSnapshot,
         installation: InstalledToolLease,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
+        if context.actor != installation.actor()
+            || expected_snapshot.installation().actor() != context.actor
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "generation preparation actor does not own installation".into(),
+            ));
+        }
+        let evidence = installation.source().generation_evidence().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "generation preparation has no issued source evidence".into(),
+            )
+        })?;
+        let configuration_digest = evidence.configuration_digest;
+        let references = installation
+            .generation_references(evidence.reference.clone(), prompts.clone())
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let expected = expected_snapshot.generation().cloned();
+        let checkout_context = context.clone();
         installation
             .verify_recovered_generation(&references)
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
@@ -2089,6 +2274,11 @@ where
                     native_owner,
                 )?;
                 Ok(PreparedActorGeneration {
+                    checkout_context,
+                    expected: expected_snapshot,
+                    prompts,
+                    configuration_digest,
+                    reload_report: None,
                     installation,
                     context: next_context,
                     scope,
@@ -2101,125 +2291,14 @@ where
 
     /// The existing machine checkout and one actor issuance fence own publication.
     /// Native code preparation and immutable artifact capture finish beforehand.
-    pub(crate) async fn commit_actor_generation(
+    pub(crate) fn generation_publisher(
         &self,
-        context: crate::ActorSessionContext,
-        _descriptor: crate::ActorDescriptor,
         state: Arc<InstalledToolsState>,
-        expected: ActorRequestSnapshot,
-        prepared: PreparedActorGeneration,
-        installation: InstalledToolLease,
-        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-        configuration_digest: [u8; 32],
-        publication: Arc<tidepool_runtime::session::PublicationDecision>,
-        publication_kind: ActorGenerationPublication,
-    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
-        self.access.with_machine(context, move |session, _, _| {
-            let mut current = state.0.lock();
-            let same = match (&*current, &expected) {
-                (InstalledToolsAvailability::Generation(active), ActorRequestSnapshot::Generation(expected)) => Arc::ptr_eq(active,expected),
-                (InstalledToolsAvailability::Available(active), ActorRequestSnapshot::Bootstrap(expected)) => active.actor() == expected.actor()
-                    && active.source().same_revision(expected.source())
-                    && match (&active.tools, &expected.tools) { (Some(a),Some(b))=>Arc::ptr_eq(a,b),(None,None)=>true,_=>false },
-                _ => false,
-            };
-            if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
-            let PreparedActorGeneration { installation: selected_installation, context, scope, commit,public_owner } = prepared;
-            if selected_installation.actor() != installation.actor()
-                || !selected_installation.source().same_revision(installation.source())
-                || match (&selected_installation.tools, &installation.tools) {
-                    (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
-                    (None, None) => false,
-                    _ => true,
-                }
-            {
-                return Ok(ActorGenerationCommit::Refused("prepared generation selects a different installation".into()));
-            }
-            let mut visible = None;
-            match commit {
-                PreparedGenerationCommit::Restored { selected, readiness } => {
-                    let canonical = selected.owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL);
-                    let observed = session.active_notebook_generation(&canonical).map_err(ResidentError::Session)?;
-                    if observed.as_ref() != Some(&selected) || !readiness.is_current() {
-                        return Ok(ActorGenerationCommit::Refused("restored generation changed before adoption".into()));
-                    }
-                    installation.verify_recovered_generation(&selected.references).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                    if prompts != selected.references.prompts {
-                        return Ok(ActorGenerationCommit::Refused("restored prompt snapshot changed before adoption".into()));
-                    }
-                    let owner = public_owner.bind(Some(readiness));
-                    let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
-                    *current = InstalledToolsAvailability::Generation(generation.clone());
-                    visible=Some((generation, false));
-                },
-                PreparedGenerationCommit::Ephemeral { id, source } => {
-                    let owner = public_owner.bind(None);
-                    let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
-                    if let Some(source) = source {
-                        if let Err(error) = session.publish_source_originals(source) {
-                            claim.before_rename_failure();
-                            return Err(error.into());
-                        }
-                    }
-                    let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
-                    *current = InstalledToolsAvailability::Generation(generation.clone());
-                    let cancellation_pending = match publication_kind {
-                        ActorGenerationPublication::Terminal => claim.published(),
-                        ActorGenerationPublication::Continuing => claim.published_continuing(),
-                    };
-                    visible = Some((generation, cancellation_pending));
-                },
-                PreparedGenerationCommit::Durable { prepared, selected } => {
-                    let on_visible = |readiness| {
-                        let owner = public_owner.bind(Some(readiness));
-                        let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
-                        *current = InstalledToolsAvailability::Generation(generation.clone());
-                        visible = Some((generation, false));
-                    };
-                    let result = match publication_kind {
-                        ActorGenerationPublication::Terminal => session
-                            .commit_notebook_generation(prepared, &publication, on_visible),
-                        ActorGenerationPublication::Continuing => session
-                            .commit_notebook_generation_continuing(prepared, &publication, on_visible),
-                    };
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
-                            if let InstalledToolsAvailability::Generation(generation) = &*current {
-                                *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
-                            }
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
-                        },
-                        Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
-                    };
-                    match result {
-                        tidepool_runtime::session::DurablePublicOwnerPublication::CommittedContinuing { cancellation_pending, .. } => {
-                            visible = visible.map(|(generation, _)| (generation, cancellation_pending));
-                        },
-                        tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
-                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),
-                        tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
-                            if let InstalledToolsAvailability::Generation(generation) = &*current {
-                                *current = InstalledToolsAvailability::GenerationUnavailable(generation.clone());
-                            }
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
-                        },
-                    }
-                },
-            }
-            match visible {
-                Some((generation, cancellation_pending)) => Ok(ActorGenerationCommit::Published {
-                    generation,
-                    cancellation_pending,
-                }),
-                None => {
-                    if let InstalledToolsAvailability::Generation(generation)=&*current {
-                        *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
-                    }
-                    Ok(ActorGenerationCommit::Unconfirmed("native publication confirmed without its live generation; admission requires reconciliation".into()))
-                },
-            }
-        }).await
+    ) -> ActorGenerationPublisher<H, O> {
+        ActorGenerationPublisher {
+            access: self.access.sharing(),
+            state,
+        }
     }
 }
 
@@ -6084,7 +6163,7 @@ where
     }
 
     /// Prepare a replacement without publishing into its continuing namespace.
-    pub(crate) fn prepare_candidate_tools<'a>(
+    fn prepare_candidate_tools<'a>(
         &'a self,
         context: crate::ActorSessionContext,
         install: u64,
@@ -19446,29 +19525,20 @@ pub(crate) mod request_tests {
             let prompts = tidepool_runtime::session::ComposedPromptSnapshot::capture(
                 "quoted generation".into(),
             );
-            let references = installation
-                .generation_references(source_reference, prompts.clone())
-                .unwrap();
             let prepared = workbench
-                .prepare_actor_generation(
+                .prepare_initial_generation(
+                    state.clone(),
                     context.clone(),
                     descriptor.clone(),
-                    None,
-                    references.clone(),
                     installation.clone(),
+                    prompts.clone(),
                 )
                 .await
                 .unwrap();
             let initial = match workbench
-                .commit_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    state.clone(),
-                    ActorRequestSnapshot::Bootstrap(installation.clone()),
+                .generation_publisher(state.clone())
+                .publish(
                     prepared,
-                    installation.clone(),
-                    prompts.clone(),
-                    [0; 32],
                     tidepool_runtime::session::PublicationDecision::new(),
                     ActorGenerationPublication::Terminal,
                 )
@@ -19510,17 +19580,14 @@ pub(crate) mod request_tests {
             );
             let next_installation =
                 InstalledToolLease::new(context.actor, generation_source.clone(), Some(candidate));
-            let next_references = next_installation
-                .generation_references(references.source.clone(), prompts.clone())
-                .unwrap();
             for cancelled in [false, true] {
                 let rejected = workbench
                     .prepare_actor_generation(
                         context.clone(),
                         descriptor.clone(),
-                        Some(initial.clone()),
-                        next_references.clone(),
+                        ActorRequestSnapshot::Generation(initial.clone()),
                         next_installation.clone(),
+                        prompts.clone(),
                     )
                     .await
                     .unwrap();
@@ -19536,25 +19603,14 @@ pub(crate) mod request_tests {
                     .unwrap()
                     .unwrap()
                     .revision;
-                let supplied = if cancelled {
-                    next_installation.clone()
-                } else {
-                    installation.clone()
-                };
                 assert!(matches!(
                     workbench
-                        .commit_actor_generation(
-                            context.clone(),
-                            descriptor.clone(),
-                            state.clone(),
-                            ActorRequestSnapshot::Generation(initial.clone()),
-                            rejected,
-                            supplied,
-                            prompts.clone(),
-                            [0; 32],
-                            decision,
-                            ActorGenerationPublication::Terminal
-                        )
+                        .generation_publisher(if cancelled {
+                            state.clone()
+                        } else {
+                            Arc::new(InstalledToolsState::default())
+                        })
+                        .publish(rejected, decision, ActorGenerationPublication::Terminal,)
                         .await
                         .unwrap(),
                     ActorGenerationCommit::Refused(_)
@@ -19567,7 +19623,7 @@ pub(crate) mod request_tests {
                         .unwrap()
                         .revision,
                     revision,
-                    "cancelled or mismatched generation writes no public manifest"
+                    "cancelled or unavailable publication owner writes no public manifest"
                 );
                 let old = before.clone();
                 workbench
@@ -19589,13 +19645,44 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
             }
+            let stale = workbench
+                .prepare_actor_generation(
+                    context.clone(),
+                    descriptor.clone(),
+                    ActorRequestSnapshot::Generation(initial.clone()),
+                    next_installation.clone(),
+                    prompts.clone(),
+                )
+                .await
+                .unwrap();
+            state
+                .replace_explicit(
+                    &initial.installation,
+                    initial.installation.tools_arc().unwrap(),
+                )
+                .unwrap();
+            let current = state.current_generation().unwrap();
+            assert!(!Arc::ptr_eq(&initial, &current));
+            assert!(matches!(
+                workbench
+                    .generation_publisher(state.clone())
+                    .publish(
+                        stale,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        ActorGenerationPublication::Terminal,
+                    )
+                    .await
+                    .unwrap(),
+                ActorGenerationCommit::Refused(_)
+            ));
+            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &current));
             let prepared = workbench
                 .prepare_actor_generation(
                     context.clone(),
                     descriptor.clone(),
-                    Some(initial.clone()),
-                    next_references,
+                    ActorRequestSnapshot::Generation(current),
                     next_installation.clone(),
+                    prompts.clone(),
                 )
                 .await
                 .unwrap();
@@ -19654,15 +19741,9 @@ pub(crate) mod request_tests {
                 "an unrelated public owner forces the prepared replacement to rebase"
             );
             let replacement = match workbench
-                .commit_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    state.clone(),
-                    ActorRequestSnapshot::Generation(initial.clone()),
+                .generation_publisher(state.clone())
+                .publish(
                     prepared,
-                    next_installation,
-                    prompts,
-                    [0; 32],
                     tidepool_runtime::session::PublicationDecision::new(),
                     ActorGenerationPublication::Terminal,
                 )
@@ -19675,6 +19756,7 @@ pub(crate) mod request_tests {
             crate::resident_actor::pinned_endpoint_generation_tests::assert_pinned_preflight(
                 ResidentActorRunner::new(Arc::clone(&workbench.access.machines), source.clone()),
                 descriptor.clone(),
+                state.clone(),
                 initial.clone(),
                 replacement.clone(),
                 pinned_endpoint.clone(),

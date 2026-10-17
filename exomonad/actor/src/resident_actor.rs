@@ -8656,41 +8656,27 @@ where
         else {
             return Ok(());
         };
-        let Some(evidence) = tools.source().generation_evidence() else {
+        let Some(_) = tools.source().generation_evidence() else {
             return Ok(());
         };
-        let expected = self.installed_tools.snapshot().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "initial generation lost bootstrap source custody".into(),
-            )
-        })?;
-        let references = tools
-            .generation_references(evidence.reference.clone(), prompts.clone())
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let context = self
             .descriptor
             .session_context(context.actor)
             .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
+        let publisher = workbench.generation_publisher(self.installed_tools.clone());
         let prepared = workbench
-            .prepare_actor_generation(
-                context.clone(),
-                self.descriptor.clone(),
-                None,
-                references,
-                tools.clone(),
-            )
-            .await?;
-        match workbench
-            .commit_actor_generation(
+            .prepare_initial_generation(
+                self.installed_tools.clone(),
                 context,
                 self.descriptor.clone(),
-                self.installed_tools.clone(),
-                expected,
-                prepared,
                 tools.clone(),
                 prompts.clone(),
-                evidence.configuration_digest,
+            )
+            .await?;
+        match publisher
+            .publish(
+                prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )

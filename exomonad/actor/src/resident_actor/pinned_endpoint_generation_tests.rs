@@ -37,6 +37,7 @@ impl crate::ActorSourceLayers for IssuedSourceService {
 pub(crate) fn assert_pinned_preflight(
     runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
     descriptor: ActorDescriptor,
+    state: Arc<crate::resident_workbench::InstalledToolsState>,
     initial: Arc<ActorGeneration>,
     replacement: Arc<ActorGeneration>,
     pinned: InstalledToolSelection,
@@ -57,9 +58,7 @@ pub(crate) fn assert_pinned_preflight(
     );
     behavior.policy_installed = true;
     behavior.standing = ResidentStanding::Workbench;
-    behavior
-        .installed_tools
-        .publish_generation(replacement.clone());
+    behavior.installed_tools = state;
 
     for (selected, expected) in [
         (pinned, initial),
