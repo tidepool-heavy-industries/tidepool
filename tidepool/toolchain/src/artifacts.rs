@@ -2365,7 +2365,7 @@ impl SelectedModuleCandidateOffer {
                 let artifacts =
                     crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                         source_segment.original_products(physical, &validation.inventory)?,
-                        &physical.compiler_inputs().artifacts,
+                        physical.compiler_inputs().artifacts(),
                         &mut validation,
                     )?;
                 let mut bound = BoundSegment {
@@ -2383,7 +2383,7 @@ impl SelectedModuleCandidateOffer {
                         .as_ref()
                         .expect("exact segment")
                         .compiler_inputs()
-                        .artifacts
+                        .artifacts()
                         .clone(),
                     groups: bound
                         .offer

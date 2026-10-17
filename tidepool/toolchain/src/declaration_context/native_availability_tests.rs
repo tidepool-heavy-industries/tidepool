@@ -1119,7 +1119,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .cloned()
             .unwrap();
         assert_eq!(
-            dependency(&retained, &request.compiler_inputs().artifacts),
+            dependency(&retained, request.compiler_inputs().artifacts()),
             expected
         );
         assert_eq!(wire_mode(&request, "PrivateConsumer"), full_mode());
@@ -1311,7 +1311,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         &full,
         &[
             ancestor_offer.clone(),
-            dependency_offer,
+            dependency_offer.clone(),
             unrelated_offer.clone(),
         ],
     )
@@ -1358,23 +1358,26 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     assert_ne!(replacement_b.descriptor.id, b_id);
     let b = base.select_roots(vec![b_id]).unwrap();
     let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
-    let b_metadata = b_projection
-        .project_metadata(b.metadata_snapshot())
+    let b_context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer: producer.sha256(),
+        compiler_support: recover_fixture_compiler_support(
+            b_projection.clone(),
+            b.clone(),
+            [ancestor_offer.clone(), dependency_offer.clone()],
+        )
+        .unwrap(),
+        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let inputs = ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&b_context, None)
         .unwrap();
-    let b_transport = NativeCompilerTransport {
-        metadata: b_projection
-            .project_metadata(b.metadata_snapshot())
-            .unwrap(),
-        availability: BTreeMap::from([(b_id, receipt)]),
-    };
-    let inputs = RequestCompilerInputs {
-        projection: b_projection.clone(),
-        metadata: b_metadata,
-        artifacts: b.clone(),
-        native_transport: b_transport,
-        declaration_semantic_sha256: [0; 32],
-        original_sources: Default::default(),
-    };
+    let owned_receipt = inputs.native_availability(b_id).unwrap();
+    assert_eq!(owned_receipt.offers().len(), 2);
+    assert!(owned_receipt.permits(7));
+    assert!(!owned_receipt.permits(9001));
+    drop(owned_receipt);
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         &inputs,
@@ -1383,6 +1386,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     )
     .unwrap();
     drop(inputs);
+    drop(b_context);
+    drop(dependency_offer);
     drop(transport);
     drop(metadata);
     drop(unrelated_offer);
@@ -1619,7 +1624,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             assert_eq!(requirements.as_slice(), &[chosen.proof().unwrap().clone()]);
             assert_eq!(
                 requirements[0]
-                    .issued_group_carriers(&request.compiler_inputs().artifacts)
+                    .issued_group_carriers(request.compiler_inputs().artifacts())
                     .unwrap(),
                 chosen.issued_group_carriers().unwrap()
             );
@@ -1772,7 +1777,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
         assert_eq!(
             request
                 .compiler_inputs()
-                .artifacts
+                .artifacts()
                 .capture_graph_selection()
                 .roots,
             baseline_roots
@@ -2432,7 +2437,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     assert!(
         request
             .compiler_inputs()
-            .projection
+            .projection()
             .snapshot_roles()
             .get(&helper_owner)
             .unwrap()
@@ -4248,7 +4253,7 @@ fn replay_native_transport_history(
     coverage.preparations += 1;
     let inputs = request.compiler_inputs();
     assert!(inputs.metadata.retained.selected_native_groups.is_empty());
-    let roles = inputs.projection.snapshot_roles();
+    let roles = inputs.projection().snapshot_roles();
     let role = &roles[&entries[0].descriptor.owner];
     assert!(
         role.original().is_none(),
@@ -4265,7 +4270,7 @@ fn replay_native_transport_history(
     for index in 0..2 {
         assert!(inputs.native_original_requirements().iter().any(|proof| {
             proof.original == proofs[index].original
-                && proof.issued_group_carriers(&inputs.artifacts).unwrap() == expected[index]
+                && proof.issued_group_carriers(inputs.artifacts()).unwrap() == expected[index]
         }));
     }
     let validation = PackageInterfaceValidation::default();
@@ -4279,14 +4284,14 @@ fn replay_native_transport_history(
         inputs
             .artifacts
             .inventory()
-            .bind_segment(&inputs.artifacts, vec![], &selected)
+            .bind_segment(inputs.artifacts(), vec![], &selected)
     };
     for index in 0..2 {
         let mut fixed = bind().unwrap();
         let imports = [source_import(&products[index + 1], 7)];
-        let admitted = inputs.artifacts.inventory().admit_bound_target(
+        let admitted = inputs.artifacts().inventory().admit_bound_target(
             &mut fixed,
-            &inputs.artifacts,
+            inputs.artifacts(),
             NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
             &selected,
@@ -4311,9 +4316,9 @@ fn replay_native_transport_history(
     }
     let mut fixed = bind().unwrap();
     let imports = [source_import(&products[0], 7)];
-    let demanded = inputs.artifacts.inventory().admit_bound_target(
+    let demanded = inputs.artifacts().inventory().admit_bound_target(
         &mut fixed,
-        &inputs.artifacts,
+        inputs.artifacts(),
         NativeArtifactDemand::CertifiedTargetImports(&imports),
         vec![],
         &selected,
@@ -4334,7 +4339,7 @@ fn replay_native_transport_history(
         assert_eq!(groups, BTreeSet::from([child(0).0]));
         coverage.successful_demands += 1;
     }
-    let handoff = OriginalCompilerInputs::from_selection(&selected, &inputs.artifacts).unwrap();
+    let handoff = OriginalCompilerInputs::from_selection(&selected, inputs.artifacts()).unwrap();
     let next = ExactCompileContext::new(base_context.clone())
         .prepare_compilation_with_private_input(
             &root.path().join("handoff"),
@@ -4344,8 +4349,8 @@ fn replay_native_transport_history(
         )
         .unwrap();
     let encoded = serde_json::to_vec(&(
-        next.compiler_inputs().artifacts.capture_graph_selection(),
-        next.compiler_inputs().artifacts.binding_dependencies(),
+        next.compiler_inputs().artifacts().capture_graph_selection(),
+        next.compiler_inputs().artifacts().binding_dependencies(),
     ))
     .unwrap();
     let (graph, edges): (ArtifactGraphSelection, Vec<_>) =
@@ -4355,7 +4360,7 @@ fn replay_native_transport_history(
     let restored = recovery
         .recover_selection(
             &recovery.empty_view(),
-            next.compiler_inputs().artifacts.entries(),
+            next.compiler_inputs().artifacts().entries(),
             &graph,
             &edges,
         )
@@ -4480,8 +4485,8 @@ fn replay_native_transport_history(
     let (continued_graph, continued_edges): (ArtifactGraphSelection, Vec<_>) =
         serde_json::from_slice(
             &serde_json::to_vec(&(
-                continued_inputs.artifacts.capture_graph_selection(),
-                continued_inputs.artifacts.binding_dependencies(),
+                continued_inputs.artifacts().capture_graph_selection(),
+                continued_inputs.artifacts().binding_dependencies(),
             ))
             .unwrap(),
         )
@@ -4491,13 +4496,13 @@ fn replay_native_transport_history(
     let reopened = fresh
         .recover_selection(
             &fresh.empty_view(),
-            continued_inputs.artifacts.entries(),
+            continued_inputs.artifacts().entries(),
             &continued_graph,
             &continued_edges,
         )
         .unwrap();
     coverage.recoveries += 1;
-    for view in [&continued_inputs.artifacts, &reopened] {
+    for view in [continued_inputs.artifacts(), &reopened] {
         assert_eq!(
             proof.issued_group_carriers(view).unwrap(),
             dependent_expected
@@ -4755,12 +4760,12 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             let mut fixed = inputs
                 .artifacts
                 .inventory()
-                .bind_segment(&inputs.artifacts, vec![], &selection)
+                .bind_segment(inputs.artifacts(), vec![], &selection)
                 .unwrap();
             let imports = [source_import(&native, demanded)];
-            let admitted = inputs.artifacts.inventory().admit_bound_target(
+            let admitted = inputs.artifacts().inventory().admit_bound_target(
                 &mut fixed,
-                &inputs.artifacts,
+                inputs.artifacts(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
                 vec![],
                 &selection,
@@ -4780,12 +4785,12 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         let mut fixed = inputs
             .artifacts
             .inventory()
-            .bind_segment(&inputs.artifacts, vec![], &selection)
+            .bind_segment(inputs.artifacts(), vec![], &selection)
             .unwrap();
         let imports = [source_import(&unrelated, 7)];
-        let denied = inputs.artifacts.inventory().admit_bound_target(
+        let denied = inputs.artifacts().inventory().admit_bound_target(
             &mut fixed,
-            &inputs.artifacts,
+            inputs.artifacts(),
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
             vec![],
             &selection,
@@ -5625,10 +5630,10 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap();
                         assert!(request
                             .compiler_inputs()
-                            .artifacts
+                            .artifacts()
                             .selected_native_groups()
                             .is_empty());
-                        assert_eq!(request.compiler_inputs().projection, projection);
+                        assert_eq!(request.compiler_inputs().projection(), &projection);
                         assert!(request
                             .compiler_inputs()
                             .native_transport
@@ -5797,7 +5802,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
         &validation.inventory,
     )
     .unwrap();
-    let private = OriginalCompilerInputs::from_selection(&selection, &inputs.artifacts).unwrap();
+    let private = OriginalCompilerInputs::from_selection(&selection, inputs.artifacts()).unwrap();
     assert!(private
         .artifacts
         .artifact_ids()
@@ -5810,7 +5815,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     )
     .unwrap();
     let clean =
-        OriginalCompilerInputs::from_selection(&selection, &clean.compiler_inputs().artifacts)
+        OriginalCompilerInputs::from_selection(&selection, clean.compiler_inputs().artifacts())
             .unwrap();
     let merged = clean.merge(&private);
     let protected =
@@ -6156,15 +6161,15 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
             expected_offers,
             "candidate issuance cannot alter the retained offer mode or exact proof",
         );
-        let retained = inputs.artifacts.capture_graph_selection();
+        let retained = inputs.artifacts().capture_graph_selection();
         assert!(expected_custody
             .bindings
             .iter()
             .all(|binding| retained.bindings.contains(binding)));
         assert!(expected_edges
             .iter()
-            .all(|edge| inputs.artifacts.binding_dependencies().contains(edge)));
-        assert!(inputs.artifacts.selected_native_groups().is_empty());
+            .all(|edge| inputs.artifacts().binding_dependencies().contains(edge)));
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(context.lexical_graph().is_empty());
         assert_eq!(
             inputs
@@ -6374,11 +6379,14 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         let request = ExactCompileContext::new(context)
             .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(reused))
             .unwrap();
-        assert_eq!(exact_groups(&request.compiler_inputs().artifacts), b_groups);
+        assert_eq!(
+            exact_groups(request.compiler_inputs().artifacts()),
+            b_groups
+        );
         assert_eq!(
             request
                 .compiler_inputs()
-                .artifacts
+                .artifacts()
                 .selected_native_groups()
                 .len(),
             2,
@@ -6388,7 +6396,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             assert!(
                 request
                     .compiler_inputs()
-                    .artifacts
+                    .artifacts()
                     .capture_graph_selection()
                     .roots
                     .iter()
@@ -6403,7 +6411,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             assert!(
                 request
                     .compiler_inputs()
-                    .artifacts
+                    .artifacts()
                     .binding_dependencies()
                     .contains(&historical_edge),
                 "historical parent must retain its A child, never rebind to current B"
@@ -6620,13 +6628,13 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         assert!(
             request
                 .compiler_inputs()
-                .artifacts
+                .artifacts()
                 .selected_native_groups()
                 .is_empty(),
             "published policy cannot resurrect withdrawn source demand"
         );
         assert_eq!(
-            request.compiler_inputs().projection.snapshot_roles()[&entry.descriptor.owner],
+            request.compiler_inputs().projection().snapshot_roles()[&entry.descriptor.owner],
             role
         );
     }

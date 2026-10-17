@@ -996,9 +996,9 @@ impl OriginalCompilerInputs {
 }
 
 pub(crate) struct RequestCompilerInputs {
-    pub(crate) projection: CompilerInputProjection,
+    // Retained availability outlives the transport subset consumed by this request.
+    source_support: crate::artifact_inventory::CompilerSourceSupport,
     pub(crate) metadata: CompilerArtifactMetadata,
-    pub(crate) artifacts: ArtifactView,
     native_transport: NativeCompilerTransport,
     declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
@@ -1262,6 +1262,20 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.source_support
+    }
+
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        self.source_support.projection()
+    }
+
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        self.source_support.artifacts()
+    }
+
     #[cfg(test)]
     pub(crate) fn native_original_requirements(
         &self,
@@ -1322,16 +1336,18 @@ impl ProtectedScaffoldRequirements {
         let support = context
             .compiler_source_support()
             .close_request(private, self)?;
-        let projection = support.projection().clone();
-        let artifacts = support.artifacts().clone();
-        let native_offers = support.native_offers();
-        let metadata = projection.project_metadata(artifacts.metadata_snapshot())?;
-        let native_transport =
-            NativeCompilerTransport::issue(&projection, &metadata, &artifacts, &native_offers)?;
+        let metadata = support
+            .projection()
+            .project_metadata(support.artifacts().metadata_snapshot())?;
+        let native_transport = NativeCompilerTransport::issue(
+            support.projection(),
+            &metadata,
+            support.artifacts(),
+            support.native_offers(),
+        )?;
         Ok(RequestCompilerInputs {
-            projection,
+            source_support: support,
             metadata,
-            artifacts,
             native_transport,
             declaration_semantic_sha256,
             original_sources: Default::default(),
@@ -3632,7 +3648,7 @@ impl ExactProductAdmission<'_> {
         let mut projection = self
             .request
             .compiler_inputs()
-            .projection
+            .projection()
             .within_view(artifacts)
             .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
         if let Some(support) = &self.request.program_support {
@@ -12466,7 +12482,7 @@ mod tests {
         );
         let mut captured = next.as_ref().clone();
         let support = private_support
-            .retain_custody(&request.compiler_inputs().artifacts)
+            .retain_custody(request.compiler_inputs().artifacts())
             .unwrap()
             .select_support_roots(vec![id])
             .unwrap();
@@ -13913,9 +13929,12 @@ mod tests {
                 program_admitted.home_imports().unwrap(),
                 admitted.home_imports().unwrap()
             );
-            assert_eq!(local.compiler_inputs().projection, roles);
+            assert_eq!(local.compiler_inputs().projection(), &roles);
             assert_eq!(
-                local.compiler_inputs().artifacts.capture_graph_selection(),
+                local
+                    .compiler_inputs()
+                    .artifacts()
+                    .capture_graph_selection(),
                 before_graph
             );
             for availability in local

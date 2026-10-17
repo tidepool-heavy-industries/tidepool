@@ -443,7 +443,7 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let projection = request
             .compiler_inputs()
-            .projection
+            .projection()
             .within_view(output.issued_artifacts())
             .merge(output.role_projection())?;
         Self::new(

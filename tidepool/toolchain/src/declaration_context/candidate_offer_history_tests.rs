@@ -126,7 +126,10 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
         let request = ExactCompileContext::new(Arc::new(context))
             .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(inputs))
             .unwrap();
-        let selected = request.compiler_inputs().artifacts.selected_native_groups();
+        let selected = request
+            .compiler_inputs()
+            .artifacts()
+            .selected_native_groups();
         assert!(
             selected.is_empty(),
             "the final request preserves zero executable demand"
@@ -134,7 +137,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
         if historical_expected {
             assert!(request
                 .compiler_inputs()
-                .artifacts
+                .artifacts()
                 .artifact_ids()
                 .contains(&a.descriptor.id));
             assert!(offer
@@ -143,7 +146,7 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
                 .iter()
                 .all(|edge| request
                     .compiler_inputs()
-                    .artifacts
+                    .artifacts()
                     .binding_dependencies()
                     .contains(edge)));
         }
