@@ -1,6 +1,7 @@
 """Run selected Buck-built libtest cases in fresh, bounded processes."""
 import argparse
 import concurrent.futures
+import errno
 from concurrent.futures import FIRST_COMPLETED, wait
 import os
 import hashlib
@@ -1232,7 +1233,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record.pop(key, None)
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
                   compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
-                  diagnostic_evidence_complete=None)
+                  diagnostic_evidence_complete=None, libtest_passed=None)
     record['compiler_allowances'] = {
         'requested_foreground_jobs': foreground_jobs,
         'requested_preparation_jobs': preparation_jobs,
@@ -1261,7 +1262,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 'full' if os.environ.get('TIDEPOOL_TIMING') == '1' else 'minimal')
         if trace_profile not in ('minimal', 'full'):
             raise ValueError('unsupported trace profile')
-        artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        artifact_root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifact_root.mkdir(exist_ok=False, mode=0o700)
+        record['artifact_custody'] = disposable_tree_custody(artifact_root, private_parent=True)
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
                            TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
@@ -1295,6 +1298,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     environment = dict(os.environ) if environment is None else environment
     environment['TIDEPOOL_COMPILE_CACHE_DIR'] = str(compile_cache)
     record['compile_cache_root'] = str(compile_cache)
+    if artifact_root is None:
+        record['cache_custody'] = disposable_tree_custody(compile_cache)
     started = time.monotonic_ns()
     record.update(command=args, started_ns=started, exit_code=None,
                   timeout_seconds=timeout,
@@ -1313,34 +1318,23 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if artifact_root is not None:
         (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
     def finish(passed, stdout, stderr):
-        cache_removed = False
         cleanup_complete, hosted_runtime_not_started, evidence_complete, errors = case_artifact_evidence(
             artifact_root, compiler_mode, record)
         passed = passed and cleanup_complete
+        record['acceptance_before_disposal'] = passed
         stderr += errors
-        if (passed and artifact_root is not None and evidence_complete
-                and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
-            # Successful scenarios have completed their own acknowledged teardown.
-            # The runner additionally confirms its enclosing process/service cleanup.
-            if not retain_artifacts:
-                shutil.rmtree(artifact_root)
-                record['artifacts_removed_after_success'] = True
-        # Retention is an observed disposition, independent of diagnostic
-        # completeness or the reason a passing case must preserve evidence.
-        if artifact_root is not None:
-            retained = artifact_root.is_dir() and not artifact_root.is_symlink()
-            record['artifact_disposition'] = ('retained' if retained else
-                'removed' if record.get('artifacts_removed_after_success') else 'missing')
-            if retained:
-                record['artifacts_retained_after_success' if passed else
-                       'artifacts_retained_after_failure'] = True
-        elif passed and not retain_artifacts:
-            shutil.rmtree(compile_cache)
-            cache_removed = True
-        cache_retained = compile_cache.is_dir() and not compile_cache.is_symlink()
-        record['compile_cache_disposition'] = ('retained' if cache_retained else
-            'removed' if cache_removed or record.get('artifacts_removed_after_success') else 'missing')
-        if artifact_root is None and cache_retained:
+        remove_artifacts = (passed and artifact_root is not None and evidence_complete
+                            and not hosted_runtime_not_started and startup_diagnostic_seconds is None
+                            and not retain_artifacts)
+        remove_cache = artifact_root is None and passed and not retain_artifacts
+        record['disposal'] = {
+            'status': 'pending' if remove_artifacts or remove_cache else 'not_requested',
+            'path': str(artifact_root if remove_artifacts else compile_cache) if
+                    remove_artifacts or remove_cache else None,
+            'kind': 'artifacts' if remove_artifacts else 'compile_cache' if remove_cache else None,
+        }
+        _observe_artifact_disposition(record, passed)
+        if artifact_root is None and compile_cache.is_dir() and not remove_cache:
             stderr += f'\ncompile cache retained at {compile_cache}'
         return passed, stdout, stderr
 
@@ -1393,10 +1387,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                   process_cleanup_status=process_cleanup_status(result, service_record))
     summary = terminal_summary(result.stdout)
     record_actual_counts(record, summary, service_record is not None)
+    record['libtest_passed'] = result.returncode == 0 and summary == LibtestSummary(True, 1, 0, 0)
     passed = (
-        result.returncode == 0
-        and summary is not None
-        and summary == LibtestSummary(True, 1, 0, 0)
+        record['libtest_passed']
         and record['process_cleanup_status'] == 'confirmed'
         and (service_record is None or service_record.get('cleanup_confirmed') is True)
     )
@@ -1409,14 +1402,165 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
 
 
 
+def disposable_tree_custody(path, private_parent=False):
+    def identity(metadata):
+        return {'device': metadata.st_dev, 'inode': metadata.st_ino, 'uid': metadata.st_uid}
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        raise PermissionError(errno.EPERM, 'disposable root must be a private owned directory', str(path))
+    parent = path.parent.lstat()
+    if private_parent and (not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or parent.st_mode & 0o077):
+        raise PermissionError(errno.EPERM, 'case parent must be a private owned directory', str(path.parent))
+    return {'path': str(path), 'identity': identity(metadata),
+            'parent_identity': identity(parent), 'private_parent': private_parent}
+
+
+def remove_owned_tree(custody):
+    """Dispose a quiescent private tree under the runner's exclusive case lease.
+
+    Nofollow/identity checks protect observed custody and symlink boundaries;
+    they are not a lock against hostile same-uid real-directory replacement.
+    """
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise OSError('artifact disposal requires fd-safe rmtree')
+    path = Path(custody['path']).absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # Ancestors need traversal permission, not read permission. Evidence roots
+    # may deliberately permit search without directory listing.
+    ancestor_flags = getattr(os, 'O_PATH', os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(path.anchor, ancestor_flags)
+    try:
+        # Do not admit an ancestor symlink into this disposable-tree authority.
+        for component in path.parts[1:-1]:
+            child = os.open(component, ancestor_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        parent_stat = os.fstat(parent)
+        if any(getattr(parent_stat, {'device': 'st_dev', 'inode': 'st_ino', 'uid': 'st_uid'}[key]) != value
+               for key, value in custody['parent_identity'].items()):
+            raise PermissionError(errno.EPERM, 'disposable parent identity changed')
+        if custody['private_parent'] and parent_stat.st_mode & 0o077:
+            raise PermissionError(errno.EPERM, 'case parent is no longer private')
+        root = os.open(path.name, flags, dir_fd=parent)
+        try:
+            identity = os.fstat(root)
+            if any(getattr(identity, {'device': 'st_dev', 'inode': 'st_ino', 'uid': 'st_uid'}[key]) != value
+                   for key, value in custody['identity'].items()):
+                raise PermissionError(errno.EPERM, 'disposable root identity changed')
+            def prepare(directory):
+                metadata = os.fstat(directory)
+                if metadata.st_uid != os.geteuid() or metadata.st_dev != identity.st_dev:
+                    raise PermissionError(errno.EPERM, 'disposable directory ownership or device changed')
+                mode = stat.S_IMODE(metadata.st_mode)
+                writable = mode | stat.S_IWUSR | stat.S_IXUSR
+                if mode != writable:
+                    os.fchmod(directory, writable)
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        child = os.open(entry.name, flags, dir_fd=directory)
+                        try:
+                            if not os.path.samestat(entry.stat(follow_symlinks=False), os.fstat(child)):
+                                raise OSError('disposable directory changed during observation')
+                            prepare(child)
+                        finally:
+                            os.close(child)
+            prepare(root)
+            if not os.path.samestat(identity, os.stat(path.name, dir_fd=parent, follow_symlinks=False)):
+                raise OSError('disposable root changed during observation')
+            shutil.rmtree(path.name, dir_fd=parent)
+        finally:
+            os.close(root)
+    finally:
+        os.close(parent)
+
+
+def _observe_artifact_disposition(record, passed):
+    disposal = record.get('disposal', {})
+    artifact_root = record.get('artifact_root')
+    for key in ('artifacts_removed_after_success', 'artifacts_retained_after_success',
+                'artifacts_retained_after_failure'):
+        record.pop(key, None)
+    if artifact_root is not None:
+        root = Path(artifact_root)
+        retained = root.is_dir() and not root.is_symlink()
+        removed = disposal.get('status') == 'removed' and disposal.get('kind') == 'artifacts'
+        record['artifact_disposition'] = ('partially_retained' if retained and
+            disposal.get('status') == 'failed' else 'retained' if retained else
+            'removed' if removed else 'missing')
+        if removed:
+            record['artifacts_removed_after_success'] = True
+        elif retained and disposal.get('status') != 'failed':
+            record['artifacts_retained_after_success' if passed else
+                   'artifacts_retained_after_failure'] = True
+    if not record.get('compile_cache_root'):
+        return
+    cache = Path(record['compile_cache_root'])
+    cache_retained = cache.is_dir() and not cache.is_symlink()
+    removed = disposal.get('status') == 'removed'
+    record['compile_cache_disposition'] = ('partially_retained' if cache_retained and
+        disposal.get('status') == 'failed' else 'retained' if cache_retained else
+        'removed' if removed else 'missing')
+
+
+def _dispose_case(record, passed, stderr):
+    disposal = record.get('disposal', {})
+    if disposal.get('status') == 'pending':
+        try:
+            custody = record.get('artifact_custody' if disposal['kind'] == 'artifacts' else 'cache_custody')
+            if (not custody or custody['path'] != disposal['path']
+                    or record.get('acceptance_before_disposal') is not True
+                    or record.get('process_cleanup_status') != 'confirmed'
+                    or record.get('hosted_cleanup_status') not in ('confirmed', 'not_observed')
+                    or record.get('compiler_cleanup_status') not in ('confirmed', 'not_observed')):
+                raise PermissionError(errno.EPERM, 'disposal requires issued private-tree custody and confirmed settlement')
+            remove_owned_tree(custody)
+        except RunnerInterrupted:
+            raise
+        except Exception as error:
+            disposal.update(status='failed', error={
+                'type': type(error).__name__, 'errno': getattr(error, 'errno', None),
+                'path': str(error.filename) if getattr(error, 'filename', None) is not None else disposal['path'],
+                'message': str(error),
+            })
+            passed = False
+            stderr += f"\nartifact disposal failed: {type(error).__name__}: {error}"
+        else:
+            disposal['status'] = 'removed'
+    _observe_artifact_disposition(record, passed)
+    return passed, stderr
+
+
+def _replace_result_file(path, data):
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+        os.replace(temporary, path)
+    except BaseException as error:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            error.add_note(f'result temporary cleanup failed: {cleanup_error}')
+        raise
+
+
 def retain_output(directory, name, passed, stdout, stderr, record=None):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256(name.encode()).hexdigest()
     streams = {}
     for label, text in (("stdout", stdout), ("stderr", stderr)):
         data = text.encode()
-        path = directory / f"{key}.{label}.log"
-        path.write_bytes(data[:OUTPUT_LIMIT])
+        retained = data[:OUTPUT_LIMIT]
+        # Each JSON generation names immutable bounded stream contents. A failed
+        # later JSON replacement cannot invalidate the already-published receipt.
+        stream_hash = hashlib.sha256(retained).hexdigest()
+        path = directory / f"{key}.{label}.{stream_hash}.log"
+        _replace_result_file(path, retained)
         streams[label] = {
             "path": path.name,
             "bytes": len(data),
@@ -1424,10 +1568,45 @@ def retain_output(directory, name, passed, stdout, stderr, record=None):
             "sha256": hashlib.sha256(data).hexdigest(),
             "truncated": len(data) > OUTPUT_LIMIT,
         }
-    (directory / f"{key}.json").write_text(json.dumps({
+    _replace_result_file(directory / f"{key}.json", (json.dumps({
         "version": 2, "test": name, "passed": passed, "streams": streams,
         "execution": record,
-    }, indent=2) + "\n")
+    }, indent=2) + "\n").encode())
+
+
+def retain_case_result(directory, name, passed, stdout, stderr, record):
+    # A pending disposition cannot certify acceptance. Publish the actual
+    # execution facts and bounded streams before any destructive operation.
+    retain_output(directory, name,
+                  passed and record.get('disposal', {}).get('status') != 'pending',
+                  stdout, stderr, record)
+    passed, stderr = _dispose_case(record, passed, stderr)
+    artifact_root = Path(record['artifact_root']) if record.get('artifact_root') else None
+    if artifact_root is not None and artifact_root.exists():
+        try:
+            if artifact_root.is_symlink():
+                raise PermissionError(errno.EPERM, 'artifact sidecar root is a symlink', str(artifact_root))
+            custody = record.get('artifact_custody')
+            if custody:
+                metadata = artifact_root.lstat()
+                if (metadata.st_ino != custody['identity']['inode']
+                        or metadata.st_dev != custody['identity']['device']
+                        or metadata.st_uid != custody['identity']['uid']):
+                    raise PermissionError(errno.EPERM, 'artifact sidecar root changed', str(artifact_root))
+            _replace_result_file(artifact_root / 'case.json', (json.dumps({
+                'test': name, 'passed': passed, 'execution': record,
+                'scenario': 'failed' if record.get('failed_test_count') else record['status'],
+                'cleanup': record.get('delegated_service', {}).get('cleanup_confirmed'),
+            }, indent=2) + '\n').encode())
+        except OSError as error:
+            record['artifact_record_error'] = {
+                'type': type(error).__name__, 'errno': error.errno,
+                'path': str(error.filename), 'message': str(error),
+            }
+            passed = False
+            stderr += f'\nartifact record publication failed: {error}'
+    retain_output(directory, name, passed, stdout, stderr, record)
+    return passed, stderr
 
 
 def main(argv=None):
@@ -1486,39 +1665,40 @@ def main(argv=None):
             # Caller TMPDIR may be removed by the enclosing Buck/dev shell.
             # The runner retains failed-case evidence outside that lifetime.
             temporary_output = (Path(tempfile.mkdtemp(prefix='tidepool-libtest-case-', dir='/tmp'))
-                                if compiler_mode == 'owned-resident' and options.output_dir is None
-                                else None)
+                                if options.output_dir is None else None)
             output_dir = options.output_dir or temporary_output
             record['temporary_output_dir'] = str(temporary_output) if temporary_output else None
             artifact_root = (output_dir / hashlib.sha256(name.encode()).hexdigest() / 'artifacts'
-                             if output_dir is not None else None)
-            outcome = run_one(
-                options.binary, name, name in ignored_names,
-                options.case_timeouts.get(name, options.timeout), record,
-                options.service_slice if options.delegated_service else None,
-                artifact_root, compiler_mode, options.resource_env,
-                options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
-                options.trace_profile, options.compiler_workers,
-            )
+                             if options.output_dir is not None or compiler_mode == 'owned-resident' else None)
+            try:
+                outcome = run_one(
+                    options.binary, name, name in ignored_names,
+                    options.case_timeouts.get(name, options.timeout), record,
+                    options.service_slice if options.delegated_service else None,
+                    artifact_root, compiler_mode, options.resource_env,
+                    options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
+                    options.trace_profile, options.compiler_workers,
+                )
+            except RunnerInterrupted:
+                raise
+            except Exception as error:
+                record.setdefault('status', 'runner_failed')
+                record['runner_error'] = {'type': type(error).__name__, 'message': str(error)}
+                outcome = False, '', f'test runner failed: {type(error).__name__}: {error}'
+
             return name, outcome, record
 
+        passed_cases = 0
         def retain_result(name, outcome):
-            nonlocal failures
+            nonlocal failures, passed_cases
             _, (passed, output, stderr), record = outcome
             output_dir = options.output_dir or record.get('temporary_output_dir')
-            if output_dir is not None:
-                output_dir = Path(output_dir)
-                retain_output(output_dir, name, passed, output, stderr, record)
-                artifact_root = Path(record['artifact_root'])
-                if artifact_root.exists():
-                    (artifact_root / 'case.json').write_text(json.dumps({
-                        'test': name, 'passed': passed, 'execution': record,
-                        'scenario': 'failed' if record.get('failed_test_count') else record['status'],
-                        'cleanup': record.get('delegated_service', {}).get('cleanup_confirmed'),
-                    }, indent=2) + '\n')
+            passed, stderr = retain_case_result(Path(output_dir), name, passed, output, stderr, record)
             if record.get('temporary_output_dir'):
                 print(f'Case evidence {name}: {output_dir}', flush=True)
             print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
+            if passed:
+                passed_cases += 1
             if not passed:
                 failures += 1
                 if output:
@@ -1534,10 +1714,20 @@ def main(argv=None):
         pending = {}
         next_test = 0
         interrupted = None
+        publication_failed = False
+        def observe_result(name, future):
+            nonlocal publication_failed, failures
+            try:
+                retain_result(name, future.result())
+            except OSError as error:
+                publication_failed = True
+                failures += 1
+                print(f'case evidence publication failed for {name}: {type(error).__name__}: {error}',
+                      file=sys.stderr, flush=True)
         try:
             # Keep at most `jobs` futures outstanding so cancellation cannot
             # start a large queued tail after the runner receives a signal.
-            while next_test < len(selected) and len(pending) < jobs:
+            while (not publication_failed and next_test < len(selected) and len(pending) < jobs):
                 name = selected[next_test]
                 pending[pool.submit(run, name)] = name
                 next_test += 1
@@ -1551,7 +1741,7 @@ def main(argv=None):
                 for future in completed:
                     name = pending.pop(future)
                     try:
-                        retain_result(name, future.result())
+                        observe_result(name, future)
                     except RunnerInterrupted:
                         interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
                         continue
@@ -1560,7 +1750,7 @@ def main(argv=None):
                     for future in pending:
                         future.cancel()
                     break
-                while next_test < len(selected) and len(pending) < jobs:
+                while (not publication_failed and next_test < len(selected) and len(pending) < jobs):
                     name = selected[next_test]
                     pending[pool.submit(run, name)] = name
                     next_test += 1
@@ -1572,14 +1762,17 @@ def main(argv=None):
                 if future.cancelled():
                     continue
                 try:
-                    retain_result(name, future.result())
+                    observe_result(name, future)
                 except RunnerInterrupted:
                     interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
         if interrupted is not None:
             print(f'libtest runner interrupted by signal {interrupted}', file=sys.stderr)
             return 128 + interrupted
 
-        passed = len(selected) - failures
+        passed = passed_cases
+        if publication_failed:
+            print(f'case evidence publication failed; {next_test} of {len(selected)} cases submitted',
+                  file=sys.stderr)
         print(
             f'Isolated libtest: {passed} passed; {failures} failed; '
             f'{len(ignored_names)} ignored in binary',
