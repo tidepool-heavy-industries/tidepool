@@ -3693,6 +3693,145 @@ mod tests {
         assert_eq!(inspection.read_from(&a, "Project.Work").unwrap(), a_text);
     }
 
+    #[test]
+    fn source_recovery_validates_recorded_ownership_and_disk_before_entry_selection() {
+        use exomonad_actor::{ActorSourceLayers, SourceEntryStorage, ToolsetAcquisition};
+        use tidepool_runtime::session::GenerationArtifactReference;
+        let (project, reload) = generation_owner();
+        let selected = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let reference = &selected.generation_evidence().unwrap().reference;
+        let acquisition = ToolsetAcquisition::FreshRunOriginal {
+            recipe: "a".repeat(64),
+            original: uuid::Uuid::new_v4(),
+        };
+        let builtin = ToolsetAcquisition::BuiltinDeploymentProgram {
+            program: exomonad_actor::BuiltinDeploymentProgram {
+                policy: exomonad_actor::BuiltinToolsetPolicy::Workbench,
+                manifest_blake3: "b".repeat(64),
+            },
+        };
+        let assert_refused = |reference: &GenerationArtifactReference| {
+            assert!(reload.restore_source(reference).is_err());
+            assert!(reload
+                .restore_graph_with_entries(reference, reload.fresh_entry_storage.clone())
+                .is_err());
+            for acquisition in [&acquisition, &builtin] {
+                assert!(reload
+                    .restore_source_with_acquisition(reference, acquisition)
+                    .is_err());
+            }
+        };
+        let foreign = tempfile::tempdir().unwrap();
+        let mut graph: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+        graph["entries"]["directory"] = serde_json::json!(foreign.path());
+        let foreign_record =
+            GenerationArtifactReference::capture(serde_json::to_vec(&graph).unwrap());
+        assert_refused(&foreign_record);
+        assert!(reload
+            .restore_graph_with_entries(
+                reference,
+                SourceEntryStorage::FreshCompilation {
+                    directory: foreign.path().to_owned(),
+                    preparation: uuid::Uuid::new_v4(),
+                },
+            )
+            .is_err());
+        for acquisition in [
+            ToolsetAcquisition::UnretainedCompilation {
+                recipe: "a".repeat(64),
+            },
+            ToolsetAcquisition::FreshRunOriginal {
+                recipe: "invalid".into(),
+                original: uuid::Uuid::new_v4(),
+            },
+        ] {
+            assert!(matches!(
+                reload.restore_source_with_acquisition(reference, &acquisition),
+                Err(exomonad_actor::SourceInspectionError::Unreadable(_))
+            ));
+        }
+
+        let graph: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+        let prompts: PathBuf =
+            serde_json::from_value(graph["prompts"]["directory"].clone()).unwrap();
+        let retained_prompts = prompts.with_extension("retained");
+        std::fs::rename(&prompts, &retained_prompts).unwrap();
+        for acquisition in [&acquisition, &builtin] {
+            assert!(matches!(
+                reload.restore_source_with_acquisition(reference, acquisition),
+                Err(exomonad_actor::SourceInspectionError::Unavailable(_))
+            ));
+        }
+        std::fs::rename(retained_prompts, prompts).unwrap();
+
+        // The selected old graph survives a newer boot publication, including
+        // a different prompt capture. Recovery follows its reference directly.
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 99\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join(".exomonad/agent.md"), "Instructions B").unwrap();
+        let newer = reload
+            .layer
+            .capture_from_workspace(&reload.frozen, project.path())
+            .unwrap();
+        reload.layer.publish(newer).unwrap();
+        let staged = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, &selected, &[])
+            .unwrap();
+        assert_ne!(
+            staged.configuration_digest(),
+            selected.generation_evidence().unwrap().configuration_digest
+        );
+        let assert_restored = || {
+            let restored = reload
+                .restore_source_with_acquisition(reference, &acquisition)
+                .unwrap();
+            assert_eq!(restored.identities(), selected.identities());
+            assert_eq!(restored.include_paths(), selected.include_paths());
+            assert_eq!(
+                &restored.generation_evidence().unwrap().reference,
+                reference
+            );
+            assert!(reload
+                .read_issued(&restored, "Project.Work")
+                .unwrap()
+                .1
+                .contains("work = 1\n"));
+        };
+        assert_restored();
+
+        let run_root = selected
+            .include_paths()
+            .iter()
+            .find(|root| root.join("Project/Work.hs").is_file())
+            .unwrap();
+        // Both publication identities and the generated revision resource
+        // remain authenticated before a recorded or overridden entry is issued.
+        for (root, relative) in [
+            (&selected.include_paths()[1], REVISION_MODULE),
+            (run_root, "Project/Work.hs"),
+        ] {
+            let path = root.join(relative);
+            let original = std::fs::read(&path).unwrap();
+            std::fs::write(&path, "corrupt captured source").unwrap();
+            assert_refused(reference);
+            std::fs::write(path, original).unwrap();
+            assert_restored();
+
+            let retained = root.with_extension("retained");
+            std::fs::rename(root, &retained).unwrap();
+            assert_refused(reference);
+            std::os::unix::fs::symlink(&retained, root).unwrap();
+            assert_refused(reference);
+            std::fs::remove_file(root).unwrap();
+            std::fs::rename(&retained, root).unwrap();
+            assert_restored();
+        }
+    }
+
     /// Capsule staging does not publish an actor generation. The model records
     /// authored facts and explicit retained selections, never the active links.
     #[derive(Clone, Debug)]
@@ -3705,7 +3844,7 @@ mod tests {
         Abandon,
         Retain,
         Read(u8, bool),
-        Restore(u8),
+        Restore(u8, u8),
         Observe(u8),
         CorruptReference(u8, u8),
     }
@@ -3747,6 +3886,7 @@ mod tests {
         delayed_reads: usize,
         missing_reads: usize,
         restores: usize,
+        restore_modes: [usize; 4],
         refusals: usize,
         deletion_stages: usize,
         readd_stages: usize,
@@ -3770,7 +3910,7 @@ mod tests {
             1 => Just(Abandon),
             3 => Just(Retain),
             3 => (0u8..4, any::<bool>()).prop_map(|(slot, extra)| Read(slot, extra)),
-            2 => (0u8..4).prop_map(Restore),
+            2 => (0u8..4, 0u8..4).prop_map(|(slot, mode)| Restore(slot, mode)),
             1 => (0u8..4).prop_map(Observe),
             2 => (0u8..4, 0u8..4).prop_map(|(slot, mode)| CorruptReference(slot, mode)),
         ];
@@ -3800,7 +3940,7 @@ mod tests {
                 Abandon,
                 Work(3),
                 Read(0, false),
-                Restore(0),
+                Restore(0, 0),
                 Observe(0),
             ],
             1 => vec![
@@ -3813,7 +3953,7 @@ mod tests {
                 Stage(0),
                 Stage(0),
                 Abandon,
-                Restore(1),
+                Restore(1, 1),
             ],
             2 => vec![
                 Extra(Some(2)),
@@ -3828,7 +3968,7 @@ mod tests {
                 Retain,
                 Read(2, true),
                 Read(0, true),
-                Restore(1),
+                Restore(1, 2),
             ],
             _ => vec![
                 Work(2),
@@ -3842,7 +3982,7 @@ mod tests {
                 CorruptReference(0, 2),
                 CorruptReference(0, 3),
                 Read(0, false),
-                Restore(0),
+                Restore(0, 3),
             ],
         }
     }
@@ -4024,10 +4164,75 @@ mod tests {
                         coverage.missing_reads += 1;
                     }
                 }
-                Restore(pick) => {
+                Restore(pick, mode) => {
                     let capsule = &retained[slot(pick)];
                     let reference = &capsule.source.generation_evidence().unwrap().reference;
-                    let restored = reload.restore_source(reference).unwrap();
+                    use exomonad_actor::{SourceEntryStorage, ToolsetAcquisition};
+                    // Acquisition metadata selects storage only. This history
+                    // exercises source admission, not native installer custody.
+                    let original = uuid::Uuid::new_v4();
+                    let recipe = "a".repeat(64);
+                    let restored = match mode {
+                        0 => reload.restore_source(reference).unwrap(),
+                        1 => reload.fresh_toolset_layer_from(&capsule.source).unwrap(),
+                        2 => reload
+                            .restore_source_with_acquisition(
+                                reference,
+                                &ToolsetAcquisition::FreshRunOriginal {
+                                    recipe: recipe.clone(),
+                                    original,
+                                },
+                            )
+                            .unwrap(),
+                        3 => reload
+                            .restore_source_with_acquisition(
+                                reference,
+                                &ToolsetAcquisition::BuiltinDeploymentProgram {
+                                    program: exomonad_actor::BuiltinDeploymentProgram {
+                                        policy: exomonad_actor::BuiltinToolsetPolicy::Workbench,
+                                        manifest_blake3: "b".repeat(64),
+                                    },
+                                },
+                            )
+                            .unwrap(),
+                        _ => unreachable!(),
+                    };
+                    match mode {
+                        0 | 3 => proptest::prop_assert_eq!(
+                            restored.semantic_digest(),
+                            capsule.source.semantic_digest()
+                        ),
+                        1 => proptest::prop_assert!(
+                            matches!(
+                                restored.prepared_entries(),
+                                Some(SourceEntryStorage::FreshCompilation {
+                                    directory, preparation,
+                                }) if directory == reload.fresh_entry_storage.directory()
+                                    && *preparation == fresh_preparation(&reload)
+                            ),
+                            "fresh source recovery changed its selected preparation"
+                        ),
+                        2 => {
+                            let Some(SourceEntryStorage::CompletedOriginal {
+                                directory,
+                                selections,
+                            }) = restored.prepared_entries()
+                            else {
+                                return Err(proptest::test_runner::TestCaseError::fail(
+                                    "completed acquisition lost its exact selection",
+                                ));
+                            };
+                            proptest::prop_assert_eq!(
+                                directory,
+                                reload.fresh_entry_storage.directory()
+                            );
+                            proptest::prop_assert_eq!(
+                                selections,
+                                &BTreeMap::from([(recipe, original)])
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
                     proptest::prop_assert_eq!(restored.identities(), capsule.source.identities());
                     proptest::prop_assert_eq!(
                         restored.include_paths(),
@@ -4037,6 +4242,14 @@ mod tests {
                         restored.generation_evidence().unwrap().reference.bytes(),
                         reference.bytes()
                     );
+                    proptest::prop_assert_eq!(
+                        restored.generation_evidence().unwrap().configuration_digest,
+                        capsule
+                            .source
+                            .generation_evidence()
+                            .unwrap()
+                            .configuration_digest
+                    );
                     let restored = HistoryCapsule {
                         source: restored,
                         model: capsule.model.clone(),
@@ -4044,6 +4257,7 @@ mod tests {
                     check_history_read(&services, &restored, false)?;
                     check_history_read(&services, &restored, true)?;
                     coverage.restores += 1;
+                    coverage.restore_modes[usize::from(mode)] += 1;
                 }
                 Observe(pick) => {
                     let capsule = &retained[slot(pick)];
@@ -4130,6 +4344,7 @@ mod tests {
                 && coverage.deletion_stages > 0
                 && coverage.readd_stages > 0
         );
+        assert!(coverage.restore_modes.iter().all(|count| *count > 0));
     }
 
     #[test]
