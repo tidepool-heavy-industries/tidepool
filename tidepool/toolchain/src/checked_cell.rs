@@ -1375,7 +1375,7 @@ impl ExactHostBindingPrototype {
             .ok_or_else(|| failure("host prototype lacks its original value interface"))?;
         let context = Arc::new(
             crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
-                interface, signature,
+                &interface, signature,
             )?,
         );
         let producer = context.toolchain_identity_sha256();
