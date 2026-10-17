@@ -876,6 +876,30 @@ fn codec_rejects_retired_prepared_schema_and_graph_versions() {
             Err(ParseError::UnsupportedVersion(version))
         );
     }
+    let group =
+        tidepool_repr::execution_schema::testing::projected_group(program.clone(), 7).unwrap();
+    let group_bytes = tidepool_test_data::prepared_encode::encode_projected_group(&group);
+    assert_eq!(
+        tidepool_repr::execution_schema::parse_projected_group(
+            &group_bytes,
+            &requirements(),
+            DecodeLimits::default(),
+        ),
+        Ok(group)
+    );
+    let Cbor::Array(mut group_fields) = ciborium::de::from_reader(group_bytes.as_slice()).unwrap()
+    else {
+        unreachable!()
+    };
+    group_fields[4] = int(18);
+    assert_eq!(
+        tidepool_repr::execution_schema::parse_projected_group(
+            &bytes(&Cbor::Array(group_fields)),
+            &requirements(),
+            DecodeLimits::default(),
+        ),
+        Err(ParseError::UnsupportedVersion(18))
+    );
     let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
     let Cbor::Array(fields) = &mut value else {
         unreachable!()

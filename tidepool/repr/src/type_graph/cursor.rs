@@ -1095,6 +1095,48 @@ mod tests {
     fn publish(graph: GraphStorage, inventory: &[ConstructorDecl]) -> Arc<TypeGraph> {
         Arc::new(TypeGraph::validate(graph, inventory, GraphLimits::default()).unwrap())
     }
+
+    #[test]
+    fn constructor_scheme_compatibility_retains_explicit_arguments_and_telescope() {
+        let mut storage = GraphStorage::new();
+        let proxy = declaration(
+            &mut storage,
+            "Proxy",
+            2,
+            DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "argument identity control".into(),
+            },
+        );
+        let first = storage.add_node(TypeNode::Bound(1));
+        let second = storage.add_node(TypeNode::Bound(0));
+        let kind = storage.add_node(TypeNode::Literal(TypeLiteral::Symbol("Type".into())));
+        let other_kind = storage.add_node(TypeNode::Literal(TypeLiteral::Symbol(
+            "Type -> Type".into(),
+        )));
+        let original = application(&mut storage, proxy, &[first, second]);
+        let swapped = application(&mut storage, proxy, &[second, first]);
+        let explicit = application(&mut storage, proxy, &[kind, second]);
+        let changed = application(&mut storage, proxy, &[other_kind, second]);
+        let original = root(&mut storage, original, 2);
+        let swapped = root(&mut storage, swapped, 2);
+        let unused_binder = root(&mut storage, explicit, 2);
+        let explicit = root(&mut storage, explicit, 1);
+        let changed = root(&mut storage, changed, 1);
+        let graph = publish(storage, &[]);
+        for (left, right) in [
+            (original, swapped),
+            (explicit, changed),
+            (explicit, unused_binder),
+        ] {
+            assert!(!graph
+                .rooted_compatible(left, &graph, right, &mut TypeWorkBudget::new(20_000))
+                .unwrap());
+        }
+        assert!(graph
+            .rooted_compatible(original, &graph, original, &mut TypeWorkBudget::new(20_000))
+            .unwrap());
+    }
     fn template(
         graph: &mut GraphStorage,
         declaration: TypeNodeId,
