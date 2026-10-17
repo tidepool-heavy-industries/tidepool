@@ -253,6 +253,8 @@ pub struct PersistentSession {
     stub_revision: u64,
     #[cfg(test)]
     compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
     /// resolution, retained-import pairs, live module names, root-slot
     /// aliasing refcounts), kept in sync at every bind/evict site below so
@@ -377,6 +379,8 @@ impl PersistentSession {
             stub_revision: 1,
             #[cfg(test)]
             compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
@@ -655,6 +659,8 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
+        #[cfg(test)]
+        self.certified_resolution_work[0].fetch_add(1, Ordering::Relaxed);
         let retained = std::cell::OnceCell::new();
         let mut source_evidence = BTreeMap::new();
         let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
@@ -770,6 +776,8 @@ impl PersistentSession {
             .groups
             .iter()
             .map(|pending| {
+                #[cfg(test)]
+                self.certified_resolution_work[1].fetch_add(1, Ordering::Relaxed);
                 if pending.group().globals().len() != pending.imports().len() {
                     return Err(PreparedRuntimeError::CertifiedTargetOwners);
                 }
@@ -851,6 +859,14 @@ impl PersistentSession {
                 snapshot,
             },
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn certified_resolution_work(&self) -> (usize, usize) {
+        (
+            self.certified_resolution_work[0].load(Ordering::Relaxed),
+            self.certified_resolution_work[1].load(Ordering::Relaxed),
+        )
     }
 
     /// Install a certified target against this exact lexical view and place

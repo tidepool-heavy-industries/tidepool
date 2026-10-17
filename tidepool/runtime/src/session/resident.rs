@@ -2690,6 +2690,18 @@ struct AdmittedTurnCode<'a> {
     resolved: Option<super::persistent::ResolvedCertifiedTurn>,
 }
 
+/// Installation retains input metadata and certification through execution and
+/// publication; moving the native image does not release that custody.
+struct InstalledAdmittedTurn<'a> {
+    program: ProgramId,
+    source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
+    _inputs: (
+        std::borrow::Cow<'a, DataConTable>,
+        std::borrow::Cow<'a, [YieldSite]>,
+        std::borrow::Cow<'a, Option<super::turn::TurnCertification>>,
+    ),
+}
+
 enum PendingPreparedSource {
     Legacy(super::prepared::InstallSnapshot),
     Certified {
@@ -7002,7 +7014,7 @@ where
         // Preview source instances belong to its detached authority, so dropping
         // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
-        let (program, source_keys) = self.install_admitted_turn(
+        let InstalledAdmittedTurn { program, source_keys, _inputs: _installed_inputs } = self.install_admitted_turn(
             admission,
             match retained_images {
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
@@ -7067,20 +7079,14 @@ where
         )
     }
 
-    fn install_admitted_turn(
+    fn install_admitted_turn<'a>(
         &mut self,
-        admission: AdmittedTurnCode<'_>,
+        admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
-    ) -> Result<
-        (
-            ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        ResidentError,
-    > {
+    ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
         let AdmittedTurnCode { code, scope, resolved } = admission;
-        let (metadata, _sites, prepared, _certification) = code.into_parts();
-        if let Some(resolved) = resolved {
+        let (metadata, sites, prepared, certification) = code.into_parts();
+        let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
                     super::prepared::CertifiedTargetImage::lookup_scoped(
@@ -7102,17 +7108,21 @@ where
                 &resolved.source_evidence,
                 demanded,
                 &resolved.inherited_needed,
-            )
-            .map_err(Into::into)
+            )?
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
             }
-            Ok((
+            (
                 self.state.install_prepared(prepared, Some(&metadata))?,
                 Default::default(),
-            ))
-        }
+            )
+        };
+        Ok(InstalledAdmittedTurn {
+            program,
+            source_keys,
+            _inputs: (metadata, sites, certification),
+        })
     }
 
     /// Install and retain the original startup program without evaluating any
@@ -7157,7 +7167,7 @@ where
         }
         let admission = self.admit_turn_code_in(scope, code)?;
         let provenance = self.provenance_for(&admission)?;
-        let (program, source_keys) =
+        let InstalledAdmittedTurn { program, source_keys, _inputs: _installed_inputs } =
             self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
         let admitted = self
             .state
@@ -11110,11 +11120,33 @@ mod authored_publication_tests {
         .unwrap() else {
             panic!("expected compiler-owned binding");
         };
-        assert!(compiled.certification.is_some());
+        let certification = compiled.certification.as_ref().unwrap();
+        let candidate_groups = certification.groups.len();
+        // Recompute independently before the counted admission. Agreement with
+        // this oracle cannot hide a second resolver inside provenance.
+        let oracle = session
+            .state
+            .resolve_certification_in(ScopeId::ROOT, compiled.prepared(), certification)
+            .unwrap();
         let code = compiled.into_code();
+        let before_resolution = session.state.certified_resolution_work();
         let pending = session
             .snapshot_run_prepared(code.clone(), PendingPreparedMode::Value, None)
             .unwrap();
+        let after_resolution = session.state.certified_resolution_work();
+        assert_eq!(after_resolution.0 - before_resolution.0, 1);
+        assert_eq!(after_resolution.1 - before_resolution.1, candidate_groups);
+        let PendingPreparedSource::Certified { resolved, .. } = &pending.snapshot else {
+            panic!("compiler-owned turn must keep its certified admission");
+        };
+        assert_eq!(resolved.target_owners, oracle.target_owners);
+        assert_eq!(resolved.source_evidence, oracle.source_evidence);
+        let group_owners = |selection: &crate::session::persistent::ResolvedCertifiedTurn| {
+            selection.groups.iter().map(|group| {
+                (group.original().owner().clone(), group.original().original_ordinal(), group.demand().domain())
+            }).collect::<Vec<_>>()
+        };
+        assert_eq!(group_owners(resolved), group_owners(&oracle));
         let compiled = pending.compile_off_checkout().unwrap();
         let admitted = session
             .public_visibility_snapshot_in(ScopeId::ROOT)

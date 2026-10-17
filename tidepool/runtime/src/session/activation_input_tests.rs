@@ -2154,7 +2154,10 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     );
     let reobserved = outputs
         .iter()
-        .map(|output| source.provenance_for(&output.code()).unwrap())
+        .map(|output| source
+            .admit_turn_code_in(source.run_context.lexical_scope, output.code())
+            .and_then(|admission| source.provenance_for(&admission))
+            .unwrap())
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
         let recomputed = CompiledProvenancePlan::build(&output.code())
@@ -2290,7 +2293,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         );
         assert_eq!(
             source
-                .provenance_for(&compiled.code())
+                .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                .and_then(|admission| source.provenance_for(&admission))
                 .unwrap()
                 .authenticated_inputs,
             original.authenticated_inputs,
@@ -2308,7 +2312,9 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             let roots = source.persistent_roots_count();
             assert!(
                 matches!(
-                    source.provenance_for(&compiled.code()),
+                    source
+                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
                     ))
@@ -2318,7 +2324,9 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.retire_scope(sibling.private_scope());
             assert!(
                 matches!(
-                    source.provenance_for(&compiled.code()),
+                    source
+                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
                     ))
@@ -2329,7 +2337,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.set_run_context(previous).unwrap();
             assert_eq!(
                 source
-                    .provenance_for(&compiled.code())
+                    .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                    .and_then(|admission| source.provenance_for(&admission))
                     .unwrap()
                     .authenticated_inputs,
                 original.authenticated_inputs,
@@ -3547,11 +3556,14 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();
-        let refused = resident.install_turn_program_in_with_images(
-            compiled.admission.scope_lease.scope(),
-            compiled.renderer.compiled.table(),
-            compiled.renderer.compiled.prepared().as_ref().clone(),
-            compiled.renderer.compiled.certification.as_ref(),
+        let admission = resident
+            .admit_turn_code_in(
+                compiled.admission.scope_lease.scope(),
+                compiled.renderer.compiled.code(),
+            )
+            .unwrap();
+        let refused = resident.install_admitted_turn(
+            admission,
             TurnImageAcquisition::Ready {
                 bundle: &incomplete,
             },
