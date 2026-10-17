@@ -711,7 +711,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
     assert_eq!(groups.first().unwrap().original_ordinal, 7);
     assert!(private.native_offers[0].is_full());
     let before = baseline.semantic_sha256();
-    let roots = baseline.artifact_view().capture_graph_selection().roots;
+    let roots = baseline.artifact_view().selected_native_groups();
     let original = private.native_offers[0].original();
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(baseline.clone())
@@ -735,7 +735,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         .original()
         .is_none());
     assert_eq!(
-        final_inputs.artifacts.capture_graph_selection().roots,
+        final_inputs.artifacts.selected_native_groups(),
         roots,
         "private availability cannot add executable body roots"
     );
