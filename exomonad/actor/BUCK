@@ -229,7 +229,7 @@ tidepool_rust_library(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness_schema": "//third-party/rust:harness-schema",
+        "harness_schema": "//third-party/rust:harness-schema-0.1",
     },
     visibility = ["PUBLIC"],
 )
@@ -523,7 +523,7 @@ tidepool_rust_binary(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness_schema": "//third-party/rust:harness-schema",
+        "harness_schema": "//third-party/rust:harness-schema-0.1",
     },
     required_test_modules = [
         "exomonad/actor/src/initial_context_properties.rs",
@@ -819,7 +819,7 @@ tidepool_rust_isolated_test(
         ":exomonad_actor",
     ],
     named_deps = {
-        "harness_schema": "//third-party/rust:harness-schema",
+        "harness_schema": "//third-party/rust:harness-schema-0.1",
     },
     required_test_modules = [
         "exomonad/actor/tests/prepared_render_probe.rs",
