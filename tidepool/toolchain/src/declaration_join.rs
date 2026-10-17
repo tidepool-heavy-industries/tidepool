@@ -3028,16 +3028,18 @@ mod authored_tests {
         assert_eq!(accepted.expected_public_version(), "paired-public-version");
         assert_eq!(accepted.toolchain_identity_sha256(), expected_producer);
         assert!(!accepted.package_imports_bytes().is_empty());
+        let lexical = vec![ExactLexicalNode {
+            owner: ExactModuleIdentity {
+                unit: owner.unit,
+                module: joined_module,
+            },
+            imports: Vec::new(),
+        }];
         let joined_context = context
             .clone()
-            .extend(&[], &[Arc::new(accepted.clone())], Vec::new())
+            .extend(&[], &[Arc::new(accepted.clone())], lexical.clone())
             .unwrap();
         let descriptors = joined_context.artifact_view().descriptors();
-        let native_groups = joined_context
-            .artifact_view()
-            .selected_native_groups()
-            .into_iter()
-            .collect::<Vec<_>>();
         drop(worker_root);
         drop(source_root);
         let durable = tempfile::tempdir().unwrap();
@@ -3052,28 +3054,37 @@ mod authored_tests {
             crate::recovery_artifacts::verify_materialized_join(durable.path(), &stored.join)
                 .unwrap();
         assert_eq!(verified.interface_bytes, accepted.interface_bytes());
-        let lexical = vec![ExactLexicalNode {
-            owner: ExactModuleIdentity {
-                unit: owner.unit,
-                module: joined_module,
-            },
-            imports: Vec::new(),
-        }];
         let mut joins = stored.anchors.clone();
         joins.push(stored.join.clone());
-        let recovered = ExactDeclarationContext::capture_recovery_with_inventory(
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let store = MemoryBlockstore::new();
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let receipt = writer
+            .materialize_context(None, &joined_context.snapshot())
+            .unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let receipt = crate::exact_context::hydrate_context(&store, receipt.root()).unwrap();
+        let snapshot = receipt.snapshot();
+        let graph = snapshot.graph_selection().unwrap();
+        let inventory = crate::declaration_context::RecoveredArtifactInventory::capture_bound(
             durable.path(),
             &stored.products,
             &stored.module_interfaces,
             &joins,
             &stored.value_interfaces,
             &descriptors,
-            &stored.artifact_dependencies,
-            &native_groups,
-            &joined_context.compiler_input_roles(),
-            lexical.clone(),
+            &graph.bindings,
+            &snapshot.binding_dependencies().unwrap(),
         )
         .unwrap();
+        let mut recovered = inventory.context_with_snapshot(snapshot).unwrap();
+        recovered.bind_snapshot_baseline(&receipt).unwrap();
+        assert_eq!(
+            recovered.semantic_sha256(),
+            joined_context.semantic_sha256()
+        );
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
         assert!(certificate.product().source_sha256().is_some());
