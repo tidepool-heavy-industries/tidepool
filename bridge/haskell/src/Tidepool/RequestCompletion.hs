@@ -27,7 +27,7 @@ data CleanupStage
 -- The sink carries observation, never request or cleanup authority.
 data CompletionPhase
   = BodyStarted | BodyFinished | CleanupStarted CleanupStage
-  | CleanupFinished CleanupStage | RenderingResponse | DeliveringResponse | ResponseDelivered
+  | CleanupFinished CleanupStage | RenderingResponse | WritingResponse | ResponseWritten
   deriving Show
 
 type PhaseSink = CompletionPhase -> IO ()

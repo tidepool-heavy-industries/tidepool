@@ -73,10 +73,10 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
           argv <- replicateM (fromIntegral argc) (decodeText <$> hGetFrame stdin)
           (completed, captured) <- captureOutput channels (handler (phaseSink channels) cwd argv)
           (code, out, err) <- renderCaptured channels completed captured
-          emitPhase (phaseSink channels) DeliveringResponse
+          emitPhase (phaseSink channels) WritingResponse
           BS.hPut protocol (encodeResponse (exitCodeToInt code) out err)
           hFlush protocol
-          emitPhase (phaseSink channels) ResponseDelivered
+          emitPhase (phaseSink channels) ResponseWritten
           unless (null (completionFailures completed)) $
             finishCompletion completed >> pure ()
           case captured of
@@ -90,12 +90,12 @@ runDirectRequest :: (PhaseSink -> IO (Completion [Diag])) -> IO ExitCode
 runDirectRequest action = withOutputChannels $ \channels@(OutputChannels out err) -> do
   (completed, captured) <- captureOutput channels (action (phaseSink channels))
   (code, machine, human) <- renderCaptured channels completed captured
-  emitPhase (phaseSink channels) DeliveringResponse
+  emitPhase (phaseSink channels) WritingResponse
   BS.hPut out machine
   BS.hPut err human
   hFlush out
   hFlush err
-  emitPhase (phaseSink channels) ResponseDelivered
+  emitPhase (phaseSink channels) ResponseWritten
   pure code
 
 phaseSink :: OutputChannels -> PhaseSink
