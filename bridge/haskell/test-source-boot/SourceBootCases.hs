@@ -2849,10 +2849,10 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     let emit term = putStrLn ("original-comparison-cbor " ++ concatMap
           (\byte -> let value = showHex byte "" in replicate (2 - length value) '0' ++ value)
           (BS.unpack (toStrictByteString (encodeTerm term))))
-        ownerTerm owner = [TString (unitString (moduleUnit owner)),
-          TString (moduleNameString (moduleName owner))]
+        ownerTerm owner = [TString (T.pack (unitString (moduleUnit owner))),
+          TString (T.pack (moduleNameString (moduleName owner)))]
         outcomeTerm (owner,outcome) = TList (ownerTerm owner ++ [case outcome of
-          Left failure -> TList [TString "refused", TString (show failure)]
+          Left failure -> TList [TString "refused", TString (T.pack (show failure))]
           Right groups -> TList (TString "available" :
             map (TInteger . toInteger . projectedOriginalOrdinal) groups)])
     forM_ (map snd cold) $ \raw ->
@@ -2862,7 +2862,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     forM_ [("normal", coldProducts), ("withdrawn", settled cold (Set.singleton requestOwner))] $
       \(label,products) -> emit (TList [TString "settlement", TString label,
         TList (map outcomeTerm (preparedModuleProductOutcomes products)),
-        TString (show (preparedModuleProductOmissions products))])
+        TString (T.pack (show (preparedModuleProductOmissions products)))])
 
 originalPackageProjection :: IO ()
 originalPackageProjection = withScratch $ \work -> do
