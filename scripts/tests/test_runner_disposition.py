@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import stat
 import sys
@@ -240,6 +241,22 @@ else:
         directory.mkdir(mode=0o700)
         return directory, runner.disposable_tree_custody(directory)
 
+    def test_search_only_ancestor_does_not_require_directory_listing(self):
+        ancestor = self.root / 'search-only'; ancestor.mkdir(mode=0o700)
+        private = ancestor / 'private'; private.mkdir(mode=0o700)
+        custody = runner.disposable_tree_custody(private, private_parent=True)
+        # The immediate case parent remains private; only its ancestor is search-only.
+        outer = self.root / 'outer'; outer.mkdir(mode=0o700)
+        ancestor.rename(outer / 'search-only')
+        private = outer / 'search-only' / 'private'
+        custody = runner.disposable_tree_custody(private, private_parent=True)
+        outer.chmod(0o111)
+        try:
+            runner.remove_owned_tree(custody)
+            self.assertFalse(private.exists())
+        finally:
+            outer.chmod(0o700)
+
     def test_observed_root_replacement_refuses_without_touching_replacement(self):
         directory, custody = self.owned_directory()
         directory.rename(self.root / 'original')
@@ -325,6 +342,33 @@ else:
         self.assert_body_preserved(retained)
         self.assertEqual(retained['execution']['disposal']['status'], 'failed')
         self.assertTrue(Path(record['artifact_root']).is_dir())
+
+    def test_default_direct_execution_retains_result_without_enabling_diagnostics(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        observed = []
+        execute = runner.execute
+        def check(args, *rest, **kwargs):
+            if '--list' in args:
+                return execute(args, *rest, **kwargs)
+            self.assertNotIn('TIDEPOOL_TEST_ARTIFACT_ROOT', kwargs['environment'])
+            observed.append(kwargs['environment']['TIDEPOOL_COMPILE_CACHE_DIR'])
+            return execute(args, *rest, **kwargs)
+        with patch.dict(os.environ):
+            os.environ.pop('TIDEPOOL_TEST_ARTIFACT_ROOT', None)
+            with patch.object(runner, 'execute', side_effect=check), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = runner.main([str(self.binary), '--exact', 'suite::first', '--expected-count', '1'])
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(len(observed), 1)
+        line = next(line for line in stdout.getvalue().splitlines() if line.startswith('Case evidence '))
+        directory = Path(line.split(': ', 1)[1])
+        self.addCleanup(lambda: shutil.rmtree(directory))
+        record = json.loads(next(directory.glob('*.json')).read_text())
+        self.assertEqual(record['execution']['executed_test_count'], 1)
+        self.assertIsNone(record['execution']['artifact_root'])
+        self.assertEqual(record['execution']['disposal']['kind'], 'compile_cache')
+        self.assertFalse(Path(observed[0]).exists())
+        self.external_unchanged()
 
     def test_no_artifact_cache_uses_same_disposition_owner(self):
         record = {}

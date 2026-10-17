@@ -1426,11 +1426,14 @@ def remove_owned_tree(custody):
         raise OSError('artifact disposal requires fd-safe rmtree')
     path = Path(custody['path']).absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent = os.open(path.anchor, flags)
+    # Ancestors need traversal permission, not read permission. Evidence roots
+    # may deliberately permit search without directory listing.
+    ancestor_flags = getattr(os, 'O_PATH', os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(path.anchor, ancestor_flags)
     try:
         # Do not admit an ancestor symlink into this disposable-tree authority.
         for component in path.parts[1:-1]:
-            child = os.open(component, flags, dir_fd=parent)
+            child = os.open(component, ancestor_flags, dir_fd=parent)
             os.close(parent)
             parent = child
         parent_stat = os.fstat(parent)
@@ -1666,7 +1669,7 @@ def main(argv=None):
             output_dir = options.output_dir or temporary_output
             record['temporary_output_dir'] = str(temporary_output) if temporary_output else None
             artifact_root = (output_dir / hashlib.sha256(name.encode()).hexdigest() / 'artifacts'
-                             if output_dir is not None else None)
+                             if options.output_dir is not None or compiler_mode == 'owned-resident' else None)
             try:
                 outcome = run_one(
                     options.binary, name, name in ignored_names,
