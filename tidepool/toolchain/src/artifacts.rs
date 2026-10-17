@@ -3595,7 +3595,7 @@ fn seal_turn_outputs_with_validation(
                 &certified.recovery_products,
                 &certified.module_interfaces,
                 &certified.value_interfaces,
-                compiler_inputs.as_ref().map(|input| &input.artifacts),
+                compiler_inputs.as_ref().map(|input| input.artifacts()),
                 demand,
                 validation,
                 &certified.source_selection,
@@ -5221,7 +5221,7 @@ fn compile_invocation_inner(
                 &certified.recovery_products,
                 &certified.module_interfaces,
                 &certified.value_interfaces,
-                compiler_inputs.as_ref().map(|input| &input.artifacts),
+                compiler_inputs.as_ref().map(|input| input.artifacts()),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),

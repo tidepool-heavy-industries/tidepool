@@ -4224,7 +4224,7 @@ impl ArtifactInventory {
             return Err(failure("bound recovery requires an empty owning view"));
         }
         self.recover_selected_custody(parent, entries, selection, edges)
-            .map(IssuedArtifactCustody::into_view)
+            .map(|custody| custody.into_view().artifacts)
     }
 
     /// Authenticate recorded exact rows independently of any broader receiving
