@@ -175,6 +175,35 @@ class DeepSeekUsageTests(unittest.TestCase):
             report.normalize_events([{'request_id': 'old', 'kind': 'responses_transport_failure',
                                       'payload': {'version': 2}}])
 
+    def test_actual_native_store_observations_preserve_success_and_failed_presence(self):
+        import hashlib
+        # Unchanged bounded Store export from native fe543e26672166211ebea41d9308ec4917c451a5.
+        path = ROOT / 'scripts/tests/fixtures/deepseek-native-observations-v3.jsonl'
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(),
+                         'c649484c7726254de30d67a77d8cdac278aabad1c244a979d0bcc0b73ceaa25f')
+        events = report.read_events(path)
+        rows = report.report(report.normalize_events(events), self.config)['responses']
+        self.assertEqual(len(rows), 3)
+        for event, row in zip(events, rows):
+            self.assertEqual(row['request_id'], event['request_id'])
+            self.assertEqual(row['request_observation'], event['observation'])
+            self.assertEqual(row['usage_observation'], event['observation']['usage'])
+            self.assertEqual(row['cost']['kind'], 'unknown')
+        success, absent, null = rows
+        self.assertEqual(success['usage_observation']['cached_tokens'], 0)
+        self.assertIsNone(success['usage_observation']['reasoning_tokens'])
+        self.assertEqual(success['usage_observation']['raw']['value']['offline_unknown_counter'],
+                         {'preserved': 77})
+        self.assertEqual(success['request_observation']['effective_reasoning'], 'high')
+        self.assertEqual(success['request_observation']['returned_reasoning_effort'], 'low')
+        self.assertEqual(success['request_observation']['max_output_tokens'], 65536)
+        self.assertEqual(success['request_observation']['reported_max_output_tokens'], 17)
+        self.assertEqual(absent['usage_observation']['raw'], {'state': 'unavailable'})
+        self.assertEqual(null['usage_observation']['raw'], {'state': 'observed', 'value': None})
+        for row in (absent, null):
+            self.assertEqual(row['request_observation']['terminal'], {'kind': 'response_failed'})
+            self.assertIsNone(row['request_observation']['first_text_ms'])
+
 
 if __name__ == '__main__':
     unittest.main()

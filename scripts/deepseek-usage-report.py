@@ -143,6 +143,10 @@ def normalize_events(events):
             raise ValueError('usage report requires event objects')
         kind = event.get('kind', event.get('event'))
         payload = event.get('payload', {})
+        # The native producer's bounded retained-artifact export carries the
+        # unchanged Store payload under observation with its exact request ID.
+        if kind is None and 'observation' in event:
+            kind, payload = 'responses_transport', event['observation']
         if isinstance(payload, str):
             payload = json.loads(payload)
         request = event.get('request_id', event.get('request'))
