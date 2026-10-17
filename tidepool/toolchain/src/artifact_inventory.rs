@@ -2778,7 +2778,7 @@ impl ArtifactInventory {
         // Availability by itself leaves ambiguity intact until demand.
         let mut qualified = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
         for requirement in selection.native_original_requirements() {
-            for root in &requirement.selection.graph_selection().roots {
+            for root in requirement.selection.snapshot().roots.keys() {
                 let ArtifactBindingNode::Group(group) = root else {
                     continue;
                 };
@@ -2902,7 +2902,7 @@ impl ArtifactInventory {
                 continue;
             }
             let explicit_root = selection.native_original_requirements().any(|proof| {
-                proof.selection.graph_selection().roots.iter().any(|root| {
+                proof.selection.snapshot().roots.keys().any(|root| {
                     matches!(root, ArtifactBindingNode::Group(root)
                         if root.binding.artifact() == group.artifact
                             && root.original_ordinal == group.original_ordinal)
@@ -6675,7 +6675,7 @@ impl ArtifactView {
                 .collect()
             };
             for requirement in requirements {
-                for root in &requirement.selection.graph_selection().roots {
+                for root in requirement.selection.snapshot().roots.keys() {
                     let ArtifactBindingNode::Group(group) = root else {
                         continue;
                     };

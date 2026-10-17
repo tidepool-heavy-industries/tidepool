@@ -318,6 +318,40 @@ impl IssuedNativeOffer {
         let source = admitted.lease;
         let mut offers = Vec::new();
         let state = source.inventory.0.lock().expect("inventory lock");
+        // Index the solver-issued roots once. The carrier is part of the key:
+        // equal payloads from different issuances must not share a choice.
+        let requested_originals = originals.iter().copied().collect::<BTreeSet<_>>();
+        let mut issued_roots =
+            BTreeMap::<(ArtifactId, ArtifactBinding), BTreeMap<u32, NativeGroupBinding>>::new();
+        for root in &source.admission_roots {
+            let ArtifactBindingNode::Group(group) = root else {
+                continue;
+            };
+            if !requested_originals.contains(&group.binding.artifact()) {
+                continue;
+            }
+            for (target, edge) in state.outgoing(*root) {
+                let ArtifactBindingNode::Artifact(carrier) = target else {
+                    continue;
+                };
+                if *edge != ArtifactDependency::Interface
+                    || carrier.artifact != group.binding.artifact()
+                {
+                    continue;
+                }
+                let prior = issued_roots
+                    .entry((group.binding.artifact(), carrier))
+                    .or_default()
+                    .insert(group.original_ordinal, *group);
+                if prior.is_some_and(|prior| prior != *group) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: group.binding.artifact(),
+                        },
+                    ));
+                }
+            }
+        }
         for &original in originals {
             let entry = source
                 .payloads
@@ -345,25 +379,9 @@ impl IssuedNativeOffer {
                 *source.selection.namespace.get(&interface).ok_or_else(|| {
                     failure("complete availability lacks exact canonical carrier")
                 })?;
-            let mut roots = BTreeMap::new();
-            for root in &source.admission_roots {
-                let ArtifactBindingNode::Group(group) = root else {
-                    continue;
-                };
-                if group.binding.artifact() != original {
-                    continue;
-                }
-                if state.outgoing(*root).any(|(target, edge)| {
-                    target == ArtifactBindingNode::Artifact(carrier)
-                        && *edge == ArtifactDependency::Interface
-                }) {
-                    if roots.insert(group.original_ordinal, *group).is_some() {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
-                        ));
-                    }
-                }
-            }
+            let roots = issued_roots
+                .remove(&(original, carrier))
+                .unwrap_or_default();
             if !entry
                 .native_group_ordinals
                 .iter()
