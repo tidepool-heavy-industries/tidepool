@@ -7203,13 +7203,19 @@ mod tests {
             None,
         )
         .unwrap();
+        // Fixture bootstrap has its own real checked compilation; exclude it.
+        let baseline = counts();
         let outcome = crate::settle_compiler_transaction_cancellable(
             crate::CompilerTransactionCancellation::new(),
             |_| {},
             || prepare_cell_program_admitted(admission.clone(), &mut |_| {}),
         );
         let prepared = outcome.action().as_ref().unwrap();
-        let before = counts();
+        let absolute_before = counts();
+        let before = (
+            absolute_before.0 - baseline.0,
+            absolute_before.1 - baseline.1,
+        );
         assert!(before.0 >= 2, "actual multi-item output must be observed");
         assert_eq!(before.0, before.1, "one decode per captured item");
         let mut changed = 0;
@@ -7247,6 +7253,10 @@ mod tests {
             );
             assert!(owner.table().json_layout().is_none());
         }
+        let siblings = natives
+            .iter()
+            .map(|owner| owner.table().clone())
+            .collect::<Vec<_>>();
         let owner = natives[0].clone();
         let exact_target = owner.target_owned();
         drop(natives);
@@ -7259,7 +7269,10 @@ mod tests {
             .resident
             .admit_checked_item(prefix, checked.checked_item(0).unwrap())
             .unwrap();
-        let TurnResult::Bind { compiled, .. } = consume_cell_program_item(reserved).unwrap() else {
+        let TurnResult::Bind {
+            compiled, bound, ..
+        } = consume_cell_program_item(reserved.clone()).unwrap()
+        else {
             panic!("real bind must reach checked runtime conversion")
         };
         assert!(Arc::ptr_eq(compiled.prepared(), &exact_target));
@@ -7270,8 +7283,8 @@ mod tests {
         );
         assert_eq!(
             counts(),
-            before,
-            "sealing and runtime conversion must not read/decode metadata again"
+            absolute_before,
+            "sealing and runtime conversion must not revisit the physical/capture owners"
         );
         let layout = tidepool_repr::execution_schema::JsonLayout {
             object: 0,
@@ -7298,6 +7311,26 @@ mod tests {
         assert_eq!(local.json_layout(), Some(&layout));
         assert!(compiled.table().json_layout().is_none());
         assert!(owner.table().json_layout().is_none());
+        assert!(siblings.iter().all(|table| table.json_layout().is_none()));
+        let [binder] = bound.as_slice() else {
+            panic!("expected one actual binder")
+        };
+        let installed = tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reserved.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(matches!(
+            installed,
+            crate::session::ResidentOutcome::Completed { .. }
+        ));
+        assert!(owner.table().json_layout().is_none());
+        assert!(siblings.iter().all(|table| table.json_layout().is_none()));
         // The raw conversion continues checking independently supplied pairs.
         let raw = tidepool_toolchain::prepared_artifact::PreparedArtifact::parse(
             tidepool_test_data::prepared_encode::encode_wire_program(
@@ -7315,7 +7348,7 @@ mod tests {
             vec![]
         )
         .is_err());
-        eprintln!("checked-metadata-work physical_reads={} nominal_decodes={} runtime_additional_reads=0 runtime_additional_decodes=0", before.0, before.1);
+        eprintln!("checked-metadata-owner-events physical_reads={} capture_nominal_decodes={} runtime_additional_owner_events=0", before.0, before.1);
     }
 
     #[test]
