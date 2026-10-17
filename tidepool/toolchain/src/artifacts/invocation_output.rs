@@ -281,3 +281,94 @@ impl InvocationOutputBundle<PortableOutput> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn portable_members() -> BTreeMap<String, Vec<u8>> {
+        let mut members = BTreeMap::from([
+            ("meta.cbor".into(), b"metadata".to_vec()),
+            ("entry.prepared.cbor".into(), b"prepared".to_vec()),
+            ("asks.json".into(), b"sites".to_vec()),
+            ("dependencies.json".into(), b"dependencies".to_vec()),
+        ]);
+        let hashes = [
+            "meta.cbor",
+            "entry.prepared.cbor",
+            "asks.json",
+            "dependencies.json",
+        ]
+        .map(|name| {
+            (
+                name.to_owned(),
+                format!("{:x}", Sha256::digest(&members[name])),
+            )
+        });
+        let mut receipt = Vec::new();
+        ciborium::ser::into_writer(&("TPPORTABLEOUTPUT", "1", ["entry"], hashes), &mut receipt)
+            .unwrap();
+        members.insert("portable-output.cbor".into(), receipt);
+        members
+    }
+
+    #[test]
+    fn portable_receipt_refuses_unpaired_output_and_wrong_target_mode() {
+        let layout = InvocationOutputLayout::portable(&["entry"]).unwrap();
+        let capture = |members: &BTreeMap<String, Vec<u8>>| {
+            layout
+                .capture(
+                    Arc::new(InventoryOperation::new(Default::default())),
+                    |name, _| members.get(name).cloned().ok_or_else(|| name.to_owned()),
+                )
+                .unwrap()
+        };
+        let members = portable_members();
+        capture(&members).validate_receipt().unwrap();
+        let mut stale = members.clone();
+        stale.insert("asks.json".into(), b"other typed sites".to_vec());
+        assert!(capture(&stale).validate_receipt().is_err());
+        let mut trailing = members.clone();
+        trailing.get_mut("portable-output.cbor").unwrap().push(0);
+        assert!(capture(&trailing).validate_receipt().is_err());
+        let mut wrong = members.clone();
+        let mut receipt = Vec::new();
+        ciborium::ser::into_writer(
+            &(
+                "TPPORTABLEOUTPUT",
+                "0",
+                ["entry"],
+                Vec::<(String, String)>::new(),
+            ),
+            &mut receipt,
+        )
+        .unwrap();
+        wrong.insert("portable-output.cbor".into(), receipt);
+        assert!(capture(&wrong).validate_receipt().is_err());
+        wrong = members.clone();
+        wrong.insert("other.prepared.cbor".into(), b"prepared".to_vec());
+        let other = InvocationOutputLayout::portable(&["other"])
+            .unwrap()
+            .capture(
+                Arc::new(InventoryOperation::new(Default::default())),
+                |name, _| wrong.get(name).cloned().ok_or_else(|| name.to_owned()),
+            )
+            .unwrap();
+        assert!(other.validate_receipt().is_err());
+    }
+
+    #[test]
+    fn portable_members_cannot_satisfy_native_layout() {
+        let members = portable_members();
+        let layout = InvocationOutputLayout::new(&["entry"]).unwrap();
+        let missing = layout
+            .capture(
+                Arc::new(InventoryOperation::new(Default::default())),
+                |name, _| members.get(name).cloned().ok_or_else(|| name.to_owned()),
+            )
+            .err()
+            .expect("native output still requires native products");
+        assert_eq!(missing, "module-products.cbor");
+    }
+}
