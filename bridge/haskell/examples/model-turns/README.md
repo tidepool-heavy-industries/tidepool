@@ -91,10 +91,11 @@ and unavailable outcomes. It does not enumerate arbitrary transcript history.
 
 `C.trimText reason retainedText` prefixes exact retained source with an ordinary
 `[Trimmed: reason]` marker. Same-model continuation retains opaque reasoning.
-Unsupported cross-model history is refused explicitly. `setNextModel` resolves
-a configured alias, then a literal model identifier; `setNextEffort` stages the
-next request's reasoning effort. Neither is a promise about semantic validity
-after facts change.
+Unsupported cross-model history is refused explicitly. `setNextModel` accepts a
+typed `Model`; `setNextReasoning` accepts a provider-qualified `Reasoning` choice.
+Both stage changes for the next request within the backend selected when the run
+started. A custom model names that backend explicitly; neither operation switches
+providers or establishes semantic validity after facts change.
 
 For a compact semantic choice, `ContextWorkflow.selectOriginalSlices` uses
 `J.each` to examine source slices together. It returns only selected original
