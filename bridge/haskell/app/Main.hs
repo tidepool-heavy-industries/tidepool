@@ -158,7 +158,7 @@ import Tidepool.TurnSource
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset, preambleImportMarker )
 import Tidepool.DependencyEvidence
-  ( validateDependencyEvidence )
+  ( validateDependencyEvidence, writeDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -451,17 +451,25 @@ processFile bound timing path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
-    (preparedArtifacts, productContext) <- prepareArtifactsWithIntent
-      (if requestPortableOutput args then PortableExecutable else NativeOriginals)
+    output <- prepareArtifactsWithIntent
+      (preparedOutputIntent args)
       originalInterfaces outDir completion preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
+    let preparedArtifacts = case output of
+          NativeOutputs artifacts _ -> artifacts
+          PortableOutputs artifacts -> artifacts
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    void $ timePhase timing "module_products" $
-      writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
+    case output of
+      NativeOutputs _ productContext -> void $ timePhase timing "module_products" $
+        writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
+      PortableOutputs _ -> do
+        _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
+        writeRequestInputProof args outDir prepared
+        BS.writeFile (outDir </> "portable-output.mode") "TPPORTABLEOUTPUT1\n"
 
   either throwIO (const (pure [])) res
 
@@ -473,13 +481,17 @@ writeRequestProducts
 writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts = do
   products <- writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
     [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+  writeRequestInputProof args outDir prepared
+  pure products
+
+writeRequestInputProof :: WorkerRequest -> FilePath -> PreparedPipelineResult -> IO ()
+writeRequestInputProof args outDir prepared =
   when (not (requestCell args) && not (requestActivationPreview args)
       && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
       && Map.null (requestRetainedGenerations args)
       && isNothing (preparedExactCompilation prepared)) $
     writeCompileInputProof outDir (prHscEnv (pprPipelineResult prepared))
       (preparedFreshDependencies prepared) (pprPackageImports prepared)
-  pure products
 
 -- | Filter the standard prepared-turn auxiliary root names
 -- ('preparedResumeTargetName' and the generic apply roots) down to those the

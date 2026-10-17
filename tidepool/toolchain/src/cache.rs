@@ -13,6 +13,68 @@ pub struct SourceRootManifest {
     files: Vec<(PathBuf, blake3::Hash)>,
 }
 
+/// One completely observed selected namespace. Paths remain paired to the
+/// root that issued them; this inventory authenticates no file contents.
+#[derive(Debug)]
+pub(crate) struct ObservedSourcePaths {
+    root: PathBuf,
+    relative: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+pub(crate) mod source_inspection_work {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct Counts {
+        pub entries: usize,
+        pub content_read_attempts: usize,
+        pub hashes: usize,
+    }
+
+    thread_local! {
+        static COUNTS: std::cell::Cell<Counts> = const {
+            std::cell::Cell::new(Counts { entries: 0, content_read_attempts: 0, hashes: 0 })
+        };
+    }
+
+    pub(crate) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace(Counts::default()))
+    }
+
+    pub(super) fn entry() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.entries += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn read() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.content_read_attempts += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn hash() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.hashes += 1;
+            counts.set(value);
+        });
+    }
+}
+
+impl ObservedSourcePaths {
+    pub(crate) fn files(&self) -> impl Iterator<Item = (&Path, PathBuf)> {
+        self.relative
+            .iter()
+            .map(|relative| (relative.as_path(), self.root.join(relative)))
+    }
+
+    pub(crate) fn canonical_paths(&self) -> impl Iterator<Item = std::io::Result<PathBuf>> + '_ {
+        self.files().map(|(_, path)| fs::canonicalize(path))
+    }
+}
+
 impl SourceRootManifest {
     /// Reuse complete file evidence produced while capturing a source root.
     /// Header files may accompany the capture but do not contribute to the
@@ -103,6 +165,40 @@ pub fn shipped_haskell_source_manifest(
     selected_source_manifest(root, SourceSelection::ShippedHaskell)
 }
 
+pub(crate) fn dependency_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::Dependencies)
+}
+
+pub(crate) fn shipped_haskell_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::ShippedHaskell)
+}
+
+fn selected_source_paths(
+    root: &Path,
+    selection: SourceSelection,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    let mut relative = Vec::new();
+    visit_dependency_sources(
+        root,
+        root,
+        &mut std::collections::HashSet::new(),
+        selection,
+        &mut |path, _| {
+            relative.push(path.to_path_buf());
+            Ok(())
+        },
+    )?;
+    relative.sort();
+    Ok(ObservedSourcePaths {
+        root: root.to_path_buf(),
+        relative,
+    })
+}
+
 /// Enumerate Haskell home-module sources by their visible relative paths.
 fn dependency_source_manifest(root: &Path) -> Result<SourceRootManifest, SourceManifestError> {
     selected_source_manifest(root, SourceSelection::Dependencies)
@@ -125,7 +221,21 @@ fn selected_source_files<D>(
 ) -> Result<Vec<(PathBuf, D)>, SourceManifestError> {
     let mut files = Vec::new();
     let mut ancestors = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut files, &mut ancestors, selection, &digest)?;
+    visit_dependency_sources(
+        root,
+        root,
+        &mut ancestors,
+        selection,
+        &mut |relative, path| {
+            #[cfg(test)]
+            source_inspection_work::read();
+            let bytes = crate::host_work::read(path).map_err(|error| source_error(path, error))?;
+            #[cfg(test)]
+            source_inspection_work::hash();
+            files.push((relative.to_path_buf(), digest(&bytes)));
+            Ok(())
+        },
+    )?;
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(files)
 }
@@ -189,13 +299,12 @@ fn hex_digest(bytes: &[u8]) -> String {
     })
 }
 
-fn collect_dependency_sources<D>(
+fn visit_dependency_sources(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(PathBuf, D)>,
     ancestors: &mut std::collections::HashSet<PathBuf>,
     selection: SourceSelection,
-    digest: &impl Fn(&[u8]) -> D,
+    visit: &mut impl FnMut(&Path, &Path) -> Result<(), SourceManifestError>,
 ) -> Result<(), SourceManifestError> {
     crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
@@ -213,22 +322,22 @@ fn collect_dependency_sources<D>(
     for entry in entries {
         crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
         let path = entry.path();
+        #[cfg(test)]
+        source_inspection_work::entry();
         if !selection.includes_directory(&path) {
             continue;
         }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            collect_dependency_sources(root, &path, out, ancestors, selection, digest)?;
+            visit_dependency_sources(root, &path, ancestors, selection, visit)?;
         } else if selection.includes_file(&path) {
-            let bytes =
-                crate::host_work::read(&path).map_err(|error| source_error(&path, error))?;
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
                     &path,
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-            out.push((rel.to_path_buf(), digest(&bytes)));
+            visit(rel, &path)?;
         }
     }
     ancestors.remove(&canonical);
@@ -293,6 +402,28 @@ impl CompletedSourceEvidence {
     ) -> Result<Self, DependencyEvidenceFailure> {
         evidence.validate_consumed_sources(source)?;
         Ok(Self(evidence))
+    }
+
+    /// Check only the invocation text against this already authenticated target.
+    /// Dependency bytes, path normalization and negative witnesses keep the
+    /// completed observation that issued this owner.
+    pub(crate) fn validate_expected_source(
+        &self,
+        source: &str,
+    ) -> Result<(), DependencyEvidenceFailure> {
+        crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
+        let (index, target) = self
+            .0
+            .sources
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.path == Path::new(GENERATED_SOURCE))
+            .ok_or(DependencyEvidenceFailure::GeneratedSourceMissing)?;
+        validate_source_digest(
+            index,
+            target,
+            hex_digest(&Sha256::digest(source.as_bytes())),
+        )
     }
 
     pub(crate) fn revalidate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
@@ -500,9 +631,41 @@ pub(crate) struct DependencyEvidenceWork {
     pub negative_metadata_calls: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_AUTHENTICATION_WORK: std::cell::Cell<DependencyEvidenceWork> =
+        const { std::cell::Cell::new(DependencyEvidenceWork {
+            source_read_attempts: 0, source_read_bytes: 0, negative_metadata_calls: 0,
+        }) };
+}
+
+/// Observe actual completed-source validators in this thread, not global IO.
+#[cfg(test)]
+pub(crate) fn take_source_authentication_work() -> DependencyEvidenceWork {
+    SOURCE_AUTHENTICATION_WORK.with(|work| work.replace(DependencyEvidenceWork::default()))
+}
+
+fn validate_source_digest(
+    index: usize,
+    item: &SourceEvidence,
+    actual: String,
+) -> Result<(), DependencyEvidenceFailure> {
+    if actual != item.sha256 {
+        return Err(DependencyEvidenceFailure::Source {
+            index,
+            reason: SourceWitnessFailure::Changed {
+                expected: item.sha256.clone(),
+                actual,
+            },
+        });
+    }
+    Ok(())
+}
+
 impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
+    #[cfg(test)]
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
         let completed = CompletedSourceEvidence::from_worker(bytes, input, source).ok()?;
         completed.cache_safe.then(|| completed.into_evidence())
@@ -561,7 +724,19 @@ impl DependencyEvidence {
     }
 
     fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
-        self.validate_consumed_sources_with_work(source, &mut DependencyEvidenceWork::default())
+        let mut work = DependencyEvidenceWork::default();
+        let result = self.validate_consumed_sources_with_work(source, &mut work);
+        #[cfg(test)]
+        SOURCE_AUTHENTICATION_WORK.with(|total| {
+            let previous = total.get();
+            total.set(DependencyEvidenceWork {
+                source_read_attempts: previous.source_read_attempts + work.source_read_attempts,
+                source_read_bytes: previous.source_read_bytes + work.source_read_bytes,
+                negative_metadata_calls: previous.negative_metadata_calls
+                    + work.negative_metadata_calls,
+            });
+        });
+        result
     }
 
     fn validate_consumed_sources_with_work(
@@ -608,15 +783,7 @@ impl DependencyEvidence {
                 work.source_read_bytes += bytes.len() as u64;
                 hex_digest(&Sha256::digest(bytes))
             };
-            if digest != item.sha256 {
-                return Err(DependencyEvidenceFailure::Source {
-                    index,
-                    reason: SourceWitnessFailure::Changed {
-                        expected: item.sha256.clone(),
-                        actual: digest,
-                    },
-                });
-            }
+            validate_source_digest(index, item, digest)?;
         }
         if !target {
             return Err(DependencyEvidenceFailure::GeneratedSourceMissing);

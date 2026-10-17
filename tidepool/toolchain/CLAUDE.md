@@ -60,6 +60,19 @@ its eligibility flags. Cache publication, source replay recipes and sealed
 compile-input reuse keep their stricter eligibility gates. Build actions also
 require the declared input closure; completed runtime output does not establish
 a hermetic build input proof.
+Prepared-fixture and completed-corpus source admission share the caller's
+`InventoryOperation`. The private parsed observation owner charges the existing
+length-times-64 decode allowance before serde, then lends structural facts to
+source-closure checks and consumes them through `CompletedSourceEvidence`.
+Parsed facts alone do not authenticate consumed bytes or negative witnesses.
+Build-action admission authenticates one completed physical-input/dependency
+observation, then checks captured invocation text against its generated-source
+witness. These adjacent checks do not issue a later filesystem observation;
+exact receipts, later certification and standalone corpus validation retain
+their independent authentication boundaries.
+Standalone corpus validation creates one operation at its action boundary rather
+than resetting a budget for each validation.
+
 The native Suite corpus integration test uses completed source observations
 and the same declared-source-tree guard for its run-owned output. This checks
 observed Haskell bytes and import choices without converting compile-time
@@ -68,6 +81,10 @@ execution into a replay recipe or a hermetic Buck fixture.
 `source_root_manifest` and `source_roots_identity` still own whole-source-revision
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
+Build-action and corpus declaration membership instead walks the complete selected
+namespace without reading unused source contents. Keep alias, cycle and metadata
+failures strict; consumed bytes and negative imports still require their existing
+evidence authentication. Whole-source identity callers continue hashing contents.
 
 Host authentication and private materialization use `host_work` checkpoints in
 the owning compiler scope, including between bounded reads and owner-lock polls.
@@ -127,9 +144,10 @@ pinned compiler deployment/package closure and explicit source directory trees.
 The CLI binds the configured frontend directly, clears inherited compiler and
 package selection, and uses private scratch as its current directory. Admission
 checks complete source evidence against the declared trees before export.
-Fixture requests select typed portable output. The worker closes reachable home
-bindings through its existing prepared recovery and rejects residual home-unit
-imports before writing programs. Ordinary extraction retains native-original
+Fixture requests select typed portable output before native original projection.
+The worker closes reachable home and package bindings through its existing
+prepared recovery. The portable export owner refuses every remaining executable
+import before exporting programs. Ordinary extraction retains native-original
 boundaries; portable output cannot carry resident, candidate or exact inputs.
 The GHC compilation owner replaces package-database flags with the libdir's
 pinned global database before loading packages. User databases and ambient
@@ -139,7 +157,8 @@ compilation. Native oracle actions select that same global database explicitly.
 Build actions never read or publish the runtime module-candidate store,
 deployment catalog or runtime build-products directory. Production readers
 validate every requested prepared program, typed-site sidecar, metadata and
-product certificate before any portable output is exported. The directory
+self-contained portable result before export. Native product certification stays
+on the native output path. The directory
 contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for every
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
