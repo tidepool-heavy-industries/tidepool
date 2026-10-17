@@ -5130,7 +5130,8 @@ fn compile_invocation_inner(
                 module_interfaces: Arc::from([]),
                 value_interfaces: Arc::from([]),
                 retained_core_products: Default::default(),
-                source_selection: Default::default(),
+                source_selection:
+                    certified_products::CertifiedSourceSelection::empty_product_output(),
             }
         };
         let extra_products: Vec<_> = cached_receipts

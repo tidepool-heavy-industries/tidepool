@@ -2560,6 +2560,12 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    /// A validated output with no certified original rows carries no inherited
+    /// input choice. This cannot construct a native role or availability.
+    pub(crate) fn empty_product_output() -> Self {
+        Self::new_product_ingress()
+    }
+
     pub(crate) fn continuation_input(
         &self,
         owner: &crate::declaration_join::ExactModuleIdentity,
