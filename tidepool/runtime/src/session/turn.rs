@@ -7325,10 +7325,10 @@ mod tests {
             )
         })
         .unwrap();
-        assert!(matches!(
-            installed,
-            crate::session::ResidentOutcome::Completed { .. }
-        ));
+        let crate::session::ResidentOutcome::Completed { result, .. } = installed else {
+            panic!("installed checked bind must complete")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(41));
         assert!(owner.table().json_layout().is_none());
         assert!(siblings.iter().all(|table| table.json_layout().is_none()));
         // The raw conversion continues checking independently supplied pairs.
