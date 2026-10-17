@@ -42,6 +42,7 @@ use to_haskell::{
     ActorContextProjection, CallStatus, LifecycleAnswer, ProgressAnswer, RouteStateAnswer,
 };
 
+use crate::capabilities::{CompilerAdmission, HasCompilerAdmission};
 use crate::WorkbenchRequest;
 use serde::Serialize;
 use tidepool_bridge::HaskellValue;
@@ -132,7 +133,7 @@ fn register_compiler_work(
 }
 
 #[derive(Clone, Copy)]
-enum CompilerWorkAdmission {
+pub(crate) enum CompilerWorkAdmission {
     Active,
     Publication,
 }
@@ -169,9 +170,9 @@ impl CompilerCloseOwner {
         }
     }
 
-    fn register_receipt(
+    pub(crate) fn register_receipt(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
         admission: CompilerWorkAdmission,
     ) -> bool {
         match self {
@@ -201,18 +202,7 @@ impl CompilerCloseOwner {
         &self,
         admission: CompilerWorkAdmission,
     ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-        let receipt = crate::termination::CompilerWorkReceipt::pending();
-        let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
-        let admitted = self.register_receipt(receipt, admission);
-        if admitted {
-            return Ok(ticket);
-        }
-        // No native work has started. Revoke any partial metadata admission cleanly.
-        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-            action: (),
-            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
-        });
-        Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        crate::termination::CompilerWorkTicket::admit(self.clone(), admission)
     }
 }
 
@@ -2323,6 +2313,7 @@ pub type HandlerEffectSupport<H> =
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+    capabilities: crate::capabilities::WorkbenchServices,
     handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
@@ -2418,7 +2409,7 @@ where
     Ok(())
 }
 
-struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
+struct CancelCompilerTransactionOnDrop(Option<crate::termination::CompilerWorkControl>);
 
 impl Drop for CancelCompilerTransactionOnDrop {
     fn drop(&mut self) {
@@ -2433,6 +2424,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines,
             source,
+            capabilities: crate::capabilities::WorkbenchServices::new(),
             handler_effect_support: Arc::new(|_| Vec::new()),
             child_session_factory: None,
             child_bootstrap_program: None,
@@ -2455,6 +2447,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
+            capabilities: self.capabilities.clone(),
             handler_effect_support: self.handler_effect_support.clone(),
             child_session_factory: self.child_session_factory.clone(),
             child_bootstrap_program: self.child_bootstrap_program.clone(),
@@ -4596,8 +4589,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         // drops its eventual result, so it cannot register an orphan after the
         // awaiting launch's cleanup has already run.
         let compiler_work = register_compiler_work().map_err(|error| error.to_string())?;
-        let mut cancel_on_drop =
-            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let (machine, lexical_scope) = spawn_blocking_in_span(move || {
             compiler_work.run(|settlement| {
                 let mut machine = factory(session_id, &source_layer, settlement)?;
@@ -5389,10 +5381,11 @@ where
         ResultValue: Send + 'static,
     {
         let owner = CompilerCloseOwner::current()?;
+        let capabilities = self.capabilities.clone();
         self.with_machine(context, move |session, context, source| {
-            Ok(owner
-                .register_work()?
-                .run(|settlement| operation(session, context, source, settlement))?)
+            crate::capabilities::run_compiler_action(&capabilities, &owner, |settlement| {
+                operation(session, context, source, settlement)
+            })?
         })
         .await
     }
@@ -5414,10 +5407,11 @@ where
         ResultValue: Send + 'static,
     {
         let owner = CompilerCloseOwner::current()?;
+        let capabilities = self.capabilities.clone();
         self.with_machine_wait(context, admission, move |session, context, source| {
-            owner
-                .register_work()?
-                .run(|settlement| operation(session, context, source, settlement))
+            crate::capabilities::run_compiler_action(&capabilities, &owner, |settlement| {
+                operation(session, context, source, settlement)
+            })?
         })
         .await
     }
@@ -6870,7 +6864,7 @@ where
                 tidepool_runtime::session::RendererAccess::Produce(mut producer) => {
                     let compiler_work = register_compiler_work().map_err(committed)?;
                     let mut cancel_on_drop =
-                        CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+                        CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
                     let compiler_admission = admission.clone();
                     let compiler_template = template.clone();
                     let compiler_includes = includes.clone();
@@ -7185,7 +7179,7 @@ where
             let original_admission = admission.clone();
             let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
             let compiler_work = register_compiler_work()?;
-            cancel_on_drop.0 = Some(compiler_work.cancellation());
+            cancel_on_drop.0 = Some(compiler_work.control());
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(|settlement| {
                     let prototype = original_admission.prototype();
@@ -7408,7 +7402,7 @@ where
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         let parser_specification = specification.clone();
         let compiler_work = register_compiler_work()?;
-        cancel_on_drop.0 = Some(compiler_work.cancellation());
+        cancel_on_drop.0 = Some(compiler_work.control());
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
             compiler_work.run(|settlement| {
                 tidepool_toolchain::artifacts::parse_cell_plan(
@@ -7459,7 +7453,7 @@ where
         let check_specification = specification.clone();
         let check_admission = admission.clone();
         let compiler_work = register_compiler_work()?;
-        cancel_on_drop.0 = Some(compiler_work.cancellation());
+        cancel_on_drop.0 = Some(compiler_work.control());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 let prepared = compiler_work.run_with_close(|settlement| {
@@ -7667,7 +7661,7 @@ where
             let inspection_view = view.clone();
             let effects = effects_alias.clone();
             let compiler_work = register_compiler_work()?;
-            let cancellation = compiler_work.cancellation();
+            let cancellation = compiler_work.control();
             cancel_on_drop.0 = Some(cancellation.clone());
             let spawn = {
                 let _entered = compile_span.enter();
@@ -7923,8 +7917,7 @@ where
         // an `Entered` guard is not `Send` and must not live across the
         // `.await` below.
         let compiler_work = register_compiler_work()?;
-        let mut cancel_on_drop =
-            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
@@ -9182,11 +9175,16 @@ where
                     }
                     tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
                         let compiler_work = CompilerCloseOwner::current()
-                            .and_then(|owner| owner.register_publication_work())
+                            .and_then(|owner| {
+                                self.access
+                                    .capabilities
+                                    .compiler_admission()
+                                    .admit_publication(&owner)
+                            })
                             .map_err(|error| {
                                 publication_error(PrivatePublicationPhase::CertifyAndStage, error)
                             })?;
-                        cancel_on_drop.0 = Some(compiler_work.cancellation());
+                        cancel_on_drop.0 = Some(compiler_work.control());
                         let certification =
                             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                                 compiler_work.run(|settlement| base.certify(settlement))
@@ -14534,7 +14532,7 @@ pub(crate) mod request_tests {
     async fn compiler_spawn_refuses_missing_cleanup_owner() {
         assert!(matches!(
             register_compiler_work(),
-            Err(ResidentActorWorkbenchError::ActorProtocol(_))
+            Err(ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
         ));
     }
 

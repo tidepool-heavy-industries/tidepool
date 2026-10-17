@@ -655,6 +655,44 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
     assert!(!work.begin_publication(), "closing never reopens admission");
 }
 
+#[test]
+fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
+    let work = InvocationWork::new(ActorRef::first(crate::ActorId(1)), reservation());
+    let control = crate::WorkbenchExecutionControl::untracked();
+    let response = Ok(crate::KernelStep::Continue(
+        tidepool_runtime::session::WorkbenchResponse {
+            publication: None,
+            status: tidepool_runtime::session::WorkbenchRunStatus::Completed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        },
+    ));
+    control.finish_cell(
+        tidepool_runtime::session::WorkbenchExecutionId::from_digest([43; 16]),
+        &response,
+        true,
+    );
+    let owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
+        work: work.clone(),
+        control: Some(control.clone()),
+    };
+    assert!(matches!(
+        owner.register_work(),
+        Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+    ));
+    let state = work.state.lock();
+    assert_eq!(state.compilers.len(), 1);
+    assert_eq!(
+        state.compilers[0].observation(),
+        crate::termination::CompilerWorkClose::Settled(
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        )
+    );
+    assert!(control.compiler_close_observations().is_empty());
+}
+
 #[tokio::test]
 async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_cancellation() {
     let fixture = Fixture::start().await;

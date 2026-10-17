@@ -30,7 +30,7 @@ enum InvocationWorkPhase {
 struct InvocationWorkState {
     phase: InvocationWorkPhase,
     scopes: Vec<Arc<InvocationWork>>,
-    compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    compilers: Vec<crate::termination::CompilerWorkRegistration>,
     launch_revision: u64,
     launch_placements: Vec<(
         tidepool_repr::SessionId,
@@ -93,7 +93,7 @@ impl InvocationWorkState {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct InvocationCleanup {
-    compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    compilers: Vec<crate::termination::CompilerWorkObservation>,
     commands: Vec<InvocationCommandCleanup>,
     workers: Vec<InvocationWorkerCleanup>,
     requests: Vec<InvocationRequestCleanup>,
@@ -394,7 +394,7 @@ impl InvocationWork {
 
     pub(crate) fn register_compiler_work(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
     ) -> bool {
         self.with_admission_state(|state| state.compilers.push(receipt))
             .is_ok()
@@ -407,7 +407,7 @@ impl InvocationWork {
 
     pub(crate) fn register_publication_compiler_work(
         &self,
-        receipt: crate::termination::CompilerWorkReceipt,
+        receipt: crate::termination::CompilerWorkRegistration,
     ) -> bool {
         self.with_phase_state(InvocationWorkPhase::Publishing, |state| {
             state.compilers.push(receipt)
@@ -1044,7 +1044,13 @@ impl InvocationWork {
         )
         .await;
         let mut cleanup = InvocationCleanup {
-            compilers: self.state.lock().compilers.clone(),
+            compilers: self
+                .state
+                .lock()
+                .compilers
+                .iter()
+                .map(|work| work.observer())
+                .collect(),
             ..InvocationCleanup::default()
         };
         for form in self.state.lock().forms.clone() {
