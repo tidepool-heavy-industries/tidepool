@@ -449,7 +449,8 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
 forceRawModuleProducts :: RawModuleProducts -> IO RawModuleProducts
 forceRawModuleProducts raw = do
   enabled <- readTimingEnabled
-  let timed phase modul action =
+  let timed :: String -> Module -> IO a -> IO a
+      timed phase modul action =
         timeModuleDetailPhase enabled "raw_projection_task_service" phase modul action
         -- These are forcing boundaries, not exclusive pure-function costs.
         -- Projection remaining lazy after result WHNF is charged to encoding.
