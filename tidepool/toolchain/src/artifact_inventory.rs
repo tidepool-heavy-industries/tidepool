@@ -2540,6 +2540,7 @@ pub(crate) struct BoundArtifactSelection {
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
     native_source: crate::certified_products::CertifiedSourceSelection,
+    issued_group_keys: BTreeSet<NativeGroupKey>,
 }
 
 impl BoundArtifactSelection {
@@ -2772,6 +2773,7 @@ impl ArtifactInventory {
             materializations,
             groups,
             native_source: selection.clone(),
+            issued_group_keys: BTreeSet::new(),
         })
     }
 
@@ -2895,7 +2897,11 @@ impl ArtifactInventory {
             }
             // The payload key narrows candidates; its recorded carrier edges
             // decide reuse. Independently issued carriers cannot substitute.
-            let recorded = fixed.native_source.native_group_candidates(group);
+            let recorded = if fixed.issued_group_keys.contains(&group) {
+                BTreeSet::new()
+            } else {
+                fixed.native_source.native_group_candidates(group)
+            };
             let issued_nodes = if recorded.is_empty() {
                 fixed
                     .groups
@@ -3258,13 +3264,12 @@ impl ArtifactInventory {
                 .ok()
                 .expect("fresh availability projection");
             for group in &issued_groups {
-                fixed.groups.insert(
-                    NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    },
-                    BTreeSet::from([*group]),
-                );
+                let key = NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                };
+                fixed.groups.insert(key, BTreeSet::from([*group]));
+                fixed.issued_group_keys.insert(key);
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
