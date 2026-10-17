@@ -262,6 +262,32 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
 
         let visible = with_alias(&files, aliases);
         let expected_dependencies = expected(&visible, false);
+        source_inspection_work::take();
+        let observed = dependency_source_paths(&root).unwrap();
+        let path_work = source_inspection_work::take();
+        prop_assert_eq!(path_work.content_read_attempts, 0);
+        prop_assert_eq!(path_work.hashes, 0);
+        prop_assert_eq!(
+            observed
+                .files()
+                .map(|(relative, _)| relative.to_path_buf())
+                .collect::<Vec<_>>(),
+            expected_dependencies
+                .iter()
+                .map(|(relative, _)| relative.clone())
+                .collect::<Vec<_>>()
+        );
+        prop_assert_eq!(
+            shipped_haskell_source_paths(&root)
+                .unwrap()
+                .files()
+                .map(|(relative, _)| relative.to_path_buf())
+                .collect::<Vec<_>>(),
+            expected(&visible, true)
+                .into_iter()
+                .map(|(relative, _)| relative)
+                .collect::<Vec<_>>()
+        );
         prop_assert_eq!(
             source_root_manifest(&root).unwrap(),
             expected_dependencies.clone()
@@ -438,6 +464,70 @@ impl Coverage {
 
 #[cfg(unix)]
 #[test]
+fn path_only_namespace_preserves_raw_names_aliases_and_directory_errors() {
+    use std::ffi::OsString;
+    use std::os::unix::{
+        ffi::OsStringExt,
+        fs::{symlink, PermissionsExt},
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("root");
+    let outside = temporary.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("Target.bin"), b"target bytes").unwrap();
+    fs::write(outside.join("Need.hs"), b"other bytes").unwrap();
+    let raw_name = PathBuf::from(OsString::from_vec(b"source-\xff.hs".to_vec()));
+    fs::write(root.join(&raw_name), b"raw-name source").unwrap();
+    symlink(outside.join("Target.bin"), root.join("Alias.lhs-boot")).unwrap();
+    symlink(&outside, root.join("Tree")).unwrap();
+    source_inspection_work::take();
+    let paths = dependency_source_paths(&root).unwrap();
+    let work = source_inspection_work::take();
+    assert_eq!(work.content_read_attempts, 0);
+    assert_eq!(work.hashes, 0);
+    assert_eq!(
+        paths
+            .files()
+            .map(|(relative, _)| relative.to_path_buf())
+            .collect::<Vec<_>>(),
+        vec![
+            PathBuf::from("Alias.lhs-boot"),
+            PathBuf::from("Tree/Need.hs"),
+            raw_name.clone()
+        ]
+    );
+    let canonical = paths
+        .canonical_paths()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(canonical.contains(&fs::canonicalize(outside.join("Target.bin")).unwrap()));
+    assert!(canonical.contains(&fs::canonicalize(outside.join("Need.hs")).unwrap()));
+    assert_eq!(
+        shipped_haskell_source_paths(&root)
+            .unwrap()
+            .files()
+            .map(|(relative, _)| relative.to_path_buf())
+            .collect::<Vec<_>>(),
+        vec![PathBuf::from("Tree/Need.hs"), raw_name]
+    );
+    let blocked = root.join("Blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0)).unwrap();
+    let path_error = dependency_source_paths(&root).unwrap_err();
+    let manifest_error = source_root_manifest(&root).unwrap_err();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(path_error.path, blocked);
+    assert_eq!(
+        path_error.source.kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(path_error.path, manifest_error.path);
+    assert_eq!(path_error.source.kind(), manifest_error.source.kind());
+}
+
+#[cfg(unix)]
+#[test]
 fn source_manifest_rejects_ancestor_cycles_and_metadata_failures() {
     let root = tempfile::tempdir().unwrap();
     let cycle_root = root.path().join("cycle");
@@ -445,6 +535,9 @@ fn source_manifest_rejects_ancestor_cycles_and_metadata_failures() {
     std::os::unix::fs::symlink(&cycle_root, cycle_root.join("nested/back")).unwrap();
     let error = source_root_manifest(&cycle_root).unwrap_err();
     assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+    let path_error = dependency_source_paths(&cycle_root).unwrap_err();
+    assert_eq!(path_error.path, error.path);
+    assert_eq!(path_error.source.kind(), error.source.kind());
 
     let dangling_root = root.path().join("dangling");
     fs::create_dir(&dangling_root).unwrap();
@@ -456,6 +549,9 @@ fn source_manifest_rejects_ancestor_cycles_and_metadata_failures() {
     let error = source_root_manifest(&dangling_root).unwrap_err();
     assert_eq!(error.path, dangling_root.join("ignored.txt"));
     assert_eq!(error.source.kind(), std::io::ErrorKind::NotFound);
+    let path_error = dependency_source_paths(&dangling_root).unwrap_err();
+    assert_eq!(path_error.path, error.path);
+    assert_eq!(path_error.source.kind(), error.source.kind());
 
     let shipped_root = root.path().join("shipped");
     fs::create_dir(&shipped_root).unwrap();

@@ -4505,8 +4505,9 @@ thread_local! {
 }
 
 /// Validate consumed bytes and import witnesses against a build action's
-/// declared module and source trees. Parsing shares the caller's inventory;
-/// parsed observations grant no execution authority.
+/// declared module and complete source namespaces. Unused declared contents
+/// need not be readable. Parsing shares the caller's inventory; parsed
+/// observations grant no execution authority.
 pub fn validate_prepared_fixture_sources(
     operation: &tidepool_repr::execution_schema::InventoryOperation,
     evidence_bytes: &[u8],
@@ -4549,16 +4550,9 @@ fn validate_declared_source_closure(
     source: &Path,
     include: &[PathBuf],
 ) -> Result<(), CompileError> {
-    let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
-    for root in include {
-        let manifest = cache::source_root_manifest(root)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        for (relative, _) in manifest {
-            declared.insert(std::fs::canonicalize(root.join(relative))?);
-        }
-    }
+    let declared = DeclaredSourceSet::observe(source, include)?;
     for consumed in &evidence.sources {
-        if !declared.contains(&std::fs::canonicalize(&consumed.path)?) {
+        if !declared.0.contains(&std::fs::canonicalize(&consumed.path)?) {
             return Err(CompileError::ExtractFailed(format!(
                 "build action consumed an undeclared source: {}",
                 consumed.path.display()
@@ -4566,6 +4560,24 @@ fn validate_declared_source_closure(
         }
     }
     Ok(())
+}
+
+/// Declaration membership is a namespace fact. Actual consumed bytes and
+/// import witnesses are authenticated separately by CompletedSourceEvidence.
+struct DeclaredSourceSet(std::collections::BTreeSet<PathBuf>);
+
+impl DeclaredSourceSet {
+    fn observe(source: &Path, include: &[PathBuf]) -> Result<Self, CompileError> {
+        let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
+        for root in include {
+            let paths = cache::dependency_source_paths(root)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            for path in paths.canonical_paths() {
+                declared.insert(path?);
+            }
+        }
+        Ok(Self(declared))
+    }
 }
 
 struct CompilationOutput {
@@ -7353,6 +7365,136 @@ mod module_product_tests {
                 Err(CompileError::ExtractFailed(message))
                     if message == "build-action consumed bytes or import witnesses changed",
             )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_source_membership_avoids_unused_reads_but_authenticates_consumed_sources() {
+        use cache::source_inspection_work;
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("Main.hs");
+        let dependency = temporary.path().join("outside.txt");
+        let declared = temporary.path().join("declared");
+        std::fs::create_dir(&declared).unwrap();
+        std::fs::write(&source, "module Main where\nvalue = 42\n").unwrap();
+        std::fs::write(&dependency, "module Dependency where\nvalue = 1\n").unwrap();
+        symlink(&dependency, declared.join("Alias.hs")).unwrap();
+        let unused = declared.join("Unused.hs");
+        std::fs::write(&unused, "unused = 1\n").unwrap();
+        std::fs::set_permissions(&unused, std::fs::Permissions::from_mode(0)).unwrap();
+        let ignored = declared.join("ignored.txt");
+        std::fs::write(&ignored, "not a selected source").unwrap();
+        let hardlink_target = temporary.path().join("other-outside.hs");
+        std::fs::write(&hardlink_target, "different canonical path").unwrap();
+        std::fs::hard_link(&hardlink_target, declared.join("Hardlink.hs")).unwrap();
+        let mut evidence = assembly_evidence(&["Main", "Dependency"]);
+        evidence.sources = [&source, &dependency]
+            .into_iter()
+            .map(|path| cache::SourceEvidence {
+                path: path.to_path_buf(),
+                sha256: format!("{:x}", Sha256::digest(std::fs::read(path).unwrap())),
+            })
+            .collect();
+        evidence.modules[0].source = source.clone();
+        evidence.modules[1].source = dependency.clone();
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        source_inspection_work::take();
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        let work = source_inspection_work::take();
+        assert_eq!(work.content_read_attempts, 0);
+        assert_eq!(work.hashes, 0);
+        assert!(work.entries >= 4);
+        let full_error = cache::source_root_manifest(&declared).unwrap_err();
+        assert_eq!(full_error.path, unused);
+        assert_eq!(
+            full_error.source.kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        for undeclared in [&ignored, &hardlink_target] {
+            let mut other = evidence.clone();
+            other.sources[1].path = undeclared.clone();
+            assert!(validate_declared_source_closure(
+                &other,
+                &source,
+                std::slice::from_ref(&declared)
+            )
+            .is_err());
+        }
+        std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0)).unwrap();
+        assert!(validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::set_permissions(&dependency, std::fs::Permissions::from_mode(0o600)).unwrap();
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+
+        // Namespace observation remains complete after finding all consumed paths.
+        let missing = temporary.path().join("missing-root");
+        assert!(
+            validate_declared_source_closure(&evidence, &source, &[declared.clone(), missing])
+                .is_err()
+        );
+        let dangling = declared.join("dangling.txt");
+        symlink(temporary.path().join("absent"), &dangling).unwrap();
+        assert!(validate_declared_source_closure(
+            &evidence,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::remove_file(dangling).unwrap();
+        symlink(&declared, declared.join("back")).unwrap();
+        assert!(validate_declared_source_closure(
+            &evidence,
+            &source,
+            std::slice::from_ref(&declared)
+        )
+        .is_err());
+        std::fs::remove_file(declared.join("back")).unwrap();
+        std::fs::set_permissions(&unused, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = cache::source_roots_identity(
+            b"declared-membership-control",
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        std::fs::write(&unused, "unused = 2\n").unwrap();
+        let after = cache::source_roots_identity(
+            b"declared-membership-control",
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        assert_ne!(before, after);
+        validate_prepared_fixture_sources(
+            &operation,
+            &bytes,
+            &source,
+            std::slice::from_ref(&declared),
+        )
+        .unwrap();
+        eprintln!(
+            "declared-source work: namespace_entries={} unused_content_reads={} hashes={}",
+            work.entries, work.content_read_attempts, work.hashes
         );
     }
 

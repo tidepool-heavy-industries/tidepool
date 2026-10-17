@@ -13,6 +13,68 @@ pub struct SourceRootManifest {
     files: Vec<(PathBuf, blake3::Hash)>,
 }
 
+/// One completely observed selected namespace. Paths remain paired to the
+/// root that issued them; this inventory authenticates no file contents.
+#[derive(Debug)]
+pub(crate) struct ObservedSourcePaths {
+    root: PathBuf,
+    relative: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+pub(crate) mod source_inspection_work {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct Counts {
+        pub entries: usize,
+        pub content_read_attempts: usize,
+        pub hashes: usize,
+    }
+
+    thread_local! {
+        static COUNTS: std::cell::Cell<Counts> = const {
+            std::cell::Cell::new(Counts { entries: 0, content_read_attempts: 0, hashes: 0 })
+        };
+    }
+
+    pub(crate) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace(Counts::default()))
+    }
+
+    pub(super) fn entry() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.entries += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn read() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.content_read_attempts += 1;
+            counts.set(value);
+        });
+    }
+    pub(super) fn hash() {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.hashes += 1;
+            counts.set(value);
+        });
+    }
+}
+
+impl ObservedSourcePaths {
+    pub(crate) fn files(&self) -> impl Iterator<Item = (&Path, PathBuf)> {
+        self.relative
+            .iter()
+            .map(|relative| (relative.as_path(), self.root.join(relative)))
+    }
+
+    pub(crate) fn canonical_paths(&self) -> impl Iterator<Item = std::io::Result<PathBuf>> + '_ {
+        self.files().map(|(_, path)| fs::canonicalize(path))
+    }
+}
+
 impl SourceRootManifest {
     /// Reuse complete file evidence produced while capturing a source root.
     /// Header files may accompany the capture but do not contribute to the
@@ -103,6 +165,40 @@ pub fn shipped_haskell_source_manifest(
     selected_source_manifest(root, SourceSelection::ShippedHaskell)
 }
 
+pub(crate) fn dependency_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::Dependencies)
+}
+
+pub(crate) fn shipped_haskell_source_paths(
+    root: &Path,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    selected_source_paths(root, SourceSelection::ShippedHaskell)
+}
+
+fn selected_source_paths(
+    root: &Path,
+    selection: SourceSelection,
+) -> Result<ObservedSourcePaths, SourceManifestError> {
+    let mut relative = Vec::new();
+    visit_dependency_sources(
+        root,
+        root,
+        &mut std::collections::HashSet::new(),
+        selection,
+        &mut |path, _| {
+            relative.push(path.to_path_buf());
+            Ok(())
+        },
+    )?;
+    relative.sort();
+    Ok(ObservedSourcePaths {
+        root: root.to_path_buf(),
+        relative,
+    })
+}
+
 /// Enumerate Haskell home-module sources by their visible relative paths.
 fn dependency_source_manifest(root: &Path) -> Result<SourceRootManifest, SourceManifestError> {
     selected_source_manifest(root, SourceSelection::Dependencies)
@@ -125,7 +221,21 @@ fn selected_source_files<D>(
 ) -> Result<Vec<(PathBuf, D)>, SourceManifestError> {
     let mut files = Vec::new();
     let mut ancestors = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut files, &mut ancestors, selection, &digest)?;
+    visit_dependency_sources(
+        root,
+        root,
+        &mut ancestors,
+        selection,
+        &mut |relative, path| {
+            #[cfg(test)]
+            source_inspection_work::read();
+            let bytes = crate::host_work::read(path).map_err(|error| source_error(path, error))?;
+            #[cfg(test)]
+            source_inspection_work::hash();
+            files.push((relative.to_path_buf(), digest(&bytes)));
+            Ok(())
+        },
+    )?;
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(files)
 }
@@ -189,13 +299,12 @@ fn hex_digest(bytes: &[u8]) -> String {
     })
 }
 
-fn collect_dependency_sources<D>(
+fn visit_dependency_sources(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(PathBuf, D)>,
     ancestors: &mut std::collections::HashSet<PathBuf>,
     selection: SourceSelection,
-    digest: &impl Fn(&[u8]) -> D,
+    visit: &mut impl FnMut(&Path, &Path) -> Result<(), SourceManifestError>,
 ) -> Result<(), SourceManifestError> {
     crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
@@ -213,22 +322,22 @@ fn collect_dependency_sources<D>(
     for entry in entries {
         crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
         let path = entry.path();
+        #[cfg(test)]
+        source_inspection_work::entry();
         if !selection.includes_directory(&path) {
             continue;
         }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            collect_dependency_sources(root, &path, out, ancestors, selection, digest)?;
+            visit_dependency_sources(root, &path, ancestors, selection, visit)?;
         } else if selection.includes_file(&path) {
-            let bytes =
-                crate::host_work::read(&path).map_err(|error| source_error(&path, error))?;
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
                     &path,
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-            out.push((rel.to_path_buf(), digest(&bytes)));
+            visit(rel, &path)?;
         }
     }
     ancestors.remove(&canonical);
