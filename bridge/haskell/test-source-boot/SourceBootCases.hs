@@ -3410,6 +3410,13 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
               | (T.unpack unit,T.unpack name) == owner -> TList <$> transform values
             _ -> pure entry)
           _ -> fail "genuine scope has no native rows"
+      replaceNativeField index edit values
+        | length values /= 10 = fail "genuine native row has another layout"
+        | otherwise = case splitAt index values of
+            (before,value:after) -> do
+              replacement <- edit value
+              pure (before ++ [replacement] ++ after)
+            _ -> fail "native mutation has another field index"
       readAltered label transform fields = do
         changed <- rewriteOwner transform fields
         let path = directory </> "native-census-" ++ label ++ ".scope.cbor"
@@ -3454,18 +3461,15 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
             (case requested of [] -> True; ordinal:_ -> case selectNativeCensusGroups indexed (ordinal:requested) of Left _ -> True; Right _ -> False)
         ]
   unless (isSuccess property) (fail "authenticated native census ordinal projection property failed")
-  zero <- readAltered "zero-selection" (\case
-      [unit,name,version,iface,productSha,path,_,descriptor,availability] ->
-        pure [unit,name,version,iface,productSha,path,TList [],descriptor,availability]
-      _ -> fail "genuine native row has another layout") fields >>= either fail pure
+  zero <- readAltered "zero-selection" (replaceNativeField 6 (const (pure (TList [])))) fields
+    >>= either fail pure
   unless (scopeAvailableOriginalProducts zero == available
       && [originalGroups value | value <- scopeProducts zero
         , (originalUnit value,originalModule value) == owner] == [[]]) $
     fail "real selected-zero scope lost full availability or promoted native roots"
-  refused "descriptor-sha" (\case
-      [unit,name,version,iface,productSha,path,groups,TList [certificate,_],availability] ->
-        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")],availability]
-      _ -> fail "genuine native descriptor has another layout") fields
+  refused "descriptor-sha" (replaceNativeField 7 (\case
+      TList [certificate,_] -> pure (TList [certificate,TString (T.replicate 64 "0")])
+      _ -> fail "genuine native descriptor has another layout")) fields
   let legacy = [if index == 1 then TString "14" else field | (index,field) <- zip [0::Int ..] fields]
       legacyPath = directory </> "native-census-legacy.scope.cbor"
   BS.writeFile legacyPath (encode (TList legacy))
@@ -3481,11 +3485,8 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
         let certificateCopy = directory </> "native-census-" ++ label ++ ".cert.cbor"
             certificateBytes = encode certificate
         BS.writeFile certificateCopy certificateBytes
-        refused label (\case
-            [unit,name,version,iface,productSha,path,groups,_,availability] -> pure
-              [unit,name,version,iface,productSha,path,groups,
-                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))],availability]
-            _ -> fail "genuine native row has another layout") fields
+        refused label (replaceNativeField 7 (const (pure
+          (TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))])))) fields
   rejectCertificate "certificate-version" legacyCertificate
   changedCanonical <- case nativeTerm of
     TList [magic,version,nativeOwner,groups,sources,packages,execution,requirements,TString sha] ->

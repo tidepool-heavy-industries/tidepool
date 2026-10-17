@@ -12319,6 +12319,10 @@ pub(crate) mod tests {
                     ])
                 };
                 assert_eq!(native[0].as_array().unwrap()[8], expected);
+                assert_eq!(
+                    native[0].as_array().unwrap()[9],
+                    value_text("compiler-original")
+                );
             }
             let mut validation = PackageInterfaceValidation::default();
             let selection = CertifiedSourceSelection::from_compiler_inputs(
