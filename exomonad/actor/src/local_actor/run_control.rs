@@ -2547,14 +2547,37 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::ReserveExistingInput { incarnation, reply })
             .await?
     }
-    pub(crate) async fn settle_preparations(
+    /// Whole-run observation after seal, including independently owned shared
+    /// compiler producers. Root-record observation remains valid while running.
+    pub(crate) async fn settle_run_preparations(
         &self,
         timeout: Duration,
     ) -> crate::CleanupComponentOutcome {
         let deadline = tokio::time::Instant::now() + timeout;
         let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
-        let preparations = match tokio::time::timeout_at(
-            deadline,
+        let preparations = tokio::time::timeout_at(deadline, self.settle_preparations(timeout))
+            .await
+            .unwrap_or_else(|_| {
+                crate::CleanupComponentOutcome::Unconfirmed(
+                    "root preparation cleanup remains in flight".into(),
+                )
+            });
+        if shared.is_confirmed() {
+            preparations
+        } else {
+            crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "shared compiler {shared:?}; preparations {preparations:?}"
+            ))
+        }
+    }
+    /// Observe the currently admitted root-preparation records, without closing
+    /// run admission or claiming that future preparations have been excluded.
+    pub(crate) async fn settle_preparations(
+        &self,
+        timeout: Duration,
+    ) -> crate::CleanupComponentOutcome {
+        match tokio::time::timeout(
+            timeout,
             self.ask(|reply| RunControlMessage::ObservePreparations { reply }),
         )
         .await
@@ -2564,13 +2587,6 @@ impl RunControlClient {
             Err(_) => crate::CleanupComponentOutcome::Unconfirmed(
                 "root preparation cleanup remains in flight".into(),
             ),
-        };
-        if shared.is_confirmed() {
-            preparations
-        } else {
-            crate::CleanupComponentOutcome::Unconfirmed(format!(
-                "shared compiler {shared:?}; preparations {preparations:?}"
-            ))
         }
     }
     pub(crate) async fn reserve(

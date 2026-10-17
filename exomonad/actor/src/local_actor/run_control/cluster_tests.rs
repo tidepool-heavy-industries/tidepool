@@ -264,7 +264,9 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     );
     assert!(!control.shared_cleanup.observation().is_confirmed());
     assert!(matches!(
-        control.settle_preparations(Duration::from_millis(10)).await,
+        control
+            .settle_run_preparations(Duration::from_millis(10))
+            .await,
         crate::CleanupComponentOutcome::Unconfirmed(_)
     ));
     assert_eq!(
@@ -278,19 +280,41 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
     release.send(()).unwrap();
     physical.await.unwrap();
     assert_eq!(
-        control.settle_preparations(Duration::from_secs(2)).await,
+        control
+            .settle_run_preparations(Duration::from_secs(2))
+            .await,
         crate::CleanupComponentOutcome::Confirmed
     );
     other_ticket.run(|_| ());
     other_control.seal().await.unwrap();
     assert_eq!(
         other_control
-            .settle_preparations(Duration::from_secs(2))
+            .settle_run_preparations(Duration::from_secs(2))
             .await,
         crate::CleanupComponentOutcome::Confirmed
     );
     other_control.owner.stop(None);
     other_task.await.unwrap();
+    control.owner.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn observing_root_preparations_preserves_open_shared_admission() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    assert_eq!(
+        control.settle_preparations(Duration::from_secs(1)).await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert!(control.preparation_client().claim(|| ()).is_ok());
+    assert!(!control.shared_cleanup.observation().is_confirmed());
+    control.seal().await.unwrap();
+    assert_eq!(
+        control
+            .settle_run_preparations(Duration::from_secs(1))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
     control.owner.stop(None);
     task.await.unwrap();
 }

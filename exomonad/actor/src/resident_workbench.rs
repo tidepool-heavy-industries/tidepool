@@ -17973,7 +17973,7 @@ pub(crate) mod request_tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            run.settle_preparations(std::time::Duration::from_millis(10))
+            run.settle_run_preparations(std::time::Duration::from_millis(10))
                 .await,
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ));
@@ -17998,7 +17998,7 @@ pub(crate) mod request_tests {
         assert!(outcome.action.is_err());
         assert!(outcome.cleanup.observation().is_confirmed());
         let settled = run
-            .settle_preparations(std::time::Duration::from_secs(2))
+            .settle_run_preparations(std::time::Duration::from_secs(2))
             .await;
         if control_failure {
             assert!(matches!(

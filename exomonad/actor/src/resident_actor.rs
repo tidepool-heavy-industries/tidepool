@@ -14636,7 +14636,7 @@ where
                 )];
             }
         };
-        let preparation = self.directory.settle_preparations(budget).await;
+        let preparation = self.directory.settle_run_preparations(budget).await;
         // A transfer admitted before seal can change the independent roots.
         let roots = match self.directory.independent_roots().await {
             Ok(roots) => roots,
