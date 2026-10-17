@@ -170,8 +170,6 @@ struct NativeOfferCustody {
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     native_originals: BTreeSet<ArtifactId>,
     artifact_carriers: BTreeSet<ArtifactBinding>,
-    #[cfg(test)]
-    observed: Arc<OnceLock<ArtifactView>>,
 }
 
 impl NativeOfferCustody {
@@ -221,8 +219,6 @@ impl NativeOfferCustody {
             reachable,
             native_originals,
             artifact_carriers,
-            #[cfg(test)]
-            observed: Arc::new(OnceLock::new()),
         })
     }
 }
@@ -955,14 +951,6 @@ impl IssuedNativeOffer {
 
     pub(crate) fn is_full(&self) -> bool {
         matches!(self.0.body, NativeOfferBody::Full { .. })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn custody(&self) -> &ArtifactView {
-        self.0
-            .custody
-            .observed
-            .get_or_init(|| ArtifactView::from_custody(Arc::clone(&self.0.custody.lease)))
     }
 
     pub(super) fn custody_lease(&self) -> &Arc<ViewLease> {

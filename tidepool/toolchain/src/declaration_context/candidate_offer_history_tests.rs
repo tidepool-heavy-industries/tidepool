@@ -140,15 +140,20 @@ fn fresh_candidate_selects_its_original_beside_same_interface_historical_custody
                 .artifacts()
                 .artifact_ids()
                 .contains(&a.descriptor.id));
-            assert!(offer
-                .custody()
-                .binding_dependencies()
+            let retained_offer = request
+                .compiler_inputs()
+                .compiler_source_support()
+                .native_offers()
                 .iter()
-                .all(|edge| request
-                    .compiler_inputs()
-                    .artifacts()
+                .find(|retained| retained.snapshot_facts() == offer.snapshot_facts())
+                .expect("request owns historical availability independently of its transport");
+            assert_eq!(
+                retained_offer
+                    .custody_snapshot()
                     .binding_dependencies()
-                    .contains(edge)));
+                    .unwrap(),
+                offer.custody_snapshot().binding_dependencies().unwrap()
+            );
         }
     };
     // This positive control establishes B through the actual candidate issuer,
