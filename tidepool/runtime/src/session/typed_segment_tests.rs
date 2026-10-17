@@ -1217,14 +1217,13 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         item: &tidepool_toolchain::checked_cell::CellProgramItem,
     ) -> Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext> {
         let native = item.native().unwrap();
-        let (table, _) =
-            tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+        let table = native.table();
         let turn: ciborium::value::Value =
             ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
         let fields = turn.as_array().unwrap()[1].as_array().unwrap();
         let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
         native
-            .original_execution_context(&native.target_owned(), &table, &sites)
+            .original_execution_context(&native.target_owned(), table, &sites)
             .unwrap()
     }
 

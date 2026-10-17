@@ -825,7 +825,6 @@ impl PreparedCellProgram {
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
                 turn: output.turn,
-                metadata: output.metadata,
                 products: output.products.expect("program output was sealed"),
             };
             items.push(CellProgramItem {
@@ -2460,10 +2459,8 @@ impl SelectedModuleCandidateOffer {
                 generation,
                 observation,
                 true,
-                &output.directory,
+                output,
                 &initial.request_sha256,
-                &output.source,
-                &output.target,
                 sealed.original.execution().cloned().ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "program output lacks original execution evidence".into(),
@@ -2897,13 +2894,38 @@ impl SelectedModuleCandidateOffer {
 }
 
 #[derive(Debug)]
-struct ProgramNativeOutput {
+pub(crate) struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
     turn: Arc<[u8]>,
     metadata: Arc<[u8]>,
     products: Option<Arc<SealedTurnProducts>>,
     source: String,
+}
+
+impl ProgramNativeOutput {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+    pub(crate) fn target(&self) -> &Arc<PreparedProgram> {
+        &self.target
+    }
+    pub(crate) fn decode_metadata(&self) -> Result<(DataConTable, MetaWarnings), CompileError> {
+        let start = Instant::now();
+        let (table, warnings) =
+            tidepool_repr::serial::read_metadata_for_program(&self.metadata, &self.target)?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            "native.checked_metadata_decode",
+            start.elapsed(),
+            self.metadata.len() as u64,
+        );
+        Ok((table, warnings))
+    }
 }
 
 fn read_native_turn_artifacts(
@@ -2941,6 +2963,13 @@ fn read_native_turn_artifacts(
         timing::NO_NODE,
         timing::NO_ROUND,
         timing::STAGE_CBOR_READ,
+        metadata_read_start.elapsed(),
+        metadata.len() as u64,
+    );
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "native.metadata_read",
         metadata_read_start.elapsed(),
         metadata.len() as u64,
     );
@@ -8633,6 +8662,68 @@ mod constructor_identity_tests {
         assert_eq!(retained.metadata_bytes(), metadata.as_slice());
         assert_eq!(retained.source(), "module Input where");
         assert!(retained.products().is_none());
+    }
+
+    #[test]
+    fn captured_checked_metadata_never_reopens_a_changed_file_for_the_same_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = prepared_fixture_bytes();
+        let artifact = PreparedArtifact::parse(bytes.clone(), DecodeLimits::default()).unwrap();
+        let mut table = DataConTable::new();
+        for decl in artifact.prepared().constructors() {
+            table.insert_checked(matching_dc(decl)).unwrap();
+        }
+        let mut warnings = MetaWarnings::default();
+        warnings.captured_type = Some("captured observation".into());
+        let original = write_metadata(&table, &warnings).unwrap();
+        std::fs::write(directory.path().join("__prepared.prepared.cbor"), &bytes).unwrap();
+        // Both table-only and warning-only changes remain valid for exactly P.
+        for changed_table in [false, true] {
+            std::fs::write(directory.path().join("meta.cbor"), &original).unwrap();
+            let output = read_native_turn_artifacts(
+                directory.path(),
+                Arc::from(&b"turn"[..]),
+                "source".into(),
+            )
+            .unwrap();
+            let target = output.target().clone();
+            let mut alternate = table.clone();
+            if changed_table {
+                let decl = artifact.prepared().constructors().first().unwrap();
+                alternate = table_with_one_entry_mutated(&artifact, decl, |dc| {
+                    dc.qualified_name = Some("another.display.alias".into())
+                });
+            }
+            let changed_warnings = if changed_table {
+                warnings.clone()
+            } else {
+                MetaWarnings::default()
+            };
+            let replacement = write_metadata(&alternate, &changed_warnings).unwrap();
+            assert_ne!(original, replacement);
+            let (replacement_table, replacement_warnings) =
+                tidepool_repr::serial::read_metadata_for_program(&replacement, &target).unwrap();
+            assert_eq!(replacement_table == table, !changed_table);
+            assert_eq!(
+                replacement_warnings.captured_type == warnings.captured_type,
+                changed_table
+            );
+            std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
+            let (decoded, observed) = output.decode_metadata().unwrap();
+            assert!(Arc::ptr_eq(&target, output.target()));
+            assert_eq!(output.metadata.as_ref(), original.as_slice());
+            assert_eq!(decoded, table);
+            assert_eq!(observed.captured_type, warnings.captured_type);
+            std::fs::remove_file(directory.path().join("meta.cbor")).unwrap();
+            assert_eq!(output.decode_metadata().unwrap().0, table);
+        }
+        // A later valid file cannot repair the actual invalid observation.
+        std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
+        let invalid =
+            read_native_turn_artifacts(directory.path(), Arc::from(&b"turn"[..]), "source".into())
+                .unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), original).unwrap();
+        assert!(invalid.decode_metadata().is_err());
     }
 
     /// A table entry that agrees with `decl` on every fact this crate checks
