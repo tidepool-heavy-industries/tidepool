@@ -2533,6 +2533,204 @@ mod authored_tests {
 
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
+    fn accepted_join_preserves_selected_dependencies_with_historical_interface_custody() {
+        use crate::artifact_inventory::{
+            ArtifactDependency, ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+            CompilerSourceSupport,
+        };
+        use crate::exact_context::{hydrate_context, Materializer};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        use std::collections::{BTreeMap, BTreeSet};
+        let source_root = tempfile::tempdir().unwrap();
+        let module = SessionModule::lib(Generation(1));
+        let source = include_str!("../tests/fixtures/owned-declaration/G1.hs");
+        let path = source_root.path().join(module.relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        let certificate = Arc::new(
+            crate::artifacts::test_support::certify_authored_declaration(
+                module,
+                &path,
+                source,
+                &[source_root.path().to_path_buf()],
+                source_root.path(),
+            )
+            .unwrap(),
+        );
+        let owner = ExactModuleIdentity {
+            unit: certificate.product().owner().unit.clone(),
+            module: module.module_name(),
+        };
+        let context = ExactDeclarationContext::new(
+            &[certificate.clone()],
+            &[],
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }],
+        )
+        .unwrap();
+        let producer = context.toolchain_identity_sha256();
+        let hidden = ["Expr", owner.module.as_str()].map(|module| {
+            Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    "main",
+                    module,
+                    BTreeMap::new(),
+                ),
+            ))
+        });
+        let hidden_ids = hidden
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let custody = inventory
+            .admit_shared(&inventory.empty_view(), hidden.to_vec())
+            .unwrap();
+        let context = context
+            .extend_issued_compiler_support(
+                &CompilerSourceSupport::new(CompilerInputProjection::default(), custody, [])
+                    .unwrap(),
+            )
+            .unwrap();
+        let original_graph = context.artifact_view().capture_graph_selection();
+        let worker_root = Arc::new(tempfile::tempdir().unwrap());
+        let materialized = context.materialize_scratch(&worker_root).unwrap();
+        assert!(materialized
+            .artifacts
+            .iter()
+            .all(|row| row.interface.module != "Expr"));
+        let original = materialized
+            .artifacts
+            .iter()
+            .find(|row| row.interface.module == owner.module)
+            .unwrap();
+        let input = DeclarationJoinInput {
+            expected_public_version: "selected-input-join".into(),
+            public_module: None,
+            private_base: None,
+            private_tip: Some(ModuleSnapshot {
+                module: owner.module.clone(),
+                path: original.interface.path.clone(),
+                sha256: original.interface.sha256.clone(),
+            }),
+            writes: vec![],
+            reserved: ReservedJoin {
+                unit: "main".into(),
+                module: "SelectedInputJoin".into(),
+                path: worker_root.path().join("joined.hi"),
+            },
+            artifacts: materialized.artifacts,
+            family_closure: certificate.family_closure().to_vec(),
+            expected_exports: certificate.lexical_exports().to_vec(),
+            expected_instances: certificate.instances().clone(),
+        };
+        let CertifiedDeclarationJoin::Accepted(accepted) =
+            crate::artifacts::test_support::with_settlement(|settlement| {
+                certify_declaration_join(
+                    input,
+                    &context,
+                    &[source_root.path().to_path_buf()],
+                    source_root.path(),
+                    worker_root.clone(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("expected real joined interface")
+        };
+        let joined_id = accepted.artifact_id();
+        let lexical = vec![
+            ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            },
+            ExactLexicalNode {
+                owner: ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "SelectedInputJoin".into(),
+                },
+                imports: vec![owner],
+            },
+        ];
+        let live =
+            ExactDeclarationContext::new(&[], &[Arc::new(accepted.clone())], lexical).unwrap();
+        assert!(hidden_ids
+            .iter()
+            .all(|id| live.artifact_view().artifact_ids().contains(id)));
+        let live_edges = live
+            .artifact_view()
+            .interface_dependencies()
+            .into_iter()
+            .filter(|(from, _, _)| *from == joined_id)
+            .collect::<BTreeSet<_>>();
+        assert!(!live_edges.is_empty());
+        assert!(live_edges.iter().all(
+            |(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface
+        ));
+        for root in original_graph.roots.iter().filter(|node| {
+            matches!(
+                node,
+                crate::artifact_inventory::ArtifactBindingNode::Group(_)
+            )
+        }) {
+            assert!(live
+                .artifact_view()
+                .capture_graph_selection()
+                .roots
+                .contains(root));
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let stored = accepted.materialize(durable.path()).unwrap();
+        let durable_edges = stored
+            .artifact_dependencies
+            .iter()
+            .filter(|(from, _, _)| *from == joined_id)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(durable_edges, live_edges);
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let receipt = materializer
+            .materialize_context(None, &live.snapshot())
+            .unwrap();
+        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let receipt = hydrate_context(&store, receipt.root()).unwrap();
+        let mut joins = stored.anchors.clone();
+        joins.push(stored.join);
+        let graph = live.snapshot().graph_selection().unwrap();
+        let recovered = crate::declaration_context::RecoveredArtifactInventory::capture_bound(
+            durable.path(),
+            &stored.products,
+            &stored.module_interfaces,
+            &joins,
+            &stored.value_interfaces,
+            &live.artifact_view().descriptors(),
+            &graph.bindings,
+            &live.artifact_view().binding_dependencies(),
+        )
+        .unwrap()
+        .context_with_snapshot(receipt.snapshot())
+        .unwrap();
+        assert_eq!(
+            recovered
+                .artifact_view()
+                .interface_dependencies()
+                .into_iter()
+                .filter(|(from, _, _)| *from == joined_id)
+                .collect::<BTreeSet<_>>(),
+            live_edges
+        );
+        assert_eq!(recovered.semantic_sha256(), live.semantic_sha256());
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
     fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
         use std::sync::Arc;
         let source_root = tempfile::tempdir().unwrap();
