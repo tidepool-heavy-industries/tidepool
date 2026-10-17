@@ -2991,16 +2991,30 @@ impl CertifiedSourceSelection {
         {
             return selected.availability.permits(ordinal);
         }
-        self.native_original_requirements().any(|proof| {
-            proof
-                .selection
-                .graph_selection()
-                .native_groups
-                .iter()
-                .any(|group| {
-                    group.binding.artifact() == original && group.original_ordinal == ordinal
-                })
-        })
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: original,
+            original_ordinal: ordinal,
+        };
+        self.native_selections()
+            .any(|selected| match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .offers()
+                    .iter()
+                    .any(|offer| offer.group_bindings(key).next().is_some()),
+                ReceiptNativeAvailability::NewProduct { dependencies } => {
+                    dependencies.iter().any(|proof| {
+                        proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .iter()
+                            .any(|group| {
+                                group.binding.artifact() == original
+                                    && group.original_ordinal == ordinal
+                            })
+                    })
+                }
+            })
     }
 
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {

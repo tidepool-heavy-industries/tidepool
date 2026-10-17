@@ -776,7 +776,7 @@ impl IssuedNativeOffer {
 
     /// Query only this issuance's checked reachable membership. Complete scope
     /// rows outside the offer's selection cannot supply a missing binding.
-    pub(super) fn group_bindings(
+    pub(crate) fn group_bindings(
         &self,
         key: NativeGroupKey,
     ) -> impl Iterator<Item = NativeGroupBinding> + '_ {
