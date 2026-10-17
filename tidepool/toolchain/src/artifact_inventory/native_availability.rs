@@ -168,6 +168,7 @@ pub(crate) fn validate_consumed_native_namespace(
 struct NativeOfferCustody {
     lease: Arc<ViewLease>,
     reachable: imbl::OrdSet<ArtifactBindingNode>,
+    native_originals: BTreeSet<ArtifactId>,
     #[cfg(test)]
     observed: Arc<OnceLock<ArtifactView>>,
 }
@@ -177,9 +178,17 @@ impl NativeOfferCustody {
         lease: Arc<ViewLease>,
         reachable: imbl::OrdSet<ArtifactBindingNode>,
     ) -> Self {
+        let native_originals = reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
+                _ => None,
+            })
+            .collect();
         Self {
             lease,
             reachable,
+            native_originals,
             #[cfg(test)]
             observed: Arc::new(OnceLock::new()),
         }
@@ -890,9 +899,11 @@ impl IssuedNativeOffer {
             .filter_map(|role| role.original())
             .collect::<BTreeSet<_>>();
         Ok(self
-            .issued_group_carriers()?
-            .keys()
-            .any(|group| originals.contains(&group.binding.artifact())))
+            .0
+            .custody
+            .native_originals
+            .iter()
+            .any(|original| originals.contains(original)))
     }
 
     /// Current roles may stop offering an original, or stop qualifying its full
@@ -912,9 +923,11 @@ impl IssuedNativeOffer {
                 .filter_map(|role| role.original())
                 .collect::<BTreeSet<_>>();
             Ok(self
-                .issued_group_carriers()?
-                .keys()
-                .any(|group| originals.contains(&group.binding.artifact())))
+                .0
+                .custody
+                .native_originals
+                .iter()
+                .any(|original| originals.contains(original)))
         };
         let role = projection.snapshot_roles().get(&self.0.owner);
         let Some(original) = role.and_then(CompilerInputRole::original) else {
