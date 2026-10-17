@@ -276,11 +276,15 @@ impl ValidatedInputPackages {
         )
     }
 
-    pub(crate) fn read_supported(
-        path: &Path,
+    pub(crate) fn decode_supported(
+        bytes: &[u8],
         source: &crate::artifacts::SourceEvidenceAdmission<'_>,
     ) -> Result<Option<Self>, CompileInputError> {
-        Self::supported(Self::read(path, source))
+        Self::supported(Self::decode(
+            bytes,
+            source.worker_bytes(),
+            source.completed(),
+        ))
     }
 
     #[cfg(test)]
@@ -319,13 +323,7 @@ impl ValidatedInputPackages {
         }
     }
 
-    pub(crate) fn read(
-        path: &Path,
-        source: &crate::artifacts::SourceEvidenceAdmission<'_>,
-    ) -> Result<Self, CompileInputError> {
-        Self::read_observations(path, source.worker_bytes(), source.completed())
-    }
-
+    #[cfg(test)]
     fn read_observations(
         path: &Path,
         evidence_bytes: &[u8],
@@ -334,7 +332,7 @@ impl ValidatedInputPackages {
         Self::decode(&Self::read_bytes(path)?, evidence_bytes, evidence)
     }
 
-    fn read_bytes(path: &Path) -> Result<Vec<u8>, CompileInputError> {
+    pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, CompileInputError> {
         use std::io::Read;
         let file = std::fs::File::open(path)
             .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;

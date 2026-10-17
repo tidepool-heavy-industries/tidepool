@@ -3201,6 +3201,19 @@ impl CompilerSidecar {
         }
     }
 
+    fn read_observed(
+        self,
+        root: &Path,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Vec<u8>, CompileError> {
+        let path = root.join(self.filename());
+        let bytes = self.read(root, &validation.inventory)?;
+        validation
+            .record_captured_bytes(&path, &bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        Ok(bytes)
+    }
+
     fn read(
         self,
         root: &Path,
@@ -3301,14 +3314,13 @@ fn seal_turn_outputs_with_validation(
             )
         })
         .transpose()?;
-    let receipt_bytes =
-        CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
+    let receipt_bytes = CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
     let ordinary_inputs = if source_segment.is_none() {
         let product_bytes =
-            CompilerSidecar::ModuleProducts.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
         let packages =
-            CompilerSidecar::ModulePackageImports.read(output_dir, &validation.inventory)?;
-        let evidence = CompilerSidecar::Dependencies.read(output_dir, &validation.inventory)?;
+            CompilerSidecar::ModulePackageImports.read_observed(output_dir, validation)?;
+        let evidence = CompilerSidecar::Dependencies.read_observed(output_dir, validation)?;
         timing::record_inventory_work("products.decode.before", output_dir, &validation.inventory);
         let start = Instant::now();
         let products = certified_products::ParsedModuleProducts::decode_with_operation(
@@ -3401,10 +3413,10 @@ fn seal_turn_outputs_with_validation(
     }
     let ordinary_receipt = if source_segment.is_none() {
         Some(
-            certified_products::decode_receipt_with_operation(
+            certified_products::decode_receipt_with_validation(
                 &receipt_bytes,
-                Some(output_dir),
-                &validation.inventory,
+                output_dir,
+                validation,
             )
             .map_err(compiler_evidence_failure)?,
         )
@@ -3674,46 +3686,52 @@ fn seal_turn_outputs_with_validation(
     );
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let original_compile_input =
-        if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
-            let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
-                &output_dir.join("compiler-inputs.cbor"),
-                source_admission
-                    .as_ref()
-                    .expect("ordinary input source admission"),
-            )?;
-            input_packages
-                .map(|input_packages| {
-                    crate::compile_input::seal(
-                        &offer.producer,
-                        &offer.include,
-                        valid,
-                        &input_packages,
-                        source,
-                        target,
-                        prepared,
-                        &certified_groups,
-                        &pending_imports,
-                        &package_interfaces,
-                        table.clone(),
-                        sites.to_vec(),
-                        &artifact_view,
-                        &certified.source_selection,
-                        artifact_view.native_sites_for_groups(
-                            &target_native_selection.groups_for_target(
-                                &artifact_view,
-                                typed_entry.as_ref(),
-                                &pending_imports,
-                            )?,
+    let original_compile_input = if let Some((table, sites)) =
+        identity_metadata.filter(|_| offer.exact.is_none())
+    {
+        let input_path = output_dir.join("compiler-inputs.cbor");
+        let input_bytes = crate::compile_input::ValidatedInputPackages::read_bytes(&input_path)?;
+        validation
+            .record_captured_bytes(&input_path, &input_bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let input_packages = crate::compile_input::ValidatedInputPackages::decode_supported(
+            &input_bytes,
+            source_admission
+                .as_ref()
+                .expect("ordinary input source admission"),
+        )?;
+        input_packages
+            .map(|input_packages| {
+                crate::compile_input::seal(
+                    &offer.producer,
+                    &offer.include,
+                    valid,
+                    &input_packages,
+                    source,
+                    target,
+                    prepared,
+                    &certified_groups,
+                    &pending_imports,
+                    &package_interfaces,
+                    table.clone(),
+                    sites.to_vec(),
+                    &artifact_view,
+                    &certified.source_selection,
+                    artifact_view.native_sites_for_groups(
+                        &target_native_selection.groups_for_target(
+                            &artifact_view,
+                            typed_entry.as_ref(),
+                            &pending_imports,
                         )?,
-                    )
-                })
-                .transpose()?
-                .flatten()
-                .map(Arc::new)
-        } else {
-            None
-        };
+                    )?,
+                )
+            })
+            .transpose()?
+            .flatten()
+            .map(Arc::new)
+    } else {
+        None
+    };
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original = match exact.as_ref() {
         Some(admission) => {
@@ -8483,6 +8501,28 @@ mod module_product_tests {
             1,
             "fresh preparation hands off its staging validation without loading again"
         );
+        let observed = production_entry::entry_observed_inputs();
+        for name in [
+            prepared_artifact_name("__prepared"),
+            "meta.cbor".into(),
+            "asks.json".into(),
+            "module-products.cbor".into(),
+            "module-package-imports.cbor".into(),
+            "dependencies.json".into(),
+            "certified-products.cbor".into(),
+            "compiler-inputs.cbor".into(),
+        ] {
+            assert!(
+                observed.contains(Path::new(&name)),
+                "actual entry admission did not observe {name}"
+            );
+        }
+        let original = first
+            .products()
+            .recovery_products
+            .first()
+            .expect("real retained entry fixture must issue an original product");
+        crate::recovery_artifacts::check_entry_unsealed_input_observations(original);
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {
