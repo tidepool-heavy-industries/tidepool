@@ -22975,6 +22975,160 @@ pub(crate) mod request_tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn request_annotations_survive_checked_prologue_adoption_and_publication() {
+        with_test_compiler_owner(async {
+            let (session, public_context, mut source, inputs, _root) =
+                activation_input_fixture(|_| {});
+            let evidence = inputs[0].type_evidence().clone();
+            let signatures = evidence.request_type_signatures().unwrap().clone();
+            source.request_evidence = Some(evidence.clone());
+            let issuer_view = actor_compile_view(&session, &public_context, &source).unwrap();
+            let issuer = issuer_view.session_view().exact_compile_context().unwrap();
+            let producer = issuer.declarations().toolchain_identity_sha256();
+            assert_ne!(producer, [0; 32]);
+            assert!(Arc::ptr_eq(issuer.request_types().unwrap(), &signatures));
+            let original_context = issuer.declarations().semantic_sha256();
+            let public_before = session
+                .public_visibility_snapshot_in(public_context.placement.lexical_scope)
+                .unwrap();
+            let machines = Arc::new(ActorMachineRegistry::<
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput,
+            >::new());
+            machines.insert_idle(public_context.placement.session, Box::new(session));
+            let (workbench, private_context) = ResidentActorWorkbench::new(machines, source, None)
+                .admit_private_cell_for_test(public_context.clone())
+                .await
+                .unwrap();
+            let (checked, prepared) = workbench
+                .prepare_cell(
+                    private_context.clone(),
+                    "import qualified Prelude\nlet adoptedRequestValue = (41 :: Int)".into(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(checked.items.len(), 2);
+            assert!(checked.items[0].prologue_only);
+            let PreparedCell {
+                items,
+                dependencies,
+            } = prepared;
+            let prefix = items[0].ready.prefix.clone();
+            assert_eq!(
+                items[0].ready.item.kind(),
+                tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
+            );
+            assert!(items[0].ready.item.source().is_empty());
+            let assert_annotations = || {
+                let snapshot = prefix.snapshot();
+                let context = snapshot.view().exact_compile_context().unwrap();
+                assert_eq!(context.declarations().toolchain_identity_sha256(), producer);
+                assert!(Arc::ptr_eq(context.request_types().unwrap(), &signatures));
+                assert_eq!(
+                    issuer.declarations().semantic_sha256(),
+                    original_context,
+                    "adoption cannot mutate the original request issuer"
+                );
+            };
+            assert_annotations();
+            for (index, item) in items.into_iter().enumerate() {
+                let step = workbench
+                    .begin_prepared_cell_item(
+                        private_context.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: checked.items.len(),
+                            source: checked.items[index].source.clone(),
+                        },
+                        item,
+                    )
+                    .await
+                    .unwrap();
+                let ResidentWorkbenchStep::Committed {
+                    installed_bindings, ..
+                } = step
+                else {
+                    panic!("the prologue and pure bind must commit through their original owners");
+                };
+                assert_eq!(
+                    installed_bindings,
+                    if index == 0 {
+                        vec![]
+                    } else {
+                        vec!["adoptedRequestValue".to_owned()]
+                    }
+                );
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+                assert_annotations();
+                let expected = public_before.clone();
+                workbench
+                    .access
+                    .with_machine(public_context.clone(), move |session, context, _| {
+                        assert_eq!(
+                            session.public_visibility_snapshot_in(context.placement.lexical_scope),
+                            Some(expected)
+                        );
+                        assert!(session
+                            .current_binding_in(
+                                context.placement.lexical_scope,
+                                "adoptedRequestValue"
+                            )
+                            .is_none());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            drop(dependencies);
+            let private_binding = workbench
+                .access
+                .with_machine(private_context.clone(), |session, context, _| {
+                    Ok(session
+                        .current_binding_in(context.placement.lexical_scope, "adoptedRequestValue")
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            let publication = workbench_runner_for_test(&workbench)
+                .publish_private_execution(
+                    private_context.clone(),
+                    workbench.private_execution.as_ref().unwrap().clone(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                publication,
+                PrivateExecutionPublication::Manifest { .. }
+            ));
+            let private_scope = private_context.placement.lexical_scope;
+            workbench
+                .access
+                .with_machine(public_context.clone(), move |session, context, _| {
+                    assert_eq!(
+                        session.current_binding_in(
+                            context.placement.lexical_scope,
+                            "adoptedRequestValue"
+                        ),
+                        Some(private_binding)
+                    );
+                    session.retire_scope(private_scope);
+                    assert!(session.compile_view_in(private_scope).is_none());
+                    let view = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap();
+                    session.capture_inspection_inputs(&view).map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            drop(inputs);
+        })
+        .await;
+    }
+
     /// The native program retains its mounted request input across preparation;
     /// later items and closures retain the exact original input after a new mount.
     #[tokio::test]
