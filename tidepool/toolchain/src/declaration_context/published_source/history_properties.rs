@@ -173,12 +173,15 @@ fn continued_context(
     view: &ArtifactView,
     root: &ArtifactEntry,
 ) -> Result<ExactDeclarationContext, CompileError> {
-    // This is the original_execution_context production construction boundary:
-    // original instance evidence and its issued compiler projection travel together.
-    ExactDeclarationContext::from_authenticated_execution(
+    // Continuations carry the exact issued offers with their compiler roles;
+    // fresh selected issuance cannot reconstruct their original proof identity.
+    ExactDeclarationContext::from_authenticated_execution_support(
         context.facts.producer,
-        view,
-        context.facts.compiler_support.projection.clone(),
+        crate::artifact_inventory::CompilerSourceSupport::new(
+            context.facts.compiler_support.projection.clone(),
+            view.clone(),
+            context.facts.compiler_support.native_offers.iter().cloned(),
+        )?,
         context.facts.lexical.to_vec(),
         root.descriptor.owner.clone(),
         &[root.descriptor.owner.clone()],
@@ -210,7 +213,25 @@ fn restored(
         &edges,
     )
     .unwrap()
-    .context_with_graph_selection(&selection, roles, context.facts.lexical.to_vec())
+    .context_with_snapshot(&{
+        let mut snapshot = context.snapshot();
+        snapshot.roles = CompilerInputProjection::restore(view, roles)?
+            .snapshot_roles()
+            .clone();
+        let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+        use fvm_ipld_blockstore::Blockstore;
+        let mut materializer = crate::exact_context::Materializer::new(&store);
+        let retained = materializer
+            .materialize_context(None, &snapshot)
+            .map_err(failure)?;
+        for (cid, bytes) in materializer.finish().map_err(failure)?.into_blocks() {
+            store.put_keyed(&cid, &bytes).map_err(failure)?;
+        }
+        crate::exact_context::hydrate_context(&store, retained.root())
+            .map_err(failure)?
+            .snapshot()
+            .clone()
+    })
 }
 
 fn property_config() -> proptest::test_runner::Config {

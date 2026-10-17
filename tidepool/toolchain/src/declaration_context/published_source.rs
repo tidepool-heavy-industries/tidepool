@@ -764,6 +764,21 @@ mod tests {
 
     #[test]
     fn published_native_custody_does_not_require_dependency_namespace_originals() {
+        let round_trip = |context: &ExactDeclarationContext| {
+            let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+            use fvm_ipld_blockstore::Blockstore;
+            let mut materializer = crate::exact_context::Materializer::new(&store);
+            let retained = materializer
+                .materialize_context(None, &context.snapshot())
+                .unwrap();
+            for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+            crate::exact_context::hydrate_context(&store, retained.root())
+                .unwrap()
+                .snapshot()
+                .clone()
+        };
         let producer = [2; 32];
         let native = |module: &str, groups, version, requirements| {
             Arc::new(
@@ -994,16 +1009,51 @@ mod tests {
             );
             // A later exact output retains the original compiler roles while
             // selecting a previously unused body of the published module.
-            let continued = ExactDeclarationContext::from_authenticated_execution(
+            let continued = ExactDeclarationContext::from_authenticated_execution_support(
                 producer,
-                &admitted,
-                published.facts.compiler_support.projection.clone(),
+                crate::artifact_inventory::CompilerSourceSupport::new(
+                    published.facts.compiler_support.projection.clone(),
+                    admitted.clone(),
+                    published
+                        .facts
+                        .compiler_support
+                        .native_offers
+                        .iter()
+                        .cloned(),
+                )
+                .unwrap(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
             )
             .expect("later native demand preserves the issued published selection");
+            assert_eq!(
+                continued
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .unwrap(),
+                published
+                    .compiler_source_support()
+                    .native_offer_observations()
+                    .unwrap(),
+                "continuation carries exact offer issuance independently of demand"
+            );
             let reopened_after_demand = continued.published_source_original_selections().unwrap();
+            assert_eq!(
+                reopened_after_demand[0].context().compiler_input_roles(),
+                published.compiler_input_roles()
+            );
+            assert_eq!(
+                reopened_after_demand[0]
+                    .context()
+                    .artifact_view()
+                    .capture_graph_selection(),
+                published.artifact_view().capture_graph_selection()
+            );
+            assert_eq!(
+                published.artifact_view().selected_native_groups(),
+                BTreeSet::from([early])
+            );
             assert_eq!(
                 reopened_after_demand[0].context().semantic_sha256(),
                 published.semantic_sha256(),
@@ -1016,10 +1066,19 @@ mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let with_ambient = ExactDeclarationContext::from_authenticated_execution(
+            let with_ambient = ExactDeclarationContext::from_authenticated_execution_support(
                 producer,
-                &ambient,
-                published.facts.compiler_support.projection.clone(),
+                crate::artifact_inventory::CompilerSourceSupport::new(
+                    published.facts.compiler_support.projection.clone(),
+                    ambient.clone(),
+                    published
+                        .facts
+                        .compiler_support
+                        .native_offers
+                        .iter()
+                        .cloned(),
+                )
+                .unwrap(),
                 published.facts.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
@@ -1047,10 +1106,18 @@ mod tests {
             replaced[position] = future_role;
             let replacement =
                 CompilerInputProjection::restore(&ambient, &replaced).and_then(|projection| {
-                    ExactDeclarationContext::from_authenticated_execution(
+                    ExactDeclarationContext::from_authenticated_execution_support(
                         producer,
-                        &ambient,
-                        projection,
+                        crate::artifact_inventory::CompilerSourceSupport::new(
+                            projection,
+                            ambient.clone(),
+                            published
+                                .facts
+                                .compiler_support
+                                .native_offers
+                                .iter()
+                                .cloned(),
+                        )?,
                         published.facts.lexical.to_vec(),
                         root.descriptor.owner.clone(),
                         &[root.descriptor.owner.clone()],
@@ -1117,11 +1184,7 @@ mod tests {
                 "flat recovery cannot recreate an issuer's exact bound selection"
             );
             let recovered = recovery_inventory
-                .context_with_graph_selection(
-                    &selection,
-                    &published.compiler_input_roles(),
-                    published.facts.lexical.to_vec(),
-                )
+                .context_with_snapshot(&round_trip(published))
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
             for snapshot in [published.as_ref(), &continued] {
@@ -1182,11 +1245,15 @@ mod tests {
                     &snapshot_edges,
                 )
                 .unwrap()
-                .context_with_graph_selection(
-                    &snapshot_selection,
-                    &roles,
-                    snapshot.facts.lexical.to_vec(),
-                )
+                .context_with_snapshot(&{
+                    let mut retained = round_trip(snapshot);
+                    retained.roles =
+                        CompilerInputProjection::restore(snapshot.artifact_view(), &roles)
+                            .unwrap()
+                            .snapshot_roles()
+                            .clone();
+                    retained
+                })
                 .unwrap();
                 assert_eq!(durable.artifact_view(), snapshot.artifact_view());
                 assert_eq!(
