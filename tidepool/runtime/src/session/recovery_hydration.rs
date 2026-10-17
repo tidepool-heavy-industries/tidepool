@@ -879,6 +879,95 @@ mod lazy_tests {
     }
 
     #[test]
+    fn held_recovery_contexts_still_require_current_run_paths_and_store() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct RevocableOwner {
+            held: Arc<crate::session::recovery_test_fixture::TestRunOwner>,
+            admitted: AtomicBool,
+        }
+        impl RecoveryRunAuthority for RevocableOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(self.admitted.load(Ordering::SeqCst) && self.held.owns_run(root)?)
+            }
+        }
+        let run = tempfile::tempdir().unwrap();
+        let fixture = RecoveryFixture::create(run.path());
+        let artifact_root = run.path().join("artifacts");
+        std::fs::create_dir(&artifact_root).unwrap();
+        let artifact_root = artifact_root.canonicalize().unwrap();
+        let (graph, _, _) = recovery::load_or_create_domain_graph(
+            fixture.store.clone(),
+            RecoveryDomainId::Root,
+            fresh_session_id().0,
+            Generation(0),
+        )
+        .unwrap();
+        let context =
+            tidepool_toolchain::declaration_join::RecoveredArtifactInventory::capture_bound(
+                &artifact_root,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap()
+            .context_with_snapshot(
+                &tidepool_toolchain::exact_context::ExactContextSnapshot::empty(),
+            )
+            .unwrap();
+        let mut candidate = graph.candidate();
+        let root = candidate.insert_context(&context, None).unwrap();
+        let graph = candidate.seal().unwrap();
+        let authority = Arc::new(RevocableOwner {
+            held: fixture.owner.clone(),
+            admitted: AtomicBool::new(true),
+        });
+        let owner = OwnedRecoveryManifest {
+            authority: authority.clone(),
+            root: run.path().canonicalize().unwrap(),
+            path: fixture.store.path().to_path_buf(),
+            artifact_root: artifact_root.clone(),
+            hydration: parking_lot::Mutex::new(RecoveryHydration {
+                contexts: BTreeMap::new(),
+                acquisition: RecoveredArtifactAcquisition::new(&artifact_root),
+            }),
+        };
+        let roots = BTreeSet::from([root]);
+        hydrate_context_roots(&graph, &owner, &roots).unwrap();
+        assert_eq!(owner.hydration.lock().contexts.len(), 1);
+        authority.admitted.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            hydrate_context_roots(&graph, &owner, &roots),
+            Err(SessionError::RecoveryManifest { .. })
+        ));
+        authority.admitted.store(true, Ordering::SeqCst);
+        hydrate_context_roots(&graph, &owner, &roots).unwrap();
+        let moved = run.path().join("moved-artifacts");
+        std::fs::rename(&artifact_root, &moved).unwrap();
+        assert!(matches!(
+            hydrate_context_roots(&graph, &owner, &roots),
+            Err(SessionError::RecoveryManifest { .. })
+        ));
+        std::fs::rename(&moved, &artifact_root).unwrap();
+        hydrate_context_roots(&graph, &owner, &roots).unwrap();
+        std::fs::rename(
+            fixture.store.path(),
+            run.path().join("retained-recovery.sqlite"),
+        )
+        .unwrap();
+        let replacement = RunRecoveryStore::create(fixture.store.path()).unwrap();
+        assert_ne!(fixture.store.database_id(), replacement.database_id());
+        assert!(matches!(
+            hydrate_context_roots(&graph, &owner, &roots),
+            Err(SessionError::RecoveryStore(_))
+        ));
+        assert_eq!(owner.hydration.lock().contexts.len(), 1);
+    }
+
+    #[test]
     fn cold_hydration_demands_only_selected_contexts_and_preserves_older_shadowed_native_context() {
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
@@ -990,7 +1079,29 @@ mod lazy_tests {
             .unwrap();
         let state = cold.durable_graph.as_ref().unwrap();
         let retained = state.owner.as_ref().unwrap();
+        let before_old = retained.hydration.lock().acquisition.work();
         hydrate_context_roots(&state.graph, retained, &BTreeSet::from([old_root.clone()])).unwrap();
+        let after_old = retained.hydration.lock().acquisition.work();
+        let independent = OwnedRecoveryManifest {
+            authority: retained.authority.clone(),
+            root: retained.root.clone(),
+            path: retained.path.clone(),
+            artifact_root: retained.artifact_root.clone(),
+            hydration: parking_lot::Mutex::new(RecoveryHydration {
+                contexts: BTreeMap::new(),
+                acquisition: RecoveredArtifactAcquisition::new(&retained.artifact_root),
+            }),
+        };
+        hydrate_context_roots(
+            &state.graph,
+            &independent,
+            &BTreeSet::from([old_root.clone()]),
+        )
+        .unwrap();
+        let fresh_old = independent.hydration.lock().acquisition.work();
+        assert!(fresh_old.read_bytes > 0);
+        assert!(after_old.read_bytes - before_old.read_bytes < fresh_old.read_bytes);
+        eprintln!("cold hydration acquisition: before_old={before_old:?} after_old={after_old:?} independent_old={fresh_old:?}");
         let older = cached_context(retained, &old_root).unwrap();
         assert_eq!(
             older.artifact_view().capture_graph_selection(),
@@ -1000,6 +1111,17 @@ mod lazy_tests {
             .recovered_public_compiler_context(&owner())
             .unwrap()
             .unwrap();
+        let shared = older
+            .artifact_view()
+            .artifact_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .intersection(&newer.artifact_view().artifact_ids().into_iter().collect())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(!shared.is_empty());
+        assert_eq!(retained.hydration.lock().acquisition.work(), after_old);
+        eprintln!("cold hydration shared payloads: {}", shared.len());
         assert_eq!(
             probe(older, &old_lexical_root, &effects, cold.include_dir(), 8001),
             serde_json::json!(42)
