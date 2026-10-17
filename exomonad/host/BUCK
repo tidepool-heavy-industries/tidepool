@@ -1080,6 +1080,7 @@ tidepool_rust_binary(
         "exomonad/host/src/actor_host/fixtures/startup_context_spec.hs",
         "exomonad/host/src/actor_host/fixtures/startup_persona_refresh.hs",
         "exomonad/host/src/actor_host/fixtures/startup_persona_refuse_native.hs",
+        "exomonad/host/src/actor_host/fixtures/startup_persona_web_selection.hs",
         "exomonad/host/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
         "exomonad/host/src/actor_host/fresh_callable_exit_read.hs",
         "exomonad/host/src/actor_host/fresh_callable_exit_setup.hs",

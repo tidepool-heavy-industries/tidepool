@@ -7,7 +7,7 @@ personaBefore <- C.getContext
 Right () <- Memory.replaceBlock Memory.Persona "persona-memory-updated"
 personaAfterWrite <- C.getContext
 Right personaBody <- Orientation.renderMemory
-Right () <- PersonaContext.refresh
+Right personaRefresh <- PersonaContext.refresh
 personaAfterRefresh <- C.getContext
 display (toListOf C.visibleTexts personaBefore == toListOf C.visibleTexts personaAfterWrite
   && personaBody `elem` toListOf C.visibleTexts personaAfterRefresh

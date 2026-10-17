@@ -814,7 +814,14 @@ async fn startup_refusal(cancel: bool) {
         .unwrap()
     {
         Ok(host) => {
-            host.stop().await.unwrap();
+            host.stop(
+                &crate::actor_host::hosted_test_context::ScenarioOutcome::Failed {
+                    phase: crate::actor_host::hosted_test_context::ScenarioPhase::Startup,
+                    message: "failed startup became ready".into(),
+                },
+            )
+            .await
+            .unwrap();
             panic!("failed startup became ready");
         }
         Err(failure) => failure,

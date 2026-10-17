@@ -369,7 +369,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
             "captured owner remains live after both reads"
         );
     }
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production checkpoint host acknowledges cleanup");
 }

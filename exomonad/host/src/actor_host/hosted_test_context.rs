@@ -384,6 +384,18 @@ pub(super) enum ScenarioPhase {
     Scenario,
 }
 
+impl ScenarioOutcome {
+    pub(super) fn from_result<R>(scenario: &ScenarioResult<R>) -> Self {
+        match scenario {
+            Ok(_) => Self::Passed,
+            Err(payload) => Self::Failed {
+                phase: ScenarioPhase::Scenario,
+                message: panic_message(payload.as_ref()),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum CleanupOutcome {
@@ -446,13 +458,7 @@ where
     C: std::future::Future<Output = Result<(), String>>,
 {
     let scenario = std::panic::AssertUnwindSafe(scenario).catch_unwind().await;
-    let scenario_outcome = match &scenario {
-        Ok(_) => ScenarioOutcome::Passed,
-        Err(payload) => ScenarioOutcome::Failed {
-            phase: ScenarioPhase::Scenario,
-            message: panic_message(payload.as_ref()),
-        },
-    };
+    let scenario_outcome = ScenarioOutcome::from_result(&scenario);
     let mut report_errors = Vec::new();
     if let Err(error) = report(&scenario_outcome, &CleanupOutcome::Unknown) {
         report_errors.push(error);
@@ -1976,7 +1982,7 @@ impl HostedTestRuntime {
         Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await
     }
 
-    pub(super) async fn stop(mut self) -> Result<(), String> {
+    pub(super) async fn stop(mut self, scenario: &ScenarioOutcome) -> Result<(), String> {
         let mut released = self.released.clone();
         let mut journal = self.context.journal_status.clone();
         let diagnostics = self.diagnostics.clone();
@@ -2053,10 +2059,7 @@ impl HostedTestRuntime {
                     serde_json::to_vec_pretty(&evidence).map_err(|error| error.to_string())?,
                 )
                 .map_err(|error| error.to_string())?;
-                diagnostics.report(
-                    &ScenarioOutcome::Passed,
-                    &CleanupOutcome::from_result(&outcome),
-                )
+                diagnostics.report(scenario, &CleanupOutcome::from_result(&outcome))
             })();
             if let Err(report) = report {
                 return match outcome {

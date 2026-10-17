@@ -420,7 +420,10 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
         );
     }
     round.finish();
-    fixture.stop().await.unwrap();
+    fixture
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

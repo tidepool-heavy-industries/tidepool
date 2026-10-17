@@ -428,7 +428,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
     .await
     .expect("every exact measured operation joins a real compiler completion");
     fixture
-        .stop()
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("supervisor and all child owners acknowledge cleanup");
     for mut row in measured {

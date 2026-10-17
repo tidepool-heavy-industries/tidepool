@@ -579,21 +579,40 @@ fn assert_replied_cell(receipt: &Value, expected_items: usize) {
     );
 }
 
-async fn received_output(transport: &CapturedHostTransport, operation: &OperationId) {
-    let mut changed = transport.provider_changed.subscribe();
-    let expected = transport
-        .runtime
+fn retained_model_output(
+    runtime: &embedded_harness::EmbeddedHarnessRuntime,
+    operation: &OperationId,
+) -> (Value, harness::item::Item) {
+    let recorded = runtime
         .store()
-        .replay_output_operation(operation)
+        .replay_tool_output_operation(operation)
         .unwrap()
         .expect("exact operation has durable output before provider delivery");
+    assert_eq!(
+        recorded.output_format,
+        harness::provider::OutputFormat::NativeReceiptV1
+    );
+    let projected = super::embedded_policy::project_retained_result(&recorded, operation)
+        .expect("native output must retain its exact operation and terminal receipt")
+        .expect("native output must have a model presentation");
+    let item = harness::item::Item::tool_output(
+        &operation.call,
+        harness::item::ToolKind::Custom,
+        &JobOutput::Completed(Ok(projected.clone())),
+    );
+    (projected, item)
+}
+
+async fn received_output(transport: &CapturedHostTransport, operation: &OperationId) {
+    let mut changed = transport.provider_changed.subscribe();
+    let (_, expected) = retained_model_output(&transport.runtime, operation);
     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         loop {
             if let Some(returned) = transport.provider_outputs.lock().get(operation).cloned() {
                 assert_eq!(
                     returned,
                     vec![expected.clone()],
-                    "provider must receive exactly the durable original output"
+                    "provider must receive exactly the original operation's model presentation"
                 );
                 return;
             }
@@ -612,13 +631,25 @@ async fn durable_output(
     operation: &OperationId,
     output: &JobOutput,
 ) {
-    let expected =
+    let expected_format = embedded_harness::native_output_format(output);
+    let expected_terminal = harness::store::TerminalOutcome::from(output);
+    let mut expected =
         harness::item::Item::tool_output(&operation.call, harness::item::ToolKind::Custom, output);
+    if expected_format != harness::provider::OutputFormat::LegacyOpaque {
+        expected.0["output_format"] = serde_json::to_value(expected_format).unwrap();
+    }
     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         loop {
-            if let Some(item) = runtime.store().replay_output_operation(operation).unwrap() {
+            if let Some(recorded) = runtime
+                .store()
+                .replay_tool_output_operation(operation)
+                .unwrap()
+            {
+                assert_eq!(recorded.terminal, expected_terminal);
+                assert_eq!(recorded.output_format, expected_format);
+                assert_eq!(recorded.item.output_format().unwrap(), expected_format);
                 assert_eq!(
-                    item, expected,
+                    recorded.item, expected,
                     "Store must retain the exact Scheduler terminal output"
                 );
                 let claims = runtime.store().claims_for_operation(operation).unwrap();
@@ -741,7 +772,8 @@ async fn embedded_operation(
     .unwrap();
     durable_output(runtime, operation, &output).await;
     match output {
-        JobOutput::Completed(result) => result.map_err(|error| error.to_string()),
+        JobOutput::Completed(Ok(_)) => Ok(retained_model_output(runtime, operation).0),
+        JobOutput::Completed(Err(error)) => Err(error.to_string()),
         other => panic!("embedded Haskell operation {call_id} failed: {other:?}"),
     }
 }
@@ -1422,20 +1454,15 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     .await
                     .expect("exact original parent operation settles after browser interrupt")
                     .unwrap();
-                match cancelled {
-                    JobOutput::CancelledWithReceipt(Ok(ref receipt)) => {
-                        assert_eq!(receipt["publication"]["status"], "notPublished");
-                        assert_eq!(receipt["publication"]["reason"], "cancelled");
-                    }
-                    JobOutput::CancelledWithReceipt(Err(ref failure)) => {
-                        let metadata = failure
-                            .metadata()
-                            .expect("cancellation retains its publication outcome");
-                        assert_eq!(metadata["publication"]["status"], "notPublished");
-                        assert_eq!(metadata["publication"]["reason"], "cancelled");
-                    }
+                durable_output(&runtime, &pending, &cancelled).await;
+                let (cancelled_model, _) = retained_model_output(&runtime, &pending);
+                let receipt = match &cancelled {
+                    JobOutput::CancelledWithReceipt(Ok(_)) => &cancelled_model["receipt"],
+                    JobOutput::CancelledWithReceipt(Err(_)) => &cancelled_model["receipt"]["result"],
                     other => panic!("parked pipeline did not settle as cancelled: {other:?}"),
-                }
+                };
+                assert_eq!(receipt["publication"]["status"], "notPublished");
+                assert_eq!(receipt["publication"]["reason"], "cancelled");
                 assert!(
                     matches!(
                         scheduler
@@ -1446,7 +1473,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     ),
                     "the exact native owner must acknowledge cancellation"
                 );
-                durable_output(&runtime, &pending, &cancelled).await;
+
                 for child in &known_children {
                     let terminal = child.terminal();
                     tokio::time::timeout(Duration::from_secs(30), terminal.wait())
@@ -2163,30 +2190,39 @@ impl PreflightTransport {
         .await
         .expect("real preflight cell settled");
         durable_output(&self.runtime, &operation, &output).await;
-        let JobOutput::Completed(Ok(receipt)) = output else {
-            panic!("expected actual Haskell receipt: {output:?}");
-        };
-        let durable = self
-            .runtime
-            .store()
-            .replay_output_operation(&operation)
-            .unwrap()
-            .unwrap();
+        assert!(
+            matches!(output, JobOutput::Completed(Ok(_))),
+            "expected actual Haskell receipt: {output:?}"
+        );
+        let (receipt, expected_model) = retained_model_output(&self.runtime, &operation);
         tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
             loop {
-                if self
-                    .requests
-                    .lock()
-                    .iter()
-                    .any(|request| request.input.contains(&durable))
-                {
+                if self.requests.lock().iter().any(|request| {
+                    let returned = request
+                        .input
+                        .iter()
+                        .filter(|item| {
+                            item.0["type"] == "custom_tool_call_output"
+                                && item.0["call_id"] == operation.call.0
+                        })
+                        .collect::<Vec<_>>();
+                    if returned.is_empty() {
+                        return false;
+                    }
+                    assert_eq!(
+                        returned,
+                        vec![&expected_model],
+                        "preflight provider must receive exactly the original model presentation"
+                    );
+                    true
+                }) {
                     break;
                 }
                 changed.changed().await.unwrap();
             }
         })
         .await
-        .expect("real provider received exact durable preflight output");
+        .expect("real provider received exact projected preflight output");
         (operation, receipt)
     }
 }
@@ -2353,6 +2389,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .replay_output_operation(&operation)
                 .unwrap()
                 .unwrap();
+            let (_, expected_model) = retained_model_output(&host.runtime, &operation);
             let claims = host
                 .runtime
                 .store()
@@ -2496,8 +2533,8 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 returned,
-                vec![durable.clone()],
-                "recovery returns the original receipt exactly once"
+                vec![expected_model],
+                "recovery returns the original model presentation exactly once"
             );
             assert_eq!(
                 tidepool_extract_cmd::extract_spawn_count(),

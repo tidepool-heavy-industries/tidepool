@@ -1,12 +1,13 @@
 //! The delivered persona carries full authored memory to the first provider
 //! request and refreshes that exact issued block only on explicit activation.
 
-use super::hosted_test_context::HostedTestRuntime;
+use super::hosted_test_context::{HostedTestRuntime, ScenarioOutcome};
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     retained_committed_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use exomonad_actor::{InitialContextState, JevCallFailure};
+use futures_util::FutureExt;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
@@ -78,8 +79,18 @@ pub(super) fn configure_persona(
     std::fs::create_dir_all(authored.join("Persona")).unwrap();
     std::fs::create_dir_all(authored.join("Jev")).unwrap();
     let sources = [
-        ("Persona/FileTools.hs", tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/FileTools.hs")),
-        ("Persona/Patch.hs", tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Patch.hs")),
+        (
+            "Persona/FileTools.hs",
+            tidepool_testing::fixture_source(
+                "exomonad/examples/persona/.exomonad/Persona/FileTools.hs",
+            ),
+        ),
+        (
+            "Persona/Patch.hs",
+            tidepool_testing::fixture_source(
+                "exomonad/examples/persona/.exomonad/Persona/Patch.hs",
+            ),
+        ),
         (
             "Persona/Memory.hs",
             tidepool_testing::fixture_source(
@@ -229,6 +240,8 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
     })
     .await
     .unwrap();
+    let forest = Arc::downgrade(&host.context.forest);
+    let scenario = std::panic::AssertUnwindSafe(async {
     {
         let retained = host
             .context
@@ -423,11 +436,18 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         host.context.actor.terminal().get().unwrap().kind,
         exomonad_actor::ActorExitKind::Cancelled
     );
-    let forest = Arc::downgrade(&host.context.forest);
-    let stopped = host.stop().await;
-    if stopped.is_err() {
+    }).catch_unwind().await;
+    let scenario_outcome = ScenarioOutcome::from_result(&scenario);
+    let stopped = host.stop(&scenario_outcome).await;
+    if scenario.is_err() || stopped.is_err() {
         files.disable_cleanup(true);
         repository.disable_cleanup(true);
+    }
+    if let Err(payload) = scenario {
+        if let Err(cleanup) = stopped {
+            eprintln!("persona cleanup failed after scenario assertion: {cleanup}");
+        }
+        std::panic::resume_unwind(payload);
     }
     stopped.unwrap();
     assert_eq!(forest.strong_count(), 0);
@@ -604,7 +624,37 @@ async fn persona_web_selection_retains_native_judgment_and_empty_control() {
             let judgment = host
                 .while_operation_succeeds(
                     &operation,
-                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                judgment = judgments.recv() => break judgment,
+                                round = next_hosted_script_round(&mut requests, &mut pending, &root) => {
+                                    let returned = round.request.input.iter().filter(|item|
+                                        item.0["type"] == "custom_tool_call_output"
+                                            && item.0["call_id"] == operation.call.0
+                                    ).collect::<Vec<_>>();
+                                    if !returned.is_empty() {
+                                        let recorded = host.runtime.store()
+                                            .replay_tool_output_operation(&operation).unwrap()
+                                            .expect("the exact pending operation must own its returned output");
+                                        let projected = super::embedded_policy::project_retained_result(&recorded, &operation)
+                                            .expect("returned native output must authenticate its original operation")
+                                            .expect("the exact native output must have a model presentation");
+                                        let expected = harness::item::Item::tool_output(
+                                            &operation.call, harness::item::ToolKind::Custom,
+                                            &harness::turn::JobOutput::Completed(Ok(projected)),
+                                        );
+                                        assert_eq!(returned, vec![&expected],
+                                            "the observed call output must be the exact pending operation's presentation");
+                                        panic!("persona web selection settled before its judgment: {operation:?}: {:?}: {}",
+                                            recorded.terminal, round.settled_output(&operation.call.0));
+                                    }
+                                    round.finish();
+                                }
+                            }
+                        }
+                    }),
                 )
                 .await
                 .unwrap()

@@ -1039,7 +1039,7 @@ async fn production_engine_store_warm_display_cells_50() {
         "every participating worker must have measured reuse: {workers:?}"
     );
     fixture
-        .stop()
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("production host and owned resident actors cleanly stop");
     for background in trace

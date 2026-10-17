@@ -422,7 +422,7 @@ async fn committed_input_before_wake_refuses_idle_retirement_and_runs_after_rele
         .unread(&conversation.identity().actor.0)
         .unwrap()
         .is_empty());
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("actual host confirms retirement and resource cleanup");
 }
@@ -507,7 +507,7 @@ async fn idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup() {
         .unread(&conversation.identity().actor.0)
         .unwrap()
         .is_empty());
-    host.stop()
+    host.stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("actual host confirms closed admission and resource cleanup");
 }

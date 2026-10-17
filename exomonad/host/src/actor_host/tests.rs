@@ -432,7 +432,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         .expect("the valid configured spec reaches production root readiness");
     let valid_root = valid.context.actor.identity();
     valid
-        .stop()
+        .stop(&crate::actor_host::hosted_test_context::ScenarioOutcome::Passed)
         .await
         .expect("valid control cleanup is confirmed");
     let result =
@@ -447,7 +447,14 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         .await;
     match result {
         Ok(host) => {
-            host.stop().await.unwrap();
+            host.stop(
+                &crate::actor_host::hosted_test_context::ScenarioOutcome::Failed {
+                    phase: crate::actor_host::hosted_test_context::ScenarioPhase::Startup,
+                    message: "invalid configured spec reached production root readiness".into(),
+                },
+            )
+            .await
+            .unwrap();
             panic!("invalid configured spec reached production root readiness");
         }
         Err(failure) => {
