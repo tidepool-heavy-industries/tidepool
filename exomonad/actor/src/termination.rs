@@ -352,7 +352,8 @@ impl CompilerPreparationClient {
         claim: impl FnOnce() -> T,
     ) -> Result<T, crate::ResidentActorWorkbenchError> {
         let shutdown = self.retained.state.requested_shutdown.lock();
-        if shutdown.is_some() {
+        let admission = self.retained.state.cleanup.lock();
+        if shutdown.is_some() || admission.compiler_admission != CompilerAdmission::Active {
             return Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed);
         }
         Ok(claim())

@@ -482,6 +482,16 @@ impl BoundActorWorkbenchSource {
     pub fn config(&self) -> &ActorWorkbenchSource {
         &self.config
     }
+    /// Change authored configuration while preserving the exact run and shared
+    /// preparation owner. New recipes remain independently keyed by the owner.
+    pub fn with_config(
+        mut self,
+        update: impl FnOnce(ActorWorkbenchSource) -> ActorWorkbenchSource,
+    ) -> Self {
+        self.config = update(self.config);
+        self
+    }
+
     pub fn into_config(self) -> ActorWorkbenchSource {
         self.config
     }
@@ -7642,6 +7652,7 @@ where
         let source = self
             .access
             .source
+            .config
             .clone()
             .for_workbench(&context, self.request_scope.as_ref());
 
@@ -17150,6 +17161,7 @@ pub(crate) mod request_tests {
         let source = workbench
             .access
             .source
+            .config
             .clone()
             .for_workbench(&context, workbench.request_scope.as_ref());
         let (view, inputs, prepared) = workbench
