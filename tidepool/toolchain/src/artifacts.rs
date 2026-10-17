@@ -8764,8 +8764,13 @@ mod constructor_identity_tests {
             let mut open = tidepool_test_data::prepared::callable_import_program();
             open.globals[0].identity.unit = unit.into();
             open.globals[0].required_generation = generation;
+            assemble(&metadata, &[target(&open)], |_, _, _| {}).unwrap();
             assert!(
-                assemble_portable(&metadata, &[target(&open)], |_, _, _| {}).is_err(),
+                matches!(
+                    assemble_portable(&metadata, &[target(&open)], |_, _, _| {}),
+                    Err(CompileError::ExtractFailed(message))
+                        if message == "prepared target globals require certified owners"
+                ),
                 "portable output cannot borrow any absent external authority"
             );
         }
