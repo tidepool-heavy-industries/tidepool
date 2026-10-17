@@ -3779,7 +3779,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         settings.concurrent_jobs,
     )?;
     runtime.configure_inference(run_auth::RunAuth::from_settings(
-        settings,
+        &settings,
         runtime.store(),
         runtime.run_identity().to_owned(),
     )?)?;
