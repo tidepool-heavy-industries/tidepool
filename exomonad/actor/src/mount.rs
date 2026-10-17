@@ -391,6 +391,86 @@ impl ActorSourceImports {
     }
 }
 
+/// Read-only inspection of an owner-issued immutable source graph.
+///
+/// Implementations authenticate the exact capsule with its issuing owner. They
+/// must not replace missing, foreign or stale evidence with a live source head.
+/// Reads may perform blocking filesystem IO and preserve unavailable versus
+/// unreadable failures. Dropping a caller does not cancel an in-progress read
+/// or grant publication, binding, recovery or reload authority.
+pub trait SourceInspection: Send + Sync {
+    /// Inspect exactly the issued immutable graph, without selecting a live head.
+    fn read_from(
+        &self,
+        _source: &CheckpointSourceLayer,
+        _module: &str,
+    ) -> Result<(String, String), SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source inspection is unavailable".into(),
+        ))
+    }
+
+    /// Locate a module in this issued graph without consulting draft paths or
+    /// reading its body. A returned revision supports `readSourceModule`.
+    fn locate_module(
+        &self,
+        _source: &CheckpointSourceLayer,
+        _module: &str,
+    ) -> Result<Option<String>, SourceInspectionError> {
+        Ok(None)
+    }
+
+    fn revision(
+        &self,
+        _source: &CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrRevision, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source revision is unavailable".into(),
+        ))
+    }
+
+    /// Compare the authenticated supplied graph (`active`) with independently
+    /// sampled current workspace state (`disk`), without issuing a selection.
+    /// This is not an atomic combined snapshot or a freshness guarantee.
+    fn observe(
+        &self,
+        _source: &CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrStatus, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source status is unavailable".into(),
+        ))
+    }
+}
+
+/// The source inspection dependency required by read-only consumers.
+pub trait HasSourceInspection {
+    type SourceInspection: SourceInspection + ?Sized;
+    fn source_inspection(&self) -> &Self::SourceInspection;
+}
+
+/// Cheap, read-only service view of the existing source owner.
+/// Clones retain the same owner; they issue no source capsules or revisions.
+#[derive(Clone)]
+pub struct SourceInspectionServices {
+    inspection: std::sync::Arc<dyn SourceInspection>,
+}
+
+impl SourceInspectionServices {
+    pub fn new(inspection: std::sync::Arc<dyn SourceInspection>) -> Self {
+        Self { inspection }
+    }
+    pub fn from_source_layers(layers: ActorSourceLayerResolver) -> Self {
+        layers.inspection_services()
+    }
+}
+
+impl HasSourceInspection for SourceInspectionServices {
+    type SourceInspection = dyn SourceInspection;
+    fn source_inspection(&self) -> &Self::SourceInspection {
+        self.inspection.as_ref()
+    }
+}
+
 /// How a host installs branch-local helper source for an actor at launch.
 ///
 /// One implementation per host, supplied by the composition root that owns the
@@ -399,6 +479,8 @@ impl ActorSourceImports {
 /// remains in the shared graph; a checkout's historical package is not
 /// included automatically.
 pub trait ActorSourceLayers: Send + Sync {
+    /// Attenuate the existing owner to its read-only inspection service.
+    fn inspection_services(self: std::sync::Arc<Self>) -> SourceInspectionServices;
     /// Freeze the published toolset source graph independently of notebook helpers.
     /// The source owner must return direct immutable revision paths.
     fn freeze_toolset_layer(&self, _actor: PrincipalId) -> Result<CheckpointSourceLayer, String> {
@@ -505,45 +587,6 @@ pub trait ActorSourceLayers: Send + Sync {
     ) -> Result<CheckpointSourceLayer, SourceInspectionError> {
         Err(SourceInspectionError::Unavailable(
             "completed source recovery is unavailable".into(),
-        ))
-    }
-
-    /// Inspect exactly the issued immutable graph, without selecting a live head.
-    fn read_from(
-        &self,
-        _source: &CheckpointSourceLayer,
-        _module: &str,
-    ) -> Result<(String, String), SourceInspectionError> {
-        Err(SourceInspectionError::Unavailable(
-            "issued source inspection is unavailable".into(),
-        ))
-    }
-
-    /// Locate a module in this issued graph without consulting draft paths or
-    /// reading its body. A returned revision supports `readSourceModule`.
-    fn locate_module(
-        &self,
-        _source: &CheckpointSourceLayer,
-        _module: &str,
-    ) -> Result<Option<String>, SourceInspectionError> {
-        Ok(None)
-    }
-
-    fn revision(
-        &self,
-        _source: &CheckpointSourceLayer,
-    ) -> Result<tidepool_bridge_effects::SrRevision, SourceInspectionError> {
-        Err(SourceInspectionError::Unavailable(
-            "issued source revision is unavailable".into(),
-        ))
-    }
-
-    fn observe(
-        &self,
-        _source: &CheckpointSourceLayer,
-    ) -> Result<tidepool_bridge_effects::SrStatus, SourceInspectionError> {
-        Err(SourceInspectionError::Unavailable(
-            "issued source status is unavailable".into(),
         ))
     }
 

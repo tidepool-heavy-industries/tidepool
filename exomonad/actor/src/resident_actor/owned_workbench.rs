@@ -3022,7 +3022,12 @@ mod authority_tests {
 
     struct SourceService(crate::SourceLayerIssuer);
 
+    impl crate::SourceInspection for SourceService {}
+
     impl crate::ActorSourceLayers for SourceService {
+        fn inspection_services(self: std::sync::Arc<Self>) -> crate::SourceInspectionServices {
+            crate::SourceInspectionServices::new(self)
+        }
         fn stage_reload(
             self: Arc<Self>,
             _: tidepool_repr::PrincipalId,

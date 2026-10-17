@@ -498,6 +498,7 @@ struct ResidentEnvironment<H, O> {
     /// Installed by a host that keeps a source layer per checkout. Without
     /// one every actor compiles against exactly the deployment-wide roots.
     source_layers: Option<crate::ActorSourceLayerResolver>,
+    source_inspection: Option<crate::SourceInspectionServices>,
     jev: crate::JevBackendHandle,
     cell_model_factory: Option<Arc<dyn crate::CellModelFactory>>,
     form_host: Option<Arc<dyn crate::FormHost>>,
@@ -529,6 +530,7 @@ impl<H, O> ResidentEnvironment<H, O> {
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
             source_layers: None,
+            source_inspection: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
             form_host: None,
@@ -2337,6 +2339,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
             source_layers: self.source_layers.clone(),
+            source_inspection: self.source_inspection.clone(),
             jev: Arc::clone(&self.jev),
             cell_model_factory: self.cell_model_factory.clone(),
             form_host: self.form_host.clone(),
@@ -6114,7 +6117,7 @@ where
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
         let interaction_control = effect_owner.interaction_control();
-        let lookup_source = environment.source_layers.clone().zip(
+        let lookup_source = environment.source_inspection.clone().zip(
             effect_owner
                 .issued_snapshot()
                 .map(|issued| issued.installation().source().clone()),
@@ -10685,7 +10688,7 @@ where
                     }
                     crate::status_tool::StatusView::Revisions => {
                         source_effect::refresh_source_observation(
-                            self.environment.source_layers.clone(),
+                            self.environment.source_inspection.clone(),
                             self.installed_tools.clone(),
                             self.runtime_observation.clone(),
                             effects.issued_snapshot.clone(),
@@ -13820,6 +13823,9 @@ where
     /// from the checkout it is launched with. Without this every actor
     /// compiles against the deployment-wide include roots and nothing else.
     pub fn set_source_layers(&mut self, layers: crate::ActorSourceLayerResolver) {
+        self.environment.source_inspection = Some(
+            crate::SourceInspectionServices::from_source_layers(layers.clone()),
+        );
         self.environment.source_layers = Some(layers);
     }
 

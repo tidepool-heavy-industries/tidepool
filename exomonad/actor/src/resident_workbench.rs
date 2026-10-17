@@ -21,6 +21,7 @@ pub(crate) fn settled_manifest_attempt(
     }
 }
 
+use crate::SourceInspection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7664,7 +7665,7 @@ where
         usage: crate::UsagePointerTable,
         execution_control: Option<Arc<crate::WorkbenchExecutionControl>>,
         captured_source: Option<(
-            crate::ActorSourceLayerResolver,
+            crate::SourceInspectionServices,
             crate::CheckpointSourceLayer,
         )>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
@@ -7869,7 +7870,8 @@ where
                 }
                 if let Some((owner, captured)) = captured_source {
                     crate::lookup::attach_source_locators(&mut answer, |module| {
-                        owner.locate_module(&captured, module)
+                        crate::HasSourceInspection::source_inspection(&owner)
+                            .locate_module(&captured, module)
                     });
                 }
                 session

@@ -10,7 +10,12 @@ struct SourceObservation {
     failed: AtomicBool,
     freezes: AtomicUsize,
 }
+impl exomonad_actor::SourceInspection for SourceObservation {}
+
 impl exomonad_actor::ActorSourceLayers for SourceObservation {
+    fn inspection_services(self: std::sync::Arc<Self>) -> exomonad_actor::SourceInspectionServices {
+        exomonad_actor::SourceInspectionServices::new(self)
+    }
     fn stage_reload(
         self: Arc<Self>,
         _: tidepool_repr::PrincipalId,

@@ -2,6 +2,7 @@
 use super::*;
 use crate::generated::source::SourceError;
 use crate::resident_workbench::{ActorGeneration, ActorGenerationCommit, ActorRequestSnapshot};
+use crate::{HasSourceInspection, SourceInspection};
 use tidepool_bridge_effects::{
     RlPolicy, RlRefusal, RlRefusalCategory, RlSurfaceDiff, SrReloadOutcome,
 };
@@ -30,6 +31,9 @@ where
     pub(crate) async fn run(self) -> Result<SrReloadOutcome, SourceError> {
         let active = self
             .layers
+            .clone()
+            .inspection_services()
+            .source_inspection()
             .revision(self.expected.installation.source())
             .map_err(|error| match error {
                 crate::SourceInspectionError::Unavailable(detail) => {

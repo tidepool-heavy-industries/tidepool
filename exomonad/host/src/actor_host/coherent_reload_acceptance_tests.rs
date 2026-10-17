@@ -4,6 +4,7 @@ use super::test_campaign::{
     hosted_script_provider, hosted_test_settings, next_hosted_script_round,
     select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
 };
+use exomonad_actor::{HasSourceInspection, SourceInspection};
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -67,7 +68,47 @@ struct GatedSourceLayers {
     gate: Arc<ReloadGate>,
     observe_gate: Option<Arc<ReloadGate>>,
 }
+impl exomonad_actor::SourceInspection for GatedSourceLayers {
+    fn read_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        module: &str,
+    ) -> Result<(String, String), exomonad_actor::SourceInspectionError> {
+        self.owner
+            .clone()
+            .inspection_services()
+            .source_inspection()
+            .read_from(source, module)
+    }
+    fn revision(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrRevision, exomonad_actor::SourceInspectionError> {
+        self.owner
+            .clone()
+            .inspection_services()
+            .source_inspection()
+            .revision(source)
+    }
+    fn observe(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError> {
+        if let Some(gate) = &self.observe_gate {
+            gate.wait_if_armed();
+        }
+        self.owner
+            .clone()
+            .inspection_services()
+            .source_inspection()
+            .observe(source)
+    }
+}
+
 impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
+    fn inspection_services(self: std::sync::Arc<Self>) -> exomonad_actor::SourceInspectionServices {
+        exomonad_actor::SourceInspectionServices::new(self)
+    }
     fn freeze_toolset_layer(
         &self,
         actor: tidepool_repr::PrincipalId,
@@ -142,28 +183,6 @@ impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
     ) -> Result<exomonad_actor::CheckpointSourceLayer, exomonad_actor::SourceInspectionError> {
         self.owner
             .restore_source_with_acquisition(reference, acquisition)
-    }
-    fn read_from(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-        module: &str,
-    ) -> Result<(String, String), exomonad_actor::SourceInspectionError> {
-        self.owner.read_from(source, module)
-    }
-    fn revision(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-    ) -> Result<tidepool_bridge_effects::SrRevision, exomonad_actor::SourceInspectionError> {
-        self.owner.revision(source)
-    }
-    fn observe(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-    ) -> Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError> {
-        if let Some(gate) = &self.observe_gate {
-            gate.wait_if_armed();
-        }
-        self.owner.observe(source)
     }
     fn stage_reload(
         self: Arc<Self>,

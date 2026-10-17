@@ -1248,7 +1248,43 @@ impl ExomonadSourceReload {
     }
 }
 
+impl exomonad_actor::SourceInspection for ExomonadSourceReload {
+    fn read_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        module: &str,
+    ) -> std::result::Result<(String, String), exomonad_actor::SourceInspectionError> {
+        self.read_issued(source, module)
+    }
+    fn locate_module(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        module: &str,
+    ) -> std::result::Result<Option<String>, exomonad_actor::SourceInspectionError> {
+        self.locate_issued(source, module)
+    }
+    fn revision(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> std::result::Result<
+        tidepool_bridge_effects::SrRevision,
+        exomonad_actor::SourceInspectionError,
+    > {
+        self.revision_issued(source)
+    }
+    fn observe(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> std::result::Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError>
+    {
+        self.observe_issued(source)
+    }
+}
+
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
+    fn inspection_services(self: std::sync::Arc<Self>) -> exomonad_actor::SourceInspectionServices {
+        exomonad_actor::SourceInspectionServices::new(self)
+    }
     fn toolset_layer_from(
         &self,
         source: &exomonad_actor::CheckpointSourceLayer,
@@ -1386,40 +1422,6 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         self.stage_generation(actor, expected, also_check)
     }
 
-    fn read_from(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-        module: &str,
-    ) -> std::result::Result<(String, String), exomonad_actor::SourceInspectionError> {
-        self.read_issued(source, module)
-    }
-
-    fn locate_module(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-        module: &str,
-    ) -> std::result::Result<Option<String>, exomonad_actor::SourceInspectionError> {
-        self.locate_issued(source, module)
-    }
-
-    fn revision(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-    ) -> std::result::Result<
-        tidepool_bridge_effects::SrRevision,
-        exomonad_actor::SourceInspectionError,
-    > {
-        self.revision_issued(source)
-    }
-
-    fn observe(
-        &self,
-        source: &exomonad_actor::CheckpointSourceLayer,
-    ) -> std::result::Result<tidepool_bridge_effects::SrStatus, exomonad_actor::SourceInspectionError>
-    {
-        self.observe_issued(source)
-    }
-
     fn restore_source(
         &self,
         reference: &tidepool_runtime::session::GenerationArtifactReference,
@@ -1553,6 +1555,7 @@ fn revision_module(identity: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use exomonad_actor::{HasSourceInspection, SourceInspection};
 
     use super::*;
 
@@ -2399,7 +2402,9 @@ mod tests {
     fn source_graph_keeps_workspace_resource_once_through_live_updates() {
         use exomonad_actor::ActorSourceLayers;
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
-        let reload = runtime_reload_for_run(project.path(), Arc::new(run)).unwrap();
+        let reload = Arc::new(runtime_reload_for_run(project.path(), Arc::new(run)).unwrap());
+        let services = reload.clone().inspection_services();
+        let inspection = services.source_inspection();
         let selected = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
         let projected = reload.toolset_layer_from(&selected).unwrap();
         assert_eq!(projected.include_paths(), selected.include_paths());
@@ -2438,20 +2443,24 @@ mod tests {
         for root in reload.shared_roots().unwrap() {
             assert!(updated.include_paths().contains(&root));
         }
-        assert!(reload
-            .read_issued(&selected, "Project.Work")
+        assert!(inspection
+            .read_from(&selected, "Project.Work")
             .unwrap()
             .1
             .contains("work = 1"));
         assert_eq!(
-            reload.locate_issued(&selected, "Project.Work").unwrap(),
-            Some(reload.revision_issued(&selected).unwrap().identity)
+            inspection.locate_module(&selected, "Project.Work").unwrap(),
+            Some(inspection.revision(&selected).unwrap().identity)
         );
         assert_eq!(
-            reload.locate_issued(&selected, "Missing.Module").unwrap(),
+            inspection
+                .locate_module(&selected, "Missing.Module")
+                .unwrap(),
             None
         );
-        assert!(reload.locate_issued(&selected, "../Project.Work").is_err());
+        assert!(inspection
+            .locate_module(&selected, "../Project.Work")
+            .is_err());
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
@@ -3475,12 +3484,50 @@ mod tests {
     }
 
     #[test]
+    fn inspection_service_retains_exact_owner_and_refuses_foreign_source() {
+        use exomonad_actor::{ActorSourceLayers, HasSourceInspection, SourceInspection};
+        fn read<C: HasSourceInspection>(
+            services: &C,
+            source: &exomonad_actor::CheckpointSourceLayer,
+        ) -> Result<(String, String), exomonad_actor::SourceInspectionError> {
+            services
+                .source_inspection()
+                .read_from(source, "Project.Work")
+        }
+        let (project, owner) = generation_owner();
+        let (_foreign_project, foreign) = generation_owner();
+        let issued = owner.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let foreign_issued = foreign
+            .freeze_checkpoint_layer(PrincipalId::SYSTEM)
+            .unwrap();
+        let services = exomonad_actor::SourceInspectionServices::from_source_layers(owner.clone());
+        let expected = read(&services, &issued).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        // Retained inspection is tied to its capsule, including after its
+        // composition root drops its lifecycle service handle.
+        drop(owner);
+        let retained = services.clone();
+        drop(services);
+        assert_eq!(read(&retained, &issued).unwrap(), expected);
+        assert!(matches!(
+            read(&retained, &foreign_issued),
+            Err(exomonad_actor::SourceInspectionError::Unavailable(_))
+        ));
+    }
+
+    #[test]
     fn coherent_source_generation_retains_reads_prompts_and_recovers_without_links() {
         use exomonad_actor::ActorSourceLayers;
         let (project, reload) = generation_owner();
+        let services = reload.clone().inspection_services();
+        let inspection = services.source_inspection();
         let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
-        let read_a = reload.read_from(&a, "Project.Work").unwrap();
-        let status = reload.observe(&a).unwrap();
+        let read_a = inspection.read_from(&a, "Project.Work").unwrap();
+        let status = inspection.observe(&a).unwrap();
         assert_eq!(status.active.identity, status.disk.identity);
         std::fs::write(
             project.path().join(".exomonad/Project/Work.hs"),
@@ -3505,13 +3552,13 @@ mod tests {
         assert_eq!(staged.prompt_snapshot().instructions(), "Instructions B");
         let b = staged.source().clone();
         let reference_b = staged.evidence().reference.clone();
-        assert_eq!(reload.read_from(&a, "Project.Work").unwrap(), read_a);
-        assert!(reload
+        assert_eq!(inspection.read_from(&a, "Project.Work").unwrap(), read_a);
+        assert!(inspection
             .read_from(&b, "Project.Work")
             .unwrap()
             .1
             .contains("work = 41"));
-        let observation = reload.observe(&b).unwrap();
+        let observation = inspection.observe(&b).unwrap();
         assert_eq!(observation.active.identity, observation.disk.identity);
         // A staged generation leaves the boot selection at A. Its issued
         // reads and durable reference select B even with these stale links.
@@ -3535,8 +3582,8 @@ mod tests {
         assert_eq!(restored.identities(), b.identities());
         assert_eq!(restored.include_paths(), b.include_paths());
         assert_eq!(
-            reload.read_from(&restored, "Project.New").unwrap(),
-            reload.read_from(&b, "Project.New").unwrap()
+            inspection.read_from(&restored, "Project.New").unwrap(),
+            inspection.read_from(&b, "Project.New").unwrap()
         );
         std::fs::remove_file(project.path().join(".exomonad/Project/New.hs")).unwrap();
         let c = reload
@@ -3544,13 +3591,13 @@ mod tests {
             .stage_reload(PrincipalId::SYSTEM, &b, &[])
             .unwrap();
         assert!(c.changed_modules().contains(&"Project.New".to_owned()));
-        assert!(reload.read_from(c.source(), "Project.New").is_err());
-        assert!(reload.read_from(&b, "Project.New").is_ok());
+        assert!(inspection.read_from(c.source(), "Project.New").is_err());
+        assert!(inspection.read_from(&b, "Project.New").is_ok());
         assert!(!c
             .validation_imports()
             .template_text()
             .contains("Project.New ()"));
-        let status = reload.observe(&b).unwrap();
+        let status = inspection.observe(&b).unwrap();
         assert_ne!(status.active.identity, status.disk.identity);
         assert!(status
             .active
@@ -3598,6 +3645,8 @@ mod tests {
         use exomonad_actor::ActorSourceLayers;
         use tidepool_runtime::session::GenerationArtifactReference;
         let (project, reload) = generation_owner();
+        let services = reload.clone().inspection_services();
+        let inspection = services.source_inspection();
         let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
         let reference = &a.generation_evidence().unwrap().reference;
         let original: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
@@ -3622,7 +3671,7 @@ mod tests {
                 "refuse unowned source graph variant {mode}"
             );
         }
-        let a_text = reload.read_from(&a, "Project.Work").unwrap();
+        let a_text = inspection.read_from(&a, "Project.Work").unwrap();
         std::fs::write(
             project.path().join(".exomonad/Project/Work.hs"),
             "module Project.Work where\nwork :: Int\nwork = 41\n",
@@ -3640,8 +3689,8 @@ mod tests {
             .unwrap();
         std::fs::write(root.join("Project/Work.hs"), "raw mutation").unwrap();
         assert!(reload.restore_source(&b.evidence().reference).is_err());
-        assert!(reload.read_from(b.source(), "Project.Work").is_err());
-        assert_eq!(reload.read_from(&a, "Project.Work").unwrap(), a_text);
+        assert!(inspection.read_from(b.source(), "Project.Work").is_err());
+        assert_eq!(inspection.read_from(&a, "Project.Work").unwrap(), a_text);
     }
 
     /// Capsule staging does not publish an actor generation. The model records
@@ -3799,18 +3848,19 @@ mod tests {
     }
 
     fn check_history_read(
-        reload: &ExomonadSourceReload,
+        services: &impl HasSourceInspection,
         capsule: &HistoryCapsule,
         extra: bool,
     ) -> proptest::test_runner::TestCaseResult {
-        use exomonad_actor::ActorSourceLayers;
         let module = if extra {
             "Project.Extra"
         } else {
             "Project.Work"
         };
         let expected = capsule.model.modules();
-        let read = reload.read_from(&capsule.source, module);
+        let read = services
+            .source_inspection()
+            .read_from(&capsule.source, module);
         if let Some(text) = expected.get(module) {
             proptest::prop_assert_eq!(read.unwrap().1, text.clone());
         } else {
@@ -3826,6 +3876,8 @@ mod tests {
         use exomonad_actor::ActorSourceLayers;
         use SourceHistoryOp::*;
         let (project, reload) = generation_owner();
+        let services = reload.clone().inspection_services();
+        let inspection = services.source_inspection();
         let authored = project.path().join(".exomonad");
         let mut draft = SourceHistoryModel {
             work: 1,
@@ -3836,7 +3888,7 @@ mod tests {
         let mut captures = vec![(
             draft.clone(),
             initial.generation_evidence().unwrap().configuration_digest,
-            reload.revision(&initial).unwrap().identity,
+            inspection.revision(&initial).unwrap().identity,
         )];
         let mut retained = vec![HistoryCapsule {
             source: initial,
@@ -3909,7 +3961,7 @@ mod tests {
                     );
                     proptest::prop_assert_eq!(
                         &staged.previous_revision().identity,
-                        &reload.revision(&previous.source).unwrap().identity
+                        &inspection.revision(&previous.source).unwrap().identity
                     );
                     let digest = staged.configuration_digest();
                     let identity = staged.candidate_revision().identity.clone();
@@ -3964,7 +4016,7 @@ mod tests {
                 }
                 Read(pick, extra) => {
                     let capsule = &retained[slot(pick)];
-                    check_history_read(&reload, capsule, extra)?;
+                    check_history_read(&services, capsule, extra)?;
                     if capsule.model.modules() != draft.modules() {
                         coverage.delayed_reads += 1;
                     }
@@ -3989,13 +4041,13 @@ mod tests {
                         source: restored,
                         model: capsule.model.clone(),
                     };
-                    check_history_read(&reload, &restored, false)?;
-                    check_history_read(&reload, &restored, true)?;
+                    check_history_read(&services, &restored, false)?;
+                    check_history_read(&services, &restored, true)?;
                     coverage.restores += 1;
                 }
                 Observe(pick) => {
                     let capsule = &retained[slot(pick)];
-                    let status = reload.observe(&capsule.source).unwrap();
+                    let status = inspection.observe(&capsule.source).unwrap();
                     proptest::prop_assert_eq!(
                         status.active.identity == status.disk.identity,
                         capsule.model.modules() == draft.modules()
@@ -4044,8 +4096,8 @@ mod tests {
                     // Explicit refusal observation, not an invariant read after
                     // every edit: all issued snapshots survive the bad reference.
                     for old in &retained {
-                        check_history_read(&reload, old, false)?;
-                        check_history_read(&reload, old, true)?;
+                        check_history_read(&services, old, false)?;
+                        check_history_read(&services, old, true)?;
                     }
                     coverage.refusals += 1;
                 }
@@ -4115,6 +4167,8 @@ mod tests {
     async fn coherent_candidate_history(client: exomonad_actor::CompilerPreparationClient) {
         use exomonad_actor::ActorSourceLayers;
         let (project, reload) = generation_owner();
+        let services = reload.clone().inspection_services();
+        let inspection = services.source_inspection();
         let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
         let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new())
             .bind_preparation(client);
@@ -4159,7 +4213,7 @@ mod tests {
         let SourceRootOwner::Temporary(run) = reload.source_owner.as_ref() else {
             panic!("generation fixture must own temporary run storage")
         };
-        let cold = runtime_reload_for_run(project.path(), Arc::clone(run)).unwrap();
+        let cold = Arc::new(runtime_reload_for_run(project.path(), Arc::clone(run)).unwrap());
         let restored = cold
             .restore_source_with_acquisition(&reference_b, ready.acquisition())
             .unwrap();
@@ -4168,8 +4222,12 @@ mod tests {
             reference_b
         );
         assert_eq!(
-            cold.read_from(&restored, "Project.Work").unwrap(),
-            reload.read_from(b.source(), "Project.Work").unwrap()
+            cold.clone()
+                .inspection_services()
+                .source_inspection()
+                .read_from(&restored, "Project.Work")
+                .unwrap(),
+            inspection.read_from(b.source(), "Project.Work").unwrap()
         );
         assert_eq!(prompt_b.instructions(), "Instructions A");
         let (recipe, original) = ready.completed_entry_selection().unwrap();
@@ -4178,8 +4236,20 @@ mod tests {
             if selections.get(recipe) == Some(&original))
         );
         assert_ne!(
-            cold.observe(&restored).unwrap().active.identity,
-            cold.observe(&restored).unwrap().disk.identity
+            cold.clone()
+                .inspection_services()
+                .source_inspection()
+                .observe(&restored)
+                .unwrap()
+                .active
+                .identity,
+            cold.clone()
+                .inspection_services()
+                .source_inspection()
+                .observe(&restored)
+                .unwrap()
+                .disk
+                .identity
         );
         let mut owner = exomonad_actor::CompilerPreparationOwner::new();
         let warm = owner
@@ -4238,6 +4308,6 @@ mod tests {
             "deleting an unused module is a valid complete source revision: {:?}",
             deleted.action
         );
-        assert!(reload.read_from(b.source(), "Project.New").is_ok());
+        assert!(inspection.read_from(b.source(), "Project.New").is_ok());
     }
 }

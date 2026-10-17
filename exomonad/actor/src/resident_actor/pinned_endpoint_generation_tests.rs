@@ -3,7 +3,12 @@ use crate::resident_workbench::{ActorGeneration, ActorRequestSnapshot, Installed
 
 struct IssuedSourceService(crate::SourceLayerIssuer);
 
+impl crate::SourceInspection for IssuedSourceService {}
+
 impl crate::ActorSourceLayers for IssuedSourceService {
+    fn inspection_services(self: std::sync::Arc<Self>) -> crate::SourceInspectionServices {
+        crate::SourceInspectionServices::new(self)
+    }
     fn validate_source_authority(
         &self,
         source: &crate::CheckpointSourceLayer,
