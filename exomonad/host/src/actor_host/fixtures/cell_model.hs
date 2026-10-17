@@ -28,7 +28,7 @@ data EchoTools mode = EchoTools { echo :: mode :- Call EchoArgs Text }
 
 callbackTurn :: (Member Sleep effects, Member Console effects)
              => ModelTurn EchoTools effects Text
-callbackTurn = withModel (ProviderModel "test-model") $ textTurn (AgentSpec
+callbackTurn = withModel (CustomModel OpenAIPlan "test-model") $ textTurn (AgentSpec
   { specTools = EchoTools (presentWith id $ tool "Echo with the caller's effects" (\args -> do
       send (SleepWith (milliseconds 1))
       send (Print "model callback")

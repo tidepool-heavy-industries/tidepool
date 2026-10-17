@@ -126,12 +126,13 @@ Create one idle child with `spawnSubagent context workspace
 (defaultSpawnOptions actualSpec)`. The context is a captured `ForkCtx checkpoint`
 or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
 `ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
-The options carry the actual typed `AgentSpec`, model and effort choices,
-instructions, an optional ordinary text label, lifetime, and limits. Set
-`spawnModel = Just Luna`, `Just Sol`, or `Just Astra` to select a configured tier.
-The frozen workspace `[models]` table supplies provider names for those tiers;
-`CustomAlias name` selects another configured key and `ProviderModel name`
-selects an explicit provider name. Omitted model choices inherit the parent. Labels are
+The options carry the actual typed `AgentSpec`, model and reasoning choices,
+instructions, an optional ordinary text label, lifetime, and limits. Omitted
+model and reasoning choices inherit the parent's current effective selection.
+Use `DeepSeekFlash` or `DeepSeekPro` for DeepSeek, `OpenAIModel Gpt61Sol` for
+OpenAI, or `CustomModel backend name` for an explicit backend-qualified ID.
+`spawnReasoning` accepts provider-qualified reasoning. Both selections must
+match the run's fixed startup backend. Labels are
 descriptive only; they do not identify actors, workspaces, or groups. `spawnLimits`
 is an optional `SpawnLimits` record whose `maximumDescendantDepth` and
 `maximumActiveDescendants` fields use opaque `DescendantDepth` and

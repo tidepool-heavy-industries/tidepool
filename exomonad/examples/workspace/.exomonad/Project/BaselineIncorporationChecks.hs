@@ -31,17 +31,17 @@ episode = do
     , "let amendment = PlanAmendment before after [\"plans/baseline.md\"] \"accept baseline\" [\"incorporation\"] [\"plan check\"]"
     , "let decision = AcceptedDecision question after \"Adopt the accepted baseline\" [\"plan check\"]"
     , "let change = BaselineChange before after amendment decision"
-    , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
+    , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
     ])
   void $ turn owner "opened <- openBaselineEpisode me\nlet workerInput = BaselineAssignment ownerTask \"worker\" opened\nRight (worker, workerProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent workerInput defaultRequestOptions"
   worker <- activation
-  check "the typed assignment activates the selected Luna worker"
-    (checkModel worker == Just "gpt-6-luna")
+  check "the typed assignment activates its named worker"
+    (checkLabel worker == "worker")
   void $ turn (checkActor worker) "let current = sessionInput :: BaselineAssignment\nlet assigned = baselineTask current"
   assertCell (checkActor worker) "the worker receives the exact baseline task and owner label"
     ("baselineOwnerLabel current == \"worker\" && taskSource assigned == " <> gitOidLiteral before
       <> " && taskName assigned == \"baseline-change\" && planPath assigned == \".exomonad/WORKBENCH.md\" && obligation assigned == \"Incorporate the accepted baseline\" && ownedPaths assigned == [\"plans/baseline.md\"] && acceptance assigned == \"report exact source and named checks\"")
-  void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
+  void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
   lateWorker <- activation
   void $ turn (checkActor lateWorker) "respond (Blocked \"already settled\" [] :: Outcome Candidate)"
 
@@ -73,7 +73,7 @@ episode = do
     , "let workerBefore = baselineBefore workerChange"
     , "inspectFull (baselineTask (sessionInput :: BaselineAssignment), collectorBegun workerView)"
     ])
-  assertCell (checkActor worker) "typed Luna assignment carries live handle into selected context"
+  assertCell (checkActor worker) "typed assignment carries live handle into selected context"
     ("taskSource (baselineTask (sessionInput :: BaselineAssignment)) == workerBefore && collectorBegun workerView && workerBefore == " <> gitOidLiteral before <> "")
   void $ turn owner
     "forged <- R.call (submitIncorporation (R.client (openedActor opened))) (\"worker\", Incorporated amendment after [\"read exact baseline\"])\nforgedView <- episodeView active\npure ()"

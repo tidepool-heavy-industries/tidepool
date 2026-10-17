@@ -24,7 +24,7 @@ reviewRelayPolicy = ReminderPolicy
 
 independentWorkPolicy :: ReminderPolicy
 independentWorkPolicy = ReminderPolicy
-  { reminderContext = "A feature owner can admit bounded Luna children with the published Project.Work and Exomonad.Contrib.Routing interfaces."
+  { reminderContext = "A feature owner can admit bounded children with the published Project.Work and Exomonad.Contrib.Routing interfaces."
   , reminderTrigger = "The supplied evidence explicitly names multiple ready obligations with independent inputs and disjoint owned paths, yet describes doing them sequentially."
   , reminderExclusions = "Abstain if dependencies, shared-file ownership, available resources or required source are unclear. Do not infer readiness from elapsed time, actor silence or task counts. Do not suggest more forks when those obligations already have executing owners."
   , reminderSuggestion = "Consider admitting the named independent obligations together with the ordinary spawnSubagent and requestWithProgress functions and collecting their results through Exomonad.Contrib.Routing.workDefinition and R.start. Pass exact source, owned paths, acceptance and published helper names. Retain local integration ownership; keep dependent work behind its actual prerequisite."

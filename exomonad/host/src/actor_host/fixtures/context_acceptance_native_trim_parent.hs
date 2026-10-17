@@ -18,7 +18,7 @@ do
   Right captured <- checkpoint "curated parent snapshot"
   idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
     ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
-      { spawnModel = Just (ProviderModel "test-model"), spawnLabel = Just name }))
+      { spawnModel = Just (CustomModel OpenAIPlan "test-model"), spawnLabel = Just name }))
     ["first", "second"]
   workers <- mapM (\admitted -> case admitted of
     Left issue -> error (ContextText.pack (show issue))

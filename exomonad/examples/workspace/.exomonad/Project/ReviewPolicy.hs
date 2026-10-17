@@ -50,9 +50,7 @@ defaultReviewFlowPolicy = ReviewFlowPolicy
             <> "\nFlow check evidence:\n" <> evidence
           source = atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))
           spawnOptions = (defaultSpawnOptions reviewerSpec)
-            { spawnModel = Just Luna
-            , spawnEffort = Just Medium
-            , spawnInstructions = Just instructions
+            { spawnInstructions = Just instructions
             , spawnLabel = Just "review"
             }
       spawned <- spawnSubagent (FreshCtx context) (ForkWorktree source) spawnOptions

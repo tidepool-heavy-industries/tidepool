@@ -12,7 +12,7 @@ researcher <- do
   spawned <- spawnSubagent
     (FreshCtx "Use search and open for source evidence. Complete each request with its active reply tool; preserve returned source URLs and references.")
     SameDir
-    ((defaultValidatedSpawnOptions checkedResearcher) { spawnModel = Just Luna })
+    (defaultValidatedSpawnOptions checkedResearcher)
   case spawned of
     Left failure -> error (Text.pack (show failure))
     Right ready -> pure ready

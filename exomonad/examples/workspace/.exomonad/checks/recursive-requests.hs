@@ -9,14 +9,12 @@ let sink :: WorkSink (Outcome Text)
     sink = notifyWork me (workMessage (\result -> T.pack (show (result :: Outcome Text))))
 Right leftAgent <- spawnSubagent (childContext leftTask) (ForkWorktree currentCheckout)
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just Luna, spawnEffort = Just Medium
-    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName leftTask) })
+    { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName leftTask) })
 Right (leftRequest, leftProgress) <- requestWithProgress @WorkProgress @(Outcome Text) leftAgent leftTask
   (defaultRequestOptions { requestReporting = Silent })
 Right rightAgent <- spawnSubagent (childContext rightTask) (ForkWorktree currentCheckout)
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just Luna, spawnEffort = Just Medium
-    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName rightTask) })
+    { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName rightTask) })
 Right (rightRequest, rightProgress) <- requestWithProgress @WorkProgress @(Outcome Text) rightAgent rightTask
   (defaultRequestOptions { requestReporting = Silent })
 (collection, answerer) <- if phaseName == "subcomponents" then do

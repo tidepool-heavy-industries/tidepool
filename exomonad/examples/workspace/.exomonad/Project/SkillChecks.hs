@@ -6,7 +6,7 @@ module Project.SkillChecks
   , actorReuse
   , routing
   , jev
-  , lunaApplicativeAwait
+  , applicativeAwait
   , notebookForms
   , reviewProvenance
   ) where
@@ -34,12 +34,12 @@ exampleBody actor skill index = do
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
 example actor skill index = exampleBody actor skill index >>= turn actor
 
-lunaApplicativeAwait :: Member RecipeCheck effects => Eff effects ()
-lunaApplicativeAwait = do
+applicativeAwait :: Member RecipeCheck effects => Eff effects ()
+applicativeAwait = do
   owner <- root
   let fixture path = readFile owner (Text.pack workspaceRoot <> "/checks/" <> path)
-  start <- fixture "luna-agent-start.hs"
-  finish <- fixture "luna-agent-settlement.hs"
+  start <- fixture "agent-start.hs"
+  finish <- fixture "agent-settlement.hs"
   void $ turn owner start
   first <- activation
   second <- activation
@@ -47,10 +47,6 @@ lunaApplicativeAwait = do
         if checkLabel first == "compiler-scout" then (first, second) else (second, first)
   check "the two requests activate their named workers"
     (checkLabel compiler == "compiler-scout" && checkLabel lookupWorker == "lookup-scout")
-  check "the concrete workspace recipe selects Luna for the compiler scout"
-    (checkModel compiler == Just "gpt-6-luna")
-  check "the concrete workspace recipe selects Luna for the lookup scout"
-    (checkModel lookupWorker == Just "gpt-6-luna")
   assertCell (checkActor compiler) "the compiler scout receives its typed request"
     "(sessionInput :: Text) == \"Summarize the named compiler boundary in one sentence.\""
   assertCell (checkActor lookupWorker) "the lookup scout receives its typed request"
@@ -84,10 +80,10 @@ actorReuse = do
 
 requestRoundTrip :: Member RecipeCheck effects => CheckActor -> Eff effects Activation
 requestRoundTrip owner = do
-  void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just Luna, spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
+  void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
   void $ turn owner "Right pending <- request @Text worker input defaultRequestOptions"
   worker <- activation
-  check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")
+  check "typed request activates the explicitly spawned worker" (checkLabel worker == "skill-example")
   refuseCell (checkActor worker) "fresh skill worker does not inherit parent notebook declarations"
     "privateSkillNotebook"
   void $ turn (checkActor worker) $ Text.unlines

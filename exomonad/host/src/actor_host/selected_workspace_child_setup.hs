@@ -15,7 +15,7 @@ let selectedTask = Work.task "typed-source" "keep the original task" ["README.md
 selectedSpawn <- spawnSubagent (FreshCtx (Work.taskContext selectedTask))
   (ForkWorktree currentCheckout)
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
-    { spawnLabel = Just "worker", spawnEffort = Just Medium
+    { spawnLabel = Just "worker", spawnReasoning = Just (OpenAIReasoning OpenAIMedium)
     , spawnInstructions = Just (Work.projectPrompt "task"), spawnLifetime = ActorOwned })
 selectedAgent <- case selectedSpawn of
   Left failure -> Effects.error (tshow failure)

@@ -189,7 +189,10 @@ async fn next_descendant(
     assert_eq!(node.context_parent, context_parent);
     assert!(node.model_actor);
     assert!(node.bound_worktree.is_some());
-    assert_eq!(round.request.model, "gpt-6-luna");
+    assert_eq!(
+        round.request.model, "gpt-6.1-sol",
+        "ordinary recursive workers inherit the configured parent selection"
+    );
     (node.actor, round)
 }
 
@@ -210,7 +213,10 @@ fn captured(round: &HostedScriptRound, prefix: &[harness::item::Item], excluded_
         .iter()
         .any(|item| item.0["encrypted_content"] == "synthetic-opaque-gpt-6.1-sol");
     if cross_model {
-        assert_eq!(round.request.model, "gpt-6-luna");
+        assert_eq!(
+            round.request.model, "gpt-6.1-sol",
+            "ordinary recursive workers inherit the configured parent selection"
+        );
         let parent_users = prefix
             .iter()
             .filter(|item| item.0["role"] == "user")

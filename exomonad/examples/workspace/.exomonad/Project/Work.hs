@@ -123,8 +123,7 @@ implement
 implement work = do
   spawned <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree currentCheckout)
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just Luna, spawnEffort = Just Medium
-      , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+      { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))
     Right worker -> do
@@ -198,8 +197,7 @@ requestReview name input = do
   spawned <- spawnSubagent (FreshCtx (reviewContext input))
     (ForkWorktree (atRef (GitRef (renderGitOid (candidateCommit (reviewInput input))))))
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just Luna, spawnEffort = Just Medium
-      , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just name })
+      { spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just name })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))
     Right reviewer -> do
@@ -248,7 +246,7 @@ consultDesign slot question = do
   spawned <- spawnSubagent (FreshCtx (designContext slot question))
     (ForkWorktree (atRef (GitRef (renderGitOid (questionSource question)))))
     ((defaultSpawnOptions workspaceAgentSpec)
-      { spawnModel = Just (specialistModel slot), spawnReasoning = Just (specialistReasoning slot)
+      { spawnModel = specialistModel slot, spawnReasoning = specialistReasoning slot
       , spawnInstructions = Just (projectPrompt "specialist"), spawnLabel = Just (specialistLabel slot) })
   case spawned of
     Left issue -> pure (Left (WorkSpawnRefused issue))

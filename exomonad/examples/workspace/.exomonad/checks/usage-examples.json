@@ -58,7 +58,7 @@
       "prerequisites": [
         "Project/Researcher.hs"
       ],
-      "requirements": "Run in a resident workbench with AgentLaunch, Replies, Watches and Console available and a configured Luna model. Project.Researcher must be on the selected source path. The child requires Web support and network access for search and open; the caller does not need Web. SameDir shares the writable selected workspace. Validates the child spec, awaits a sourced Report, then awaits a distinct FollowUp using the active reply tool for each request."
+      "requirements": "Run in a resident workbench with AgentLaunch, Replies, Watches and Console available. Project.Researcher must be on the selected source path. The child requires Web support and network access for search and open; the caller does not need Web. SameDir shares the writable selected workspace. Validates the child spec, awaits a sourced Report, then awaits a distinct FollowUp using the active reply tool for each request."
     },
     {
       "module": "Jev.Operators",

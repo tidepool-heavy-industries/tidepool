@@ -3326,9 +3326,8 @@ mod tests {
         let config =
             std::fs::read_to_string(workspace.path().join(".exomonad/config.toml")).unwrap();
         for expected in [
-            "luna = \"gpt-6-luna\"",
-            "executor = \"gpt-6.1-sol\"",
-            "planner = \"gpt-6-astra\"",
+            "executor = { backend = \"deepseek\", model = \"deepseek-flash\" }",
+            "planner = { backend = \"deepseek\", model = \"deepseek-v4-pro\" }",
             "task = \"prompts/task.md\"",
             "review = \"prompts/review.md\"",
         ] {

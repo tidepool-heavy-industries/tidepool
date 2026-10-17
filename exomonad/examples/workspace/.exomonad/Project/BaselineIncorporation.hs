@@ -111,7 +111,7 @@ data OpenedEpisode = OpenedEpisode
   , openedOwner :: AgentRef
   }
 
--- | A selected-context Luna receives the task and the live collector handle
+-- | A selected-context worker receives the task and the live collector handle
 -- together. The handle is deliberately absent from rendered task context:
 -- it is an opaque capability read from typed sessionInput, not an address for
 -- the model to reconstruct. Allocate the one-use handle before sending this request.

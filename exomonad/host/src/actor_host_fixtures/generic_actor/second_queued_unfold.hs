@@ -10,7 +10,7 @@ Right laterDomainAgent <- spawnSubagent
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "domain"
     , spawnLifetime = ActorOwned
-    , spawnEffort = Just Low
+    , spawnReasoning = Just (OpenAIReasoning OpenAILow)
     , spawnInstructions = Just laterDomainTask
     })
 Right laterReviewAgent <- spawnSubagent

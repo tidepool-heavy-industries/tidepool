@@ -7,7 +7,6 @@ let reviewRequest = ReviewRequest (AssignedTask work) candidate OwnerRepairs
 Right reviewerAgent <- spawnSubagent (FreshCtx (reviewContext reviewRequest))
   (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just Luna, spawnEffort = Just Medium
-    , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just "reviewed-checkpoint" })
+    { spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just "reviewed-checkpoint" })
 Right (reviewer, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
   reviewerAgent reviewRequest defaultRequestOptions

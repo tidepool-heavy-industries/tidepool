@@ -6,5 +6,5 @@ result <- ModelExample.synchronousFlash input
 display (ModelExample.report result)
 -- DeepSeekPro variant: use ModelExample.synchronousPro input in this notebook.
 -- Ordinary asynchronous programs can use ModelExample.luna or ModelExample.sol.
--- This is a fresh invocation when run: it does not reuse Luna's response.
+-- This is a fresh invocation when run: it does not reuse the first invocation's response.
 result

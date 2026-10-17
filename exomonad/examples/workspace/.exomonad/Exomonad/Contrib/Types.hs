@@ -286,12 +286,13 @@ data Incorporation
   | IncorporationBlocked PlanAmendment Text [Text]
   deriving (Show, Eq)
 
+-- | Omitted specialist choices inherit the current parent selection, as in SpawnOptions.
 data DesignSlot = DesignSlot
   { specialistPlan :: Text
   , specialistLabel :: Text
   , specialistWatch :: Text
-  , specialistModel :: Model
-  , specialistReasoning :: Reasoning
+  , specialistModel :: Maybe Model
+  , specialistReasoning :: Maybe Reasoning
   }
 
 -- Evidence and questions are independently useful progress payloads. They are

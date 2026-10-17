@@ -1078,7 +1078,7 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
             descendant_depth: 8,
             descendant_active_children: None,
             model: None,
-            effort: None,
+            reasoning: None,
             instructions: None,
             launch_worktrees: Vec::new(),
             source_layer: Vec::new(),

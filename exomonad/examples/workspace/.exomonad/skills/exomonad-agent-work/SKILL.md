@@ -14,10 +14,10 @@ does not identify an actor, workspace, or group.
 
 A successful spawn returns an idle `AgentRef`. Spawn does not start inference.
 The first typed request or a human message activates it. The compiled workspace
-recipe in [luna-agent-start.hs](../../checks/luna-agent-start.hs) uses the actual
-`workspaceAgentSpec`, selects the configured `Luna` model, and issues two typed Text
+recipe in [agent-start.hs](../../checks/agent-start.hs) uses the actual
+`workspaceAgentSpec`, inherits the current parent model and reasoning, and issues two typed Text
 requests. After both requests are issued, the authored cell can continue with
-other work or end; [luna-agent-settlement.hs](../../checks/luna-agent-settlement.hs)
+other work or end; [agent-settlement.hs](../../checks/agent-settlement.hs)
 joins their typed settlements applicatively and keeps each branch's
 `ResponseFailure` distinct from an `AwaitError`.
 

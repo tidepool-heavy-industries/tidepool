@@ -10,7 +10,7 @@ let capturedGetter = capturedValue + 1
 Right seed <- checkpoint "same-cell three-actor capture"
 let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
 let workerOptions = (defaultSpawnOptions workerSpec)
-      { spawnModel = Just Luna, spawnLifetime = ActorOwned }
+      { spawnModel = Just (OpenAIModel Gpt6Luna), spawnLifetime = ActorOwned }
 Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
   (workerOptions { spawnLabel = Just "three-actor-alpha" })
 Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

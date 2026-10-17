@@ -150,7 +150,7 @@ async fn research_history(child_machines: HostedChildMachines, script: ResearchS
         if first.host_identity().actor == root {
             panic!("tutorial settled before child inference: {}", first.settled_output("researcher-tutorial"));
         }
-        assert_eq!(first.request.model, "gpt-6-luna", "the frozen Luna alias selects its actual provider model");
+        assert_eq!(first.request.model, if script == ResearchScript::Tutorial { "test-model" } else { "gpt-6-luna" }, "the tutorial inherits its parent; the explicit OpenAI refusal fixture preserves its own selection");
         let child = first.host_identity();
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let selected = graph.iter().filter(|node| host.context.binding(node.actor)

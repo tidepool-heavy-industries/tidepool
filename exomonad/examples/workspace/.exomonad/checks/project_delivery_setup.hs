@@ -3,6 +3,5 @@ let work = (task "implement-feature" "Implement the feature" ["feature.txt"] "Pr
       { planPath = "plans/current/feature.md", rationale = "Preserve the product boundary during preparation." }
 workerAgent <- either (error . T.pack . show) pure =<< spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree projectHead)
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just (CustomAlias "executor"), spawnEffort = Just Medium
-    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+    { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
 Right (worker, workerQuestions) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions

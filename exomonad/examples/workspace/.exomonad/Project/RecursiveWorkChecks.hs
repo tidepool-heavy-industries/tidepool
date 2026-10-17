@@ -70,8 +70,7 @@ revisedReview = do
   void $ turn owner ("let basis = ExactScope " <> gitOidLiteral base <> " [\"candidate.txt\"] \"The candidate contains the corrected text\"\nlet original = ReviewRequest basis (Candidate " <> gitOidLiteral first <> " [] []) OwnerRepairs\nRight (review, progress) <- requestReview \"first-review\" original")
   reviewer <- activation
   firstHead <- git (checkActor reviewer) ["rev-parse", "HEAD"]
-  check "initial review uses Luna at the exact candidate"
-    (firstHead == first && checkModel reviewer == Just "gpt-6-luna")
+  check "initial review uses the exact candidate" (firstHead == first)
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) [\"correct the text\"]))"
   revised <- checkpoint owner "candidate.txt" "corrected\n" "revised review candidate"
   void $ turn owner ("let revised = original { reviewInput = Candidate " <> gitOidLiteral revised <> " [] [] }\nRight (nextReview, nextProgress) <- requestReview \"revised-review\" revised")

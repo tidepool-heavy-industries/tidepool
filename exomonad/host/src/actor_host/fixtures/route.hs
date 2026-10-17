@@ -11,7 +11,7 @@ broken <- route (settlement producer) (\_ -> error "deliberate route failure")
 reviewLaunch <- route (settlement producer) (\settled -> case settled of
   Right answer -> do
     Right reviewer <- spawnSubagent (FreshCtx answer) (ForkWorktree projectHead)
-      ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnModel = Just (ProviderModel "gpt-6-sol"), spawnLabel = Just "review" })
+      ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnModel = Just (CustomModel OpenAIPlan "gpt-6-sol"), spawnLabel = Just "review" })
     Right _ <- request @Text reviewer answer defaultRequestOptions
     pure ()
   Left _ -> pure ())

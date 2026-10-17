@@ -3005,10 +3005,10 @@ async fn jev_skill_recipe_executes_the_published_packets() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn skill_luna_recipe_joins_typed_agent_settlements_applicatively() {
-    let repository = recipe_workspace(Some(&["Project.SkillChecks.lunaApplicativeAwait"]));
+    let repository = recipe_workspace(Some(&["Project.SkillChecks.applicativeAwait"]));
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
-        .expect("two Luna requests must settle through one typed applicative wait");
+        .expect("two child requests must settle through one typed applicative wait");
 }
 
 #[tokio::test(flavor = "multi_thread")]

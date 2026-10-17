@@ -21,7 +21,7 @@ Right consumerAgent <- spawnSubagent
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just consumerLabel
     , spawnLifetime = ActorOwned
-    , spawnEffort = Just Medium
+    , spawnReasoning = Just (OpenAIReasoning OpenAIMedium)
     , spawnInstructions = Just consumerTask
     })
 Right domainRequest <- request @Report domainAgent domainPlan
