@@ -88,6 +88,11 @@ impl CommandCleanupTransfer {
 /// this so an unresponsive backend cannot freeze the actor indefinitely.
 const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The signed wait API reserves -1 for an unbounded wait.
+fn finite_wait_millis(wait: Duration) -> i64 {
+    i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)
+}
+
 type CompletionSink = dyn Fn(CommandResult) -> bool + Send + Sync;
 
 /// Every backend call reachable from inside an actor's one active turn goes
@@ -423,6 +428,16 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct CommandJobs {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
+}
+
+/// Observational data; constructing it grants no control or cleanup authority.
+pub(crate) enum InvocationCommandCleanupObservation {
+    CleanAtEntry(CommandResult),
+    AfterCancellation {
+        cancellation: Result<(), CommandError>,
+        terminal: Option<CommandResult>,
+    },
+    ObservationTimedOut,
 }
 
 /// A read-only projection of one retained job: who raised it, who observes
@@ -921,6 +936,40 @@ impl CommandJobs {
     pub async fn status(&self, caller: ActorRef, id: &str) -> Result<CommandStatus, CommandError> {
         let shared = self.shared(id)?;
         Ok(shared.status(caller, id).await)
+    }
+
+    /// Observe invocation cleanup through the ordinary owner checks. A dropped
+    /// observer leaves membership and admitted job work with their existing owners.
+    pub(crate) async fn observe_invocation_cleanup(
+        &self,
+        caller: ActorRef,
+        id: &str,
+        terminal_wait: Duration,
+        total_wait: Duration,
+    ) -> InvocationCommandCleanupObservation {
+        let cleanup = async {
+            let initial = self.status(caller, id).await;
+            if let Ok(CommandStatus::CommandFinished(result)) = initial {
+                if result.cleanup == CommandCleanup::CommandClean {
+                    return InvocationCommandCleanupObservation::CleanAtEntry(result);
+                }
+            }
+            let cancellation = self.control(caller, id, CommandControl::Cancel).await;
+            let terminal = match self
+                .wait(caller, id, finite_wait_millis(terminal_wait))
+                .await
+            {
+                Ok(CommandStatus::CommandFinished(result)) => Some(result),
+                _ => None,
+            };
+            InvocationCommandCleanupObservation::AfterCancellation {
+                cancellation,
+                terminal,
+            }
+        };
+        tokio::time::timeout(total_wait, cleanup)
+            .await
+            .unwrap_or(InvocationCommandCleanupObservation::ObservationTimedOut)
     }
 
     pub async fn wait(
@@ -1424,6 +1473,22 @@ impl Actor for JobActor {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+
+    #[test]
+    fn finite_cleanup_wait_never_becomes_unbounded_or_negative() {
+        let maximum = i64::MAX as u64;
+        for (wait, expected) in [
+            (Duration::ZERO, 0),
+            (Duration::from_micros(999), 0),
+            (Duration::from_millis(42), 42),
+            (Duration::from_millis(maximum), i64::MAX),
+            (Duration::from_millis(maximum + 1), i64::MAX),
+            (Duration::from_millis(u64::MAX), i64::MAX),
+            (Duration::MAX, i64::MAX),
+        ] {
+            assert_eq!(finite_wait_millis(wait), expected, "{wait:?}");
+        }
+    }
 
     #[test]
     fn invalid_command_names_the_rejected_field_without_echoing_values() {

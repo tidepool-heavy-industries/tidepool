@@ -1229,6 +1229,7 @@ struct PendingBackend {
     finish: tokio::sync::Semaphore,
     cancel_entered: tokio::sync::Semaphore,
     cancel_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    cancel_answer: Mutex<Result<(), CommandError>>,
 }
 
 impl Default for PendingBackend {
@@ -1244,6 +1245,7 @@ impl Default for PendingBackend {
             finish: tokio::sync::Semaphore::new(0),
             cancel_entered: tokio::sync::Semaphore::new(0),
             cancel_gate: Mutex::new(None),
+            cancel_answer: Mutex::new(Ok(())),
         }
     }
 }
@@ -1274,8 +1276,11 @@ impl CommandBackend for PendingBackend {
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
             }
-            self.finish.add_permits(1);
-            Ok(())
+            let answer = self.cancel_answer.lock().clone();
+            if answer.is_ok() {
+                self.finish.add_permits(1);
+            }
+            answer
         })
     }
 
@@ -1302,6 +1307,173 @@ impl CommandBackend for PendingBackend {
             self.cleanup_answer.lock().clone()
         })
     }
+}
+
+#[tokio::test]
+async fn invocation_cleanup_observation_owner_probe_can_avoid_cancellation() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    backend.result.lock().cleanup = CommandCleanup::CommandRetained;
+    let unconfirmed = CommandCleanup::CommandCleanupUnknown("external cleanup pending".into());
+    *backend.cleanup_answer.lock() = unconfirmed.clone();
+    backend.finish.add_permits(1);
+    let observer = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(jobs.status(observer, &job).await.unwrap(),
+                CommandStatus::CommandFinished(result) if result.cleanup == unconfirmed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resource cleanup publishes its first probe");
+    let probes = backend.cleanup_probes.load(Ordering::SeqCst);
+    *backend.cleanup_answer.lock() = CommandCleanup::CommandClean;
+
+    let observed = jobs
+        .observe_invocation_cleanup(owner, &job, Duration::from_secs(1), Duration::from_secs(2))
+        .await;
+
+    assert!(matches!(observed,
+        InvocationCommandCleanupObservation::CleanAtEntry(result)
+            if result.cleanup == CommandCleanup::CommandClean));
+    assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), probes + 1);
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn invocation_cleanup_observation_preserves_foreign_control_refusal() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let foreign = ActorRef {
+        incarnation: crate::Incarnation(owner.incarnation.0 + 1),
+        ..owner
+    };
+
+    let observed = jobs
+        .observe_invocation_cleanup(
+            foreign,
+            &job,
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+        )
+        .await;
+
+    assert!(matches!(
+        observed,
+        InvocationCommandCleanupObservation::AfterCancellation {
+            cancellation: Err(CommandError::CommandUnauthorized),
+            terminal: None,
+        }
+    ));
+    assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    backend.finish.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invocation_cleanup_keeps_cancellation_failure_beside_clean_result() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(&fixture.environment.commands, &job)
+        .unwrap();
+    let refusal = CommandError::CommandUnavailable("controlled cancellation refusal".into());
+    *backend.cancel_answer.lock() = Err(refusal.clone());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+
+    let (cleanup, ()) = tokio::join!(work.cleanup(&fixture.environment, &fixture.kernel), async {
+        backend.cancel_entered.acquire().await.unwrap().forget();
+        backend.finish.add_permits(1);
+        gate.add_permits(1);
+    },);
+
+    assert_eq!(cleanup.commands.len(), 1);
+    assert_eq!(cleanup.commands[0].failure, Some(refusal));
+    assert_eq!(
+        cleanup.commands[0].result.as_ref().unwrap().cleanup,
+        CommandCleanup::CommandClean
+    );
+    assert!(cleanup.uncertainty().is_some());
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn invocation_cleanup_observation_timeout_retains_admitted_cancellation_for_retry() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+
+    let (observed, ()) = tokio::join!(
+        jobs.observe_invocation_cleanup(
+            owner,
+            &job,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        ),
+        async {
+            backend.cancel_entered.acquire().await.unwrap().forget();
+            tokio::time::advance(Duration::from_millis(10)).await;
+        },
+    );
+
+    assert!(matches!(
+        observed,
+        InvocationCommandCleanupObservation::ObservationTimedOut
+    ));
+    assert!(work.state.lock().commands.contains(&job));
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    gate.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn dropped_invocation_cleanup_waiter_retains_admitted_cancellation_for_retry() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *backend.cancel_gate.lock() = Some(gate.clone());
+    {
+        let cleanup = work.cleanup(&fixture.environment, &fixture.kernel);
+        tokio::pin!(cleanup);
+        tokio::select! {
+            entered = backend.cancel_entered.acquire() => entered.unwrap().forget(),
+            _ = &mut cleanup => panic!("cleanup must await the admitted cancellation"),
+        }
+    }
+
+    assert!(work.cleanup_observation().is_none());
+    assert!(work.state.lock().commands.contains(&job));
+    gate.add_permits(1);
+    jobs.wait(owner, &job, -1).await.unwrap();
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
 }
 
 #[tokio::test]
