@@ -52,8 +52,8 @@ pub use endpoint::{
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    CompileWorkload, ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError,
-    StructuredInspection, SymbolIdentity,
+    CompileWorkload, ExactNameInspection, ExtractRequest, InspectionNamespace, InspectionScope,
+    LookupNameInspection, LookupNameMode, ProtocolError, StructuredInspection, SymbolIdentity,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -826,6 +826,16 @@ impl ExtractCmd {
     }
 
     /// Ask the compiler worker for GHC's information about an in-scope name.
+    pub fn inspect_lookup_name(&mut self, query: LookupNameInspection) -> &mut Self {
+        self.request.inspect_lookup_name(query);
+        self
+    }
+
+    pub fn inspect_exact_name(&mut self, query: ExactNameInspection) -> &mut Self {
+        self.request.inspect_exact_name(query);
+        self
+    }
+
     pub fn inspect_info(&mut self, name: &str) -> &mut Self {
         self.request.inspect_info(name);
         self
@@ -1108,6 +1118,35 @@ mod tests {
         );
         let decoded = ExtractRequest::decode(&cmd.request_bytes()).unwrap();
         assert_eq!(decoded.cli_argv(), cmd.argv());
+    }
+
+    #[test]
+    fn selective_lookup_requests_round_trip_interpretation_scope_and_field_namespace() {
+        let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        command
+            .input("Expr.hs")
+            .inspect_out("inspection.cbor")
+            .inspect_lookup_name(LookupNameInspection {
+                query: "Alias.work".into(),
+                qualifier_module: Some("Project.Work".into()),
+                mode: LookupNameMode::Name,
+            })
+            .input("Expr.hs")
+            .inspect_lookup_name(LookupNameInspection {
+                query: "Project.Choice".into(),
+                qualifier_module: Some("Project".into()),
+                mode: LookupNameMode::NameOrModule,
+            })
+            .input("Expr.hs")
+            .inspect_exact_name(ExactNameInspection {
+                scope: InspectionScope::PublicModule("Project.Record".into()),
+                namespace: InspectionNamespace::Field,
+                name: "field".into(),
+            });
+        let original = command.request_bytes();
+        let decoded = ExtractRequest::decode(&original).unwrap();
+        assert_eq!(decoded.encode(), original);
+        assert_eq!(decoded.cli_argv(), command.request.cli_argv());
     }
 
     #[test]

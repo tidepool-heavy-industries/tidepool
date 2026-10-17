@@ -8,7 +8,9 @@ mod qualified_name;
 pub(crate) use qualified_name::qualifier_and_identifier;
 
 use serde::{Deserialize, Serialize};
-use tidepool_runtime::session::{InspectionAvailability, InspectionResult, TypeMatchQuality};
+use tidepool_runtime::session::{
+    InspectionAvailability, InspectionResult, LookupAnswer, TypeMatchQuality,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -585,22 +587,14 @@ pub(crate) fn resolve(
                     },
                 }
             }
-            PreparedLookupKind::Name(ref name) => {
-                // A dotted, lowercase-final name (`Cmd.exitCode`) sent a
-                // paired qualifier `Browse` in the same batch (built above,
-                // in `execute_workbench`); every other `Name` shape consumes
-                // exactly one result. This mirrors that same shape-based
-                // decision so the two stay aligned without threading a count
-                // through the response.
-                let qualifier_shaped = crate::lookup_tool::qualifier_and_identifier(name).is_some();
-                let info_result = inspected.next();
-                let browse_result = if qualifier_shaped {
-                    inspected.next()
-                } else {
-                    None
-                };
-                match info_result {
-                    Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
+            PreparedLookupKind::Name(_) | PreparedLookupKind::Qualified(_) => {
+                let module_interpretation =
+                    matches!(prepared.kind, PreparedLookupKind::Qualified(_));
+                match inspected.next() {
+                    Some(InspectionResult::Lookup {
+                        answer: LookupAnswer::Info(entries) | LookupAnswer::Module { entries, .. },
+                        ..
+                    }) => LookupResult::found(
                         prepared.query,
                         entries
                             .into_iter()
@@ -608,7 +602,10 @@ pub(crate) fn resolve(
                             .collect(),
                         MATCH_LIMIT,
                     ),
-                    Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
+                    Some(InspectionResult::Lookup {
+                        answer: LookupAnswer::Ambiguous(entries),
+                        ..
+                    }) => LookupResult::ambiguous(
                         prepared.query,
                         entries
                             .into_iter()
@@ -616,11 +613,36 @@ pub(crate) fn resolve(
                             .collect(),
                         MATCH_LIMIT,
                     ),
-                    Some(InspectionResult::NotFound { .. }) => LookupResult {
+                    Some(InspectionResult::Lookup {
+                        answer: LookupAnswer::Missing { export_names },
+                        ..
+                    }) => {
+                        let leaf = prepared.query.rsplit('.').next().unwrap_or(&prepared.query);
+                        let suggestions = near_matches(leaf, &export_names, 5);
+                        LookupResult {
+                            query: prepared.query,
+                            outcome: LookupOutcome::NotFound {
+                                attempted: if module_interpretation {
+                                    vec![LookupInterpretation::Name, LookupInterpretation::Module]
+                                } else {
+                                    vec![LookupInterpretation::Name]
+                                },
+                                suggestions,
+                            },
+                        }
+                    }
+                    Some(InspectionResult::Lookup {
+                        answer: LookupAnswer::ModuleNotFound(_),
+                        ..
+                    }) => LookupResult {
                         query: prepared.query,
                         outcome: LookupOutcome::NotFound {
-                            attempted: vec![LookupInterpretation::Name],
-                            suggestions: near_match_suggestions(name, browse_result),
+                            attempted: if module_interpretation {
+                                vec![LookupInterpretation::Name, LookupInterpretation::Module]
+                            } else {
+                                vec![LookupInterpretation::Name]
+                            },
+                            suggestions: vec![],
                         },
                     },
                     Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
@@ -643,37 +665,6 @@ pub(crate) fn resolve(
                     },
                 }
             }
-            // The batch carried `Info` then `Browse` for this one query, so the
-            // name answer is taken when GHC has one and the module browse is
-            // read only when it does not. Both results are consumed either way,
-            // which is what keeps the remaining queries aligned.
-            PreparedLookupKind::Qualified(_) => match (inspected.next(), inspected.next()) {
-                (Some(InspectionResult::Info { entries, .. }), _) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (Some(InspectionResult::Ambiguous { entries, .. }), _) => LookupResult::ambiguous(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (_, Some(InspectionResult::Browse { entries, .. })) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules, &usage_pointers))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                (by_name, by_module) => unresolved_qualified(prepared.query, by_name, by_module),
-            },
             PreparedLookupKind::Type(_) => match inspected.next() {
                 Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
                     LookupResult {
@@ -760,57 +751,6 @@ pub(crate) fn resolve(
             usage_pointer,
         }
     }
-
-    /// The closest exported names under a missed qualifier, read from the
-    /// same-batch `Browse` of that qualifier's real module (see
-    /// `crate::lookup_tool::resolve_qualifier_module`). Empty when the query
-    /// was not qualifier-shaped, the browse itself failed (an unresolvable
-    /// qualifier, most likely), or nothing in it was close enough to suggest.
-    fn near_match_suggestions(name: &str, browse: Option<InspectionResult>) -> Vec<String> {
-        let Some((_qualifier, identifier)) = crate::lookup_tool::qualifier_and_identifier(name)
-        else {
-            return Vec::new();
-        };
-        let Some(InspectionResult::Browse { entries, .. }) = browse else {
-            return Vec::new();
-        };
-        let candidates: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
-        crate::lookup_tool::near_matches(identifier, &candidates, 5)
-    }
-
-    /// Neither interpretation of a dotted capitalized query produced entries.
-    /// A miss reports both attempts, so a reader is never left guessing which
-    /// question was asked; a real diagnostic from either side outranks it,
-    /// because a failed query is not evidence the name does not exist.
-    fn unresolved_qualified(
-        query: String,
-        by_name: Option<InspectionResult>,
-        by_module: Option<InspectionResult>,
-    ) -> LookupResult {
-        let diagnostic = [by_name, by_module]
-            .into_iter()
-            .find_map(|result| match result {
-                Some(
-                    InspectionResult::NotFound { .. } | InspectionResult::ModuleNotFound { .. },
-                ) => None,
-                Some(InspectionResult::Rejected { diagnostic }) => Some(diagnostic),
-                Some(other) => Some(format!(
-                    "lookup worker returned unexpected result: {other:?}"
-                )),
-                None => Some("lookup worker omitted a result".into()),
-            });
-        LookupResult {
-            query,
-            outcome: match diagnostic {
-                Some(diagnostic) => LookupOutcome::Rejected { diagnostic },
-                None => LookupOutcome::NotFound {
-                    attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
-                    suggestions: Vec::new(),
-                },
-            },
-        }
-    }
-
     fn lookup_origin(module: Option<&str>, live_modules: &[String]) -> LookupOrigin {
         if module.is_some_and(|module| live_modules.iter().any(|live| live == module)) {
             LookupOrigin::LiveBinding

@@ -1,7 +1,10 @@
 //! Structured lookup mechanics shared by the self-hosted lookup tool.
 use crate::lookup_tool;
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
-use tidepool_runtime::session::{InspectionQuery, InspectionResult};
+use tidepool_runtime::session::{
+    ExactNameQuery, IdentifierNamespace, InspectionQuery, InspectionResult, LookupAnswer,
+    LookupNameMode, NameScope,
+};
 
 #[derive(Debug)]
 pub(crate) enum LookupInspectionError {
@@ -231,19 +234,36 @@ pub(crate) enum LookupModuleSearch {
     #[haskell(module = "Tidepool.Effects.Core", name = "LookupModulesAttempted")]
     Attempted,
 }
-fn attempted_scopes(queries: &[InspectionQuery]) -> Vec<LookupSearchScope> {
+fn attempted_scopes(results: &[InspectionResult]) -> Vec<LookupSearchScope> {
     let mut scopes = Vec::new();
-    for query in queries {
-        let scope = match query {
-            InspectionQuery::Browse { module, .. } => LookupSearchScope::Module(module.clone()),
-            _ => LookupSearchScope::Current,
+    for result in results {
+        let observed = match result {
+            InspectionResult::Lookup { scopes, .. }
+            | InspectionResult::ModuleNotFound { scopes, .. } => scopes
+                .iter()
+                .map(|scope| match scope {
+                    NameScope::Current => LookupSearchScope::Current,
+                    NameScope::PublicModule(module) => LookupSearchScope::Module(module.clone()),
+                })
+                .collect::<Vec<_>>(),
+            InspectionResult::Browse { module, .. } => vec![if module.is_empty() {
+                LookupSearchScope::Current
+            } else {
+                LookupSearchScope::Module(module.clone())
+            }],
+            InspectionResult::TypeMatches { .. } => vec![LookupSearchScope::Current],
+            InspectionResult::Rejected { .. } => vec![],
+            _ => vec![],
         };
-        if !scopes.contains(&scope) {
-            scopes.push(scope);
+        for scope in observed {
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
         }
     }
     scopes
 }
+
 #[derive(ToHaskell)]
 #[haskell(module = "Tidepool.Effects.Core", name = "LookupResult")]
 pub(crate) struct LookupResult {
@@ -449,47 +469,44 @@ pub(crate) fn queries(
 ) -> Vec<InspectionQuery> {
     prepared
         .iter()
-        .flat_map(|q| match &q.kind {
-            lookup_tool::PreparedLookupKind::Name(name) => {
-                match lookup_tool::qualifier_and_identifier(name) {
-                    Some((qualifier, _)) => vec![
-                        InspectionQuery::Info(name.clone()),
-                        InspectionQuery::Browse {
-                            module: lookup_tool::resolve_qualifier_module(imports, qualifier)
-                                .unwrap_or_else(|| qualifier.into()),
-                            expanded: false,
-                        },
-                    ],
-                    None => vec![InspectionQuery::Info(name.clone())],
-                }
+        .filter_map(|q| match &q.kind {
+            lookup_tool::PreparedLookupKind::Name(name)
+            | lookup_tool::PreparedLookupKind::Qualified(name) => {
+                let mode = if matches!(q.kind, lookup_tool::PreparedLookupKind::Qualified(_)) {
+                    LookupNameMode::NameOrModule
+                } else {
+                    LookupNameMode::Name
+                };
+                let qualifier = match mode {
+                    LookupNameMode::Name => {
+                        lookup_tool::qualifier_and_identifier(name).map(|(qualifier, _)| qualifier)
+                    }
+                    LookupNameMode::NameOrModule => {
+                        name.rsplit_once('.').map(|(qualifier, _)| qualifier)
+                    }
+                };
+                let qualifier_module = qualifier.map(|qualifier| {
+                    lookup_tool::resolve_qualifier_module(imports, qualifier)
+                        .unwrap_or_else(|| qualifier.into())
+                });
+                Some(InspectionQuery::LookupName {
+                    query: name.clone(),
+                    qualifier_module,
+                    mode,
+                })
             }
-            lookup_tool::PreparedLookupKind::Qualified(name) => vec![
-                InspectionQuery::Info(name.clone()),
-                InspectionQuery::Browse {
-                    module: name.clone(),
-                    expanded: false,
-                },
-            ],
             lookup_tool::PreparedLookupKind::Type(query) => {
-                vec![InspectionQuery::TypeSearch(query.clone())]
+                Some(InspectionQuery::TypeSearch(query.clone()))
             }
             lookup_tool::PreparedLookupKind::Doc(_)
-            | lookup_tool::PreparedLookupKind::Rejected(_) => vec![],
+            | lookup_tool::PreparedLookupKind::Rejected(_) => None,
         })
         .collect()
-}
-
-struct ParentExportProbe {
-    answer_index: usize,
-    name: String,
-    leaf: String,
-    result_index: usize,
 }
 
 struct LookupInspectionPlan {
     queries: Vec<InspectionQuery>,
     primary_len: usize,
-    parent_exports: Vec<ParentExportProbe>,
     reference_indices: Vec<usize>,
 }
 
@@ -503,38 +520,23 @@ impl LookupInspectionPlan {
         let mut plan = Self {
             primary_len: primary.len(),
             queries: primary,
-            parent_exports: vec![],
             reference_indices: vec![],
         };
-        let mut answer_index = 0;
-        for query in prepared {
-            if let lookup_tool::PreparedLookupKind::Qualified(name) = &query.kind {
-                if let Some((qualifier, leaf)) = name.rsplit_once('.') {
-                    let module = lookup_tool::resolve_qualifier_module(imports, qualifier)
-                        .unwrap_or_else(|| qualifier.into());
-                    let result_index = plan.include(InspectionQuery::Browse {
-                        module,
-                        expanded: false,
-                    });
-                    plan.parent_exports.push(ParentExportProbe {
-                        answer_index,
-                        name: name.clone(),
-                        leaf: leaf.to_owned(),
-                        result_index,
-                    });
-                }
-            }
-            answer_index += queries(std::slice::from_ref(query), imports).len();
-        }
         for reference in references {
-            let result_index = plan.include(if reference.module.is_empty() {
-                InspectionQuery::ScopeBrowse
-            } else {
-                InspectionQuery::Browse {
-                    module: reference.module.clone(),
-                    expanded: true,
-                }
-            });
+            let result_index = plan.include(InspectionQuery::ExactName(ExactNameQuery {
+                scope: if reference.module.is_empty() {
+                    NameScope::Current
+                } else {
+                    NameScope::PublicModule(reference.module.clone())
+                },
+                namespace: match reference.namespace {
+                    LookupNamespace::Value => IdentifierNamespace::Value,
+                    LookupNamespace::Type => IdentifierNamespace::Type,
+                    LookupNamespace::Constructor => IdentifierNamespace::Constructor,
+                    LookupNamespace::Field => IdentifierNamespace::Field,
+                },
+                name: reference.name.clone(),
+            }));
             plan.reference_indices.push(result_index);
         }
         plan
@@ -679,12 +681,10 @@ pub(crate) fn execute(
             }
         }
     };
-    // Parent exports and explicit references are known before inspection.
-    // Request their facts with the primary queries so ordinary browsing shares
-    // one PreserveSource environment; type searches keep their own transform.
+    // Exact name decisions and explicit references share one checked environment.
+    // Type searches retain their own wildcard transform.
     let plan = LookupInspectionPlan::new(&prepared, imports, &request.references);
     batch.search_receipt.disposition = LookupSearchDisposition::Captured;
-    batch.search_receipt.attempted_scopes = attempted_scopes(&plan.queries);
     let InspectionAnswers {
         results: mut inspected,
         unavailable,
@@ -713,66 +713,7 @@ pub(crate) fn execute(
         }
     };
     batch.issue = unavailable;
-    // Public exports are valid read-only lookup targets even without a source import.
-    for index in 0..plan.primary_len.saturating_sub(1) {
-        if let (
-            InspectionQuery::Info(name),
-            InspectionResult::NotFound { .. },
-            InspectionResult::Browse { entries, .. },
-        ) = (
-            &plan.queries[index],
-            &inspected[index],
-            &inspected[index + 1],
-        ) {
-            if let Some((_, leaf)) = lookup_tool::qualifier_and_identifier(name) {
-                let exact: Vec<_> = entries
-                    .iter()
-                    .filter(|entry| entry.name == leaf)
-                    .cloned()
-                    .collect();
-                if !exact.is_empty() {
-                    inspected[index] = if exact.len() > 1 {
-                        InspectionResult::Ambiguous {
-                            query: name.clone(),
-                            entries: exact,
-                        }
-                    } else {
-                        InspectionResult::Info {
-                            query: name.clone(),
-                            entries: exact,
-                        }
-                    };
-                }
-            }
-        }
-    }
-    for probe in &plan.parent_exports {
-        if matches!(
-            inspected[probe.answer_index],
-            InspectionResult::NotFound { .. }
-        ) {
-            if let InspectionResult::Browse { entries, .. } = &inspected[probe.result_index] {
-                let exact = entries
-                    .iter()
-                    .filter(|entry| entry.name == probe.leaf)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !exact.is_empty() {
-                    inspected[probe.answer_index] = if exact.len() > 1 {
-                        InspectionResult::Ambiguous {
-                            query: probe.name.clone(),
-                            entries: exact,
-                        }
-                    } else {
-                        InspectionResult::Info {
-                            query: probe.name.clone(),
-                            entries: exact,
-                        }
-                    };
-                }
-            }
-        }
-    }
+    batch.search_receipt.attempted_scopes = attempted_scopes(&inspected);
     let reference_results = plan
         .reference_indices
         .iter()
@@ -793,46 +734,21 @@ pub(crate) fn execute(
             format!("{}.{}", reference.module, reference.name)
         };
         let outcome = match reference_results.get(index).cloned() {
-            Some(InspectionResult::Browse { entries, .. }) => {
-                let exact = entries
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.name == reference.name
-                            && LookupNamespace::from_kind(&entry.kind) == reference.namespace
-                    })
-                    .collect::<Vec<_>>();
-                if exact.is_empty() {
-                    lookup_tool::LookupOutcome::NotFound {
-                        attempted: vec![lookup_tool::LookupInterpretation::Name],
-                        suggestions: vec![],
-                    }
-                } else {
-                    let prepared = vec![lookup_tool::PreparedLookup {
-                        query: query.clone(),
-                        kind: lookup_tool::PreparedLookupKind::Name(reference.name.clone()),
-                    }];
-                    let inspected = if exact.len() > 1 {
-                        InspectionResult::Ambiguous {
-                            query: query.clone(),
-                            entries: exact,
-                        }
-                    } else {
-                        InspectionResult::Info {
-                            query: query.clone(),
-                            entries: exact,
-                        }
-                    };
-                    lookup_tool::resolve(
-                        prepared,
-                        vec![inspected],
-                        live_modules,
-                        workspace_modules,
-                        usage.clone(),
-                    )
-                    .results
-                    .remove(0)
-                    .outcome
-                }
+            Some(result @ InspectionResult::Lookup { .. }) => {
+                let prepared = vec![lookup_tool::PreparedLookup {
+                    query: query.clone(),
+                    kind: lookup_tool::PreparedLookupKind::Name(reference.name.clone()),
+                }];
+                lookup_tool::resolve(
+                    prepared,
+                    vec![result],
+                    live_modules,
+                    workspace_modules,
+                    usage.clone(),
+                )
+                .results
+                .remove(0)
+                .outcome
             }
             Some(InspectionResult::Rejected { diagnostic }) => {
                 lookup_tool::LookupOutcome::Rejected { diagnostic }
@@ -923,6 +839,7 @@ pub(crate) fn execute(
                 )
         });
         let mut discovery_scopes = vec![];
+        let mut submitted_modules = 0;
         let module_search = if !misses {
             LookupModuleSearch::NotNeeded
         } else if batch.issue.is_some() {
@@ -942,9 +859,15 @@ pub(crate) fn execute(
                 named_count.min(discovery_queries.len()),
                 InspectionQuery::ScopeBrowse,
             );
-            discovery_scopes = attempted_scopes(&discovery_queries);
+            submitted_modules = discovery_queries
+                .iter()
+                .filter(|query| matches!(query, InspectionQuery::Browse { .. }))
+                .count();
             match inspect_checked(&discovery_queries, &mut inspect) {
-                Ok(results) => results,
+                Ok(results) => {
+                    discovery_scopes = attempted_scopes(&results);
+                    results
+                }
                 Err(error) => {
                     batch.issue = Some(bound_diagnostic(
                         &format!(
@@ -978,7 +901,10 @@ pub(crate) fn execute(
                 } => {
                     if let Some(first) = own.first() {
                         let refs: Vec<_> = match first {
-                            InspectionResult::Info { entries, .. } => entries
+                            InspectionResult::Lookup {
+                                answer: LookupAnswer::Info(entries),
+                                ..
+                            } => entries
                                 .iter()
                                 .filter(|e| {
                                     returned
@@ -1153,12 +1079,7 @@ pub(crate) fn execute(
         if eligible_query {
             batch.search_receipt.discovery = LookupDiscovery::Observed(LookupDiscoveryReceipt {
                 module_search,
-                submitted_modules: LookupCount::known(
-                    discovery_scopes
-                        .iter()
-                        .filter(|scope| matches!(scope, LookupSearchScope::Module(_)))
-                        .count(),
-                ),
+                submitted_modules: LookupCount::known(submitted_modules),
                 attempted_scopes: discovery_scopes,
                 eligible_modules: LookupCount::known(eligible_modules),
                 module_limit: 128,
@@ -1520,6 +1441,90 @@ mod tests {
     }
 
     #[test]
+    fn semantic_lookup_keeps_existing_qualifier_recognition() {
+        let prepared = lookup_tool::prepare(serde_json::json!({"queries": ["value", "lower.value", "Alias.value", "Project.Choice"]})).unwrap();
+        let planned = queries(&prepared, "qualified Project.Work as Alias");
+        assert!(matches!(
+            &planned[0],
+            InspectionQuery::LookupName {
+                qualifier_module: None,
+                mode: LookupNameMode::Name,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &planned[1],
+            InspectionQuery::LookupName {
+                qualifier_module: None,
+                mode: LookupNameMode::Name,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&planned[2], InspectionQuery::LookupName { qualifier_module: Some(module), mode: LookupNameMode::Name, .. } if module == "Project.Work")
+        );
+        assert!(
+            matches!(&planned[3], InspectionQuery::LookupName { qualifier_module: Some(module), mode: LookupNameMode::NameOrModule, .. } if module == "Project")
+        );
+    }
+
+    #[test]
+    fn search_receipt_uses_worker_attempts_instead_of_optional_query_paths() {
+        for scopes in [
+            vec![NameScope::Current],
+            vec![
+                NameScope::Current,
+                NameScope::PublicModule("Project".into()),
+            ],
+            vec![],
+        ] {
+            let issued = scopes.clone();
+            let batch = execute(
+                request(&["Alias.value"], false),
+                "view".into(),
+                "qualified Project as Alias",
+                &[],
+                &[],
+                crate::UsagePointerTable::default(),
+                |queries| {
+                    assert!(
+                        matches!(&queries[..], [InspectionQuery::LookupName { qualifier_module: Some(module), .. }] if module == "Project")
+                    );
+                    Ok(vec![InspectionResult::Lookup {
+                        query: "Alias.value".into(),
+                        scopes: issued.clone(),
+                        answer: LookupAnswer::Missing {
+                            export_names: vec![],
+                        },
+                    }])
+                },
+            );
+            assert_eq!(batch.search_receipt.attempted_scopes.len(), scopes.len());
+            for (observed, scope) in batch.search_receipt.attempted_scopes.iter().zip(&scopes) {
+                assert!(matches!(
+                    (observed, scope),
+                    (LookupSearchScope::Current, NameScope::Current)
+                        | (LookupSearchScope::Module(_), NameScope::PublicModule(_))
+                ));
+            }
+        }
+        let batch = execute(
+            request(&["Alias.value"], false),
+            "view".into(),
+            "qualified Project as Alias",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| Err(source_error("query rejected before name search")),
+        );
+        assert!(batch.search_receipt.attempted_scopes.is_empty());
+        assert!(matches!(
+            batch.results[0].outcome,
+            LookupOutcome::Rejected(_)
+        ));
+    }
+
+    #[test]
     fn qualified_module_parent_names_and_references_share_inspection() {
         let calls = Cell::new(0);
         let mut req = request(&["Project.Work", "Project.Choice", "doc workbench"], false);
@@ -1540,26 +1545,42 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|query| match query {
-                        InspectionQuery::Info(name) => InspectionResult::NotFound {
-                            query: name.clone(),
-                        },
-                        InspectionQuery::Browse { module, expanded } => {
-                            let entries = match module.as_str() {
-                                "Project" => {
+                        InspectionQuery::LookupName {
+                            query,
+                            mode: LookupNameMode::NameOrModule,
+                            ..
+                        } => {
+                            let answer = match query.as_str() {
+                                "Project.Work" => LookupAnswer::Module {
+                                    module: query.clone(),
+                                    entries: vec![entry("runWork")],
+                                },
+                                "Project.Choice" => {
                                     let mut ty = entry("Choice");
                                     ty.kind = "type".into();
                                     let mut constructor = entry("Choice");
                                     constructor.kind = "constructor".into();
-                                    vec![ty, constructor]
+                                    LookupAnswer::Ambiguous(vec![ty, constructor])
                                 }
-                                "Project.Work" => vec![entry("runWork")],
-                                "Project.Choice" => vec![entry("moduleChoice")],
-                                _ => panic!("unexpected module {module}"),
+                                _ => panic!("unexpected semantic query {query}"),
                             };
-                            InspectionResult::Browse {
-                                module: module.clone(),
-                                expanded: *expanded,
-                                entries,
+                            InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: query.clone(),
+                                answer,
+                            }
+                        }
+                        InspectionQuery::ExactName(ExactNameQuery {
+                            namespace: IdentifierNamespace::Constructor,
+                            name,
+                            ..
+                        }) => {
+                            let mut constructor = entry(name);
+                            constructor.kind = "constructor".into();
+                            InspectionResult::Lookup {
+                                scopes: vec![NameScope::PublicModule("Project".into())],
+                                query: name.clone(),
+                                answer: LookupAnswer::Info(vec![constructor]),
                             }
                         }
                         _ => panic!("unexpected query {query:?}"),
@@ -1614,27 +1635,25 @@ mod tests {
                 queries
                     .iter()
                     .map(|query| match query {
-                        InspectionQuery::Info(name) if name == "x" => Ok(InspectionResult::Info {
-                            query: name.clone(),
-                            entries: vec![entry("x")],
-                        }),
-                        InspectionQuery::Info(name) => Ok(InspectionResult::NotFound {
-                            query: name.clone(),
-                        }),
-                        InspectionQuery::Browse { module, expanded }
-                            if module == "Project.Work" =>
-                        {
-                            Ok(InspectionResult::Browse {
-                                module: module.clone(),
-                                expanded: *expanded,
-                                entries: vec![entry("runWork")],
+                        InspectionQuery::LookupName { query, .. } if query == "x" => {
+                            Ok(InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: query.clone(),
+                                answer: LookupAnswer::Info(vec![entry("x")]),
                             })
                         }
-                        InspectionQuery::Browse { module, .. } if module == "Broken.Reference" => {
-                            Err(source_error("reference source rejected"))
+                        InspectionQuery::LookupName { query, .. } if query == "Project.Work" => {
+                            Ok(InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: query.clone(),
+                                answer: LookupAnswer::Module {
+                                    module: query.clone(),
+                                    entries: vec![entry("runWork")],
+                                },
+                            })
                         }
-                        InspectionQuery::Browse { .. } => {
-                            Err(source_error("parent source rejected"))
+                        InspectionQuery::ExactName(_) => {
+                            Err(source_error("reference source rejected"))
                         }
                         _ => panic!("unexpected query {query:?}"),
                     })
@@ -1735,9 +1754,10 @@ mod tests {
             |queries| {
                 calls.set(calls.get() + 1);
                 assert_eq!(queries.len(), 1);
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "x".into(),
-                    entries: vec![entry("x")],
+                    answer: LookupAnswer::Info(vec![entry("x")]),
                 }])
             },
         );
@@ -1790,14 +1810,23 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|query| match query {
-                        InspectionQuery::Info(name) => InspectionResult::Info {
-                            query: name.clone(),
-                            entries: vec![make_entry("Tidepool.Command", available)],
-                        },
-                        InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
-                            module: module.clone(),
-                            expanded: *expanded,
-                            entries: vec![make_entry("Tidepool.Command", available)],
+                        InspectionQuery::LookupName { query: name, .. } => {
+                            InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: name.clone(),
+                                answer: LookupAnswer::Info(vec![make_entry(
+                                    "Tidepool.Command",
+                                    available,
+                                )]),
+                            }
+                        }
+                        InspectionQuery::ExactName(query) => InspectionResult::Lookup {
+                            scopes: vec![query.scope.clone()],
+                            query: query.name.clone(),
+                            answer: LookupAnswer::Info(vec![make_entry(
+                                "Tidepool.Command",
+                                available,
+                            )]),
                         },
                         _ => panic!("unexpected query"),
                     })
@@ -1825,9 +1854,10 @@ mod tests {
             &[],
             usage.clone(),
             |_| {
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "start".into(),
-                    entries: vec![make_entry("Other.Command", available)],
+                    answer: LookupAnswer::Info(vec![make_entry("Other.Command", available)]),
                 }])
             },
         );
@@ -1846,9 +1876,10 @@ mod tests {
             &[],
             usage.clone(),
             |_| {
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "start".into(),
-                    entries: vec![make_entry("Tidepool.Command", available)],
+                    answer: LookupAnswer::Info(vec![make_entry("Tidepool.Command", available)]),
                 }])
             },
         );
@@ -1867,12 +1898,13 @@ mod tests {
             &[],
             usage.clone(),
             |_| {
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "start".into(),
-                    entries: vec![make_entry(
+                    answer: LookupAnswer::Info(vec![make_entry(
                         "Tidepool.Command",
                         InspectionAvailability::Unavailable,
-                    )],
+                    )]),
                 }])
             },
         );
@@ -1891,12 +1923,13 @@ mod tests {
             &[],
             usage.clone(),
             |_| {
-                Ok(vec![InspectionResult::Ambiguous {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "start".into(),
-                    entries: vec![
+                    answer: LookupAnswer::Ambiguous(vec![
                         make_entry("Tidepool.Command", available),
                         make_entry("Other.Command", available),
-                    ],
+                    ]),
                 }])
             },
         );
@@ -1952,13 +1985,22 @@ mod tests {
                     Ok(queries
                         .iter()
                         .map(|query| {
-                            let InspectionQuery::Browse { module, expanded } = query else {
+                            let InspectionQuery::ExactName(query) = query else {
                                 panic!()
                             };
-                            InspectionResult::Browse {
-                                module: module.clone(),
-                                expanded: *expanded,
-                                entries: entries.clone(),
+                            assert_eq!(query.name, "start");
+                            InspectionResult::Lookup {
+                                query: query.name.clone(),
+                                scopes: vec![query.scope.clone()],
+                                answer: if expected_missing {
+                                    LookupAnswer::Missing {
+                                        export_names: vec![],
+                                    }
+                                } else if expected_ambiguous {
+                                    LookupAnswer::Ambiguous(entries.clone())
+                                } else {
+                                    LookupAnswer::Info(entries.clone())
+                                },
                             }
                         })
                         .collect())
@@ -1995,7 +2037,7 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|q| {
-                        let InspectionQuery::Info(name) = q else {
+                        let InspectionQuery::LookupName { query: name, .. } = q else {
                             panic!()
                         };
                         let mut e = entry(name);
@@ -2011,9 +2053,10 @@ mod tests {
                                 namespace: IdentifierNamespace::Type,
                             },
                         ];
-                        InspectionResult::Info {
+                        InspectionResult::Lookup {
+                            scopes: vec![NameScope::Current],
                             query: name.clone(),
-                            entries: vec![e],
+                            answer: LookupAnswer::Info(vec![e]),
                         }
                     })
                     .collect())
@@ -2043,7 +2086,7 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|query| {
-                        let InspectionQuery::Info(name) = query else {
+                        let InspectionQuery::LookupName { query: name, .. } = query else {
                             panic!()
                         };
                         let mut entry = entry(name);
@@ -2052,9 +2095,10 @@ mod tests {
                             name: "Shared".into(),
                             namespace: IdentifierNamespace::Type,
                         }];
-                        InspectionResult::Info {
+                        InspectionResult::Lookup {
+                            scopes: vec![NameScope::Current],
                             query: name.clone(),
-                            entries: vec![entry],
+                            answer: LookupAnswer::Info(vec![entry]),
                         }
                     })
                     .collect())
@@ -2074,9 +2118,10 @@ mod tests {
                 &[],
                 crate::UsagePointerTable::default(),
                 |_| {
-                    Ok(vec![InspectionResult::Info {
+                    Ok(vec![InspectionResult::Lookup {
+                        scopes: vec![NameScope::Current],
                         query: "value".into(),
-                        entries: (0..count).map(|_| entry("value")).collect(),
+                        answer: LookupAnswer::Info((0..count).map(|_| entry("value")).collect()),
                     }])
                 },
             );
@@ -2111,9 +2156,10 @@ mod tests {
                             namespace: IdentifierNamespace::Type,
                         })
                         .collect();
-                    Ok(vec![InspectionResult::Info {
+                    Ok(vec![InspectionResult::Lookup {
+                        scopes: vec![NameScope::Current],
                         query: "root".into(),
-                        entries: vec![hit],
+                        answer: LookupAnswer::Info(vec![hit]),
                     }])
                 },
             );
@@ -2150,9 +2196,15 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|query| match query {
-                        InspectionQuery::Info(name) => InspectionResult::NotFound {
-                            query: name.clone(),
-                        },
+                        InspectionQuery::LookupName { query: name, .. } => {
+                            InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: name.clone(),
+                                answer: LookupAnswer::Missing {
+                                    export_names: vec![],
+                                },
+                            }
+                        }
                         InspectionQuery::ScopeBrowse => InspectionResult::Browse {
                             module: "".into(),
                             expanded: true,
@@ -2181,6 +2233,47 @@ mod tests {
         assert_eq!(receipt.broader_module_count, LookupCount::Unknown);
         assert_eq!(receipt.enumerated_occurrences, LookupCount::Known(0));
     }
+    #[test]
+    fn discovery_submission_is_distinct_from_scopes_rejected_before_search() {
+        let captured = execute(
+            request(&["Missing.value"], true),
+            "view".into(),
+            "",
+            &[],
+            &[],
+            crate::UsagePointerTable::default(),
+            |queries| {
+                if matches!(&queries[..], [InspectionQuery::LookupName { .. }]) {
+                    Ok(vec![InspectionResult::Lookup {
+                        query: "Missing.value".into(),
+                        scopes: vec![
+                            NameScope::Current,
+                            NameScope::PublicModule("Missing".into()),
+                        ],
+                        answer: LookupAnswer::Missing {
+                            export_names: vec![],
+                        },
+                    }])
+                } else {
+                    assert_eq!(
+                        queries
+                            .iter()
+                            .filter(|query| matches!(query, InspectionQuery::Browse { .. }))
+                            .count(),
+                        1
+                    );
+                    Err(source_error("discovery source rejected before name search"))
+                }
+            },
+        );
+        let LookupDiscovery::Observed(receipt) = captured.search_receipt.discovery else {
+            panic!()
+        };
+        assert_eq!(receipt.submitted_modules, LookupCount::Known(1));
+        assert!(receipt.attempted_scopes.is_empty());
+        assert!(receipt.issue.is_some());
+    }
+
     #[test]
     fn search_receipt_does_not_turn_not_run_into_zero_coverage() {
         let mut stale = request(&["value"], true);
@@ -2229,9 +2322,10 @@ mod tests {
             &[],
             crate::UsagePointerTable::default(),
             |_| {
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "value".into(),
-                    entries: vec![entry("value")],
+                    answer: LookupAnswer::Info(vec![entry("value")]),
                 }])
             },
         );
@@ -2251,9 +2345,10 @@ mod tests {
             &[],
             crate::UsagePointerTable::default(),
             |_| {
-                Ok(vec![InspectionResult::Info {
+                Ok(vec![InspectionResult::Lookup {
+                    scopes: vec![NameScope::Current],
                     query: "value".into(),
-                    entries: vec![entry("value")],
+                    answer: LookupAnswer::Info(vec![entry("value")]),
                 }])
             },
         );
@@ -2295,12 +2390,12 @@ mod tests {
             req.candidate_limit = cap as i64;
             let captured = execute(req, "view".into(), "", &[], &[], crate::UsagePointerTable::default(), |queries| {
                 Ok(queries.iter().map(|query| {
-                    let InspectionQuery::Info(name) = query else { panic!() };
+                    let InspectionQuery::LookupName { query: name, .. } = query else { panic!() };
                     let mut hit = entry(name);
                     hit.references = (0..width).chain(std::iter::once(0)).map(|n| IdentifierRef {
                         module: "Project.Other".into(), name: format!("Ref{n}"), namespace: IdentifierNamespace::Type,
                     }).collect();
-                    InspectionResult::Info { query: name.clone(), entries: vec![hit] }
+                    InspectionResult::Lookup { scopes: vec![NameScope::Current], query: name.clone(), answer: LookupAnswer::Info(vec![hit]) }
                 }).collect())
             });
             let LookupDiscovery::Observed(receipt) = &captured.search_receipt.discovery else { panic!() };
@@ -2327,9 +2422,15 @@ mod tests {
                 Ok(queries
                     .iter()
                     .map(|q| match q {
-                        InspectionQuery::Info(name) => InspectionResult::NotFound {
-                            query: name.clone(),
-                        },
+                        InspectionQuery::LookupName { query: name, .. } => {
+                            InspectionResult::Lookup {
+                                scopes: vec![NameScope::Current],
+                                query: name.clone(),
+                                answer: LookupAnswer::Missing {
+                                    export_names: vec![],
+                                },
+                            }
+                        }
                         InspectionQuery::ScopeBrowse => InspectionResult::Browse {
                             module: String::new(),
                             expanded: true,
@@ -2388,15 +2489,20 @@ mod tests {
                     return Err(source_error("combined source rejected"));
                 }
                 match &queries[0] {
-                    InspectionQuery::Info(name) if name == "validName" => {
-                        Ok(vec![InspectionResult::Info {
+                    InspectionQuery::LookupName { query: name, .. } if name == "validName" => {
+                        Ok(vec![InspectionResult::Lookup {
+                            scopes: vec![NameScope::Current],
                             query: name.clone(),
-                            entries: vec![entry("validName")],
+                            answer: LookupAnswer::Info(vec![entry("validName")]),
                         }])
                     }
-                    InspectionQuery::Info(name) if name == "unknownName" => {
-                        Ok(vec![InspectionResult::NotFound {
+                    InspectionQuery::LookupName { query: name, .. } if name == "unknownName" => {
+                        Ok(vec![InspectionResult::Lookup {
+                            scopes: vec![NameScope::Current],
                             query: name.clone(),
+                            answer: LookupAnswer::Missing {
+                                export_names: vec![],
+                            },
                         }])
                     }
                     InspectionQuery::TypeSearch(_) => Err(source_error(
@@ -2504,21 +2610,24 @@ mod reference_tests {
                 Ok(queries
                     .iter()
                     .map(|q| {
-                        assert!(matches!(q, InspectionQuery::Browse { expanded: true, .. }));
-                        InspectionResult::Browse {
-                            module: "Project.Test".into(),
-                            expanded: true,
-                            entries: ["type", "constructor"]
-                                .into_iter()
-                                .map(|kind| InfoEntry {
-                                    name: "Same".into(),
-                                    module: Some("Project.Test".into()),
-                                    kind: kind.into(),
-                                    display: kind.into(),
-                                    availability: InspectionAvailability::Available,
-                                    references: vec![],
-                                })
-                                .collect(),
+                        assert!(matches!(
+                            q,
+                            InspectionQuery::ExactName(ExactNameQuery {
+                                namespace: IdentifierNamespace::Constructor,
+                                ..
+                            })
+                        ));
+                        InspectionResult::Lookup {
+                            scopes: vec![NameScope::PublicModule("Project.Test".into())],
+                            query: "Same".into(),
+                            answer: LookupAnswer::Info(vec![InfoEntry {
+                                name: "Same".into(),
+                                module: Some("Project.Test".into()),
+                                kind: "constructor".into(),
+                                display: "constructor".into(),
+                                availability: InspectionAvailability::Available,
+                                references: vec![],
+                            }]),
                         }
                     })
                     .collect())

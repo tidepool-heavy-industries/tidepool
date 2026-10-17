@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v19";
-const MAGIC: &[u8; 8] = b"TPREQ019";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v20";
+const MAGIC: &[u8; 8] = b"TPREQ020";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -64,6 +64,7 @@ pub enum InspectionNamespace {
     Value,
     Type,
     Constructor,
+    Field,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +74,28 @@ pub struct StructuredInspection {
     pub name: String,
     pub generation: u64,
     pub fingerprint: String,
+}
+
+/// Interpretation selected by the authored lookup parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupNameMode {
+    Name,
+    NameOrModule,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupNameInspection {
+    pub query: String,
+    pub qualifier_module: Option<String>,
+    pub mode: LookupNameMode,
+}
+
+/// Exact observation of an exported or reader-scoped name; carries no authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactNameInspection {
+    pub scope: InspectionScope,
+    pub namespace: InspectionNamespace,
+    pub name: String,
 }
 
 /// Mirrors `tidepool_repr::execution_schema::SymbolIdentity` field-for-field.
@@ -128,6 +151,8 @@ enum Field {
     HarnessProfile,
     InspectType(String),
     InspectInfo(String),
+    InspectLookupName(LookupNameInspection),
+    InspectExactName(ExactNameInspection),
     InspectBrowse(String),
     InspectBrowseExpanded(String),
     InspectScopeBrowse,
@@ -259,6 +284,8 @@ impl ExtractRequest {
                             | Field::InspectInfo(_)
                             | Field::InspectBrowse(_)
                             | Field::InspectBrowseExpanded(_)
+                            | Field::InspectLookupName(_)
+                            | Field::InspectExactName(_)
                             | Field::InspectScopeBrowse
                             | Field::InspectSearch(_)
                             | Field::InspectStructuredInfo(_)
@@ -492,6 +519,16 @@ impl ExtractRequest {
                 48 => Field::DeclarationJoinOut(PathBuf::from(decoder.os_string()?)),
                 26 => Field::InspectType(decoder.string()?),
                 27 => Field::InspectInfo(decoder.string()?),
+                54 => Field::InspectLookupName(LookupNameInspection {
+                    query: decoder.string()?,
+                    qualifier_module: decoder.maybe_string()?,
+                    mode: match decoder.byte()? {
+                        0 => LookupNameMode::Name,
+                        1 => LookupNameMode::NameOrModule,
+                        tag => return Err(ProtocolError::UnknownLookupNameMode(tag)),
+                    },
+                }),
+                55 => Field::InspectExactName(decoder.exact_name_inspection()?),
                 28 => Field::InspectOut(decoder.os_string()?),
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
@@ -792,6 +829,14 @@ impl ExtractRequest {
         self.fields.push(Field::InspectType(expression.to_owned()));
     }
 
+    pub(crate) fn inspect_lookup_name(&mut self, query: LookupNameInspection) {
+        self.fields.push(Field::InspectLookupName(query));
+    }
+
+    pub(crate) fn inspect_exact_name(&mut self, query: ExactNameInspection) {
+        self.fields.push(Field::InspectExactName(query));
+    }
+
     pub(crate) fn inspect_info(&mut self, name: &str) {
         self.fields.push(Field::InspectInfo(name.to_owned()));
     }
@@ -892,6 +937,22 @@ impl ExtractRequest {
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
                 Field::InspectType(value) => flag(&mut flags, "--inspect-type", OsStr::new(value)),
                 Field::InspectInfo(value) => flag(&mut flags, "--inspect-info", OsStr::new(value)),
+                Field::InspectLookupName(query) => flag(
+                    &mut flags,
+                    "--inspect-lookup-name",
+                    OsStr::new(&format!(
+                        "query={};qualifier={:?};mode={:?}",
+                        query.query, query.qualifier_module, query.mode
+                    )),
+                ),
+                Field::InspectExactName(query) => flag(
+                    &mut flags,
+                    "--inspect-exact-name",
+                    OsStr::new(&format!(
+                        "scope={:?};namespace={:?};name={}",
+                        query.scope, query.namespace, query.name
+                    )),
+                ),
                 Field::InspectBrowse(value) => {
                     flag(&mut flags, "--inspect-browse", OsStr::new(value))
                 }
@@ -1037,6 +1098,27 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    fn exact_name_inspection(&mut self) -> Result<ExactNameInspection, ProtocolError> {
+        let scope = match self.byte()? {
+            0 => InspectionScope::Current,
+            1 => InspectionScope::PublicModule(self.string()?),
+            tag => return Err(ProtocolError::UnknownInspectionScope(tag)),
+        };
+        let namespace = match self.byte()? {
+            0 => InspectionNamespace::Any,
+            1 => InspectionNamespace::Value,
+            2 => InspectionNamespace::Type,
+            3 => InspectionNamespace::Constructor,
+            4 => InspectionNamespace::Field,
+            tag => return Err(ProtocolError::UnknownInspectionNamespace(tag)),
+        };
+        Ok(ExactNameInspection {
+            scope,
+            namespace,
+            name: self.string()?,
+        })
+    }
+
     fn structured_inspection(&mut self) -> Result<StructuredInspection, ProtocolError> {
         let scope = match self.byte()? {
             0 => InspectionScope::Current,
@@ -1048,6 +1130,7 @@ impl<'a> Decoder<'a> {
             1 => InspectionNamespace::Value,
             2 => InspectionNamespace::Type,
             3 => InspectionNamespace::Constructor,
+            4 => InspectionNamespace::Field,
             tag => return Err(ProtocolError::UnknownInspectionNamespace(tag)),
         };
         Ok(StructuredInspection {
@@ -1083,6 +1166,7 @@ pub enum ProtocolError {
     RetiredFieldTag(u8),
     UnknownFieldTag(u8),
     UnknownInspectionScope(u8),
+    UnknownLookupNameMode(u8),
     UnknownInspectionNamespace(u8),
     UnknownOptionalTextTag(u8),
 }
@@ -1108,6 +1192,9 @@ impl std::fmt::Display for ProtocolError {
             Self::NonHexData => f.write_str("worker request payload contains non-hexadecimal data"),
             Self::RetiredFieldTag(tag) => write!(f, "retired field tag {tag}"),
             Self::UnknownFieldTag(tag) => write!(f, "unknown field tag {tag}"),
+            Self::UnknownLookupNameMode(tag) => {
+                write!(f, "unknown lookup interpretation tag {tag}")
+            }
             Self::UnknownInspectionScope(tag) => {
                 write!(f, "unknown structured inspection scope tag {tag}")
             }
@@ -1189,6 +1276,25 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::HarnessProfile => out.push(24),
         Field::InspectType(value) => tagged_frame(out, 26, OsStr::new(value)),
         Field::InspectInfo(value) => tagged_frame(out, 27, OsStr::new(value)),
+        Field::InspectLookupName(query) => {
+            out.push(54);
+            push_frame(out, OsStr::new(&query.query));
+            match &query.qualifier_module {
+                None => out.push(0),
+                Some(module) => {
+                    out.push(1);
+                    push_frame(out, OsStr::new(module));
+                }
+            }
+            out.push(match query.mode {
+                LookupNameMode::Name => 0,
+                LookupNameMode::NameOrModule => 1,
+            });
+        }
+        Field::InspectExactName(query) => {
+            out.push(55);
+            encode_exact_name(out, query);
+        }
         Field::InspectOut(value) => tagged_frame(out, 28, value),
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
@@ -1225,22 +1331,36 @@ fn encode_symbol_identity(out: &mut Vec<u8>, identity: &SymbolIdentity) {
     }
 }
 
-fn encode_structured(out: &mut Vec<u8>, tag: u8, query: &StructuredInspection) {
-    out.push(tag);
-    match &query.scope {
+fn encode_exact_name(out: &mut Vec<u8>, query: &ExactNameInspection) {
+    encode_name_selection(out, &query.scope, query.namespace, &query.name);
+}
+
+fn encode_name_selection(
+    out: &mut Vec<u8>,
+    scope: &InspectionScope,
+    namespace: InspectionNamespace,
+    name: &str,
+) {
+    match scope {
         InspectionScope::Current => out.push(0),
         InspectionScope::PublicModule(module) => {
             out.push(1);
             push_frame(out, OsStr::new(module));
         }
     }
-    out.push(match query.namespace {
+    out.push(match namespace {
         InspectionNamespace::Any => 0,
         InspectionNamespace::Value => 1,
         InspectionNamespace::Type => 2,
         InspectionNamespace::Constructor => 3,
+        InspectionNamespace::Field => 4,
     });
-    push_frame(out, OsStr::new(&query.name));
+    push_frame(out, OsStr::new(name));
+}
+
+fn encode_structured(out: &mut Vec<u8>, tag: u8, query: &StructuredInspection) {
+    out.push(tag);
+    encode_name_selection(out, &query.scope, query.namespace, &query.name);
     out.extend_from_slice(&query.generation.to_le_bytes());
     push_frame(out, OsStr::new(&query.fingerprint));
 }
