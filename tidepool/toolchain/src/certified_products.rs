@@ -2414,6 +2414,15 @@ fn duplicate_source_binder(
 pub(crate) struct CertifiedSourceSelection {
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    private_native: Arc<BTreeMap<crate::artifact_inventory::ArtifactId, RequestNativeAvailability>>,
+}
+
+/// Request input availability survives independently of output type visibility
+/// and compiler namespace roles. Newly produced bodies never enter this channel.
+#[derive(Clone, Debug)]
+struct RequestNativeAvailability {
+    owner: CachedHomeOwner,
+    issued: Arc<crate::declaration_context::NativeTransportAvailability>,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -2606,6 +2615,38 @@ impl CertifiedSourceSelection {
                     CertificationError::Mismatch("request original availability"),
                 )?);
         }
+        let originals = inputs
+            .projection
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        for (original, issued) in inputs.issued_native_availability() {
+            if originals.contains(&original) {
+                continue;
+            }
+            let Some(crate::artifact_inventory::ArtifactEntry {
+                payload: crate::artifact_inventory::ArtifactPayload::Original(product),
+                ..
+            }) = metadata.retained.artifacts.get(&original).map(Arc::as_ref)
+            else {
+                return Err(CertificationError::Mismatch(
+                    "request private native payload",
+                ));
+            };
+            operation.reserve::<(
+                crate::artifact_inventory::ArtifactId,
+                RequestNativeAvailability,
+            )>(1)?;
+            operation.charge(product.owner().unit.len() + product.owner().module.len())?;
+            Arc::make_mut(&mut selected.private_native).insert(
+                original,
+                RequestNativeAvailability {
+                    owner: product.owner().clone(),
+                    issued: Arc::clone(issued),
+                },
+            );
+        }
         Ok(selected)
     }
 
@@ -2617,6 +2658,7 @@ impl CertifiedSourceSelection {
                 ReceiptNativeAvailability::Issued(issued) => Some(issued),
                 ReceiptNativeAvailability::NewProduct { .. } => None,
             })
+            .chain(self.private_native.values().map(|native| &native.issued))
     }
 
     pub(crate) fn complete_native_products(
@@ -2659,6 +2701,13 @@ impl CertifiedSourceSelection {
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         self.native_selections()
             .flat_map(|native| native.availability.requirements())
+            .chain(self.private_native.values().flat_map(|native| {
+                native
+                    .issued
+                    .offers()
+                    .iter()
+                    .filter_map(|offer| offer.proof())
+            }))
     }
 
     fn visible_modules(
@@ -2990,6 +3039,9 @@ impl CertifiedSourceSelection {
             .find(|selected| &selected.owner == owner)
         {
             return selected.availability.permits(ordinal);
+        }
+        if let Some(private) = self.private_native.get(&original) {
+            return &private.owner == owner && private.issued.permits(ordinal);
         }
         self.native_original_requirements().any(|proof| {
             proof

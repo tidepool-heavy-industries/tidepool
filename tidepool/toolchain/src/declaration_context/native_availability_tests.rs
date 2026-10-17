@@ -2115,6 +2115,48 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         &validation.inventory,
     )
     .unwrap();
+    let issued = inputs.native_availability(entry.descriptor.id).unwrap();
+    let cloned = selection.clone();
+    assert!(cloned
+        .issued_native_availability()
+        .any(|available| Arc::ptr_eq(available, &issued)));
+    assert!(cloned
+        .native_original_requirements()
+        .any(|proof| proof.original == entry.descriptor.id));
+    assert!(cloned.selected_original_owners().next().is_none());
+    assert!(cloned
+        .complete_native_products(&inputs.artifacts)
+        .unwrap()
+        .is_empty());
+    assert!(!cloned.permits_native_group(ArtifactId([255; 32]), native.owner(), 9001));
+    assert!(!cloned.permits_native_group(
+        entry.descriptor.id,
+        product("WrongPrivateOwner", 128).owner(),
+        9001
+    ));
+    let private = OriginalCompilerInputs::from_selection(&cloned, &inputs.artifacts).unwrap();
+    assert!(private
+        .projection
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    let next = ExactCompileContext::new(context.clone())
+        .prepare_compilation_with_private_input(
+            &root.path().join("next"),
+            PRODUCER,
+            None,
+            Some(private),
+        )
+        .unwrap();
+    assert_eq!(wire_mode(&next, "PrivateFullInterface"), full_mode());
+    assert!(wire_groups(&next)["PrivateFullInterface"].is_empty());
+    let next_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        next.compiler_inputs(),
+        &next.compiler_inputs().metadata,
+        &validation.inventory,
+    )
+    .unwrap();
+    assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
     let mut fixed = inputs
         .artifacts
         .inventory()
@@ -5453,6 +5495,52 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 .roles()
                 .iter()
                 .all(|role| !interface_only || role.original().is_none()));
+            if interface_only {
+                let inputs = request.compiler_inputs();
+                let validation = PackageInterfaceValidation::default();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                        inputs,
+                        &inputs.metadata,
+                        &validation.inventory,
+                    )
+                    .unwrap();
+                let ArtifactPayload::Original(native) = &entry.payload else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    selection.permits_native_group(entry.descriptor.id, native.owner(), 9001),
+                    index == 0
+                );
+                assert!(selection.selected_original_owners().next().is_none());
+                if index == 0 {
+                    let mut fixed = inputs
+                        .artifacts
+                        .inventory()
+                        .bind_segment(&inputs.artifacts, vec![], &selection)
+                        .unwrap();
+                    let imports = [source_import(native, 9001)];
+                    let demanded = inputs
+                        .artifacts
+                        .inventory()
+                        .admit_bound_target(
+                            &mut fixed,
+                            &inputs.artifacts,
+                            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                                &imports,
+                            ),
+                            vec![],
+                            &selection,
+                        )
+                        .expect("restored private Full survives certification and actual demand");
+                    assert!(demanded
+                        .artifacts
+                        .selected_native_groups()
+                        .iter()
+                        .any(|group| group.artifact == entry.descriptor.id
+                            && group.original_ordinal == 9001));
+                }
+            }
             assert_eq!(
                 request.context().artifact_view().selected_native_groups(),
                 context.artifact_view().selected_native_groups()

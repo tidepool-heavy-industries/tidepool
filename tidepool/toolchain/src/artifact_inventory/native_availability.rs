@@ -549,6 +549,12 @@ impl IssuedNativeOffer {
         projection: &CompilerInputProjection,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
+        if self
+            .qualified_private_availability(projection, namespace)
+            .is_some()
+        {
+            return Ok(Some(self.clone()));
+        }
         // Matching roles propagate the existing opaque issuance directly.
         // Only a different or absent role needs dependency relevance.
         let contributes = || -> Result<bool, CompileError> {

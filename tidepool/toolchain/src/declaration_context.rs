@@ -1418,6 +1418,15 @@ impl RequestCompilerInputs {
         self.native_transport.availability.get(&original).cloned()
     }
 
+    pub(crate) fn issued_native_availability(
+        &self,
+    ) -> impl Iterator<Item = (ArtifactId, &Arc<NativeTransportAvailability>)> {
+        self.native_transport
+            .availability
+            .iter()
+            .map(|(original, availability)| (*original, availability))
+    }
+
     pub(crate) fn available_original_sources(
         &self,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
