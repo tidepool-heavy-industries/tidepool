@@ -465,6 +465,8 @@ impl ToolsetPreparation {
             crate::call_timing::PreparationInterval::new(preparation, PreparationPhase::Producer);
         let span = tracing::info_span!(target: "exomonad_actor::toolset_preparation",
             "toolset_preparation", %preparation, source_revision = %recipe.source_revision, entry = %recipe.entry, restore = true);
+        #[cfg(test)]
+        let observer_owner = Arc::clone(self);
         let pending = span.in_scope(|| {
             tidepool_runtime::spawn_blocking_in_span(move || {
                 let mut service_timing = crate::call_timing::PreparationInterval::new(
@@ -472,6 +474,10 @@ impl ToolsetPreparation {
                     PreparationPhase::Service,
                 );
                 let outcome = compiler_work.run_for_workload(workload, |_settlement| {
+                    #[cfg(test)]
+                    if let Some(observer) = observer_owner.completed_load_observer.lock().take() {
+                        observer();
+                    }
                     restore_installer(recipe, resolved, source, acquisition, registry)
                 });
                 service_timing.complete(outcome.is_ok());

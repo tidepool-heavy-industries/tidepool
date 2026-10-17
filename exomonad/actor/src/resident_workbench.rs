@@ -18901,6 +18901,98 @@ pub(crate) mod request_tests {
             "generated source-publication histories reuse immutable original custody without compiler work");
     }
 
+    async fn assert_restore_preparation_stops_with_its_run(
+        config: ActorWorkbenchSource,
+        captured: crate::CheckpointSourceLayer,
+        installation: PersistedActorInstallation,
+    ) {
+        let (run, task) = crate::LocalActorDirectory::start().await.unwrap();
+        let source = config.bind_preparation(run.preparation_client());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (cancelled, cancellation_seen) = tokio::sync::oneshot::channel();
+        let (release, finish) = std::sync::mpsc::channel();
+        let barrier = parking_lot::Mutex::new(Some((entered, cancelled, finish)));
+        source
+            .toolset_preparation
+            .observe_completed_load(Arc::new(move || {
+                let (entered, cancelled, finish) = barrier.lock().take().unwrap();
+                entered.send(()).unwrap();
+                while tidepool_extract_cmd::compiler_host_checkpoint().is_ok() {
+                    std::thread::yield_now();
+                }
+                cancelled.send(()).unwrap();
+                finish
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }));
+        let pending = tokio::spawn({
+            let source = source.clone();
+            let captured = captured.clone();
+            let installation = installation.clone();
+            async move {
+                let mut observer = crate::CompilerPreparationOwner::new();
+                observer
+                    .scope(source.restore_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        captured,
+                        &installation,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), started)
+            .await
+            .unwrap()
+            .unwrap();
+        run.seal().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            run.settle_run_preparations(std::time::Duration::from_millis(10))
+                .await,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert!(matches!(
+            source
+                .restore_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    captured,
+                    &installation,
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await,
+            Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        release.send(()).unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            outcome.action.is_err(),
+            "retired run cannot issue a restored result"
+        );
+        assert!(outcome.cleanup.observation().is_confirmed());
+        assert_eq!(
+            run.settle_run_preparations(std::time::Duration::from_secs(2))
+                .await,
+            crate::CleanupComponentOutcome::Confirmed
+        );
+        assert_eq!(
+            run.shutdown_run_resources().await,
+            crate::CleanupComponentOutcome::Confirmed
+        );
+        run.finish_run().await.unwrap();
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
@@ -19088,6 +19180,21 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap()
         });
+        if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
+            let lease = InstalledToolLease::new(
+                context.actor,
+                generation_source.clone(),
+                Some(first.clone()),
+            );
+            let installation =
+                PersistedActorInstallation::capture(&lease, &source_reference).unwrap();
+            assert_restore_preparation_stops_with_its_run(
+                source.config().clone(),
+                generation_source.clone(),
+                installation,
+            )
+            .await;
+        }
         let initial_originals = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {

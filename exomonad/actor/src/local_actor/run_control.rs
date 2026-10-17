@@ -2555,7 +2555,7 @@ impl RunControlClient {
     ) -> crate::CleanupComponentOutcome {
         let deadline = tokio::time::Instant::now() + timeout;
         let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
-        let preparations = tokio::time::timeout_at(deadline, self.settle_preparations(timeout))
+        let preparations = tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
             .await
             .unwrap_or_else(|_| {
                 crate::CleanupComponentOutcome::Unconfirmed(
@@ -2572,7 +2572,7 @@ impl RunControlClient {
     }
     /// Observe the currently admitted root-preparation records, without closing
     /// run admission or claiming that future preparations have been excluded.
-    pub(crate) async fn settle_preparations(
+    pub(crate) async fn settle_root_preparations(
         &self,
         timeout: Duration,
     ) -> crate::CleanupComponentOutcome {

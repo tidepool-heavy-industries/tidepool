@@ -86,7 +86,7 @@ async fn confirmed_finish_releases_boot_lease_after_journal_and_lifecycle_exit()
         assert_excluded(&competing);
         control.seal().await.unwrap();
         assert!(matches!(
-            control.settle_preparations(Duration::from_secs(1)).await,
+            control.settle_root_preparations(Duration::from_secs(1)).await,
             crate::CleanupComponentOutcome::Confirmed
         ));
         assert!(matches!(
@@ -141,7 +141,7 @@ async fn uncertain_preparation_refuses_finish_and_keeps_actual_boot_lease() {
     drop(reservation);
     control.seal().await.unwrap();
     assert!(matches!(
-        control.settle_preparations(Duration::from_secs(1)).await,
+        control.settle_root_preparations(Duration::from_secs(1)).await,
         crate::CleanupComponentOutcome::Unconfirmed(_)
     ));
     assert!(matches!(
