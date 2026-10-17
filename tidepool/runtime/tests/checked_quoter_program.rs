@@ -336,9 +336,19 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
                     && binder.occurrence == "value"
             })
     }));
-    let producer = compiled
-        .producer_identity
-        .expect("ordinary compiler endpoint binds the original issuer");
+    let descriptors = compiled.artifact_view.descriptors();
+    let matching = descriptors
+        .iter()
+        .filter(|descriptor| {
+            descriptor.kind == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                && descriptor.owner.unit == original.owner().unit
+                && descriptor.owner.module == original.owner().module
+                && descriptor.interface_sha256 == original.owner().skinny_iface_sha256
+                && descriptor.product_sha256 == Some(original.owner().product_sha256)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let producer = matching[0].producer_sha256;
     let durable = tempfile::tempdir().unwrap();
     let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
         durable.path(),
