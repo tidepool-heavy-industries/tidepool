@@ -1,5 +1,5 @@
 module Tidepool.Introspection
-  ( InspectionResult (..),
+  ( InspectionResult (..), LookupAnswer(..),
     InfoEntry (..),
     TypeMatch (..),
     TypeMatchQuality (..),
@@ -17,15 +17,15 @@ module Tidepool.Introspection
     StructuredQueryError (..),
     normalizeLookupWildcards,
     searchTypeMatches,
-    runInspection, runInspectionGhc,
+    InspectionWork, withInspectionWork, runInspection, runInspectionGhc,
     encodeInspectionResults,
   )
 where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Monad (foldM, forM)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad (foldM, forM, forM_)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
 import Data.Generics (everything, everywhereM, mkM, mkQ)
@@ -60,7 +60,7 @@ import GHC.Types.Id (idName)
 import GHC.Types.Name (nameIsLocalOrFrom, nameModule_maybe, nameOccName)
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Name (isDataConName, isTyConName, isVarName)
-import GHC.Types.Name.Occurrence (isSymOcc, mkTyVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (fieldOcc_maybe, isSymOcc, mkTyVarOcc, occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
@@ -78,10 +78,12 @@ import GHC.Utils.Outputable
   )
 import Tidepool.ExtractRequest
   ( InspectionProvenance (..), InspectionRequest (..), StructuredInspection (..),
+    ExactNameInspection(..), LookupNameInspection(..), LookupNameMode(..),
     StructuredNameNamespace (..), StructuredNameScope (..)
   )
 import GHC.Driver.Monad (reflectGhc, Session(..))
-import Data.IORef (newIORef)
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
+import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.Session (parseSessionModule)
 
@@ -97,16 +99,27 @@ data InfoEntry = InfoEntry
 
 data InspectionResult
   = InspectionType String String Availability
+  | InspectionLookup String [StructuredNameScope] LookupAnswer
   | InspectionInfo String [InfoEntry]
   | InspectionAmbiguous String [InfoEntry]
   | InspectionNotFound String
-  | InspectionModuleNotFound String
+  | InspectionModuleNotFound String [StructuredNameScope]
   | InspectionRejected String
   | InspectionBrowse String Bool [InfoEntry]
   | InspectionTypeMatches String [TypeMatch]
   | InspectionStructuredInfo IdentifierInfo
   | InspectionStructuredType TypeInfo
   | InspectionStructuredError StructuredQueryError
+  deriving (Eq, Show)
+
+-- A single compiler-issued decision, never a pair whose interpretation
+-- depends on a caller reproducing source-shape rules.
+data LookupAnswer
+  = LookupInfo [InfoEntry]
+  | LookupAmbiguous [InfoEntry]
+  | LookupModule String [InfoEntry]
+  | LookupMissing [String]
+  | LookupModuleNotFound String
   deriving (Eq, Show)
 
 data TypeMatchQuality
@@ -220,8 +233,40 @@ data AvailabilityContext = AvailabilityContext
   { availabilityHscEnv :: HscEnv,
     availabilityTcGblEnv :: TcGblEnv,
     availabilityEffTyCon :: Maybe TyCon,
-    availabilityRow :: Maybe Type
+    availabilityRow :: Maybe Type,
+    availabilityWork :: Maybe (IORef InspectionWorkCounts)
   }
+
+newtype InspectionWork = InspectionWork (Maybe (IORef InspectionWorkCounts))
+
+data InspectionWorkCounts = InspectionWorkCounts
+  { workResolvedNames :: !Integer, workRichEntries :: !Integer, workAvailabilityChecks :: !Integer, workConstraintSolves :: !Integer }
+
+-- One physical request may inspect several separately checked environments.
+-- Its observation lifetime therefore belongs outside the per-environment call.
+withInspectionWork :: (InspectionWork -> IO a) -> IO a
+withInspectionWork action = do
+  enabled <- readTimingEnabled
+  work <- if enabled then Just <$> newIORef (InspectionWorkCounts 0 0 0 0) else pure Nothing
+  result <- action (InspectionWork work)
+  forM_ work $ \counts -> do
+    observed <- readIORef counts
+    emitCount True "inspection.resolved_names" (workResolvedNames observed)
+    emitCount True "inspection.rich_entries" (workRichEntries observed)
+    emitCount True "inspection.availability_checks" (workAvailabilityChecks observed)
+    emitCount True "inspection.constraint_solves" (workConstraintSolves observed)
+  pure result
+
+observeWork :: MonadIO m => AvailabilityContext -> (InspectionWorkCounts -> InspectionWorkCounts) -> m ()
+observeWork context update = liftIO $ case availabilityWork context of
+  Nothing -> pure ()
+  Just counts -> modifyIORef' counts update
+
+resolveNameWork :: MonadIO m => AvailabilityContext -> m ()
+resolveNameWork context = observeWork context (\counts -> counts { workResolvedNames = workResolvedNames counts + 1 })
+
+richEntryWork :: MonadIO m => AvailabilityContext -> m ()
+richEntryWork context = observeWork context (\counts -> counts { workRichEntries = workRichEntries counts + 1 })
 
 -- | The sentinel is generated with a qualified Data.Proxy signature. Its
 -- argument is inspected as a GHC Type; rendered text never determines a row.
@@ -298,6 +343,7 @@ rootEffRow maybeEffTyCon ty = do
 
 availabilityFor :: AvailabilityContext -> Maybe Type -> [Type] -> IO Availability
 availabilityFor context output predicates = do
+  observeWork context (\counts -> counts { workAvailabilityChecks = workAvailabilityChecks counts + 1 })
   let outputRow = output >>= rootEffRow (availabilityEffTyCon context)
       rowDecision = case (availabilityRow context, outputRow) of
         (_, Nothing) -> Available
@@ -339,6 +385,7 @@ solvePredicates context predicates =
   if null predicates
     then pure True
     else do
+      observeWork context (\counts -> counts { workConstraintSolves = workConstraintSolves counts + 1 })
       (_, result) <- initTcWithGbl (availabilityHscEnv context) (availabilityTcGblEnv context)
         (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<inspection availability>") 1 1)
           (mkRealSrcLoc (mkFastString "<inspection availability>") 1 1))
@@ -395,7 +442,7 @@ searchTypeMatches hscEnv tcGblEnv rdrEnv queryBinder query = do
   case (row, effTyCon) of
     (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
     _ -> pure ()
-  searchTypeMatchesWithContext (AvailabilityContext hscEnv tcGblEnv effTyCon row) rdrEnv queryBinder query
+  searchTypeMatchesWithContext (AvailabilityContext hscEnv tcGblEnv effTyCon row Nothing) rdrEnv queryBinder query
 
 searchTypeMatchesWithContext :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatchesWithContext context rdrEnv queryBinder query = do
@@ -499,13 +546,13 @@ runInspection ::
   Map.Map String Id ->
   [InspectionRequest] ->
   IO [InspectionResult]
-runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
+runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = withInspectionWork $ \work -> do
   session <- Session <$> newIORef hscEnv
-  reflectGhc (runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests) session
+  reflectGhc (runInspectionGhc work hscEnv tcGblEnv rdrEnv inspectionProbes requests) session
 
-runInspectionGhc :: HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
+runInspectionGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
   -> [InspectionRequest] -> Ghc [InspectionResult]
-runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
+runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
   borrowed <- liftIO (forkExactContext hscEnv)
   setSession borrowed
   effTyCon <- lookupEffTyCon
@@ -515,7 +562,7 @@ runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
   case (row,effTyCon) of
     (Just _,Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
     _ -> pure ()
-  let context = AvailabilityContext borrowed tcGblEnv effTyCon row
+  let context = AvailabilityContext borrowed tcGblEnv effTyCon row work
   reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
   where
     inspect context (typeIndex, results) request = case request of
@@ -527,12 +574,18 @@ runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
                 let display = renderType (idType identifier)
                 pure (typeIndex + 1, InspectionType expression display availability : results)
               Nothing -> missing binder
+      InspectLookupNameOf query -> do
+        result <- inspectLookupName context rdrEnv query
+        pure (typeIndex, result : results)
+      InspectExactNameOf query -> do
+        result <- inspectExactName context rdrEnv query
+        pure (typeIndex, result : results)
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
         pure (typeIndex, result : results)
       InspectScope -> do
         let names = nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
-              not ("__tidepool_" `isPrefixOf` occNameString (nameOccName name))]
+              visibleInspectionName name]
         entries <- browseEntries context True names
         pure (typeIndex, InspectionBrowse "" True
           (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
@@ -564,33 +617,36 @@ data StructuredMode = StructuredInfo | StructuredType
 
 inspectStructured :: GhcMonad m => GlobalRdrEnv -> StructuredMode -> StructuredInspection -> m InspectionResult
 inspectStructured rdrEnv mode query = do
-  candidates <- namesInScope rdrEnv query
+  NameSelection _ candidates <- namesInScope rdrEnv (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
   case candidates of
     Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
     Right (names, visibleNames) -> do
       things <- fmap catMaybes $ forM names $ \name -> do
         found <- lookupName name
-        pure ((name,) <$> found)
+        pure ((name,) <$> (found >>= \thing -> if exactThingMatches (structuredNamespace query) thing then Just thing else Nothing))
       case things of
         [] -> pure (InspectionStructuredError (StructuredUnknown query))
         [resolved] -> pure (inspectResolved mode query visibleNames resolved)
         many -> pure (InspectionStructuredError
           (StructuredAmbiguous query (map (uncurry identifierRef) many)))
 
-namesInScope :: GhcMonad m => GlobalRdrEnv -> StructuredInspection -> m (Either String ([Name], [Name]))
-namesInScope rdrEnv query = case structuredScope query of
-  StructuredCurrentScope -> pure (Right (filter matches currentNames, currentNames))
+-- Selection and attempted-scope evidence are issued by the same search.
+data NameSelection = NameSelection [StructuredNameScope] (Either String ([Name], [Name]))
+
+namesInScope :: GhcMonad m => GlobalRdrEnv -> ExactNameInspection -> m NameSelection
+namesInScope rdrEnv query = case exactNameScope query of
+  StructuredCurrentScope -> pure (NameSelection [StructuredCurrentScope] (Right (filter matches currentNames, currentNames)))
   StructuredPublicModule requested
-    | isJust (parseSessionModule requested) -> pure (Left requested)
-    | otherwise -> handleSourceError (\_ -> pure (Left requested)) $ do
+    | isJust (parseSessionModule requested) -> pure (NameSelection [] (Left requested))
+    | otherwise -> handleSourceError (\_ -> pure (NameSelection [StructuredPublicModule requested] (Left requested))) $ do
         mdl <- findModule (mkModuleName requested) Nothing
         resolvedInfo <- getModuleInfo mdl
         let visible = nub (maybe [] modInfoExports resolvedInfo)
-        pure (Right (filter matches visible, visible))
+        pure (NameSelection [StructuredPublicModule requested] (Right (filter matches visible, visible)))
   where
     currentNames = nub (map greName (globalRdrEnvElts rdrEnv))
-    matches name = matchesNameQuery (structuredName query) name
-      && namespaceMatches (structuredNamespace query) name
+    matches name = matchesNameQuery (exactNameQuery query) name
+      && namespaceMatches (exactNameNamespace query) name
 
 matchesNameQuery :: String -> Name -> Bool
 matchesNameQuery query name =
@@ -609,6 +665,7 @@ namespaceMatches namespace name = case namespace of
   StructuredValueName -> isVarName name
   StructuredTypeName -> isTyConName name
   StructuredConstructorName -> isDataConName name
+  StructuredFieldName -> isJust (fieldOcc_maybe (nameOccName name)) || isVarName name
 
 inspectResolved :: StructuredMode -> StructuredInspection -> [Name] -> (Name, TyThing) -> InspectionResult
 inspectResolved mode query visibleNames (name, thing) = case mode of
@@ -786,9 +843,98 @@ inspectName context rdrEnv query = do
     [_] -> InspectionInfo query preferred
     _ -> InspectionAmbiguous query preferred
 
+exactThingMatches :: StructuredNameNamespace -> TyThing -> Bool
+exactThingMatches StructuredFieldName (AnId identifier) = isRecordSelector identifier
+exactThingMatches StructuredFieldName _ = False
+exactThingMatches _ _ = True
+
+referenceThingMatches :: StructuredNameNamespace -> TyThing -> Bool
+referenceThingMatches StructuredValueName (AnId identifier) = not (isRecordSelector identifier)
+referenceThingMatches namespace thing = exactThingMatches namespace thing
+
+hasExportedParent :: [Name] -> TyThing -> Bool
+hasExportedParent exported thing = case tyThingParent_maybe thing of
+  Just parent -> getName parent `elem` exported
+  Nothing -> False
+
+visibleInspectionName :: Name -> Bool
+visibleInspectionName = not . isPrefixOf "__tidepool_" . occNameString . nameOccName
+
+data NameProjection = CompactExportFallback | ExactReference deriving (Eq)
+
+selectExactName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> NameProjection -> ExactNameInspection -> m (NameSelection, [InfoEntry])
+selectExactName context rdrEnv projection query = do
+  let compact = projection == CompactExportFallback
+  observed <- namesInScope rdrEnv query
+  let selected@(NameSelection _ result) = case (projection, exactNameScope query, observed) of
+        (ExactReference, StructuredCurrentScope, NameSelection scopes (Right (names, visible))) ->
+          NameSelection scopes (Right (filter visibleInspectionName names, filter visibleInspectionName visible))
+        _ -> observed
+  entries <- case result of
+    Left _ -> pure []
+    Right (names, visible) -> entriesForMatching context
+      (if compact then ContextualEntry else ExpandedEntry)
+      (\thing -> (if compact then exactThingMatches else referenceThingMatches) (exactNameNamespace query) thing
+        && (not compact || not (hasExportedParent visible thing))) visible names
+  pure (selected, entries)
+
+exactLookupAnswer :: NameSelection -> [InfoEntry] -> LookupAnswer
+exactLookupAnswer (NameSelection _ (Left missing)) _ = LookupModuleNotFound missing
+exactLookupAnswer _ entries = case entries of
+  [] -> LookupMissing []
+  [_] -> LookupInfo entries
+  _ -> LookupAmbiguous entries
+
+inspectExactName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> ExactNameInspection -> m InspectionResult
+inspectExactName context rdrEnv query = do
+  (selected@(NameSelection scopes _), entries) <- selectExactName context rdrEnv ExactReference query
+  pure (InspectionLookup (exactNameQuery query) scopes (exactLookupAnswer selected entries))
+
+inspectLookupName :: GhcMonad m => AvailabilityContext -> GlobalRdrEnv -> LookupNameInspection -> m InspectionResult
+inspectLookupName context rdrEnv request = do
+  primary <- inspectName context rdrEnv (lookupNameQuery request)
+  case primary of
+    InspectionInfo _ entries -> pure (issued [StructuredCurrentScope] (LookupInfo entries))
+    InspectionAmbiguous _ entries -> pure (issued [StructuredCurrentScope] (LookupAmbiguous entries))
+    InspectionNotFound _ -> do
+      (selected@(NameSelection scopes _), entries) <- case lookupQualifierModule request of
+        Nothing -> pure (NameSelection [] (Right ([], [])), [])
+        Just owner -> selectExactName context rdrEnv CompactExportFallback
+          (ExactNameInspection (StructuredPublicModule owner) StructuredAnyName leaf)
+      let attempted = nub (StructuredCurrentScope : scopes)
+      case exactLookupAnswer selected entries of
+        answer@(LookupInfo _) -> pure (issued attempted answer)
+        answer@(LookupAmbiguous _) -> pure (issued attempted answer)
+        LookupMissing _ -> missing attempted selected
+        LookupModuleNotFound _ -> missing attempted selected
+        LookupModule _ _ -> liftIO (ioError (userError "exact lookup returned a module observation"))
+    _ -> liftIO (ioError (userError "reader lookup returned an invalid name observation"))
+  where
+    issued = InspectionLookup (lookupNameQuery request)
+    leaf = reverse (takeWhile (/= '.') (reverse (lookupNameQuery request)))
+    missing attempted (NameSelection _ selected) = case lookupNameMode request of
+      LookupNameOrModule -> do
+        result <- inspectModule context (lookupNameQuery request) False
+        case result of
+          InspectionBrowse owner _ entries -> pure (issued (nub (attempted ++ [StructuredPublicModule owner])) (LookupModule owner entries))
+          InspectionModuleNotFound owner scopes -> pure (issued (nub (attempted ++ scopes)) (LookupModuleNotFound owner))
+          _ -> liftIO (ioError (userError "module lookup returned an invalid module observation"))
+      LookupNameOnly -> do
+        names <- case selected of
+          Left _ -> pure []
+          Right (_, visible) -> fmap catMaybes $ forM visible $ \name -> do
+            resolveNameWork context
+            found <- lookupName name
+            pure $ case found of
+              Just thing | not (hasExportedParent visible thing) -> Just (occNameString (nameOccName name))
+              _ -> Nothing
+        pure (issued attempted (LookupMissing (sortOn id names)))
+
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> m InspectionResult
-inspectModule context requested expanded = handleSourceError
-  (\_ -> pure (InspectionModuleNotFound requested))
+inspectModule context requested expanded
+  | isJust (parseSessionModule requested) = pure (InspectionModuleNotFound requested [])
+  | otherwise = handleSourceError
+  (\_ -> pure (InspectionModuleNotFound requested [StructuredPublicModule requested]))
   $ do
     let checked = availabilityTcGblEnv context
         localOwner = tcg_mod checked
@@ -829,13 +975,24 @@ visibleDisplay visible thing =
           ss_forall = ShowForAllWhen
         }
 
+data EntryPresentation = ContextualEntry | ExpandedEntry
+
+entryDisplay :: EntryPresentation -> [Name] -> TyThing -> String
+entryDisplay ExpandedEntry _ thing | isJust (tyThingParent_maybe thing) =
+  renderWithContext defaultSDocContext (pprTyThing showEverything thing)
+entryDisplay _ visible thing = visibleDisplay visible thing
+
 -- | The query module is typechecked, never loaded, so 'getInfo' cannot see its
 -- own top-level binders: the preamble's declarations, including a pending
 -- request's @respond@/@sessionReply@/@sessionInput@. Those resolve through the
 -- typechecked module's own type environment instead, and report no defining
 -- module, because the generated query module is not one a cell can import.
 entriesFor :: (GhcMonad m) => AvailabilityContext -> [Name] -> [Name] -> m [InfoEntry]
-entriesFor context visible names = fmap concat $ forM names $ \name -> do
+entriesFor context = entriesForMatching context ContextualEntry (const True)
+
+entriesForMatching :: (GhcMonad m) => AvailabilityContext -> EntryPresentation -> (TyThing -> Bool) -> [Name] -> [Name] -> m [InfoEntry]
+entriesForMatching context presentation matches visible names = fmap concat $ forM names $ \name -> do
+  resolveNameWork context
   found <- getInfo False name
   let tcg = availabilityTcGblEnv context
       local
@@ -846,12 +1003,14 @@ entriesFor context visible names = fmap concat $ forM names $ \name -> do
         Nothing -> (\thing -> (thing, True)) <$> local
   case resolved of
     Nothing -> pure []
+    Just (thing, _) | not (matches thing) -> pure []
     Just (thing, isLocal) ->
-      let display = visibleDisplay visible thing
+      let display = entryDisplay presentation visible thing
           definingModule
             | isLocal = Nothing
             | otherwise = moduleNameString . moduleName <$> nameModule_maybe name
        in do
+          richEntryWork context
           availability <- thingAvailability context thing
           pure
             [ InfoEntry
@@ -867,6 +1026,7 @@ entriesFor context visible names = fmap concat $ forM names $ \name -> do
 browseEntries :: (GhcMonad m) => AvailabilityContext -> Bool -> [Name] -> m [InfoEntry]
 browseEntries context expanded names = do
   found <- fmap catMaybes $ forM names $ \name -> do
+    resolveNameWork context
     let checked = availabilityTcGblEnv context
         local
           | nameIsLocalOrFrom (tcg_mod checked) name = lookupTypeEnv (tcg_type_env checked) name
@@ -881,11 +1041,9 @@ browseEntries context expanded names = do
           then found
           else filter (not . hasExportedParent exportedNames . snd) found
   forM visible $ \(name, thing) -> do
+    richEntryWork context
     availability <- thingAvailability context thing
-    let display =
-          if expanded && isJust (tyThingParent_maybe thing)
-            then renderWithContext defaultSDocContext (pprTyThing showEverything thing)
-            else visibleDisplay exportedNames thing
+    let display = entryDisplay (if expanded then ExpandedEntry else ContextualEntry) exportedNames thing
         definingModule = moduleNameString . moduleName <$> nameModule_maybe name
     pure InfoEntry
           { infoName = occNameString (nameOccName name),
@@ -895,10 +1053,6 @@ browseEntries context expanded names = do
             infoAvailability = availability,
             infoReferences = declarationReferences exportedNames thing
           }
-  where
-    hasExportedParent exported thing = case tyThingParent_maybe thing of
-      Just parent -> getName parent `elem` exported
-      Nothing -> False
 
 thingAvailability :: (GhcMonad m) => AvailabilityContext -> TyThing -> m Availability
 thingAvailability context thing = case thing of
@@ -947,12 +1101,12 @@ renderUser = renderWithContext defaultSDocContext {sdocSuppressUniques = True} .
 tidyInspectionType :: Type -> Type
 tidyInspectionType = tidyOpenType emptyTidyEnv
 
--- | Private V6 batch receipt. The outer list is @['TPINSP006', results]@.
+-- | Private V7 batch receipt. The outer list is @['TPINSP007', results]@.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString
 encodeInspectionResults results =
   toStrictByteString $
     encodeListLen 2
-      <> encodeString "TPINSP006"
+      <> encodeString "TPINSP007"
       <> encodeListLen (fromIntegral (length results))
       <> foldMap encodeResult results
   where
@@ -960,14 +1114,15 @@ encodeInspectionResults results =
       InspectionType expression display availability ->
         encodeListLen 4 <> encodeString "Type" <> text expression <> text display
           <> encodeAvailability availability
+      InspectionLookup query scopes answer -> encodeListLen 4 <> encodeString "Lookup" <> text query <> encodeList encodeScope scopes <> encodeLookupAnswer answer
       InspectionInfo query entries ->
         encodeListLen 3 <> encodeString "Info" <> text query <> encodeEntries entries
       InspectionAmbiguous query entries ->
         encodeListLen 3 <> encodeString "Ambiguous" <> text query <> encodeEntries entries
       InspectionNotFound query ->
         encodeListLen 2 <> encodeString "NotFound" <> text query
-      InspectionModuleNotFound moduleName ->
-        encodeListLen 2 <> encodeString "ModuleNotFound" <> text moduleName
+      InspectionModuleNotFound moduleName scopes ->
+        encodeListLen 3 <> encodeString "ModuleNotFound" <> text moduleName <> encodeList encodeScope scopes
       InspectionRejected diagnostic ->
         encodeListLen 2 <> encodeString "Rejected" <> text diagnostic
       InspectionBrowse moduleName expanded entries ->
@@ -987,6 +1142,12 @@ encodeInspectionResults results =
         encodeListLen 2 <> encodeString "StructuredTypeOk" <> encodeTypeInfo details
       InspectionStructuredError failure ->
         encodeListLen 2 <> encodeString "StructuredError" <> encodeStructuredError failure
+    encodeLookupAnswer answer = case answer of
+      LookupInfo entries -> encodeListLen 2 <> text "Info" <> encodeEntries entries
+      LookupAmbiguous entries -> encodeListLen 2 <> text "Ambiguous" <> encodeEntries entries
+      LookupModule owner entries -> encodeListLen 3 <> text "Module" <> text owner <> encodeEntries entries
+      LookupMissing names -> encodeListLen 2 <> text "Missing" <> encodeTexts names
+      LookupModuleNotFound owner -> encodeListLen 2 <> text "ModuleNotFound" <> text owner
     encodeEntries entries =
       encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries
     encodeEntry entry =
@@ -1077,7 +1238,8 @@ encodeStructuredQuery query = encodeListLen 3 <> encodeScope (structuredScope qu
     StructuredAnyName -> "Any"
     StructuredValueName -> "Value"
     StructuredTypeName -> "Type"
-    StructuredConstructorName -> "Constructor")
+    StructuredConstructorName -> "Constructor"
+    StructuredFieldName -> "Field")
   <> encodeText (structuredName query)
 
 encodeScope :: StructuredNameScope -> Encoding

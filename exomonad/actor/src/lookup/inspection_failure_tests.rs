@@ -88,8 +88,19 @@ fn request(names: usize, references: usize, discover: bool) -> LookupRequest {
 
 fn answer(query: &InspectionQuery) -> InspectionResult {
     match query {
-        InspectionQuery::Info(name) => InspectionResult::NotFound {
-            query: name.clone(),
+        InspectionQuery::LookupName { query, .. } => InspectionResult::Lookup {
+            scopes: vec![NameScope::Current],
+            query: query.clone(),
+            answer: LookupAnswer::Missing {
+                export_names: vec![],
+            },
+        },
+        InspectionQuery::ExactName(query) => InspectionResult::Lookup {
+            scopes: vec![query.scope.clone()],
+            query: query.name.clone(),
+            answer: LookupAnswer::Missing {
+                export_names: vec![],
+            },
         },
         InspectionQuery::Browse { module, expanded } => InspectionResult::Browse {
             module: module.clone(),
@@ -175,12 +186,17 @@ fn run_history(
         {
             prop_assert_eq!(queries.len(), 1);
             let expected = if index < names {
-                InspectionQuery::Info(format!("q{index}"))
-            } else {
-                InspectionQuery::Browse {
-                    module: format!("Project.Ref{}", index - names),
-                    expanded: true,
+                InspectionQuery::LookupName {
+                    query: format!("q{index}"),
+                    qualifier_module: None,
+                    mode: LookupNameMode::Name,
                 }
+            } else {
+                InspectionQuery::ExactName(ExactNameQuery {
+                    scope: NameScope::PublicModule(format!("Project.Ref{}", index - names)),
+                    namespace: IdentifierNamespace::Value,
+                    name: "name".into(),
+                })
             };
             prop_assert_eq!(&queries[0], &expected);
         }
