@@ -2844,6 +2844,25 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     Right _ -> fail "constructor identity accepted a name outside its exact parent owner"
   unless (Set.fromList (map dcmId withdrawnRows) `Set.isSubsetOf` Set.fromList (map dcmId coldRows)) $
     fail "withdrawing an original introduced unrelated constructor metadata"
+  capture <- (== Just "1") <$> lookupEnv "TIDEPOOL_TEST_ORIGINAL_CAPTURE"
+  when capture $ do
+    let emit term = putStrLn ("original-comparison-cbor " ++ concatMap
+          (\byte -> let value = showHex byte "" in replicate (2 - length value) '0' ++ value)
+          (BS.unpack (toStrictByteString (encodeTerm term))))
+        ownerTerm owner = [TString (unitString (moduleUnit owner)),
+          TString (moduleNameString (moduleName owner))]
+        outcomeTerm (owner,outcome) = TList (ownerTerm owner ++ [case outcome of
+          Left failure -> TList [TString "refused", TString (show failure)]
+          Right groups -> TList (TString "available" :
+            map (TInteger . toInteger . projectedOriginalOrdinal) groups)])
+    forM_ (map snd cold) $ \raw ->
+      forM_ (Map.toAscList (rawOriginalGroupEncodings raw)) $ \(ordinal,encoding) ->
+        emit (TList (TString "group" : ownerTerm (rawOriginalProductOwner raw) ++
+          [TInteger (toInteger ordinal), TBytes (projectedGroupEncodingBytes encoding)]))
+    forM_ [("normal", coldProducts), ("withdrawn", settled cold (Set.singleton requestOwner))] $
+      \(label,products) -> emit (TList [TString "settlement", TString label,
+        TList (map outcomeTerm (preparedModuleProductOutcomes products)),
+        TString (show (preparedModuleProductOmissions products))])
 
 originalPackageProjection :: IO ()
 originalPackageProjection = withScratch $ \work -> do
