@@ -2361,8 +2361,8 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             .collect::<Vec<_>>();
         let projection =
             CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
-        let namespace = inventory
-            .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+        let namespace = base
+            .with_compiler_projection(&projection)
             .unwrap()
             .retain_custody(&views[0])
             .unwrap()
