@@ -220,58 +220,157 @@ fn validate_group_work(rows: &[serde_json::Value]) {
     }
 }
 
-fn daemon_work(rows: &[Value], requests: &[Value]) -> Vec<Value> {
-    let mut result = Vec::new();
-    for row in rows {
-        let mut fields = serde_json::Map::new();
-        for source in row["spans"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(&row["span"]))
-            .chain(std::iter::once(&row["fields"]))
-        {
-            if let Some(object) = source.as_object() {
-                fields.extend(object.clone());
-            }
-        }
-        let fields = Value::Object(fields);
-        if !requests.iter().any(|request| {
-            [
-                "daemon_epoch",
-                "admission_id",
-                "request_ordinal",
-                "compile_request",
-            ]
-            .iter()
-            .all(|key| !fields[key].is_null() && fields[key] == request[key])
-        }) {
-            continue;
-        }
-        if let Some(line) = fields["line"].as_str() {
-            if let Some(payload) = line.strip_prefix("tidepool-group-work ") {
-                let work: Value = serde_json::from_str(payload).unwrap();
-                assert_eq!(work["complete"], true, "complete worker-issued census");
-                result.push(json!({"physical_request": {
-                    "daemon_epoch":fields["daemon_epoch"], "admission_id":fields["admission_id"],
-                    "request_ordinal":fields["request_ordinal"], "compile_request":fields["compile_request"]},
-                    "work":work}));
-            }
+fn flattened(row: &Value) -> Value {
+    let mut fields = serde_json::Map::new();
+    for source in row["spans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(&row["span"]))
+        .chain(std::iter::once(&row["fields"]))
+    {
+        if let Some(object) = source.as_object() {
+            fields.extend(object.clone());
         }
     }
-    // A previously prepared cell may legitimately avoid compiler submission.
-    // Enabled profile evidence is checked independently before this history.
-    assert!(
-        requests.is_empty() || !result.is_empty(),
-        "identified physical requests retain enabled worker work observations"
-    );
-    validate_group_work(
-        &result
-            .iter()
-            .map(|row| row["work"].clone())
-            .collect::<Vec<_>>(),
-    );
-    result
+    Value::Object(fields)
+}
+
+fn same_request(fields: &Value, request: &Value) -> bool {
+    [
+        "daemon_epoch",
+        "admission_id",
+        "request_ordinal",
+        "compile_request",
+    ]
+    .iter()
+    .all(|key| !fields[key].is_null() && fields[key] == request[key])
+}
+
+fn physical_key(fields: &Value) -> (String, u64, u64) {
+    let epoch = fields["daemon_epoch"].as_str().expect("daemon epoch");
+    let admission = fields["admission_id"].as_u64().expect("admission identity");
+    let ordinal = fields["request_ordinal"]
+        .as_u64()
+        .expect("physical request ordinal");
+    let logical = fields["compile_request"]
+        .as_str()
+        .expect("logical request correlation");
+    assert!(admission > 0 && ordinal > 0);
+    for (value, length) in [(epoch, 64), (logical, 16)] {
+        assert!(value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+    (epoch.to_owned(), admission, ordinal)
+}
+
+fn daemon_work(rows: &[Value], requests: &[Value]) -> Vec<Value> {
+    let fields = rows.iter().map(flattened).collect::<Vec<_>>();
+    requests
+        .iter()
+        .map(|request| {
+            let observed = fields
+                .iter()
+                .filter(|row| same_request(row, request))
+                .collect::<Vec<_>>();
+            let started = observed
+                .iter()
+                .filter(|row| row["message"] == "compiler request started")
+                .collect::<Vec<_>>();
+            let finished = observed
+                .iter()
+                .filter(|row| row["message"] == "compiler request finished")
+                .collect::<Vec<_>>();
+            let processed = observed
+                .iter()
+                .filter(|row| row["message"] == "compiler diagnostics processed")
+                .count();
+            assert_eq!(
+                (started.len(), finished.len(), processed),
+                (1, 1, 1),
+                "exact completed physical request and consumed worker diagnostics"
+            );
+            assert_eq!(finished[0]["exit_code"], 0);
+            let mode = started[0]["request_mode"]
+                .as_str()
+                .expect("typed physical request mode");
+            assert!(
+                matches!(
+                    mode,
+                    "cell_plan"
+                        | "cell_program"
+                        | "declaration_interface"
+                        | "check_source"
+                        | "classify"
+                        | "inspection"
+                        | "turn"
+                        | "source"
+                        | "activation_preview"
+                ),
+                "unknown request mode {mode}"
+            );
+            let work = observed
+                .iter()
+                .filter_map(|row| row["line"].as_str())
+                .filter_map(|line| line.strip_prefix("tidepool-group-work "))
+                .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+                .collect::<Vec<_>>();
+            validate_group_work(&work);
+            let worker_timing = observed
+                .iter()
+                .filter_map(|row| row["line"].as_str())
+                .filter(|line| line.starts_with("tidepool-timing "))
+                .count();
+            // Parsing/interface-only requests do not promise executable groups.
+            // An absent group row is reported as such, never converted to zero
+            // physical evaluation or a measured unused-body saving.
+            json!({"physical_request":request, "mode":mode,
+            "terminal":finished[0], "worker_timing_rows":worker_timing,
+            "group_observation_status":if work.is_empty() {"not_emitted"} else {"observed"},
+            "work":work, "encoding_counts_are_demands_not_evaluations":true})
+        })
+        .collect()
+}
+
+fn attribute_requests(rows: &[Value], execution: &str) -> (Vec<Value>, Vec<Value>) {
+    // Census every identified submission in this retained call slice before
+    // attributing it. A lost cell span is unknown, never a cache-hit zero.
+    let mut requests = Vec::new();
+    let mut unrelated = Vec::new();
+    let mut all_physical = BTreeSet::new();
+    for row in rows
+        .iter()
+        .filter(|row| row["fields"]["message"] == "compiler request identified")
+    {
+        let fields = &row["fields"];
+        assert!(
+            all_physical.insert(physical_key(fields)),
+            "one identification per physical request"
+        );
+        assert_eq!(
+            fields["transport"], "daemon",
+            "unclassified compiler transport"
+        );
+        if execution_matches(row, execution) {
+            requests.push(fields.clone());
+        } else {
+            let issuer = rows
+                .iter()
+                .find(|dispatch| {
+                    let issued = &dispatch["fields"];
+                    issued["message"] == "workbench cell dispatched to its actor"
+                        && issued["execution"]
+                            .as_str()
+                            .is_some_and(|other| execution_matches(row, other))
+                        && issued["turn_id"].as_str().is_some()
+                        && issued["context_call_id"]
+                            .as_str()
+                            .is_some_and(|call| !call.is_empty())
+                })
+                .expect("unbound compiler observation: attribution UNKNOWN, not zero work");
+            unrelated.push(json!({"physical_request":fields, "issuer":issuer["fields"]}));
+        }
+    }
+    (requests, unrelated)
 }
 
 fn observe_cell(
@@ -279,7 +378,7 @@ fn observe_cell(
     operation: &OperationId,
     expected: &ExpectedOriginal,
     ordinal: u32,
-) -> (Vec<Value>, BTreeMap<ImageKey, u64>) {
+) -> (Vec<Value>, BTreeMap<ImageKey, u64>, Vec<Value>) {
     let dispatch = rows
         .iter()
         .filter(|row| {
@@ -299,26 +398,7 @@ fn observe_cell(
         .iter()
         .filter(|row| execution_matches(row, execution))
         .collect::<Vec<_>>();
-    let requests = observed
-        .iter()
-        .filter(|row| {
-            row["fields"]["message"] == "compiler request identified"
-                && row["fields"]["transport"] == "daemon"
-        })
-        .map(|row| row["fields"].clone())
-        .collect::<Vec<_>>();
-    let mut physical = BTreeSet::new();
-    for request in &requests {
-        let epoch = request["daemon_epoch"].as_str().unwrap();
-        let admission = request["admission_id"].as_u64().unwrap();
-        let ordinal = request["request_ordinal"].as_u64().unwrap();
-        assert_eq!(epoch.len(), 64);
-        assert!(admission > 0 && ordinal > 0);
-        assert!(
-            physical.insert((epoch, admission, ordinal)),
-            "unique physical request"
-        );
-    }
+    let (requests, unrelated) = attribute_requests(rows, execution);
     let uses = observed
         .iter()
         .filter(|row| row["fields"]["message"] == "certified source import resolved")
@@ -367,7 +447,7 @@ fn observe_cell(
             images.insert(key, fields["image_instance"].as_u64().unwrap());
         }
     }
-    (requests, images)
+    (requests, images, unrelated)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -402,6 +482,25 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
         crate::exomonad::edit_fixture_project_config(&authored, |project| {
             project.haskell.modules.push(PROBE.into());
         });
+        // The installed spec's actual lexical closure, rather than the wider
+        // preparation inventory, is the source-publication boundary.
+        let spec_path = authored.join("AgentSpec.hs");
+        let spec = std::fs::read_to_string(&spec_path).unwrap();
+        let declaration = "module AgentSpec (agentSpec) where";
+        assert_eq!(
+            spec.matches(declaration).count(),
+            1,
+            "the shipped spec template"
+        );
+        std::fs::write(
+            &spec_path,
+            spec.replacen(
+                declaration,
+                &format!("{declaration}\n\nimport {PROBE} ()"),
+                1,
+            ),
+        )
+        .unwrap();
         commit_workspace(&config.workspace);
     })
     .await
@@ -439,7 +538,7 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
                 .await.expect("the exact ordinary cell succeeds and produces its successor request");
             round.assert_authored_value(&host.runtime.store(), &origin, &call, value);
             let rows = trace_rows(&host_trace, offset);
-            let (physical, images) = observe_cell(&rows, &operation, &expected, ordinal);
+            let (physical, images, unrelated) = observe_cell(&rows, &operation, &expected, ordinal);
             let work = daemon_work(&trace_rows(&compiler_trace, compiler_offset), &physical);
             if label == "warm-repeat" {
                 for row in &rows {
@@ -459,7 +558,7 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
             record_phase(&phases, json!({"phase":label, "operation":operation,
                 "elapsed_ns":started.elapsed().as_nanos(), "expected_value":value,
                 "expected_original":expected, "demanded_ordinal":ordinal,
-                "compiler_requests":physical, "observed_registry_keys":images.len(),
+                "compiler_requests":physical, "explicit_unrelated_issuers":unrelated, "observed_registry_keys":images.len(),
                 "worker_work":work,
                 "host_trace_start":offset, "host_trace_end":trace_offset(&host_trace),
                 "compiler_trace_start":compiler_offset, "compiler_trace_end":trace_offset(&compiler_trace),
@@ -470,4 +569,33 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
         }
         round.finish();
     })).await;
+}
+
+#[test]
+#[should_panic(expected = "attribution UNKNOWN")]
+fn compiler_request_without_its_execution_span_refuses_zero_work() {
+    let fields = json!({"message":"compiler request identified", "transport":"daemon",
+        "daemon_epoch":"a".repeat(64), "admission_id":1, "request_ordinal":1,
+        "compile_request":"b".repeat(16)});
+    // Diagnostic input only: this row cannot issue any compiler or actor work.
+    attribute_requests(&[json!({"fields":fields})], "issued-cell");
+}
+
+#[test]
+fn completed_parser_without_group_rows_keeps_observation_absent() {
+    let request = json!({"daemon_epoch":"a".repeat(64), "admission_id":1,
+        "request_ordinal":1, "compile_request":"b".repeat(16)});
+    let rows = [
+        "compiler request started",
+        "compiler request finished",
+        "compiler diagnostics processed",
+    ]
+    .map(|message| {
+        json!({"span":request, "fields":{
+            "message":message, "request_mode":"cell_plan", "exit_code":0}})
+    });
+    let work = daemon_work(&rows, &[request]);
+    assert_eq!(work[0]["mode"], "cell_plan");
+    assert_eq!(work[0]["group_observation_status"], "not_emitted");
+    assert_eq!(work[0]["work"], json!([]));
 }
