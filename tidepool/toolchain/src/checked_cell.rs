@@ -5522,6 +5522,23 @@ mod tests {
 
     #[test]
     fn authored_lifetime_query_follows_issued_unselected_value_edges() {
+        checked_value_custody_histories(|captured, context| {
+            check_authored_lifetime_graph(captured, context, false)
+        });
+    }
+
+    #[test]
+    fn authored_lifetime_query_traverses_issued_cycles_and_shared_groups() {
+        checked_value_custody_histories(|captured, context| {
+            check_authored_lifetime_graph(captured, context, true)
+        });
+    }
+
+    fn check_authored_lifetime_graph(
+        captured: &Arc<super::CheckedValueArtifact>,
+        context: &crate::declaration_context::ExactDeclarationContext,
+        cyclic: bool,
+    ) -> Result<(), String> {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -5531,176 +5548,272 @@ mod tests {
         use crate::certified_products::PendingImportOwner;
         use crate::declaration_join::ExactModuleIdentity;
 
-        checked_value_custody_histories(|captured, context| {
-            let producer = captured
-                .certified_interface()
-                .interface()
-                .toolchain_identity_sha256();
-            let value_id = captured.certified_interface().artifact_id();
-            let identity = tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "main".into(),
-                module: captured.owner().module_name(),
-                namespace: "value".into(),
-                occurrence: "captured".into(),
-                record_parent: None,
+        let producer = captured
+            .certified_interface()
+            .interface()
+            .toolchain_identity_sha256();
+        let value_id = captured.certified_interface().artifact_id();
+        let identity = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "main".into(),
+            module: captured.owner().module_name(),
+            namespace: "value".into(),
+            occurrence: "captured".into(),
+            record_parent: None,
+        };
+        let retained = || PendingImportOwner::Retained {
+            identity: identity.clone(),
+            generation: captured.owner().gen.0,
+        };
+        let authored_module =
+            tidepool_repr::SessionModule::lib(tidepool_repr::Generation(2)).module_name();
+        let raw = |module: &str, groups| {
+            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                "main",
+                module,
+                groups,
+                81,
+                &BTreeMap::new(),
+                format!("{module} interface").into_bytes(),
+                &BTreeMap::new(),
+                &[],
+            )
+        };
+        let source = |owner: tidepool_repr::execution_schema::CachedHomeOwner, ordinal| {
+            PendingImportOwner::Source {
+                binder: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    namespace: "value".into(),
+                    occurrence: format!("entry_{ordinal}"),
+                    record_parent: None,
+                },
+                owner,
+                original_ordinal: ordinal,
+            }
+        };
+        let (product, helper) = if cyclic {
+            // The owner's existing cyclic-certification fixture uses this same
+            // provisional-owner construction. Final certificates authenticate
+            // both complete products together; no inventory edge is fabricated.
+            let placeholder = raw("LifetimeHelper", vec![(7, vec![]), (29, vec![])]);
+            let authored_groups = |helper: tidepool_repr::execution_schema::CachedHomeOwner| {
+                vec![
+                    (7, vec![]),
+                    (11, vec![source(helper.clone(), 7)]),
+                    (13, vec![source(helper, 7)]),
+                ]
             };
-            let retained = || PendingImportOwner::Retained {
-                identity: identity.clone(),
-                generation: captured.owner().gen.0,
-            };
-            let authored_module =
-                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(2)).module_name();
-            let product = crate::certified_products::fixture_native_declaration_product(
-                crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
-                    "main",
+            let first = raw(
+                &authored_module,
+                authored_groups(placeholder.owner().clone()),
+            );
+            let helper = raw(
+                "LifetimeHelper",
+                vec![
+                    (7, vec![source(first.owner().clone(), 11), retained()]),
+                    (29, vec![]),
+                ],
+            );
+            let final_authored = raw(&authored_module, authored_groups(helper.owner().clone()));
+            assert_eq!(
+                first.owner(),
+                final_authored.owner(),
+                "the final owner records the same immutable authored product"
+            );
+            (
+                final_authored,
+                Some(crate::certified_products::fixture_finalized_product(
+                    helper, producer,
+                )),
+            )
+        } else {
+            (
+                raw(
                     &authored_module,
                     vec![(7, vec![]), (11, vec![retained()]), (13, vec![retained()])],
-                    81,
-                    &BTreeMap::new(),
-                    b"later authored capture".to_vec(),
-                    &BTreeMap::new(),
-                    &[],
                 ),
-                producer,
-                2,
-            );
-            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
-                .remove(0)
-                .product;
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-                .descriptor
-                .id;
-            let authored = Arc::new(ArtifactEntry::original(producer, product).unwrap());
-            let authored_id = authored.descriptor.id;
-            let accepted = BTreeSet::from([ExactModuleIdentity {
-                unit: "main".into(),
-                module: authored_module,
-            }]);
-            // A fresh issuance consumes the captured owner's selected interface rows.
-            // Historical custody does not choose any of the new issuer's dependencies.
-            let metadata = captured.compiler_artifact_view().metadata_snapshot();
-            let mut entries = captured
-                .compiler_input_projection()
-                .roles()
-                .iter()
-                .map(|role| metadata.artifacts[&role.interface()].clone())
-                .collect::<Vec<_>>();
-            assert!(entries.iter().any(|entry| entry.descriptor.id == value_id));
-            entries.push(authored.clone());
-            let inventory = ArtifactInventory::default();
-            let full = inventory
-                .admit_shared(&inventory.empty_view(), entries)
-                .unwrap();
-            let proof =
-                NativeOriginalRequirement::from_issued_group_custody(authored_id, canonical, &full)
-                    .unwrap()
-                    .expect("the owner issued all authored groups");
-            let full_offer = IssuedNativeOffer::issue(authored_id, &full, Some(proof)).unwrap();
-            assert!(full_offer.is_full());
-            let empty_offer = IssuedNativeOffer::issue(authored_id, &full, None).unwrap();
-            let authored_role = CompilerInputProjection::from_issued_entries(&[authored]).unwrap();
-            let partial_offer = full_offer
-                .within_projection(&authored_role, context.artifact_view())
+                None,
+            )
+        };
+        let product =
+            crate::certified_products::fixture_native_declaration_product(product, producer, 2);
+        let mut products = vec![product];
+        products.extend(helper);
+        let recovered = crate::certified_products::tests::recovered_witness_fixtures(&products);
+        let product = recovered
+            .iter()
+            .find(|row| row.product.owner().module == authored_module)
+            .unwrap()
+            .product
+            .clone();
+        let helper = recovered
+            .iter()
+            .find(|row| row.product.owner().module == "LifetimeHelper")
+            .map(|row| Arc::new(ArtifactEntry::original(producer, row.product.clone()).unwrap()));
+        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            .descriptor
+            .id;
+        let authored = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+        let authored_id = authored.descriptor.id;
+        let accepted = BTreeSet::from([ExactModuleIdentity {
+            unit: "main".into(),
+            module: authored_module,
+        }]);
+        // A fresh issuance consumes the captured owner's selected interface rows.
+        // Historical custody does not choose any of the new issuer's dependencies.
+        let metadata = captured.compiler_artifact_view().metadata_snapshot();
+        let mut entries = captured
+            .compiler_input_projection()
+            .roles()
+            .iter()
+            .map(|role| metadata.artifacts[&role.interface()].clone())
+            .collect::<Vec<_>>();
+        assert!(entries.iter().any(|entry| entry.descriptor.id == value_id));
+        entries.push(authored.clone());
+        entries.extend(helper.iter().cloned());
+        let inventory = ArtifactInventory::default();
+        let full = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let proof =
+            NativeOriginalRequirement::from_issued_group_custody(authored_id, canonical, &full)
                 .unwrap()
-                .expect("the same original role preserves its issued offer");
-            assert!(!partial_offer.is_full());
-            assert!(matches!(
-                partial_offer.snapshot_facts().body,
-                crate::exact_context::NativeOfferSnapshotBody::Partial(_)
-            ));
+                .expect("the owner issued all authored groups");
+        let full_offer = IssuedNativeOffer::issue(authored_id, &full, Some(proof)).unwrap();
+        assert!(full_offer.is_full());
+        let empty_offer = IssuedNativeOffer::issue(authored_id, &full, None).unwrap();
+        let authored_role = CompilerInputProjection::from_issued_entries(&[authored]).unwrap();
+        let partial_offer = full_offer
+            .within_projection(&authored_role, context.artifact_view())
+            .unwrap()
+            .expect("the same original role preserves its issued offer");
+        assert!(!partial_offer.is_full());
+        assert!(matches!(
+            partial_offer.snapshot_facts().body,
+            crate::exact_context::NativeOfferSnapshotBody::Partial(_)
+        ));
 
-            let expected = vec![NativeBindingRequirement {
-                artifact_id: value_id,
-                identity: identity.clone(),
-                generation: captured.owner().gen.0,
-            }];
-            let issued_edges = full.binding_dependencies();
-            for ordinal in [11, 13] {
-                let group = full
-                    .capture_graph_selection()
-                    .native_groups
-                    .into_iter()
-                    .find(|group| {
-                        group.binding.artifact() == authored_id && group.original_ordinal == ordinal
-                    })
-                    .unwrap();
-                let source = ArtifactBindingNode::Group(group);
-                assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
-                    && matches!(to, ArtifactBindingNode::Artifact(binding)
-                        if binding.artifact() == authored_id)
-                    && *edge == ArtifactDependency::Interface));
-                assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
-                    && matches!(to, ArtifactBindingNode::Artifact(binding)
+        let expected = vec![NativeBindingRequirement {
+            artifact_id: value_id,
+            identity: identity.clone(),
+            generation: captured.owner().gen.0,
+        }];
+        let issued_edges = full.binding_dependencies();
+        let binding_source = helper
+            .as_ref()
+            .map_or(authored_id, |entry| entry.descriptor.id);
+        let ordinals: &[u32] = if cyclic { &[7] } else { &[11, 13] };
+        for &ordinal in ordinals {
+            let group = full
+                .capture_graph_selection()
+                .native_groups
+                .into_iter()
+                .find(|group| {
+                    group.binding.artifact() == binding_source && group.original_ordinal == ordinal
+                })
+                .unwrap();
+            let source = ArtifactBindingNode::Group(group);
+            assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
+                && matches!(to, ArtifactBindingNode::Artifact(binding)
+                        if binding.artifact() == binding_source)
+                && *edge == ArtifactDependency::Interface));
+            assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
+                && matches!(to, ArtifactBindingNode::Artifact(binding)
                         if binding.artifact() == value_id)
-                    && matches!(edge, ArtifactDependency::NativeBinding {
+                && matches!(edge, ArtifactDependency::NativeBinding {
                             generation, namespace, occurrence, record_parent, ..
                         } if *generation == captured.owner().gen.0
                             && namespace == &identity.namespace
                             && occurrence == &identity.occurrence
                             && record_parent == &identity.record_parent)));
-            }
-            for (offer, nonempty) in [
-                (empty_offer, false),
-                (partial_offer, true),
-                (full_offer, true),
+        }
+        if cyclic {
+            let groups = full.capture_graph_selection().native_groups;
+            let group = |id, ordinal| {
+                *groups
+                    .iter()
+                    .find(|group| {
+                        group.binding.artifact() == id && group.original_ordinal == ordinal
+                    })
+                    .unwrap()
+            };
+            for (from, to) in [
+                (group(authored_id, 11), group(binding_source, 7)),
+                (group(authored_id, 13), group(binding_source, 7)),
+                (group(binding_source, 7), group(authored_id, 11)),
             ] {
-                let support = CompilerSourceSupport::new(
-                    CompilerInputProjection::default(),
-                    context.artifact_view().clone(),
-                    [offer],
-                )
+                assert!(issued_edges.contains(&(
+                    ArtifactBindingNode::Group(from),
+                    ArtifactBindingNode::Group(to),
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal: from.original_ordinal,
+                        required_ordinal: to.original_ordinal,
+                    },
+                )));
+            }
+        }
+        for (offer, nonempty) in [
+            (empty_offer, false),
+            (partial_offer, true),
+            (full_offer, true),
+        ] {
+            let support = CompilerSourceSupport::new(
+                CompilerInputProjection::default(),
+                context.artifact_view().clone(),
+                [offer],
+            )
+            .unwrap();
+            let retained = context
+                .clone()
+                .extend_issued_compiler_support(&support)
                 .unwrap();
-                let retained = context
-                    .clone()
-                    .extend_issued_compiler_support(&support)
-                    .unwrap();
-                let before = retained.artifact_view().capture_graph_selection();
-                assert_eq!(
-                    retained.compiler_input_projection(),
-                    context.compiler_input_projection()
-                );
-                assert_eq!(
-                    before.roots,
-                    context.artifact_view().capture_graph_selection().roots
-                );
-                if nonempty {
-                    for edge in issued_edges.iter().filter(|(from, _, _)| {
-                        matches!(from, ArtifactBindingNode::Group(group)
-                            if group.binding.artifact() == authored_id)
-                    }) {
-                        assert!(retained
-                            .artifact_view()
-                            .binding_dependencies()
-                            .contains(edge));
-                    }
-                } else {
-                    assert!(before
-                        .native_groups
-                        .iter()
-                        .all(|group| group.binding.artifact() != authored_id));
-                    assert!(
-                        retained
-                            .artifact_view()
-                            .artifact_ids()
-                            .contains(&authored_id),
-                        "immutable authored bytes do not imply issued group custody"
-                    );
+            let before = retained.artifact_view().capture_graph_selection();
+            assert_eq!(
+                retained.compiler_input_projection(),
+                context.compiler_input_projection()
+            );
+            assert_eq!(
+                before.roots,
+                context.artifact_view().capture_graph_selection().roots
+            );
+            if nonempty {
+                for edge in issued_edges.iter().filter(|(from, _, _)| {
+                    matches!(from, ArtifactBindingNode::Group(group)
+                            if group.binding.artifact() == authored_id
+                                || group.binding.artifact() == binding_source)
+                }) {
+                    assert!(retained
+                        .artifact_view()
+                        .binding_dependencies()
+                        .contains(edge));
                 }
-                let requirements = retained
-                    .authored_native_binding_custody_requirements(&accepted)
-                    .map_err(|error| error.to_string())?;
-                assert_eq!(
-                    requirements,
-                    if nonempty { expected.clone() } else { vec![] }
-                );
-                assert_eq!(retained.artifact_view().capture_graph_selection(), before);
-                assert_eq!(
-                    retained.compiler_input_projection(),
-                    context.compiler_input_projection()
+            } else {
+                assert!(before
+                    .native_groups
+                    .iter()
+                    .all(|group| group.binding.artifact() != authored_id));
+                assert!(
+                    retained
+                        .artifact_view()
+                        .artifact_ids()
+                        .contains(&authored_id),
+                    "immutable authored bytes do not imply issued group custody"
                 );
             }
-            Ok(())
-        });
+            let requirements = retained
+                .authored_native_binding_custody_requirements(&accepted)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                requirements,
+                if nonempty { expected.clone() } else { vec![] }
+            );
+            assert_eq!(retained.artifact_view().capture_graph_selection(), before);
+            assert_eq!(
+                retained.compiler_input_projection(),
+                context.compiler_input_projection()
+            );
+        }
+        Ok(())
     }
 
     fn checked_value_custody_histories(
