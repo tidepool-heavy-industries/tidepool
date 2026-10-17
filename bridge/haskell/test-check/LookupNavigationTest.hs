@@ -14,13 +14,15 @@ import Tidepool.Lookup
 import Tidepool.Lookup.Navigation
 import Tidepool.Text.Navigation (TextSlice(..), TextSelectionIssue(..))
 import qualified Tidepool.Lookup.Tools as Tools
-import Tidepool.Agent.Contract (compileTools, AsServerT)
-import Control.Monad.Freer (Eff, run)
+import Tidepool.Agent.Contract (compileTools, AsServerT, CompiledTools(..))
+import Tidepool.Aeson.Value (object, (.=))
+import Control.Monad.Freer (Eff, run, interpret, reinterpret)
+import Control.Monad.Freer.State (State, modify, runState)
 import Control.Monad.Freer.Internal (handleRelay)
 import Data.List (nubBy)
 import Tidepool.Inspection (displayWith, displayTree, DisplayTree(..))
 import Tidepool.Inspection.Tree (renderTree)
-import Tidepool.Effects.Core (Lookup(..), Console)
+import Tidepool.Effects.Core (Lookup(..), Console(..))
 
 entry :: T.Text -> LookupEntry
 entry source = LookupEntry "same" (Just "Owner") "same :: Text" LookupValue LookupAvailable LookupModuleExport LookupExact Nothing (Just "owner contract")
@@ -39,6 +41,22 @@ assert label value = unless value (fail label)
 lookupNavigationTests :: TestTree
 lookupNavigationTests = testGroup "retained lookup navigation"
   [lookupPackingTests
+  ,testCase "default lookup dispatch applies the display budget before later results" $ do
+     tooling <- either (fail . show) pure (compileTools (Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup, Console]))))
+     let original = (batch "source") {lookupResults =
+           LookupResult "same" (LookupFound [entry "source"] False) : error "default tool forced an unrequested result"}
+         lookupHost :: Lookup value -> Eff '[Console] value
+         lookupHost (LookupRaw _) = pure original
+         console :: Console value -> Eff '[State [T.Text]] value
+         console DisplayAllowanceWith = pure 160
+         console (DisplaySelectableWith (_, text, _, _) _) = modify (++ [text]) >> pure (7, 11, 13)
+         console _ = error "unexpected default lookup console operation"
+         observed = run $ runState [] $ reinterpret console $ interpret lookupHost $
+           dispatch tooling "lookup" (object ["queries" .= (["same"] :: [T.Text])])
+     case observed of
+       (Right _, [text]) -> assert "ordinary dispatch publishes a bounded initial index"
+         ("fixture-capture" `T.isInfixOf` text && "same" `T.isInfixOf` text && T.length text <= 160)
+       _ -> fail "default lookup did not publish exactly one retained display"
   ,testCase "index display leaves unrequested result and setup tails untouched" $ do
      let first = (batch "source") {lookupResults =
            LookupResult "same" (LookupFound [entry "source"] False) : error "unrequested result tail"}
