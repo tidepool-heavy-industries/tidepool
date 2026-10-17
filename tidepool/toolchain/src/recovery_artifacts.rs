@@ -905,6 +905,7 @@ fn recovery_validation_error(
             limit,
         }),
         CertificationError::EvidenceRead { .. }
+        | CertificationError::InputDecision { .. }
         | CertificationError::CapturedModulePayload(_)
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)

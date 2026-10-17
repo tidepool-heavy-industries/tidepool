@@ -2787,7 +2787,6 @@ impl ArtifactInventory {
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
             .collect::<BTreeMap<_, _>>();
-        let graph = view.capture_graph_selection();
         let state = self.0.lock().expect("inventory lock");
         let namespace_entries = view
             .namespace()
@@ -2937,7 +2936,13 @@ impl ArtifactInventory {
                 }
                 None => fixed
                     .native_source
-                    .native_group_candidates(group)
+                    .native_group_candidates(
+                        group,
+                        match &fixed.entries[&group.artifact].payload {
+                            ArtifactPayload::Original(product) => product.owner(),
+                            _ => unreachable!("native demand has checked original payload"),
+                        },
+                    )
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             };
             let candidates = resolution.bindings().clone();

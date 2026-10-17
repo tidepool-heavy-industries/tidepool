@@ -3095,11 +3095,12 @@ impl CertifiedSourceSelection {
     pub(crate) fn native_group_candidates(
         &self,
         key: crate::artifact_inventory::NativeGroupKey,
+        owner: &CachedHomeOwner,
     ) -> CertResult<NativeGroupCandidates> {
         use crate::artifact_inventory::InputNativeDecision;
         let own = self
             .native_selections()
-            .find(|native| native.original == key.artifact);
+            .find(|native| &native.owner == owner);
         if let Some(native) = own {
             if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
                 let groups = dependencies
@@ -3116,12 +3117,10 @@ impl CertifiedSourceSelection {
             }
         }
         let mut candidates = BTreeSet::new();
-        let mut input_owner = None;
         for row in self.issued_native_availability() {
             let owner = row.original_owner();
             if let Some(support) = row.dependency_support(key, owner) {
                 candidates.extend(support.groups());
-                input_owner = Some(owner);
             }
         }
         // A fresh body's immutable child graph grants its exact historical
@@ -3143,19 +3142,11 @@ impl CertifiedSourceSelection {
         if let CertifiedInputOrigin::Continuation(source) = &self.input_origin {
             // Finished current products retain their producer origin even after
             // their availability becomes an issued row. They are not old inputs.
-            let own = own.filter(|native| matches!(native.origin, ReceiptNativeOrigin::Input));
-            let input_owner = if self.native_selections().any(|native| {
-                native.original == key.artifact
-                    && matches!(native.origin, ReceiptNativeOrigin::NewProduct)
-            }) {
-                None
-            } else {
-                input_owner
-            };
+            let current_product =
+                own.is_some_and(|native| matches!(native.origin, ReceiptNativeOrigin::NewProduct));
             // Even unavailable input must consult its old choice so a miss is
             // diagnosed rather than treated as an unconstrained fresh policy.
-            let owner = input_owner.or_else(|| own.map(|native| &native.owner));
-            if let Some(owner) = owner {
+            if !current_product {
                 let identity = crate::declaration_join::ExactModuleIdentity {
                     unit: owner.unit.clone(),
                     module: owner.module.clone(),
@@ -3207,9 +3198,20 @@ impl CertifiedSourceSelection {
     ) -> bool {
         if let Some(selected) = self
             .native_selections()
-            .find(|selected| selected.original == original && &selected.owner == owner)
+            .find(|selected| &selected.owner == owner)
         {
-            return selected.availability.permits(ordinal);
+            return match &selected.availability {
+                ReceiptNativeAvailability::Issued(availability) => availability
+                    .dependency_support(
+                        crate::artifact_inventory::NativeGroupKey {
+                            artifact: original,
+                            original_ordinal: ordinal,
+                        },
+                        owner,
+                    )
+                    .is_some(),
+                ReceiptNativeAvailability::NewProduct { .. } => true,
+            };
         }
         if let Some(permitted) = self.private_native.permits(original, owner, ordinal) {
             return permitted;
