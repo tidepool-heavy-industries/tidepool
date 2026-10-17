@@ -6244,6 +6244,21 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
                 request
                     .compiler_inputs()
                     .artifacts
+                    .capture_graph_selection()
+                    .roots
+                    .iter()
+                    .all(|node| match node {
+                        crate::artifact_inventory::ArtifactBindingNode::Group(group) =>
+                            group.binding.artifact() != parent_entry.descriptor.id,
+                        crate::artifact_inventory::ArtifactBindingNode::Artifact(binding) =>
+                            binding.artifact != parent_entry.descriptor.id,
+                    }),
+                "historical parent availability cannot become a current root"
+            );
+            assert!(
+                request
+                    .compiler_inputs()
+                    .artifacts
                     .binding_dependencies()
                     .contains(&historical_edge),
                 "historical parent must retain its A child, never rebind to current B"
