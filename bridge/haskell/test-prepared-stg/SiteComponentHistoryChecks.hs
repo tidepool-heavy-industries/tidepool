@@ -7,9 +7,10 @@ import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import GHC
-import GHC.Driver.Session (gopt_set, updOptLevel)
-import GHC.Types.Name (nameModule_maybe)
+import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Var (varName)
 import System.Directory (copyFile, createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.Process (readProcess)
@@ -42,9 +43,11 @@ verifySiteComponentHistories directory = do
     flags <- getSessionDynFlags
     _ <- setSessionDynFlags
       ((`gopt_set` Opt_WriteInterface) $ (`gopt_set` Opt_WriteIfSimplifiedCore)
-       $ (`gopt_set` Opt_ForceRecomp) $ updOptLevel 1 flags)
+       $ (`gopt_set` Opt_ForceRecomp) $ (`gopt_unset` Opt_OmitInterfacePragmas)
+       $ (`gopt_unset` Opt_IgnoreInterfacePragmas) $ updOptLevel 1 flags)
         { importPaths = directory : importPaths flags
-        , hiDir = Just directory, objectDir = Just directory }
+        , hiDir = Just directory, objectDir = Just directory
+        , backend = ncgBackend, ghcLink = NoLink }
     target <- guessTarget source Nothing Nothing
     setTargets [target]
     let reload = do

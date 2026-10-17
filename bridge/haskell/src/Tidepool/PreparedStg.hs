@@ -380,7 +380,7 @@ recoveredSubsetScope owner bindings =
     bodies (Rec pairs) = map snd pairs
 
 -- | Exact versions and consumed site facts authorize completed-body reuse.
--- Canonical pure units are coalesced separately from typed site batches.
+-- Canonical pure units are coalesced separately from typed exact-body variants.
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map PreparedBodyKey [PreparedModule]))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
