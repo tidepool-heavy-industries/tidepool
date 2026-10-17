@@ -1,6 +1,8 @@
 //! Complete named compiler output, shared by physical acquisition and memo IO.
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::marker::PhantomData;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
@@ -15,6 +17,8 @@ enum Artifact {
     YieldSites(Option<String>),
     ModuleProducts,
     ModulePackageImports,
+    PortableReceipt,
+    Dependencies,
 }
 
 impl Artifact {
@@ -26,16 +30,37 @@ impl Artifact {
             Self::YieldSites(None) => "asks.json".into(),
             Self::ModuleProducts => "module-products.cbor".into(),
             Self::ModulePackageImports => "module-package-imports.cbor".into(),
+            Self::PortableReceipt => "portable-output.cbor".into(),
+            Self::Dependencies => "dependencies.json".into(),
         }
     }
 }
 
-pub(crate) struct InvocationOutputLayout {
+pub(crate) struct NativeOutput;
+pub(crate) struct PortableOutput;
+
+pub(crate) struct InvocationOutputLayout<P = NativeOutput> {
     artifacts: Vec<Artifact>,
+    purpose: PhantomData<P>,
 }
 
-impl InvocationOutputLayout {
+impl InvocationOutputLayout<NativeOutput> {
     pub(crate) fn new(targets: &[&str]) -> Result<Self, CompileError> {
+        Self::for_members(
+            targets,
+            [Artifact::ModuleProducts, Artifact::ModulePackageImports],
+        )
+    }
+}
+
+impl InvocationOutputLayout<PortableOutput> {
+    pub(crate) fn portable(targets: &[&str]) -> Result<Self, CompileError> {
+        Self::for_members(targets, [Artifact::PortableReceipt, Artifact::Dependencies])
+    }
+}
+
+impl<P> InvocationOutputLayout<P> {
+    fn for_members(targets: &[&str], members: [Artifact; 2]) -> Result<Self, CompileError> {
         if targets.is_empty() {
             return Err(CompileError::ExtractFailed(
                 "invocation output requires a target".into(),
@@ -54,7 +79,7 @@ impl InvocationOutputLayout {
                 (targets.len() > 1).then(|| (*target).into()),
             ));
         }
-        artifacts.extend([Artifact::ModuleProducts, Artifact::ModulePackageImports]);
+        artifacts.extend(members);
         let mut filenames = BTreeSet::new();
         for artifact in &artifacts {
             let filename = artifact.filename();
@@ -72,7 +97,10 @@ impl InvocationOutputLayout {
                 ));
             }
         }
-        Ok(Self { artifacts })
+        Ok(Self {
+            artifacts,
+            purpose: PhantomData,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -85,7 +113,7 @@ impl InvocationOutputLayout {
         &self,
         operation: Arc<InventoryOperation>,
         mut read: impl FnMut(&str, bool) -> Result<Vec<u8>, E>,
-    ) -> Result<InvocationOutputBundle, E> {
+    ) -> Result<InvocationOutputBundle<P>, E> {
         let mut artifacts = Vec::with_capacity(self.artifacts.len());
         for artifact in &self.artifacts {
             let bytes = read(
@@ -97,6 +125,7 @@ impl InvocationOutputLayout {
         Ok(InvocationOutputBundle {
             artifacts,
             operation,
+            purpose: PhantomData,
         })
     }
 
@@ -104,7 +133,7 @@ impl InvocationOutputLayout {
         &self,
         root: &Path,
         operation: Arc<InventoryOperation>,
-    ) -> Result<InvocationOutputBundle, CompileError> {
+    ) -> Result<InvocationOutputBundle<P>, CompileError> {
         operation
             .reserve::<(Artifact, Arc<Vec<u8>>)>(self.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
@@ -129,12 +158,13 @@ impl InvocationOutputLayout {
     }
 }
 
-pub(crate) struct InvocationOutputBundle {
+pub(crate) struct InvocationOutputBundle<P = NativeOutput> {
     artifacts: Vec<(Artifact, Arc<Vec<u8>>)>,
     operation: Arc<InventoryOperation>,
+    purpose: PhantomData<P>,
 }
 
-impl InvocationOutputBundle {
+impl<P> InvocationOutputBundle<P> {
     fn get(&self, selected: &Artifact) -> &Arc<Vec<u8>> {
         &self
             .artifacts
@@ -146,14 +176,6 @@ impl InvocationOutputBundle {
 
     pub(crate) fn metadata(&self) -> &[u8] {
         self.get(&Artifact::Metadata)
-    }
-
-    pub(crate) fn products(&self) -> &[u8] {
-        self.get(&Artifact::ModuleProducts)
-    }
-
-    pub(crate) fn package_imports(&self) -> &[u8] {
-        self.get(&Artifact::ModulePackageImports)
     }
 
     pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
@@ -195,5 +217,67 @@ impl InvocationOutputBundle {
             .iter()
             .map(|(_, bytes)| bytes.len() as u64)
             .sum()
+    }
+}
+
+impl InvocationOutputBundle<NativeOutput> {
+    pub(crate) fn products(&self) -> &[u8] {
+        self.get(&Artifact::ModuleProducts)
+    }
+
+    pub(crate) fn package_imports(&self) -> &[u8] {
+        self.get(&Artifact::ModulePackageImports)
+    }
+}
+
+impl InvocationOutputBundle<PortableOutput> {
+    pub(crate) fn dependencies(&self) -> &[u8] {
+        self.get(&Artifact::Dependencies)
+    }
+
+    pub(crate) fn receipt(&self) -> &[u8] {
+        self.get(&Artifact::PortableReceipt)
+    }
+
+    pub(crate) fn validate_receipt(&self) -> Result<(), CompileError> {
+        let mut reader = std::io::Cursor::new(self.receipt());
+        let (magic, version, targets, members): (
+            String,
+            String,
+            Vec<String>,
+            Vec<(String, String)>,
+        ) = ciborium::de::from_reader(&mut reader)
+            .map_err(|error| CompileError::ExtractFailed(format!("portable receipt: {error}")))?;
+        let expected_targets = self
+            .artifacts
+            .iter()
+            .filter_map(|(artifact, _)| match artifact {
+                Artifact::Prepared(target) => Some(target.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected_members = self
+            .artifacts
+            .iter()
+            .filter_map(|(artifact, bytes)| {
+                (!matches!(artifact, Artifact::PortableReceipt)).then(|| {
+                    (
+                        artifact.filename(),
+                        format!("{:x}", Sha256::digest(bytes.as_slice())),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if reader.position() != self.receipt().len() as u64
+            || magic != "TPPORTABLEOUTPUT"
+            || version != "1"
+            || targets != expected_targets
+            || members != expected_members
+        {
+            return Err(CompileError::ExtractFailed(
+                "portable output receipt differs from acquired members".into(),
+            ));
+        }
+        Ok(())
     }
 }

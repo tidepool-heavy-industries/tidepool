@@ -4927,6 +4927,53 @@ fn compile_invocation_inner(
         }
     }
     let compiler_stderr = run.output.stderr.clone();
+    if let CompilationPolicy::BuildAction {
+        export: BuildActionExport::PreparedFixture { output },
+        ..
+    } = &policy
+    {
+        let portable = (|| {
+            let layout = invocation_output::InvocationOutputLayout::portable(inv.targets)?;
+            let bundle = extract_and_read(
+                run,
+                output_owner.path(),
+                &layout,
+                &mut on_stage,
+                |stderr, success| {
+                    if !success && !stderr.is_empty() {
+                        tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
+                    }
+                },
+            )?;
+            bundle.validate_receipt()?;
+            validate_prepared_fixture_sources(bundle.dependencies(), &input_path, inv.include)?;
+            let raw = bundle.targets();
+            let artifacts = assemble(bundle.metadata(), &raw, &mut on_stage)?;
+            for (target, artifact) in &artifacts.targets {
+                check_constructor_identity_agreement(target, &artifact.prepared, &artifacts.table)
+                    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            }
+            std::fs::create_dir(output)?;
+            std::fs::write(output.join("meta.cbor"), bundle.metadata())?;
+            for target in &raw {
+                std::fs::write(
+                    output.join(prepared_artifact_name(&target.target)),
+                    target.prepared_bytes.as_slice(),
+                )?;
+                std::fs::write(
+                    output.join(format!("{}.asks.json", target.target)),
+                    target.asks_bytes.as_slice(),
+                )?;
+            }
+            Ok(CompilationOutput {
+                artifacts,
+                original_entry: None,
+            })
+        })();
+        return portable.map_err(|error| {
+            retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error)
+        });
+    }
     let extracted = extract_and_read(
         run,
         output_owner.path(),
@@ -5335,26 +5382,6 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
-    if let CompilationPolicy::BuildAction {
-        export: BuildActionExport::PreparedFixture { output },
-        ..
-    } = &policy
-    {
-        std::fs::create_dir(output)?;
-        // Portable code has no authority to hydrate the source-bound
-        // native products or certificates from this transaction.
-        std::fs::write(output.join("meta.cbor"), &meta_bytes)?;
-        for target in &raw {
-            std::fs::write(
-                output.join(prepared_artifact_name(&target.target)),
-                target.prepared_bytes.as_slice(),
-            )?;
-            std::fs::write(
-                output.join(format!("{}.asks.json", target.target)),
-                target.asks_bytes.as_slice(),
-            )?;
-        }
-    }
     let original_entry = if let CompilationOutputOwner::Original(preparation) = output_owner {
         match &policy {
             CompilationPolicy::RetainedEntry {
@@ -5813,13 +5840,13 @@ pub(crate) struct RawTargetOutput {
 /// already gives an ordinary eval compile, so a bad target name or any other
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
-pub(crate) fn extract_and_read(
+pub(crate) fn extract_and_read<P>(
     run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
-    layout: &invocation_output::InvocationOutputLayout,
+    layout: &invocation_output::InvocationOutputLayout<P>,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<invocation_output::InvocationOutputBundle, CompileError> {
+) -> Result<invocation_output::InvocationOutputBundle<P>, CompileError> {
     let inventory_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
         Default::default(),
     ));
