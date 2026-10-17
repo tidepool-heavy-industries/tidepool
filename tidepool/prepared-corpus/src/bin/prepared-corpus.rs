@@ -249,6 +249,10 @@ fn validate_fixture(
     targets: &Path,
     include: &[PathBuf],
 ) -> Result<(), Box<dyn Error>> {
+    // This standalone action owns one cumulative source-evidence admission.
+    // Use the compiler inventory's existing default work budget (4 GiB).
+    let source_operation =
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
     let manifest_path = directory.join("manifest.json");
     let manifest = read_manifest(&manifest_path)?;
     let summary = validate_manifest(&manifest)?;
@@ -291,6 +295,7 @@ fn validate_fixture(
     match admission {
         CorpusSourceAdmission::ImmutableBuild => {
             tidepool_toolchain::artifacts::validate_prepared_fixture_sources(
+                &source_operation,
                 &dependencies,
                 source,
                 include,
@@ -298,6 +303,7 @@ fn validate_fixture(
         }
         CorpusSourceAdmission::CompletedOriginal => {
             tidepool_toolchain::artifacts::validate_completed_corpus_sources(
+                &source_operation,
                 &dependencies,
                 source,
                 include,
