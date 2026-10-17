@@ -375,6 +375,12 @@ mod tests {
         assert!(serde_json::from_slice::<serde_json::Value>(surrogate).is_err());
         let record: Record<'_> = serde_json::from_slice(surrogate).unwrap();
         assert_eq!(record.fields["status"].as_str(), Some("Committed"));
+        let opaque_utf8 = b"{\"unknown\":\"\xff\",\"fields\":{\"status\":\"Committed\"}}";
+        assert!(serde_json::from_slice::<serde_json::Value>(opaque_utf8).is_err());
+        assert!(serde_json::from_slice::<Record<'_>>(opaque_utf8).is_ok());
+        assert!(
+            serde_json::from_slice::<Record<'_>>(b"{\"fields\":{\"status\":\"\xff\"}}").is_err()
+        );
         let deep = format!("{{\"unknown\":{}0{}}}", "[".repeat(200), "]".repeat(200));
         assert!(serde_json::from_str::<serde_json::Value>(&deep).is_err());
         assert!(serde_json::from_str::<Record<'_>>(&deep).is_ok());
