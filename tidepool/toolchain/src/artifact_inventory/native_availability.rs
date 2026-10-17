@@ -241,6 +241,56 @@ impl PartialEq for IssuedNativeOffer {
 }
 impl Eq for IssuedNativeOffer {}
 
+/// The exact portion of an admitted offer consumed by one request. Its
+/// membership remains tied to that offer's proof and acquisition lifetimes.
+#[derive(Clone, Debug)]
+pub(crate) struct NativeOfferContribution {
+    offer: IssuedNativeOffer,
+    reachable: imbl::OrdSet<ArtifactBindingNode>,
+    originals: BTreeSet<ArtifactId>,
+}
+
+impl NativeOfferContribution {
+    pub(crate) fn offer(&self) -> &IssuedNativeOffer {
+        &self.offer
+    }
+
+    pub(crate) fn originals(&self) -> &BTreeSet<ArtifactId> {
+        &self.originals
+    }
+
+    pub(crate) fn permits(&self, key: NativeGroupKey) -> bool {
+        self.offer
+            .group_bindings(key)
+            .any(|group| self.reachable.contains(&ArtifactBindingNode::Group(group)))
+    }
+
+    pub(crate) fn ordinals(&self, original: ArtifactId) -> impl Iterator<Item = u32> + '_ {
+        self.reachable
+            .range(
+                ArtifactBindingNode::Group(NativeGroupBinding {
+                    binding: NativeGroupIssuer {
+                        artifact: original,
+                        selection: ArtifactSelectionId([0; 32]),
+                    },
+                    original_ordinal: 0,
+                })..=ArtifactBindingNode::Group(NativeGroupBinding {
+                    binding: NativeGroupIssuer {
+                        artifact: original,
+                        selection: ArtifactSelectionId([u8::MAX; 32]),
+                    },
+                    original_ordinal: u32::MAX,
+                }),
+            )
+            .filter_map(move |node| match node {
+                ArtifactBindingNode::Group(group) if group.binding.artifact() == original => {
+                    Some(group.original_ordinal)
+                }
+                _ => None,
+            })
+    }
+}
+
 #[derive(Debug)]
 struct NativeOfferFacts {
     original: ArtifactId,
@@ -878,6 +928,71 @@ impl IssuedNativeOffer {
                 Ok((*group, carrier))
             })
             .collect()
+    }
+
+    /// Consume either this offer's own body or the immutable descendants of
+    /// requested dependency bodies. Unrelated sibling bodies remain custody.
+    pub(crate) fn contribution_for(
+        &self,
+        originals: &BTreeSet<ArtifactId>,
+    ) -> Result<Option<NativeOfferContribution>, CompileError> {
+        let reachable = if originals.contains(&self.original()) {
+            self.0.custody.reachable.clone()
+        } else {
+            if !self
+                .0
+                .custody
+                .native_originals
+                .iter()
+                .any(|id| originals.contains(id))
+            {
+                return Ok(None);
+            }
+            let state = self
+                .0
+                .custody
+                .lease
+                .inventory
+                .0
+                .lock()
+                .expect("inventory lock");
+            let nodes = admitted_closure(
+                &state,
+                self.0
+                    .custody
+                    .reachable
+                    .iter()
+                    .filter_map(|node| match node {
+                        ArtifactBindingNode::Group(group)
+                            if originals.contains(&group.binding.artifact()) =>
+                        {
+                            Some(*node)
+                        }
+                        _ => None,
+                    }),
+            );
+            if !nodes
+                .iter()
+                .all(|node| self.0.custody.reachable.contains(node))
+            {
+                return Err(failure(
+                    "native contribution exceeds its checked offer closure",
+                ));
+            }
+            nodes
+        };
+        let originals = reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(group.binding.artifact()),
+                _ => None,
+            })
+            .collect();
+        Ok(Some(NativeOfferContribution {
+            offer: self.clone(),
+            reachable,
+            originals,
+        }))
     }
 
     /// A receipt can carry this proof for one of its dependencies. Consume that

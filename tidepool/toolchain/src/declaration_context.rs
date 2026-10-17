@@ -1008,12 +1008,14 @@ pub(crate) struct RequestCompilerInputs {
 pub(crate) struct NativeTransportAvailability {
     mode: NativeTransportMode,
     issuance: Arc<[crate::artifact_inventory::IssuedNativeOffer]>,
+    original: ArtifactId,
+    contributions: Arc<[Arc<crate::artifact_inventory::NativeOfferContribution>]>,
 }
 
 #[derive(Clone, Debug)]
 enum NativeTransportMode {
     Full,
-    IssuedGroups(BTreeSet<u32>),
+    IssuedGroups,
 }
 
 impl NativeTransportAvailability {
@@ -1024,8 +1026,20 @@ impl NativeTransportAvailability {
     pub(crate) fn permits(&self, ordinal: u32) -> bool {
         match &self.mode {
             NativeTransportMode::Full => true,
-            NativeTransportMode::IssuedGroups(groups) => groups.contains(&ordinal),
+            NativeTransportMode::IssuedGroups => self.contributions.iter().any(|contribution| {
+                contribution.permits(crate::artifact_inventory::NativeGroupKey {
+                    artifact: self.original,
+                    original_ordinal: ordinal,
+                })
+            }),
         }
+    }
+
+    fn issued_ordinals(&self) -> BTreeSet<u32> {
+        self.contributions
+            .iter()
+            .flat_map(|contribution| contribution.ordinals(self.original))
+            .collect()
     }
 }
 
@@ -1081,31 +1095,23 @@ impl NativeCompilerTransport {
             retained: artifacts.metadata_snapshot(),
             entries: projection.entries.clone(),
         };
-        let mut availability = BTreeMap::new();
+        let mut availability = BTreeMap::<
+            ArtifactId,
+            Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
+        >::new();
         for entry in projection
             .entries
             .values()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
-            availability.insert(entry.descriptor.id, BTreeSet::new());
+            availability.insert(entry.descriptor.id, Vec::new());
         }
-        let mut full = BTreeSet::new();
         let offered_roots = availability.keys().copied().collect::<BTreeSet<_>>();
-        let mut issuance =
-            BTreeMap::<ArtifactId, Vec<crate::artifact_inventory::IssuedNativeOffer>>::new();
+        let mut full = BTreeSet::new();
         for offer in offers {
-            let groups = if offered_roots.contains(&offer.original()) {
-                offer.issued_group_carriers()?
-            } else {
-                offer.dependency_group_carriers(&offered_roots)?
-            };
-            if !offered_roots.contains(&offer.original())
-                && !groups
-                    .keys()
-                    .any(|group| offered_roots.contains(&group.binding.artifact()))
-            {
+            let Some(contribution) = offer.contribution_for(&offered_roots)? else {
                 continue;
-            }
+            };
             let consumed = if offered_roots.contains(&offer.original()) {
                 offer
                     .within_projection(roles, artifacts)?
@@ -1113,50 +1119,54 @@ impl NativeCompilerTransport {
             } else {
                 offer.clone()
             };
-            let offer = &consumed;
-            if offered_roots.contains(&offer.original()) {
-                let sources = issuance.entry(offer.original()).or_default();
-                if !sources.contains(offer) {
-                    sources.push(offer.clone());
-                }
-            }
-            // Each offer authenticates its own exact group-to-carrier edges.
-            // Independent offers may retain different bindings for the same body.
-            if offered_roots.contains(&offer.original()) && offer.is_full() {
-                if !groups
-                    .keys()
-                    .any(|group| group.binding.artifact() == offer.original())
-                {
+            // Qualification can demote Full, but cannot change exact membership.
+            let contribution = if consumed.is_full() == offer.is_full() {
+                contribution
+            } else {
+                consumed
+                    .contribution_for(&offered_roots)?
+                    .expect("same checked contribution")
+            };
+            if offered_roots.contains(&consumed.original()) && consumed.is_full() {
+                if !contribution.originals().contains(&consumed.original()) {
                     return Err(failure("full native offer has no issued carrier"));
                 }
-                full.insert(offer.original());
+                full.insert(consumed.original());
             }
-            for group in groups.keys() {
-                let sources = issuance.entry(group.binding.artifact()).or_default();
-                if !sources.contains(offer) {
-                    sources.push(offer.clone());
+            let contribution = Arc::new(contribution);
+            if offered_roots.contains(&consumed.original()) {
+                let contributions = availability.entry(consumed.original()).or_default();
+                if !contributions
+                    .iter()
+                    .any(|prior| prior.offer() == contribution.offer())
+                {
+                    contributions.push(Arc::clone(&contribution));
                 }
+            }
+            for original in contribution.originals() {
                 let entry = metadata
                     .retained
                     .artifacts
-                    .get(&group.binding.artifact())
+                    .get(original)
                     .ok_or_else(|| failure("issued native dependency is outside request custody"))?
                     .clone();
                 crate::artifact_inventory::validate_consumed_native_namespace(
                     &entry,
                     &metadata.entries,
                 )?;
-                let owner = &entry.descriptor.owner;
-                metadata.entries.insert(owner.clone(), entry);
-                availability
-                    .entry(group.binding.artifact())
-                    .or_default()
-                    .insert(group.original_ordinal);
+                metadata
+                    .entries
+                    .insert(entry.descriptor.owner.clone(), entry);
+                let contributions = availability.entry(*original).or_default();
+                if !contributions
+                    .iter()
+                    .any(|prior| prior.offer() == contribution.offer())
+                {
+                    contributions.push(Arc::clone(&contribution));
+                }
             }
         }
         for selected in &projection.retained.selected_native_groups {
-            // Retained generations can independently demand historical owners
-            // which this request does not offer to the compiler.
             if !projection
                 .entries
                 .values()
@@ -1164,10 +1174,14 @@ impl NativeCompilerTransport {
             {
                 continue;
             }
-            let Some(offer) = availability.get(&selected.artifact) else {
+            let Some(contributions) = availability.get(&selected.artifact) else {
                 continue;
             };
-            if !full.contains(&selected.artifact) && !offer.contains(&selected.original_ordinal) {
+            if !full.contains(&selected.artifact)
+                && !contributions
+                    .iter()
+                    .any(|contribution| contribution.permits(*selected))
+            {
                 return Err(failure(
                     "selected native group is outside issued availability",
                 ));
@@ -1175,17 +1189,25 @@ impl NativeCompilerTransport {
         }
         let availability = availability
             .into_iter()
-            .map(|(id, offer)| {
-                let mode = if full.contains(&id) {
+            .map(|(original, contributions)| {
+                let mode = if full.contains(&original) {
                     NativeTransportMode::Full
                 } else {
-                    NativeTransportMode::IssuedGroups(offer)
+                    NativeTransportMode::IssuedGroups
                 };
+                let mut issuance = Vec::new();
+                for contribution in &contributions {
+                    if !issuance.contains(contribution.offer()) {
+                        issuance.push(contribution.offer().clone());
+                    }
+                }
                 (
-                    id,
+                    original,
                     Arc::new(NativeTransportAvailability {
                         mode,
-                        issuance: issuance.remove(&id).unwrap_or_default().into(),
+                        original,
+                        contributions: contributions.into(),
+                        issuance: issuance.into(),
                     }),
                 )
             })
@@ -7990,12 +8012,13 @@ impl ExactDeclarationContext {
                         let availability = inputs.native_transport.availability[&selected].as_ref();
                         let mode = match &availability.mode {
                             NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
-                            NativeTransportMode::IssuedGroups(groups) => Value::Array(vec![
+                            NativeTransportMode::IssuedGroups => Value::Array(vec![
                                 text("issued-groups"),
                                 Value::Array(
-                                    groups
-                                        .iter()
-                                        .map(|ordinal| Value::Integer((*ordinal).into()))
+                                    availability
+                                        .issued_ordinals()
+                                        .into_iter()
+                                        .map(|ordinal| Value::Integer(ordinal.into()))
                                         .collect(),
                                 ),
                             ]),
@@ -13852,8 +13875,8 @@ mod tests {
                     .get(&original)
                     .unwrap();
                 assert!(
-                    matches!(&offers.mode, NativeTransportMode::IssuedGroups(groups)
-                    if groups == &BTreeSet::from([7]))
+                    matches!(&offers.mode, NativeTransportMode::IssuedGroups)
+                        && offers.issued_ordinals() == BTreeSet::from([7])
                 );
                 assert!(offers.permits(7));
                 assert!(!offers.permits(11));
@@ -13903,8 +13926,8 @@ mod tests {
                 .values()
             {
                 assert!(
-                    matches!(&availability.mode, NativeTransportMode::IssuedGroups(groups)
-                    if groups == &BTreeSet::from([7]))
+                    matches!(&availability.mode, NativeTransportMode::IssuedGroups)
+                        && availability.issued_ordinals() == BTreeSet::from([7])
                 );
                 assert!(!availability.permits(11));
             }

@@ -1332,7 +1332,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .all(|offer| offer.original() != entries[2].descriptor.id));
     assert!(receipt.permits(7));
     assert!(!receipt.permits(9001));
-    assert!(matches!(receipt.mode, NativeTransportMode::IssuedGroups(_)));
+    assert!(matches!(receipt.mode, NativeTransportMode::IssuedGroups));
     let unrelated_payload =
         Arc::downgrade(&full.metadata_snapshot().artifacts[&entries[2].descriptor.id]);
     let b_id = entries[1].descriptor.id;
