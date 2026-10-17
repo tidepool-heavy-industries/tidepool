@@ -4352,9 +4352,6 @@ fn compile_build_action(
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
 
-/// Validate consumed bytes and import witnesses against a build action's
-/// declared module and complete readable source trees. This shares the worker
-/// dependency reader with ordinary artifact admission and grants no execution.
 fn charge_source_evidence(
     operation: &tidepool_repr::execution_schema::InventoryOperation,
     bytes: usize,
@@ -4366,6 +4363,9 @@ fn charge_source_evidence(
         .map_err(|error| compiler_evidence_failure(error.into()))
 }
 
+/// Validate consumed bytes and import witnesses against a build action's
+/// declared module and complete readable source trees. This shares the worker
+/// dependency reader with ordinary artifact admission and grants no execution.
 pub fn validate_prepared_fixture_sources(
     evidence_bytes: &[u8],
     source: &Path,
