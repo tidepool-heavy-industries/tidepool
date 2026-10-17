@@ -1628,7 +1628,7 @@ impl ArtifactEntry {
     }
     fn catalog_input_custody(
         &self,
-    ) -> Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>> {
+    ) -> Option<Arc<crate::module_candidates::deployment::CapturedCatalogInputs>> {
         match &self.payload {
             ArtifactPayload::Canonical(interface) => interface.catalog_input_custody(),
             ArtifactPayload::Original(product) => product
