@@ -1018,7 +1018,9 @@ pub fn capture_recovery_artifact_observations<T, E>(
 impl RetainedRecoveryArtifactObservations {
     #[cfg(test)]
     pub(crate) fn entry_owned_paths(&self) -> std::collections::BTreeSet<PathBuf> {
-        self.files.iter().filter(|(_, file)| file.owned)
+        self.files
+            .iter()
+            .filter(|(_, file)| file.owned)
             .filter_map(|(path, _)| path.strip_prefix(&self.root).ok().map(Path::to_owned))
             .collect()
     }
@@ -1194,10 +1196,13 @@ impl PackageInterfaceValidation {
         let mut validation = Self::with_inventory(inventory);
         validation.observed = Some(BTreeMap::new());
         let value = operation(&mut validation)?;
-        Ok((value, RetainedRecoveryArtifactObservations {
-            root: root.to_path_buf(),
-            files: Arc::new(validation.observed.take().expect("entry observation scope")),
-        }))
+        Ok((
+            value,
+            RetainedRecoveryArtifactObservations {
+                root: root.to_path_buf(),
+                files: Arc::new(validation.observed.take().expect("entry observation scope")),
+            },
+        ))
     }
 
     pub(crate) fn record_captured_bytes(
@@ -1507,7 +1512,8 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    if expected_sha256.is_some_and(|expected| &validation.admitted_digest(path, &bytes) != expected) {
+    if expected_sha256.is_some_and(|expected| &validation.admitted_digest(path, &bytes) != expected)
+    {
         return Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(
             path.to_path_buf(),
         ));
@@ -3004,67 +3010,115 @@ mod tests {
             let path = root.join(name);
             fs::write(&path, b"admitted").unwrap();
             let (bytes, observations) = PackageInterfaceValidation::capture_entry(
-                &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+                &root,
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
                 |validation| read_admission_bytes(&path, 64, validation),
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(bytes, b"admitted");
-            let mut inventory = BTreeMap::from([(PathBuf::from(name), hex(&Sha256::digest(&bytes).into()))]);
-            observations.verify_entry_inventory(&root, &inventory).unwrap();
-            observations.observe(&root, &mut Default::default()).unwrap();
+            let mut inventory =
+                BTreeMap::from([(PathBuf::from(name), hex(&Sha256::digest(&bytes).into()))]);
+            observations
+                .verify_entry_inventory(&root, &inventory)
+                .unwrap();
+            observations
+                .observe(&root, &mut Default::default())
+                .unwrap();
             fs::write(&path, b"mutated-after-admission").unwrap();
-            inventory.insert(PathBuf::from(name), hex(&Sha256::digest(b"mutated-after-admission").into()));
-            assert!(matches!(observations.verify_entry_inventory(&root, &inventory),
-                Err(RecoveryArtifactError::DigestMismatch(_))));
-            assert!(matches!(observations.observe(&root, &mut Default::default()),
-                Err(RecoveryArtifactError::DigestMismatch(_))));
+            inventory.insert(
+                PathBuf::from(name),
+                hex(&Sha256::digest(b"mutated-after-admission").into()),
+            );
+            assert!(matches!(
+                observations.verify_entry_inventory(&root, &inventory),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            assert!(matches!(
+                observations.observe(&root, &mut Default::default()),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
         }
         let inside_package = root.join("Package.hi");
         fs::write(&inside_package, b"package-interface").unwrap();
         let digest: [u8; 32] = Sha256::digest(b"package-interface").into();
         let (_, package_observations) = PackageInterfaceValidation::capture_entry(
-            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
             |validation| validation.verify(&inside_package, &digest),
-        ).unwrap();
+        )
+        .unwrap();
         // The package reader issues an external witness role. Its physical
         // presence under raw still requires equality with the entry manifest.
-        assert!(matches!(package_observations.verify_entry_inventory(&root, &BTreeMap::new()),
-            Err(RecoveryArtifactError::DigestMismatch(_))));
-        package_observations.verify_entry_inventory(&root,
-            &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))])).unwrap();
+        assert!(matches!(
+            package_observations.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        package_observations
+            .verify_entry_inventory(
+                &root,
+                &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))]),
+            )
+            .unwrap();
         #[cfg(unix)]
         {
             let aliases = tempfile::tempdir().unwrap();
             let alias = aliases.path().join("Package.hi");
             std::os::unix::fs::symlink(&inside_package, &alias).unwrap();
             let (_, alias_observations) = PackageInterfaceValidation::capture_entry(
-                &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+                &root,
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
                 |validation| validation.verify(&alias, &digest),
-            ).unwrap();
+            )
+            .unwrap();
             let stale_inventory = BTreeMap::from([(PathBuf::from("Package.hi"), hex(&[42; 32]))]);
-            assert!(matches!(alias_observations.verify_entry_inventory(&root, &stale_inventory),
-                Err(RecoveryArtifactError::DigestMismatch(_))));
-            alias_observations.verify_entry_inventory(&root,
-                &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))])).unwrap();
+            assert!(matches!(
+                alias_observations.verify_entry_inventory(&root, &stale_inventory),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            alias_observations
+                .verify_entry_inventory(
+                    &root,
+                    &BTreeMap::from([(PathBuf::from("Package.hi"), hex(&digest))]),
+                )
+                .unwrap();
         }
         let external = tempfile::NamedTempFile::new().unwrap();
         fs::write(external.path(), b"not-owned-by-entry").unwrap();
         let (_, escaped) = PackageInterfaceValidation::capture_entry(
-            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
             |validation| read_admission_bytes(external.path(), 64, validation),
-        ).unwrap();
-        assert!(matches!(escaped.verify_entry_inventory(&root, &BTreeMap::new()),
-            Err(RecoveryArtifactError::InvalidReference)));
+        )
+        .unwrap();
+        assert!(matches!(
+            escaped.verify_entry_inventory(&root, &BTreeMap::new()),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
         let path = root.join("conflicting-read");
         fs::write(&path, b"first").unwrap();
         let conflict = PackageInterfaceValidation::capture_entry(
-            &root, Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+            &root,
+            Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                Default::default(),
+            )),
             |validation| {
                 read_admission_bytes(&path, 64, validation)?;
                 fs::write(&path, b"second")?;
                 read_admission_bytes(&path, 64, validation)
             },
         );
-        assert!(matches!(conflict, Err(RecoveryArtifactError::DigestMismatch(_))));
+        assert!(matches!(
+            conflict,
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
     }
 
     #[cfg(unix)]

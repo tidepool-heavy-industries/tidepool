@@ -184,8 +184,12 @@ impl AdmittedOriginalEntry {
         raw: &Path,
         files: &BTreeMap<PathBuf, String>,
     ) -> Result<(), CompileError> {
-        self.physical.verify_entry_inventory(raw, files).map_err(invalid)?;
-        self.physical.observe(raw, &mut Default::default()).map_err(invalid)
+        self.physical
+            .verify_entry_inventory(raw, files)
+            .map_err(invalid)?;
+        self.physical
+            .observe(raw, &mut Default::default())
+            .map_err(invalid)
     }
 }
 
@@ -204,41 +208,78 @@ fn admit_original_entry(
     let root = std::fs::canonicalize(raw)?;
     let ((output, dependency_selection), physical) =
         crate::recovery_artifacts::PackageInterfaceValidation::capture_entry(
-            &root, inventory, |validation| {
+            &root,
+            inventory,
+            |validation| {
                 for (name, bytes) in [
                     (prepared_artifact_name("__prepared"), prepared_bytes),
                     ("meta.cbor".to_owned(), metadata),
                     ("asks.json".to_owned(), asks),
                 ] {
-                    validation.record_captured_bytes(&root.join(name), bytes).map_err(invalid)?;
+                    validation
+                        .record_captured_bytes(&root.join(name), bytes)
+                        .map_err(invalid)?;
                 }
                 let prepared = Arc::new(tidepool_repr::execution_schema::parse_program(
-                    prepared_bytes, &crate::prepared_artifact::production_requirements()?,
+                    prepared_bytes,
+                    &crate::prepared_artifact::production_requirements()?,
                     DecodeLimits::default(),
                 )?);
-                let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(metadata, &prepared)?;
+                let (table, warnings) =
+                    tidepool_repr::serial::read_metadata_for_program(metadata, &prepared)?;
                 let sites = parse_asks(asks)?.sites();
                 let products = seal_turn_outputs_with_validation(
-                    offer, &root, source_path, &source, &prepared, "__prepared",
-                    Some((&table, &sites)), None, OriginalOutputPublication::RetainedEntry,
-                    None, None, None, None, validation,
-                )?.ok_or_else(|| invalid("original native custody unavailable"))?;
+                    offer,
+                    &root,
+                    source_path,
+                    &source,
+                    &prepared,
+                    "__prepared",
+                    Some((&table, &sites)),
+                    None,
+                    OriginalOutputPublication::RetainedEntry,
+                    None,
+                    None,
+                    None,
+                    None,
+                    validation,
+                )?
+                .ok_or_else(|| invalid("original native custody unavailable"))?;
                 if products.checked.is_some() || products.original_compile_input.is_none() {
                     return Err(invalid("entry has no complete original source custody"));
                 }
-                let dependency_selection = offer.selected.as_deref().map(|candidates| {
-                    products.source_selection.entry_dependency_selection(&products.artifact_view, candidates)
-                        .map_err(compiler_evidence_failure)
-                }).transpose()?.filter(|selection| selection.has_linked_originals());
-                Ok((ProductionEntryOutput {
-                    prepared, table, warnings, sites, products: Arc::new(products), source,
-                    source_path: source_path.to_owned(),
-                }, dependency_selection))
+                let dependency_selection = offer
+                    .selected
+                    .as_deref()
+                    .map(|candidates| {
+                        products
+                            .source_selection
+                            .entry_dependency_selection(&products.artifact_view, candidates)
+                            .map_err(compiler_evidence_failure)
+                    })
+                    .transpose()?
+                    .filter(|selection| selection.has_linked_originals());
+                Ok((
+                    ProductionEntryOutput {
+                        prepared,
+                        table,
+                        warnings,
+                        sites,
+                        products: Arc::new(products),
+                        source,
+                        source_path: source_path.to_owned(),
+                    },
+                    dependency_selection,
+                ))
             },
         )?;
     #[cfg(test)]
     ENTRY_OBSERVED_INPUTS.with(|inputs| *inputs.borrow_mut() = physical.entry_owned_paths());
-    Ok(AdmittedOriginalEntry { output, physical, dependency_selection })
+    Ok(AdmittedOriginalEntry {
+        output,
+        physical,
+        dependency_selection,
+    })
 }
 
 impl ProductionEntryOutput {
@@ -788,7 +829,8 @@ pub fn load_selected_production_entry_with_catalog(
     }
     let source = String::from_utf8(crate::host_work::read(&manifest.source)?)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let prepared_bytes = crate::checked_cell::read(raw.join(prepared_artifact_name("__prepared")), 128 << 20)?;
+    let prepared_bytes =
+        crate::checked_cell::read(raw.join(prepared_artifact_name("__prepared")), 128 << 20)?;
     let metadata = crate::checked_cell::read(raw.join("meta.cbor"), 32 << 20)?;
     let asks = crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?;
     let offer = ModuleCandidateOffer {
@@ -808,10 +850,23 @@ pub fn load_selected_production_entry_with_catalog(
             .expect("validated retained-entry format has no session selections"),
     };
     let admitted = admit_original_entry(
-        &raw, &manifest.source, source, &prepared_bytes, &metadata, &asks, &offer,
-        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default())),
+        &raw,
+        &manifest.source,
+        source,
+        &prepared_bytes,
+        &metadata,
+        &asks,
+        &offer,
+        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        )),
     )?;
-    if admitted.dependency_selection.as_ref() != manifest.dependencies.as_ref().map(|dependencies| &dependencies.selection) {
+    if admitted.dependency_selection.as_ref()
+        != manifest
+            .dependencies
+            .as_ref()
+            .map(|dependencies| &dependencies.selection)
+    {
         return Err(invalid("linked entry issued dependency closure differs"));
     }
     admitted.verify_physical(&raw, &manifest.files)?;
