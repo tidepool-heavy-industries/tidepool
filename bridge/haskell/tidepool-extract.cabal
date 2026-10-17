@@ -83,6 +83,7 @@ library tidepool-extract-internal
     Tidepool.DependencyEvidence
     Tidepool.DeclarationJoin
     Tidepool.WorkerServer
+    Tidepool.RequestCompletion
     Tidepool.HarnessSource
     Tidepool.InspectionRunner
     Tidepool.WorkerDiagnostics
