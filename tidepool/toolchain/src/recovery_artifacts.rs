@@ -802,6 +802,11 @@ pub enum RecoveryAdmissionFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("input native decision for {owner:?} refused: {reason:?}")]
+    InputDecision {
+        owner: crate::declaration_join::ExactModuleIdentity,
+        reason: crate::certified_products::InputDecisionRefusal,
+    },
     #[error("completed source evidence for {} failed: {failure:?}", input.display())]
     CompletedSourceEvidence {
         input: PathBuf,
@@ -862,6 +867,9 @@ fn recovery_validation_error(
     use tidepool_repr::execution_schema::ParseError;
     match error {
         CertificationError::Interrupted(error) => RecoveryArtifactError::Io(error),
+        CertificationError::InputDecision { owner, reason } => {
+            RecoveryArtifactError::InputDecision { owner, reason }
+        }
         CertificationError::CompletedSourceEvidence { input, failure } => {
             RecoveryArtifactError::CompletedSourceEvidence { input, failure }
         }
@@ -905,7 +913,6 @@ fn recovery_validation_error(
             limit,
         }),
         CertificationError::EvidenceRead { .. }
-        | CertificationError::InputDecision { .. }
         | CertificationError::CapturedModulePayload(_)
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)

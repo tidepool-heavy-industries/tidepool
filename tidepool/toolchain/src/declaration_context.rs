@@ -6058,6 +6058,11 @@ fn failure(message: impl std::fmt::Display) -> CompileError {
 
 fn materialization_failure(error: recovery_artifacts::RecoveryArtifactError) -> CompileError {
     match error {
+        recovery_artifacts::RecoveryArtifactError::InputDecision { owner, reason } => {
+            compiler_evidence_failure(
+                crate::certified_products::CertificationError::InputDecision { owner, reason },
+            )
+        }
         recovery_artifacts::RecoveryArtifactError::Io(error)
         | recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. }
             if error.kind() == std::io::ErrorKind::Interrupted =>
