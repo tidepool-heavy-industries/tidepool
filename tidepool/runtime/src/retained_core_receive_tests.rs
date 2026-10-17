@@ -278,7 +278,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .certified_groups
         .iter()
         .find(|group| {
-            group.owner().module == support.module
+            group.owner().unit == support.unit
+                && group.owner().module == support.module
                 && group
                     .group()
                     .binders()
