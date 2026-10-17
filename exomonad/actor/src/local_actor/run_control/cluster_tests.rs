@@ -231,8 +231,6 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         )
         .admit_work()
         .unwrap();
-    let other_outcome = other_ticket.run_with_close(|_| ());
-    let other_cancellation = other_outcome.host_admission_cancellation().unwrap();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
@@ -267,7 +265,7 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         .await
         .unwrap()
         .unwrap();
-    other_cancellation.checkpoint().unwrap();
+    assert!(other_control.preparation_client().claim(|| ()).is_ok());
     assert!(client.claim(|| ()).is_err());
     assert!(services
         .with_compiler_owner(
@@ -298,7 +296,9 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
             .await,
         crate::CleanupComponentOutcome::Confirmed
     );
-    other_ticket.run(|_| ());
+    other_ticket
+        .run(|_| tidepool_extract_cmd::compiler_host_checkpoint())
+        .unwrap();
     other_control.seal().await.unwrap();
     assert_eq!(
         other_control
