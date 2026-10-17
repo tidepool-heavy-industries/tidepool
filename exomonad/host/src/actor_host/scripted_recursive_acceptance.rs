@@ -137,6 +137,7 @@ async fn next_descendant(
     pending: &mut VecDeque<HostedScriptRound>,
     parent: ActorRef,
     context_parent: Option<ActorRef>,
+    expected_model: &str,
     parent_operation: &OperationId,
 ) -> (ActorRef, HostedScriptRound) {
     pending_claim(host, parent_operation);
@@ -190,8 +191,8 @@ async fn next_descendant(
     assert!(node.model_actor);
     assert!(node.bound_worktree.is_some());
     assert_eq!(
-        round.request.model, "gpt-6.1-sol",
-        "ordinary recursive workers inherit the configured parent selection"
+        round.request.model, expected_model,
+        "the descendant request uses its authored model selection"
     );
     (node.actor, round)
 }
@@ -206,17 +207,22 @@ fn transcript(round: &HostedScriptRound) -> Vec<harness::item::Item> {
         .collect()
 }
 
-fn captured(round: &HostedScriptRound, prefix: &[harness::item::Item], excluded_call: &str) {
+fn captured(
+    round: &HostedScriptRound,
+    expected_model: &str,
+    prefix: &[harness::item::Item],
+    excluded_call: &str,
+) {
+    assert_eq!(
+        round.request.model, expected_model,
+        "captured history projects into the selected descendant model"
+    );
     let retained = transcript(round);
     let text = serde_json::to_string(&retained).unwrap();
     let cross_model = prefix
         .iter()
         .any(|item| item.0["encrypted_content"] == "synthetic-opaque-gpt-6.1-sol");
     if cross_model {
-        assert_eq!(
-            round.request.model, "gpt-6.1-sol",
-            "ordinary recursive workers inherit the configured parent selection"
-        );
         let parent_users = prefix
             .iter()
             .filter(|item| item.0["role"] == "user")
@@ -540,10 +546,11 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 &mut pending,
                 root_actor,
                 Some(root_actor),
+                "gpt-6-luna",
                 &root_operation,
             )
             .await;
-            captured(&child, &root_prefix, ROOT_CALL);
+            captured(&child, "gpt-6-luna", &root_prefix, ROOT_CALL);
             assert_eq!(transcript(&root_wait)[..root_prefix.len()], root_prefix);
             let native_turns = host
                 .runtime
@@ -598,10 +605,11 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 &mut pending,
                 child_actor,
                 Some(child_actor),
+                "gpt-6-luna",
                 &child_operation,
             )
             .await;
-            captured(&grandchild, &child_prefix, CHILD_CALL);
+            captured(&grandchild, "gpt-6-luna", &child_prefix, CHILD_CALL);
             let grandchild_path = identity(&grandchild).actor;
             let graph = host.context.forest.inspect_host_graph().await.unwrap();
             assert_eq!(graph.len(), 3);
@@ -744,7 +752,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         let root_wait = next(host, &mut requests, &mut pending, &root_path).await;
         unsettled(&root_wait, "fresh-default-request");
         let (child_actor, child) = next_descendant(
-            host, &mut requests, &mut pending, root_actor, None, &operation,
+            host, &mut requests, &mut pending, root_actor, None, "gpt-6-luna", &operation,
         ).await;
         let child_path = identity(&child).actor;
         assert!(!serde_json::to_string(&child.request.input).unwrap()
@@ -933,7 +941,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         let child_wait = next(host, &mut requests, &mut pending, &reviewer_path).await;
         unsettled(&child_wait, "review-fresh-consumer");
         let (consumer_actor, consumer) = host.while_operation_succeeds(&operation,
-            next_descendant(host, &mut requests, &mut pending, reviewer_actor, None, &operation),
+            next_descendant(host, &mut requests, &mut pending, reviewer_actor, None, "gpt-6-luna", &operation),
         ).await.unwrap();
         let consumer_path = identity(&consumer).actor;
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
