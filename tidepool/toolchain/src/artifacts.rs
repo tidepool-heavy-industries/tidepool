@@ -7203,9 +7203,10 @@ mod module_product_tests {
             .collect();
         let operation =
             tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let bytes = serde_json::to_vec(&evidence).unwrap();
         let parsed = ParsedSourceEvidence::parse(
             &operation,
-            &serde_json::to_vec(&evidence).unwrap(),
+            &bytes,
             SourceEvidenceUse::BuildAction,
             &source,
         )
@@ -7216,9 +7217,10 @@ mod module_product_tests {
         assert!(parsed.validate_build_action_closure(&source, &[]).is_err());
         evidence.sources.pop();
         evidence.selection_complete = false;
+        let bytes = serde_json::to_vec(&evidence).unwrap();
         let parsed = ParsedSourceEvidence::parse(
             &operation,
-            &serde_json::to_vec(&evidence).unwrap(),
+            &bytes,
             SourceEvidenceUse::BuildAction,
             &source,
         )
