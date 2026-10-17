@@ -5539,7 +5539,7 @@ impl ArtifactView {
     /// Read-only lifetime requirements for accepted authored owners. Retaining a
     /// full module also retains private helpers that may be called by a later
     /// exported entry; this query grants no executable group selection.
-    pub(crate) fn authored_native_binding_custody_requirements(
+    fn authored_native_binding_custody_requirements(
         &self,
         accepted_owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {

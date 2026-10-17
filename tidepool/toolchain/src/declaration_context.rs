@@ -6468,7 +6468,6 @@ impl ExactDeclarationContext {
         self.owner
             .facts
             .compiler_support
-            .artifacts()
             .authored_native_binding_custody_requirements(owners)
     }
 

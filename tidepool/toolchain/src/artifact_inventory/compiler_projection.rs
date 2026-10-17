@@ -812,6 +812,23 @@ impl CompilerSourceSupport {
         )
     }
 
+    /// Lifetime custody includes authored private helpers, independently of
+    /// current executable demand and without choosing a historical issuer.
+    pub(crate) fn authored_native_binding_custody_requirements(
+        &self,
+        accepted: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        let mut requirements = self
+            .artifacts
+            .authored_native_binding_custody_requirements(accepted)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for offer in self.native_offers.iter() {
+            requirements.extend(offer.authored_binding_requirements(accepted)?);
+        }
+        Ok(requirements.into_iter().collect())
+    }
+
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
     }

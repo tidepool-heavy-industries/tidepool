@@ -1041,6 +1041,45 @@ impl IssuedNativeOffer {
             .collect()
     }
 
+    pub(super) fn authored_binding_requirements(
+        &self,
+        accepted: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        if !accepted.contains(&self.0.owner) {
+            return Ok(Vec::new());
+        }
+        let lease = &self.0.custody.lease;
+        if !matches!(&lease.payloads[&self.original()].payload, ArtifactPayload::Original(product)
+            if product.module_interface().is_some_and(|interface| matches!(interface.origin(),
+                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+        {
+            return Ok(Vec::new());
+        }
+        let roots = self
+            .0
+            .custody
+            .reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == self.original() =>
+                {
+                    Some(*group)
+                }
+                _ => None,
+            })
+            .collect();
+        let state = lease.inventory.0.lock().expect("inventory lock");
+        Ok(native_requirements_for_exact_groups_in_custody(
+            &state,
+            &lease.payloads,
+            &self.0.custody.reachable,
+            roots,
+        )?
+        .0
+        .bindings)
+    }
+
     /// Consume either this offer's own body or the immutable descendants of
     /// requested dependency bodies. Unrelated sibling bodies remain custody.
     pub(crate) fn contribution_for(

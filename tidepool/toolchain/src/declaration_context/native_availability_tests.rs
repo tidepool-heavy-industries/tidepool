@@ -559,8 +559,9 @@ fn issued_offer_retention_preserves_historical_canonical_custody() {
                 .iter()
                 .all(|node| actual.bindings.contains(node)));
             assert!(offer
-                .custody()
+                .custody_snapshot()
                 .binding_dependencies()
+                .unwrap()
                 .iter()
                 .all(|edge| retained.artifacts().binding_dependencies().contains(edge)));
         }
@@ -693,12 +694,11 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         "the issued fragment intentionally leaves its baseline dependency unoffered"
     );
     assert_eq!(private.native_offers.len(), 1);
-    let proof = private.native_offers[0]
-        .proof()
-        .expect("the owner issued its actual empty group");
-    let groups = proof
-        .issued_groups(private.native_offers[0].custody())
-        .unwrap();
+    let groups = private.native_offers[0]
+        .issued_group_carriers()
+        .unwrap()
+        .into_keys()
+        .collect::<BTreeSet<_>>();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups.first().unwrap().original_ordinal, 7);
     assert!(private.native_offers[0].is_full());
@@ -2003,11 +2003,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         "exact offer custody retains materialized file leases"
     );
     assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
-    offer
-        .proof()
-        .unwrap()
-        .issued_group_carriers(offer.custody())
-        .unwrap();
+    offer.issued_group_carriers().unwrap();
     drop(offer);
     assert!(
         directory_owner.upgrade().is_none(),
@@ -6293,8 +6289,9 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         },
     );
     assert!(parent_offer
-        .custody()
+        .custody_snapshot()
         .binding_dependencies()
+        .unwrap()
         .contains(&historical_edge));
     assert!(!b_groups.contains(&historical_child));
     let support = fixture_compiler_support(projection.clone(), right.clone());
@@ -6329,8 +6326,9 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
         }
         if includes_a {
             assert!(a
-                .custody()
+                .custody_snapshot()
                 .binding_dependencies()
+                .unwrap()
                 .iter()
                 .all(|edge| carried.artifacts().binding_dependencies().contains(edge)));
         }
@@ -7081,8 +7079,9 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         );
         assert!(
             fresh_offer
-                .custody()
+                .custody_snapshot()
                 .binding_dependencies()
+                .unwrap()
                 .contains(&expected),
             "the fresh body uses the exact current carrier's issued dependency edge"
         );
