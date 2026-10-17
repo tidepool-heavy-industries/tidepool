@@ -7,7 +7,7 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{auth::chatgpt::RunAccountAuth, ResponsesClient},
+    transport::ResponsesClient,
 };
 
 #[cfg(test)]
@@ -49,8 +49,8 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
 
 pub(super) fn responses_client(
     runtime: &EmbeddedHarnessRuntime,
-) -> ResponsesClient<RunAccountAuth> {
-    ResponsesClient::new(runtime.account_auth().clone())
+) -> ResponsesClient<super::run_auth::RunAuth> {
+    ResponsesClient::new(runtime.inference_auth().clone())
 }
 
 pub(super) struct EmbeddedService {
@@ -281,6 +281,7 @@ impl EmbeddedService {
         run_root: &Path,
         settings: &EmbeddedLaunchConfig,
         owner: Arc<super::HostIncarnationLease>,
+        inference_auth: Option<super::run_auth::RunAuth>,
     ) -> Result<Self, String> {
         if !owner
             .owns_run(run_root)
@@ -302,7 +303,18 @@ impl EmbeddedService {
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
-        runtime.configure_accounts(settings.credential_file.clone())?;
+        let auth = match inference_auth {
+            Some(auth) if auth.backend() == settings.provider => auth,
+            Some(_) => {
+                return Err("preadmitted transport differs from configured run backend".into())
+            }
+            None => super::run_auth::RunAuth::from_settings(
+                settings,
+                runtime.store(),
+                runtime.run_identity().to_owned(),
+            )?,
+        };
+        runtime.configure_inference(auth)?;
         // Only this exclusive host startup can prove native continuations
         // from the previous process no longer exist. Ordinary Store reads
         // must preserve live mounted forms.
@@ -321,9 +333,12 @@ impl EmbeddedService {
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_browser_bundle(browser_bundle)
             .with_history_store(runtime.store())
-            .with_account_auth(runtime.account_auth().clone())
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
+        let server_config = match runtime.account_auth() {
+            Some(auth) => server_config.with_account_auth(auth.clone()),
+            None => server_config,
+        };
         let server_config = match &settings.public_origin {
             Some(origin) => server_config
                 .with_public_origin(origin.clone())
@@ -366,14 +381,13 @@ impl EmbeddedService {
             runtime.store(),
             runtime.scheduler(),
         ))?;
-        control.publish(
-            harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
-                runtime
-                    .account_auth()
-                    .selection()
-                    .map_err(|e| e.to_string())?,
-            ),
-        );
+        if let Some(auth) = runtime.account_auth() {
+            control.publish(
+                harness::server::browser_contract::StateEvent::AccountSelectionUpsert(
+                    auth.selection().map_err(|error| error.to_string())?,
+                ),
+            );
+        }
         let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
             let _server_owner = server_owner;
@@ -410,7 +424,7 @@ impl EmbeddedService {
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
-        Self::prepare_owned(run_root, settings, Arc::new(owner)).await
+        Self::prepare_owned(run_root, settings, Arc::new(owner), None).await
     }
 
     #[cfg(test)]
@@ -771,7 +785,7 @@ pub(super) async fn drive_conversation(
     actor_ref: exomonad_actor::ActorRef,
 ) -> Result<(), EmbeddedDriverError> {
     let transport = responses_client(&runtime);
-    drive_conversation_with_transport::<RunAccountAuth, _>(
+    drive_conversation_with_transport::<super::run_auth::RunAuth, _>(
         embedded,
         runtime,
         settings,
@@ -957,6 +971,13 @@ pub(super) mod round_fixture {
     }
     struct Offline;
     impl harness::transport::Auth for Offline {
+        fn admission(
+            &self,
+        ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+        {
+            Err(harness::transport::TransportError::InvalidAdmission)
+        }
+
         fn access(&self) -> Result<String, TransportError> {
             panic!("component fixture has no network authentication")
         }

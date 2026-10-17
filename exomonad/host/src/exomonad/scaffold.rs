@@ -20,15 +20,12 @@ mod scaffold_gitlink {
 /// and prompt files match the shipped workspace; only repository-specific
 /// settings stay out of a new project.
 const CONFIG: &str = r#"[defaults]
-model = "gpt-6.1-sol"
-effort = "medium"
+model = { backend = "deepseek", model = "deepseek-flash" }
+reasoning = { backend = "deepseek", effort = "high" }
 
 [models]
-astra = "gpt-6-astra"
-sol = "gpt-6.1-sol"
-planner = "gpt-6-astra"
-executor = "gpt-6.1-sol"
-luna = "gpt-6-luna"
+planner = { backend = "deepseek", model = "deepseek-v4-pro" }
+executor = { backend = "deepseek", model = "deepseek-flash" }
 
 [haskell]
 source_roots = [".", "workspace"]

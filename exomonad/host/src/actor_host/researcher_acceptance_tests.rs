@@ -1,13 +1,12 @@
 //! Execute the exact published tutorial through real source capture, Harness,
 //! installed Sync handlers, Web normalization and typed request settlement.
-use super::ResidentToolEndpointTestExt;
 use super::hosted_test_context::{HostedChildMachines, HostedTestRuntime};
 use super::test_campaign::{
-    HostedScriptRound, HostedScriptSelection, commit_workspace, hosted_script_provider,
-    hosted_test_settings, next_hosted_child_round, next_hosted_script_round,
-    select_hosted_script_round,
+    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_child_round,
+    next_hosted_script_round, select_hosted_script_round, HostedScriptRound, HostedScriptSelection,
 };
-use serde_json::{Value, json};
+use super::ResidentToolEndpointTestExt;
+use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -69,7 +68,10 @@ fn configure_research(config: &mut super::ActorHostConfig, script: ResearchScrip
         .unwrap();
     }
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.models.insert("luna".into(), "gpt-6-luna".into());
+        project.models.insert(
+            "luna".into(),
+            exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "gpt-6-luna"),
+        );
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["Project.Researcher".into(), "AgentSpec".into()];
         if script == ResearchScript::RefusalControls {

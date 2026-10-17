@@ -17,6 +17,13 @@ use std::{
 
 struct Offline;
 impl Auth for Offline {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, TransportError> {
         panic!("scripted projection property requires no authentication")
     }

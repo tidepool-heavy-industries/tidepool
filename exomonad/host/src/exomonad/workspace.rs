@@ -337,8 +337,8 @@ pub struct FrozenWorkspace {
     #[serde(default)]
     pub(crate) spec: Option<String>,
     pub(crate) prompts: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(crate) models: BTreeMap<String, String>,
+    #[serde(default, with = "super::inference_selection::models_config")]
+    pub(crate) models: BTreeMap<String, exomonad_actor::Model>,
     files: BTreeMap<PathBuf, String>,
     config: String,
     library_identity: String,
@@ -533,7 +533,7 @@ impl FrozenWorkspace {
         }
         let (config, config_text) = super::read_project_config(workspace)?;
         for (alias, model) in &config.models {
-            if alias.trim().is_empty() || model.trim().is_empty() {
+            if alias.trim().is_empty() || model.value().trim().is_empty() {
                 return Err("model aliases and provider model names must be non-empty".into());
             }
         }

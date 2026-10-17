@@ -14,7 +14,7 @@ use harness::{
     turn::JobOutput,
 };
 use parking_lot::Mutex;
-use tidepool_effect::{DeferredEffect, Response, error::EffectError};
+use tidepool_effect::{error::EffectError, DeferredEffect, Response};
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
@@ -31,6 +31,10 @@ type TransactionObserver =
     Arc<dyn Fn(&ContextTransaction) -> Result<ContextTransactionStatus, String> + Send + Sync>;
 pub(super) type ReasoningResolver =
     Arc<dyn Fn(&exomonad_actor::Reasoning) -> Result<Effort, String> + Send + Sync>;
+
+pub(super) type InferenceSelectionObserver = Arc<
+    dyn Fn() -> Result<(exomonad_actor::Model, exomonad_actor::Reasoning), String> + Send + Sync,
+>;
 
 type ExchangeObserver = Arc<
     dyn Fn(&ContextReference) -> Result<harness::context::RetainedExchangeObservation, String>
@@ -51,6 +55,7 @@ pub(super) struct EmbeddedContextBinding {
     invocation: ToolInvocationContext,
     model: ModelResolver,
     reasoning: ReasoningResolver,
+    inference_selection: InferenceSelectionObserver,
     initial_context: InitialContextObserver,
     transaction_issuer: TransactionIssuer,
     transaction_observer: TransactionObserver,
@@ -102,6 +107,7 @@ impl EmbeddedContextBinding {
         snapshot: &ContextSnapshot,
         model: ModelResolver,
         reasoning: ReasoningResolver,
+        inference_selection: InferenceSelectionObserver,
         initial_context: InitialContextObserver,
         store: Arc<harness::store::Store>,
     ) -> Result<Self, String> {
@@ -141,6 +147,7 @@ impl EmbeddedContextBinding {
             invocation,
             model,
             reasoning,
+            inference_selection,
             initial_context,
             transaction_issuer,
             transaction_observer,
@@ -249,6 +256,14 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
 }
 
 impl HostedContextBinding for EmbeddedContextBinding {
+    fn effective_inference(
+        &self,
+    ) -> Result<Option<(exomonad_actor::Model, exomonad_actor::Reasoning)>, EffectError> {
+        (self.inference_selection)()
+            .map(Some)
+            .map_err(EffectError::Handler)
+    }
+
     fn admit_request_reply(
         &self,
         activation: &exomonad_actor::RequestReplyActivation,
@@ -518,6 +533,14 @@ mod tests {
                 call_id: "call".into(),
                 namespace: None,
             },
+            inference_selection: Arc::new(|| {
+                Ok((
+                    exomonad_actor::Model::DeepSeekFlash,
+                    exomonad_actor::Reasoning::DeepSeekReasoning(
+                        exomonad_actor::DeepSeekReasoning::DeepSeekHigh,
+                    ),
+                ))
+            }),
             model: Arc::new(|model| match model {
                 exomonad_actor::Model::CustomModel(exomonad_actor::Backend::DeepSeek, name) => {
                     Ok(name.clone())
@@ -787,14 +810,12 @@ mod tests {
         binding
             .admit(&execution, &binding.invocation, principal)
             .unwrap();
-        assert!(
-            prepare_result(
-                &binding,
-                ContextReq::GetInitialContextWith,
-                PrincipalId::new(2, 1)
-            )
-            .is_err()
-        );
+        assert!(prepare_result(
+            &binding,
+            ContextReq::GetInitialContextWith,
+            PrincipalId::new(2, 1)
+        )
+        .is_err());
         for _ in 0..2 {
             assert!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal).is_ok());
         }
@@ -857,17 +878,15 @@ mod tests {
             .unwrap();
         let disposition = completion.context;
         assert!(matches!(disposition, ContextDisposition::Unedited));
-        assert!(
-            prepare_result(
-                &binding,
-                ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
-                    exomonad_actor::Backend::DeepSeek,
-                    "late".into()
-                )),
-                principal
-            )
-            .is_err()
-        );
+        assert!(prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                exomonad_actor::Backend::DeepSeek,
+                "late".into()
+            )),
+            principal
+        )
+        .is_err());
     }
 
     #[test]
@@ -968,17 +987,15 @@ mod tests {
             cause: CellExitCause::Cancelled,
             cleanup_confirmed: true,
         });
-        assert!(
-            prepare_result(
-                &binding,
-                ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
-                    exomonad_actor::Backend::DeepSeek,
-                    "late".into()
-                )),
-                principal
-            )
-            .is_err()
-        );
+        assert!(prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith(exomonad_actor::Model::CustomModel(
+                exomonad_actor::Backend::DeepSeek,
+                "late".into()
+            )),
+            principal
+        )
+        .is_err());
         assert_eq!(source.completion(output), Some(owner));
     }
 
@@ -1082,11 +1099,9 @@ mod tests {
                 .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
                 .unwrap();
             binding.cancel();
-            assert!(
-                binding
-                    .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
-                    .is_none()
-            );
+            assert!(binding
+                .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+                .is_none());
             binding.finish(CellExit {
                 execution,
                 cause: CellExitCause::Cancelled,

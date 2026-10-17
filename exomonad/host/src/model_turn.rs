@@ -35,16 +35,13 @@ pub type ModelResolver =
 /// and share the cell allowance. Any exhausted scope latches the cell breaker.
 #[derive(Clone)]
 pub struct ModelPolicy {
-    pub default_model: String,
-    pub models: Vec<String>,
+    pub inherit_selection: Arc<dyn Fn() -> Result<(String, Effort), String> + Send + Sync>,
     pub resolve_model: Arc<ModelResolver>,
-    pub default_effort: Effort,
-    pub efforts: Vec<Effort>,
+    pub resolve_reasoning:
+        Arc<dyn Fn(&tidepool_bridge_effects::Reasoning) -> Result<Effort, String> + Send + Sync>,
     pub limits: Limits,
 }
-use tidepool_bridge_effects::{
-    ModelAnnotationEnvelope, ModelControlStep, ModelEffortEnvelope, ModelRequestEnvelope,
-};
+use tidepool_bridge_effects::{ModelAnnotationEnvelope, ModelControlStep, ModelRequestEnvelope};
 enum Pending {
     Callback(Callback),
     Hook { hook: Hook, handle: String },
@@ -359,21 +356,16 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         self.authorize(caller)?;
         let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
+        let (inherited_model, inherited_effort) =
+            (self.policy.inherit_selection)().map_err(rejected)?;
         let model = match request.model {
             Some(selection) => (self.policy.resolve_model)(&selection).map_err(rejected)?,
-            None => self.policy.default_model.clone(),
+            None => inherited_model,
         };
-        let effort = request
-            .effort
-            .map(|effort| match effort {
-                ModelEffortEnvelope::ModelLowEffort => Effort::Low,
-                ModelEffortEnvelope::ModelMediumEffort => Effort::Medium,
-                ModelEffortEnvelope::ModelHighEffort => Effort::High,
-            })
-            .unwrap_or(self.policy.default_effort);
-        if !self.policy.models.contains(&model) || !self.policy.efforts.contains(&effort) {
-            return Err(rejected("model or effort is outside admitted host policy"));
-        }
+        let effort = match request.reasoning {
+            Some(selection) => (self.policy.resolve_reasoning)(&selection).map_err(rejected)?,
+            None => inherited_effort,
+        };
         let limits = Limits {
             requests: request
                 .limits
@@ -571,6 +563,13 @@ mod tests {
     }
     struct TestAuth;
     impl Auth for TestAuth {
+        fn admission(
+            &self,
+        ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+        {
+            Err(harness::transport::TransportError::InvalidAdmission)
+        }
+
         fn access(&self) -> Result<String, TransportError> {
             unreachable!()
         }
@@ -630,7 +629,7 @@ mod tests {
         json!({"status":"success","output":output})
     }
     fn request(hook: bool) -> Value {
-        json!({"instructions":"offline","input":"run","model":null,"effort":null,"limits":{"requests":null,"tools":null,"reported_tokens":null,"seconds":null},"tools":[{"name":"echo","description":"echo","kind":"call","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":null}],"result_schema":null,"after_tool":hook})
+        json!({"instructions":"offline","input":"run","model":null,"reasoning":null,"limits":{"requests":null,"tools":null,"reported_tokens":null,"seconds":null},"tools":[{"name":"echo","description":"echo","kind":"call","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":null}],"result_schema":null,"after_tool":hook})
     }
     fn service(
         runtime: &tokio::runtime::Runtime,
@@ -645,14 +644,20 @@ mod tests {
             Arc::new(Store::memory().unwrap()),
             Arc::new(JobScheduler::new(1).unwrap()),
             ModelPolicy {
-                default_model: "offline".into(),
-                models: vec!["offline".into()],
+                inherit_selection: Arc::new(|| Ok(("offline".into(), Effort::Low))),
                 resolve_model: Arc::new(|selection| match selection {
-                    tidepool_bridge_effects::Model::ProviderModel(model) => Ok(model.clone()),
+                    tidepool_bridge_effects::Model::CustomModel(
+                        tidepool_bridge_effects::Backend::OpenAIPlan,
+                        model,
+                    ) => Ok(model.clone()),
                     _ => Err("no frozen workspace models in this fixture".into()),
                 }),
-                default_effort: Effort::Low,
-                efforts: vec![Effort::Low],
+                resolve_reasoning: Arc::new(|reasoning| match reasoning {
+                    tidepool_bridge_effects::Reasoning::OpenAIReasoning(
+                        tidepool_bridge_effects::OpenAIReasoning::OpenAILow,
+                    ) => Ok(Effort::Low),
+                    _ => Err("outside fixture policy".into()),
+                }),
                 limits,
             },
             Arc::new(move || {

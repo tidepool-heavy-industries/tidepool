@@ -398,6 +398,13 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
 
 struct Offline;
 impl harness::transport::Auth for Offline {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, harness::transport::TransportError> {
         panic!("the deterministic transport must not request credentials")
     }

@@ -1,12 +1,10 @@
 //! Compose the admitted cell's ModelCall service from the embedded run owners.
 use std::{marker::PhantomData, sync::Arc};
 
+use super::run_auth::RunAuth;
 use exomonad_actor::{
-    ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, Model, ModelReq,
+    ActorDescriptor, CellModelBinding, CellModelFactory, Model, ModelReq, Reasoning,
 };
-use harness::transport::auth::chatgpt::RunAccountAuth;
-#[cfg(test)]
-use harness::transport::auth::ChatGptPlanAuth;
 use harness::{
     engine::ResponsesTransport, invocation::Limits, model::Effort, store::Store, transport::Auth,
     turn::JobScheduler,
@@ -26,8 +24,8 @@ pub(super) struct EmbeddedCellModelFactory<A, C> {
     runtime: tokio::runtime::Handle,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
-    default_model: String,
-    default_effort: Effort,
+    default_model: Model,
+    default_reasoning: Reasoning,
     launch_config: Option<Arc<ActorHostConfig>>,
     transport: Arc<dyn Fn() -> C + Send + Sync>,
     auth: PhantomData<fn() -> A>,
@@ -37,8 +35,8 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
     pub(super) fn new(
         store: Arc<Store>,
         scheduler: Arc<JobScheduler>,
-        default_model: String,
-        default_effort: Effort,
+        default_model: Model,
+        default_reasoning: Reasoning,
         transport: Arc<dyn Fn() -> C + Send + Sync>,
     ) -> Self {
         Self {
@@ -46,48 +44,57 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> EmbeddedCellModelFactor
             store,
             scheduler,
             default_model,
-            default_effort,
+            default_reasoning,
             launch_config: None,
             transport,
             auth: PhantomData,
         }
     }
-    fn policy(&self, descriptor: &ActorDescriptor) -> Result<ModelPolicy, String> {
+    fn policy(
+        &self,
+        descriptor: &ActorDescriptor,
+        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
+    ) -> Result<ModelPolicy, String> {
+        let backend = self.default_model.backend();
         let config = self.launch_config.clone();
         let resolve_model: Arc<ModelResolver> = Arc::new(move |model| match config.as_ref() {
             Some(config) => super::resolve_model(config, model),
-            None => match model.workspace_key() {
-                None => Ok(model.value().to_owned()),
-                Some(alias) => Err(format!(
-                    "model alias {alias} has no admitted workspace policy"
-                )),
-            },
-        });
-        let model = match descriptor.model() {
-            Some(model) => resolve_model(model),
-            None => Ok(self.default_model.clone()),
-        };
-        let model = model?;
-        let mut models = vec![model.clone()];
-        for tier in [Model::Sol, Model::Luna] {
-            if let Ok(configured) = resolve_model(&tier) {
-                if !models.contains(&configured) {
-                    models.push(configured);
-                }
+            None if model.backend() == backend && !model.value().trim().is_empty() => {
+                Ok(model.value().to_owned())
             }
-        }
-        let effort = match descriptor.fork_effort() {
-            Some(ForkEffort::Low) => Effort::Low,
-            Some(ForkEffort::Medium) => Effort::Medium,
-            Some(ForkEffort::High) => Effort::High,
-            None => self.default_effort,
-        };
+            None => Err("model differs from the fixed inference backend".into()),
+        });
+        let config = self.launch_config.clone();
+        let resolve_reasoning: Arc<dyn Fn(&Reasoning) -> Result<Effort, String> + Send + Sync> =
+            Arc::new(move |reasoning| match config.as_ref() {
+                Some(config) => super::resolve_reasoning(config, reasoning),
+                None if reasoning.backend() == backend => Ok(super::reasoning_effort(reasoning)),
+                None => Err("reasoning differs from the fixed inference backend".into()),
+            });
+        let model = descriptor
+            .model()
+            .cloned()
+            .unwrap_or_else(|| self.default_model.clone());
+        let reasoning = descriptor.reasoning().unwrap_or(self.default_reasoning);
+        // Validate admitted defaults before allocating the bounded invocation.
+        resolve_model(&model)?;
+        resolve_reasoning(&reasoning)?;
+        let inherited_model = resolve_model.clone();
+        let inherited_reasoning = resolve_reasoning.clone();
+        let inherit_selection = Arc::new(move || {
+            let effective = context
+                .as_ref()
+                .map(|binding| binding.effective_inference())
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .flatten();
+            let (model, reasoning) = effective.unwrap_or_else(|| (model.clone(), reasoning));
+            Ok((inherited_model(&model)?, inherited_reasoning(&reasoning)?))
+        });
         Ok(ModelPolicy {
-            default_model: model.clone(),
-            models,
+            inherit_selection,
             resolve_model,
-            default_effort: effort,
-            efforts: vec![effort],
+            resolve_reasoning,
             limits: Limits::default(),
         })
     }
@@ -105,8 +112,9 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelFactory
         execution: &WorkbenchExecutionId,
         principal: PrincipalId,
         descriptor: &ActorDescriptor,
+        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding> {
-        let policy = match self.policy(descriptor) {
+        let policy = match self.policy(descriptor, context) {
             Ok(policy) => policy,
             Err(reason) => return Arc::new(RefusedCellModelBinding(reason)),
         };
@@ -205,19 +213,13 @@ pub(super) fn admitted_factory(
     config: &ActorHostConfig,
 ) -> Arc<dyn CellModelFactory> {
     #[cfg(test)]
-    let effort = match config.effort {
-        exomonad_actor::ForkEffort::Low => Effort::Low,
-        exomonad_actor::ForkEffort::Medium => Effort::Medium,
-        exomonad_actor::ForkEffort::High => Effort::High,
-    };
-    #[cfg(test)]
     if let Some(transport) = service.test_transport() {
         return Arc::new(
-            EmbeddedCellModelFactory::<ChatGptPlanAuth, _>::new(
+            EmbeddedCellModelFactory::<RunAuth, _>::new(
                 service.runtime.store(),
                 service.runtime.scheduler(),
                 config.model.clone(),
-                effort,
+                config.reasoning,
                 Arc::new(move || transport.clone()),
             )
             .with_launch_config(config),
@@ -231,19 +233,14 @@ pub(super) fn admitted_runtime_factory(
     settings: &EmbeddedLaunchConfig,
     config: &ActorHostConfig,
 ) -> Arc<dyn CellModelFactory> {
-    let effort = match config.effort {
-        exomonad_actor::ForkEffort::Low => Effort::Low,
-        exomonad_actor::ForkEffort::Medium => Effort::Medium,
-        exomonad_actor::ForkEffort::High => Effort::High,
-    };
     let _ = settings;
-    let auth = runtime.account_auth().clone();
+    let auth = runtime.inference_auth().clone();
     Arc::new(
-        EmbeddedCellModelFactory::<RunAccountAuth, _>::new(
+        EmbeddedCellModelFactory::<RunAuth, _>::new(
             runtime.store(),
             runtime.scheduler(),
             config.model.clone(),
-            effort,
+            config.reasoning,
             Arc::new(move || harness::transport::ResponsesClient::new(auth.clone())),
         )
         .with_launch_config(config),

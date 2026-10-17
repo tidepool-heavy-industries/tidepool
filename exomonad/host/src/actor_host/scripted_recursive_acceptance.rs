@@ -477,12 +477,18 @@ fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
         )
         .unwrap(),
     );
-    config.model = "gpt-6.1-sol".into();
+    config.model =
+        exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "gpt-6.1-sol");
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
-        project.defaults.model = "gpt-6.1-sol".into();
-        project.models.insert("luna".into(), "gpt-6-luna".into());
-        project.defaults.effort = crate::exomonad::ExomonadEffort::Low;
+        project.defaults.model =
+            exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "gpt-6.1-sol");
+        project.models.insert(
+            "luna".into(),
+            exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "gpt-6-luna"),
+        );
+        project.defaults.reasoning =
+            exomonad_actor::Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow);
     });
     commit_workspace(&config.workspace);
 }

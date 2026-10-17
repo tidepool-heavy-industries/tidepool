@@ -1,7 +1,7 @@
 use crate::{
-    Model, ModelAnnotationEnvelope, ModelControlStep, ModelEffortEnvelope, ModelLimitEnvelope,
-    ModelOutcomeEnvelope, ModelReceiptEnvelope, ModelRequestEnvelope, ModelRequestLimits,
-    ModelUsageEnvelope,
+    Backend, DeepSeekReasoning, Model, ModelAnnotationEnvelope, ModelControlStep,
+    ModelLimitEnvelope, ModelOutcomeEnvelope, ModelReceiptEnvelope, ModelRequestEnvelope,
+    ModelRequestLimits, ModelUsageEnvelope, OpenAIModel, OpenAIReasoning, Reasoning,
 };
 use serde_json::{json, Value};
 
@@ -76,7 +76,7 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         instructions: "instruction".into(),
         input: "input".into(),
         model: None,
-        effort: Some(ModelEffortEnvelope::ModelLowEffort),
+        reasoning: Some(Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow)),
         limits: ModelRequestLimits {
             requests: None,
             tools: None,
@@ -93,16 +93,19 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
         request
     );
     for (selection, expected) in [
-        (Model::Luna, json!({"tag":"Luna"})),
-        (Model::Sol, json!({"tag":"Sol"})),
-        (Model::Astra, json!({"tag":"Astra"})),
+        (Model::DeepSeekFlash, json!({"tag":"DeepSeekFlash"})),
+        (Model::DeepSeekPro, json!({"tag":"DeepSeekPro"})),
         (
-            Model::CustomAlias("luna".into()),
-            json!({"tag":"CustomAlias","contents":"luna"}),
+            Model::OpenAIModel(OpenAIModel::Gpt6Luna),
+            json!({"tag":"OpenAIModel","contents":"Gpt6Luna"}),
         ),
         (
-            Model::ProviderModel("luna".into()),
-            json!({"tag":"ProviderModel","contents":"luna"}),
+            Model::CustomModel(Backend::DeepSeek, "same-id".into()),
+            json!({"tag":"CustomModel","contents":["DeepSeek","same-id"]}),
+        ),
+        (
+            Model::CustomModel(Backend::OpenAIPlan, "same-id".into()),
+            json!({"tag":"CustomModel","contents":["OpenAIPlan","same-id"]}),
         ),
     ] {
         let mut selected = request.clone();
@@ -117,14 +120,36 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
     for selection in [
         json!("luna"),
         json!({"tag":"Unknown"}),
-        json!({"tag":"ProviderModel"}),
-        json!({"tag":"ProviderModel","contents":true}),
+        json!({"tag":"CustomModel"}),
+        json!({"tag":"CustomModel","contents":true}),
         json!({"tag":"Sol","foreign":"value"}),
     ] {
         let mut malformed = valid.clone();
         malformed["model"] = selection;
         assert!(serde_json::from_value::<ModelRequestEnvelope>(malformed).is_err());
     }
+    for reasoning in [
+        Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekNone),
+        Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekLow),
+        Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekHigh),
+        Reasoning::DeepSeekReasoning(DeepSeekReasoning::DeepSeekMax),
+        Reasoning::OpenAIReasoning(OpenAIReasoning::OpenAILow),
+        Reasoning::OpenAIReasoning(OpenAIReasoning::OpenAIMedium),
+        Reasoning::OpenAIReasoning(OpenAIReasoning::OpenAIHigh),
+    ] {
+        let mut selected = request.clone();
+        selected.reasoning = Some(reasoning);
+        assert_eq!(
+            serde_json::from_value::<ModelRequestEnvelope>(
+                serde_json::to_value(&selected).unwrap()
+            )
+            .unwrap(),
+            selected
+        );
+    }
+    let mut retired_effort = valid.clone();
+    retired_effort["effort"] = json!("ModelLowEffort");
+    assert!(serde_json::from_value::<ModelRequestEnvelope>(retired_effort).is_err());
     let mut omitted = valid.clone();
     omitted.as_object_mut().unwrap().remove("model");
     assert_eq!(

@@ -38,6 +38,28 @@ impl Backend {
     }
 }
 
+impl std::fmt::Display for Model {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}/{}",
+            self.backend().config_name(),
+            self.value()
+        )
+    }
+}
+
+impl std::fmt::Display for Reasoning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}/{}",
+            self.backend().config_name(),
+            self.value()
+        )
+    }
+}
+
 impl Model {
     /// Model identifiers are interpreted only within an explicitly selected backend.
     #[must_use]

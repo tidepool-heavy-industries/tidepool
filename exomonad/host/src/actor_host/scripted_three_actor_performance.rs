@@ -271,6 +271,13 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
 
     struct Offline;
     impl Auth for Offline {
+        fn admission(
+            &self,
+        ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+        {
+            Err(harness::transport::TransportError::InvalidAdmission)
+        }
+
         fn access(&self) -> Result<String, TransportError> {
             panic!("scripted yield requires no credentials")
         }
@@ -504,12 +511,21 @@ async fn three_actor_capture(concurrent: bool) {
     let authored_settings = settings.clone();
     let (provider, mut requests) = hosted_script_provider();
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
-        config.model = "gpt-6.1-sol".into();
+        config.model =
+            exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "gpt-6.1-sol");
         let authored = config.workspace.join(".exomonad");
         crate::exomonad::write_fixture_project_config(&authored, "gpt-6.1-sol", |project| {
             project.launch.embedded = Some(authored_settings);
-            project.models.insert("luna".into(), "gpt-6-luna".into());
-            project.defaults.effort = crate::exomonad::ExomonadEffort::Low;
+            project.models.insert(
+                "luna".into(),
+                exomonad_actor::Model::for_backend(
+                    exomonad_actor::Backend::OpenAIPlan,
+                    "gpt-6-luna",
+                ),
+            );
+            project.defaults.reasoning = exomonad_actor::Reasoning::OpenAIReasoning(
+                exomonad_actor::OpenAIReasoning::OpenAILow,
+            );
         });
         commit_workspace(&config.workspace);
     })

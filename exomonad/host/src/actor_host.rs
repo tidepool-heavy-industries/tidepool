@@ -15,6 +15,7 @@ pub(crate) use crate::transport_test_support::ResidentToolEndpointTestExt;
 
 mod cell_context;
 mod cell_model;
+pub(crate) mod run_auth;
 
 #[cfg(test)]
 mod command_test_support;
@@ -168,7 +169,7 @@ use exomonad_actor::{
     ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
 };
 
-use exomonad_actor::ForkEffort;
+use exomonad_actor::Reasoning;
 use frunk::{hlist, HCons, HNil};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
@@ -646,9 +647,12 @@ pub struct ActorHostConfig {
     pub root_binding_path: PathBuf,
 
     pub embedded: Option<crate::exomonad::EmbeddedLaunchConfig>,
+    /// An embedding may supply an already admitted transport at startup.
+    /// CLI launches construct the official transport from frozen settings.
+    pub(crate) inference_auth: Option<run_auth::RunAuth>,
     pub tmux_session: String,
-    pub model: String,
-    pub effort: ForkEffort,
+    pub model: exomonad_actor::Model,
+    pub reasoning: Reasoning,
     pub pane_environment: std::collections::BTreeMap<String, String>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
@@ -874,20 +878,58 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
     }
 }
 
-/// Resolve configured tiers and custom aliases against the frozen workspace.
-/// Actual launches and recipe checks use the same model table.
+/// Resolve an authored model only within the run's fixed backend.
 pub(crate) fn resolve_model(
     config: &ActorHostConfig,
     model: &exomonad_actor::Model,
 ) -> std::result::Result<String, String> {
-    match model.workspace_key() {
-        Some(alias) => config
-            .workspace_inputs
-            .as_ref()
-            .and_then(|workspace| workspace.models.get(alias))
-            .cloned()
-            .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}")),
-        None => Ok(model.value().to_owned()),
+    if model.backend() != config.model.backend() {
+        return Err("model backend differs from the admitted run backend".into());
+    }
+    if model.value().trim().is_empty() {
+        return Err("model must be nonempty".into());
+    }
+    Ok(model.value().to_owned())
+}
+
+pub(crate) fn resolve_reasoning(
+    config: &ActorHostConfig,
+    reasoning: &exomonad_actor::Reasoning,
+) -> Result<harness::model::Effort, String> {
+    if reasoning.backend() != config.model.backend() {
+        return Err("reasoning backend differs from the admitted run backend".into());
+    }
+    Ok(reasoning_effort(reasoning))
+}
+
+fn reasoning_effort(reasoning: &exomonad_actor::Reasoning) -> harness::model::Effort {
+    use exomonad_actor::{DeepSeekReasoning as DS, OpenAIReasoning as OAI, Reasoning};
+    match reasoning {
+        Reasoning::DeepSeekReasoning(DS::DeepSeekNone) => harness::model::Effort::None,
+        Reasoning::DeepSeekReasoning(DS::DeepSeekLow)
+        | Reasoning::OpenAIReasoning(OAI::OpenAILow) => harness::model::Effort::Low,
+        Reasoning::DeepSeekReasoning(DS::DeepSeekHigh)
+        | Reasoning::OpenAIReasoning(OAI::OpenAIHigh) => harness::model::Effort::High,
+        Reasoning::DeepSeekReasoning(DS::DeepSeekMax) => harness::model::Effort::Max,
+        Reasoning::OpenAIReasoning(OAI::OpenAIMedium) => harness::model::Effort::Medium,
+    }
+}
+
+fn reasoning_from_effort(
+    backend: exomonad_actor::Backend,
+    effort: harness::model::Effort,
+) -> Result<exomonad_actor::Reasoning, String> {
+    use exomonad_actor::{Backend, DeepSeekReasoning as DS, OpenAIReasoning as OAI, Reasoning};
+    use harness::model::Effort;
+    match (backend, effort) {
+        (Backend::DeepSeek, Effort::None) => Ok(Reasoning::DeepSeekReasoning(DS::DeepSeekNone)),
+        (Backend::DeepSeek, Effort::Low) => Ok(Reasoning::DeepSeekReasoning(DS::DeepSeekLow)),
+        (Backend::DeepSeek, Effort::High) => Ok(Reasoning::DeepSeekReasoning(DS::DeepSeekHigh)),
+        (Backend::DeepSeek, Effort::Max) => Ok(Reasoning::DeepSeekReasoning(DS::DeepSeekMax)),
+        (Backend::OpenAIPlan, Effort::Low) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAILow)),
+        (Backend::OpenAIPlan, Effort::Medium) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAIMedium)),
+        (Backend::OpenAIPlan, Effort::High) => Ok(Reasoning::OpenAIReasoning(OAI::OpenAIHigh)),
+        _ => Err("retained reasoning is unsupported by the run backend".into()),
     }
 }
 
@@ -1760,6 +1802,20 @@ async fn run_owned(
         .embedded
         .as_ref()
         .ok_or_else(|| runtime_error("embedded host requires [launch.embedded]"))?;
+    if config.model.backend() != settings.provider
+        || config.reasoning.backend() != settings.provider
+        || config
+            .inference_auth
+            .as_ref()
+            .is_some_and(|auth| auth.backend() != settings.provider)
+    {
+        return Err(runtime_error(
+            "model, reasoning and transport must select one run backend",
+        ));
+    }
+    if config.model.value().trim().is_empty() {
+        return Err(runtime_error("run model must be nonempty"));
+    }
     let (host_incarnation, boot_registration) = host_incarnation.into_boot_registration();
     let run_root = config.run_directory.path().to_path_buf();
     if !host_incarnation.owns_run(&run_root)? {
@@ -1815,6 +1871,7 @@ async fn run_owned(
         &run_root,
         settings,
         Arc::clone(&host_incarnation),
+        config.inference_auth.clone(),
     )
     .instrument(
         tracing::info_span!(target: "tidepool::actor_host::startup", "embedded_service_prepare"),
@@ -3673,9 +3730,10 @@ pub(crate) async fn prepare_workspace_toolsets(
         run_directory: runtime_directory.clone(),
         root_binding_path: runtime_directory.path().join("root-binding.json"),
         embedded: Some(settings.clone()),
+        inference_auth: None,
         tmux_session: String::new(),
         model: authored.defaults.model,
-        effort: authored.defaults.effort.into(),
+        reasoning: authored.defaults.reasoning,
         pane_environment: Default::default(),
         jev: None,
     };
@@ -3715,7 +3773,11 @@ pub(crate) async fn prepare_workspace_toolsets(
         runtime_directory.path(),
         settings.concurrent_jobs,
     )?;
-    runtime.configure_accounts(settings.credential_file.clone())?;
+    runtime.configure_inference(run_auth::RunAuth::from_settings(
+        settings,
+        runtime.store(),
+        runtime.run_identity().to_owned(),
+    )?)?;
     let recovery = exomonad_actor::ActorRecoveryJournal::open(
         &runtime_directory,
         "actor-lifecycle.v2.jsonl",

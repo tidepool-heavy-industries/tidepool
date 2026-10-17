@@ -1853,7 +1853,9 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                 for child in &children {
                     assert_eq!(
                         child.model,
-                        Some(exomonad_actor::Model::ProviderModel("gpt-6-sol".into()))
+                        Some(exomonad_actor::Model::OpenAIModel(
+                            exomonad_actor::OpenAIModel::Gpt6Sol
+                        ))
                     );
                     assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
                     if child.label == "exact" {
@@ -1867,7 +1869,12 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                         assert_eq!(explicit_display_output(&inherited)["text"], "41");
                     } else {
                         assert_eq!(child.context_parent, None);
-                        assert_eq!(child.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
+                        assert_eq!(
+                            child.reasoning,
+                            Some(exomonad_actor::Reasoning::OpenAIReasoning(
+                                exomonad_actor::OpenAIReasoning::OpenAIMedium
+                            ))
+                        );
                         let missing = dispatch_lookup(child.policy.as_ref(), &["parentOnly"]).await;
                         assert!(missing.to_string().contains("no match"), "{missing}");
                     }
@@ -1973,7 +1980,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             match arrival {
                 ReviewArrival::Child(child) => {
                     assert_eq!(child.context_parent, None);
-                    assert_eq!(child.model, Some(exomonad_actor::Model::ProviderModel("gpt-6-sol".into())));
+                    assert_eq!(child.model, Some(exomonad_actor::Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Sol)));
                     bindings.push(open_test_workspace(campaign, &child));
                     reviewer = Some(child);
                 }

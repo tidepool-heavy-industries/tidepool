@@ -281,7 +281,7 @@ pub(super) async fn run_interactive_applications(
                         &graph, &live_actors, &embedded_projection,
                         &conversations, &embedded_lifecycle_tx,
                         &mut browser_commands,
-                        Some((service.runtime.account_auth(), &service._owner)),
+                        service.runtime.account_auth().map(|auth| (auth, &service._owner)),
                     ) {
                         break Some(format!("embedded browser command drain failed: {error}"));
                     }
@@ -346,7 +346,7 @@ pub(super) async fn run_interactive_applications(
                     &live_actors, &embedded_projection, &conversations,
                     &embedded_lifecycle_tx,
                     &mut browser_commands,
-                        Some((service.runtime.account_auth(), &service._owner)),
+                        service.runtime.account_auth().map(|auth| (auth, &service._owner)),
                 ) {
                     break Some(format!("embedded browser command drain failed: {error}"));
                 }
@@ -627,7 +627,7 @@ pub(super) async fn run_interactive_applications(
                                 .transpose()
                             {
                                 Ok(Some(model)) => model,
-                                Ok(None) => launch_context.config.model.clone(),
+                                Ok(None) => launch_context.config.model.value().to_owned(),
                                 Err(error) => {
                                     if is_root { break Some(error); }
                                     if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
@@ -636,10 +636,16 @@ pub(super) async fn run_interactive_applications(
                                     continue;
                                 },
                             };
-                            let effort = match installation.fork_effort.unwrap_or(launch_context.config.effort) {
-                                ForkEffort::Low => harness::model::Effort::Low,
-                                ForkEffort::Medium => harness::model::Effort::Medium,
-                                ForkEffort::High => harness::model::Effort::High,
+                            let effort = match super::resolve_reasoning(&launch_context.config,
+                                &installation.reasoning.unwrap_or(launch_context.config.reasoning)) {
+                                Ok(effort) => effort,
+                                Err(error) => {
+                                    if is_root { break Some(error); }
+                                    if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
+                                        break Some(error.to_string());
+                                    }
+                                    continue;
+                                }
                             };
                             let mut instructions = developer_instructions_selected(
                                 &installation.capabilities,
@@ -760,7 +766,7 @@ pub(super) async fn run_interactive_applications(
                                         #[cfg(test)]
                                         let result = if let Some(transport) = test_transport {
                                             embedded_service::drive_conversation_with_transport::<
-                                                harness::transport::auth::ChatGptPlanAuth, _
+                                                super::run_auth::RunAuth, _
                                             >(
                                                 embedded.driver, runtime, &settings, model, effort,
                                                 instructions, embedded.cancellation_rx,

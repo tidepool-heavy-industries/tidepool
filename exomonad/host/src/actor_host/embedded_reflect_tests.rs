@@ -47,6 +47,13 @@ impl HostActor for Host {
 }
 struct NoAuth;
 impl Auth for NoAuth {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, TransportError> {
         unreachable!("mock transport has no credentials")
     }

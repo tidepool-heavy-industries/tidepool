@@ -981,9 +981,13 @@ impl TestCampaign {
             root_binding_path: runtime.path().join("root-binding.json"),
 
             embedded: None,
+            inference_auth: None,
             tmux_session: "unused-in-resident-test".into(),
-            model: "test-model".into(),
-            effort: ForkEffort::Low,
+            model: exomonad_actor::Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "test-model",
+            ),
+            reasoning: Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
 
             pane_environment: BTreeMap::new(),
             jev: Some(exomonad_actor::unconfigured_jev()),
@@ -2251,7 +2255,8 @@ pub(crate) fn hosted_test_settings(
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(session_secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+        provider: exomonad_actor::Backend::OpenAIPlan,
+        inference_limits: Default::default(),
         credential_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs,
@@ -3432,6 +3437,15 @@ mod tests {
         };
         struct Offline;
         impl Auth for Offline {
+            fn admission(
+                &self,
+            ) -> Result<
+                harness::transport::NativeTransportAdmission,
+                harness::transport::TransportError,
+            > {
+                Err(harness::transport::TransportError::InvalidAdmission)
+            }
+
             fn access(&self) -> Result<String, TransportError> {
                 panic!("scripted provider must not use credentials")
             }

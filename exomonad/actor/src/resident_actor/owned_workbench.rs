@@ -975,6 +975,7 @@ where
                     execution,
                     tidepool_repr::PrincipalId::from(context.actor),
                     &self.descriptor,
+                    context_binding.clone(),
                 )
             })
         } else {

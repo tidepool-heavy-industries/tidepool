@@ -31,7 +31,9 @@ use harness::{
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
-use super::cell_context::{EmbeddedContextBinding, ModelResolver};
+use super::cell_context::{
+    EmbeddedContextBinding, InferenceSelectionObserver, ModelResolver, ReasoningResolver,
+};
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
 
 /// Observes real transaction boundaries without replacing admission or Store checks.
@@ -79,8 +81,8 @@ pub(super) struct EmbeddedHarnessRuntime {
     scheduler: Arc<JobScheduler>,
     output_observer: Arc<OnceLock<harness::server::ServerControl>>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
-    context_models: Arc<OnceLock<ModelResolver>>,
-    account_auth: OnceLock<harness::transport::auth::chatgpt::RunAccountAuth>,
+    context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
+    inference_auth: OnceLock<super::run_auth::RunAuth>,
     #[cfg(test)]
     admission_test_hooks: OnceLock<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -94,7 +96,7 @@ impl EmbeddedHarnessRuntime {
             output_observer: Arc::new(OnceLock::new()),
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
-            account_auth: OnceLock::new(),
+            inference_auth: OnceLock::new(),
             #[cfg(test)]
             admission_test_hooks: OnceLock::new(),
             store,
@@ -105,26 +107,20 @@ impl EmbeddedHarnessRuntime {
         })
     }
 
-    pub(super) fn configure_accounts(
-        &self,
-        credential_file: std::path::PathBuf,
-    ) -> Result<(), String> {
-        let accounts = harness::transport::auth::chatgpt::SavedAccounts::beside(credential_file)
-            .map_err(|e| e.to_string())?;
-        let auth = harness::transport::auth::chatgpt::RunAccountAuth::new(
-            self.store.clone(),
-            self.run.clone(),
-            accounts,
-        )
-        .map_err(|e| e.to_string())?;
-        self.account_auth
+    pub(super) fn configure_inference(&self, auth: super::run_auth::RunAuth) -> Result<(), String> {
+        self.inference_auth
             .set(auth)
-            .map_err(|_| "run account authentication already configured".to_owned())
+            .map_err(|_| "run inference already configured".to_owned())
     }
-    pub(super) fn account_auth(&self) -> &harness::transport::auth::chatgpt::RunAccountAuth {
-        self.account_auth
+    pub(super) fn inference_auth(&self) -> &super::run_auth::RunAuth {
+        self.inference_auth
             .get()
-            .expect("run accounts configured before model admission")
+            .expect("run inference configured before model admission")
+    }
+    pub(super) fn account_auth(
+        &self,
+    ) -> Option<&harness::transport::auth::chatgpt::RunAccountAuth> {
+        self.inference_auth().account()
     }
 
     #[cfg(test)]
@@ -141,24 +137,16 @@ impl EmbeddedHarnessRuntime {
         &self,
         config: &super::ActorHostConfig,
     ) -> Result<(), String> {
-        let config = config.clone();
+        if config.model.backend() != self.inference_auth().backend()
+            || config.reasoning.backend() != config.model.backend()
+        {
+            return Err(
+                "run model and reasoning differ from the admitted transport backend".into(),
+            );
+        }
         self.context_models
-            .set(Arc::new(move |selection| {
-                if selection.trim().is_empty() {
-                    return Err("next model must be nonempty".into());
-                }
-                let configured = config
-                    .workspace_inputs
-                    .as_ref()
-                    .is_some_and(|workspace| workspace.models.contains_key(selection));
-                let model = if configured {
-                    exomonad_actor::Model::CustomAlias(selection.to_owned())
-                } else {
-                    exomonad_actor::Model::ProviderModel(selection.to_owned())
-                };
-                super::resolve_model(&config, &model)
-            }))
-            .map_err(|_| "context model policy already configured".into())
+            .set(Arc::new(config.clone()))
+            .map_err(|_| "context inference policy already configured".into())
     }
 
     pub(super) fn configure_output_observer(
@@ -842,7 +830,7 @@ pub(super) struct EmbeddedHostActor {
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
-    context_models: Arc<OnceLock<ModelResolver>>,
+    context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
     #[cfg(test)]
     admission_test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 }
@@ -854,7 +842,7 @@ impl EmbeddedHostActor {
         self
     }
 
-    fn with_context_models(mut self, models: Arc<OnceLock<ModelResolver>>) -> Self {
+    fn with_context_models(mut self, models: Arc<OnceLock<Arc<super::ActorHostConfig>>>) -> Self {
         self.context_models = models;
         self
     }
@@ -986,6 +974,7 @@ impl HostActor for EmbeddedHostActor {
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
             context_models: self.context_models.clone(),
+            inference_defaults: self.installation.inference_defaults(),
             snapshot,
             store: self.store.clone(),
         });
@@ -1043,7 +1032,11 @@ struct EmbeddedCancellationOwner {
 
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
-    context_models: Arc<OnceLock<ModelResolver>>,
+    context_models: Arc<OnceLock<Arc<super::ActorHostConfig>>>,
+    inference_defaults: (
+        Option<exomonad_actor::Model>,
+        Option<exomonad_actor::Reasoning>,
+    ),
     identity: HostIdentity,
     issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,
@@ -1777,10 +1770,43 @@ impl Provider for EmbeddedDispatcher {
                         )));
                     }
                 };
-                let resolver = self.context_models.get().cloned().unwrap_or_else(|| {
-                    Arc::new(|_| {
-                        Err("next-model selection requires admitted workspace policy".into())
-                    })
+                let model_policy = self.context_models.get().cloned();
+                let reasoning_policy = model_policy.clone();
+                let observed_policy = model_policy.clone();
+                let resolver: ModelResolver = Arc::new(move |model| {
+                    super::resolve_model(
+                        model_policy
+                            .as_deref()
+                            .ok_or("model selection requires admitted run policy")?,
+                        model,
+                    )
+                });
+                let reasoning: ReasoningResolver = Arc::new(move |reasoning| {
+                    super::resolve_reasoning(
+                        reasoning_policy
+                            .as_deref()
+                            .ok_or("reasoning selection requires admitted run policy")?,
+                        reasoning,
+                    )
+                });
+                let observing_store = self.store.clone();
+                let observing_identity = snapshot.operation.origin.clone();
+                let (initial_model, initial_reasoning) = self.inference_defaults.clone();
+                let inference_selection: InferenceSelectionObserver = Arc::new(move || {
+                    let config = observed_policy
+                        .as_deref()
+                        .ok_or("effective selection requires admitted run policy")?;
+                    let model = initial_model.as_ref().unwrap_or(&config.model);
+                    let reasoning = initial_reasoning.unwrap_or(config.reasoning);
+                    super::resolve_model(config, model)?;
+                    let effort = super::resolve_reasoning(config, &reasoning)?;
+                    let selected = observing_store
+                        .effective_inference_selection(&observing_identity, model.value(), effort)
+                        .map_err(|error| error.to_string())?;
+                    Ok((
+                        exomonad_actor::Model::for_backend(config.model.backend(), &selected.model),
+                        super::reasoning_from_effort(config.model.backend(), selected.effort)?,
+                    ))
                 });
                 let observed_initial_context =
                     match self.attachment.initial_context_wire_observation().await {
@@ -1802,6 +1828,8 @@ impl Provider for EmbeddedDispatcher {
                     invocation,
                     snapshot,
                     resolver,
+                    reasoning,
+                    inference_selection,
                     initial_context,
                     self.store.clone(),
                 ) {
@@ -2997,7 +3025,8 @@ mod tests {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(secret_file),
-            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+            provider: exomonad_actor::Backend::OpenAIPlan,
+            inference_limits: Default::default(),
             credential_file: auth_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,

@@ -17,6 +17,7 @@ pub trait CellModelFactory: Send + Sync {
         execution: &WorkbenchExecutionId,
         principal: PrincipalId,
         descriptor: &ActorDescriptor,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding>;
 }
 

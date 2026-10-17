@@ -15,6 +15,13 @@ use tokio::sync::Notify;
 
 struct Offline;
 impl Auth for Offline {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, TransportError> {
         panic!("offline fixture must not read credentials")
     }
@@ -132,8 +139,9 @@ impl CellModelFactory for HoldingFactory {
         execution: &WorkbenchExecutionId,
         principal: PrincipalId,
         descriptor: &ActorDescriptor,
+        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Arc<dyn CellModelBinding> {
-        let binding = self.inner.bind(execution, principal, descriptor);
+        let binding = self.inner.bind(execution, principal, descriptor, context);
         let mut retained = self.retained.lock().unwrap();
         if retained.is_none() {
             *retained = Some(binding.clone());
@@ -150,8 +158,8 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
         inner: EmbeddedCellModelFactory::<Offline, _>::new(
             store.clone(),
             Arc::new(JobScheduler::new(4).unwrap()),
-            "test-model".into(),
-            Effort::Low,
+            Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "test-model"),
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
             Arc::new(move || Script(transport.clone())),
         ),
         retained: retained.clone(),
@@ -460,9 +468,12 @@ fn policy_config() -> (tempfile::TempDir, ActorHostConfig) {
         root_binding_path: Default::default(),
 
         embedded: None,
+        inference_auth: None,
         tmux_session: String::new(),
-        model: "default-model".into(),
-        effort: exomonad_actor::ForkEffort::Medium,
+        model: Model::for_backend(exomonad_actor::Backend::OpenAIPlan, "default-model"),
+        reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+            exomonad_actor::OpenAIReasoning::OpenAIMedium,
+        ),
 
         pane_environment: Default::default(),
         jev: None,
@@ -471,14 +482,14 @@ fn policy_config() -> (tempfile::TempDir, ActorHostConfig) {
 }
 
 #[tokio::test]
-async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
-    use exomonad_actor::ActorPlacement;
+async fn cell_model_policy_resolves_only_the_fixed_backend_before_provider_work() {
+    use exomonad_actor::{ActorPlacement, Backend, DeepSeekReasoning, OpenAIReasoning};
     let (_storage, config) = policy_config();
     let factory = EmbeddedCellModelFactory::<Offline, Script>::new(
         Arc::new(Store::memory().unwrap()),
         Arc::new(JobScheduler::new(1).unwrap()),
         config.model.clone(),
-        Effort::Medium,
+        config.reasoning,
         Arc::new(|| panic!("policy does not start provider work")),
     )
     .with_launch_config(&config);
@@ -490,55 +501,46 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
         },
     )
-    .with_model(Some(Model::CustomAlias("fast".into())));
-    let policy = factory.policy(&descriptor).unwrap();
+    .with_model(Some(Model::for_backend(
+        Backend::OpenAIPlan,
+        "admitted-model",
+    )));
+    let policy = factory.policy(&descriptor, None).unwrap();
     assert_eq!(
-        policy.models,
-        ["admitted-model", "configured-sol", "configured-luna"]
+        (policy.inherit_selection)().unwrap(),
+        ("admitted-model".into(), Effort::Medium)
     );
-    assert!(matches!(
-        (
-            descriptor.fork_effort().unwrap_or(config.effort),
-            policy.default_effort
-        ),
-        (exomonad_actor::ForkEffort::Medium, Effort::Medium)
-    ));
-    assert_eq!(policy.efforts, [Effort::Medium]);
-    for (selection, expected) in [
-        (Model::Luna, "configured-luna"),
-        (Model::Sol, "configured-sol"),
-        (Model::Astra, "configured-astra"),
-        (Model::ProviderModel("luna".into()), "luna"),
-    ] {
-        let selected = descriptor.clone().with_model(Some(selection));
-        let policy = factory.policy(&selected).unwrap();
-        assert_eq!(policy.default_model, expected);
-        let mut expected_models = vec![expected];
-        for tier in ["configured-sol", "configured-luna"] {
-            if !expected_models.contains(&tier) {
-                expected_models.push(tier);
-            }
-        }
-        assert_eq!(policy.models, expected_models);
-    }
-    let mut missing = config.clone();
-    missing.workspace_inputs = None;
-    assert!(super::super::resolve_model(&missing, &Model::Luna).is_err());
     assert_eq!(
-        super::super::resolve_model(&missing, &Model::ProviderModel("luna".into())).unwrap(),
-        "luna"
+        (policy.resolve_model)(&Model::OpenAIModel(exomonad_actor::OpenAIModel::Gpt6Luna)).unwrap(),
+        "gpt-6-luna"
     );
+    assert!((policy.resolve_model)(&Model::DeepSeekFlash).is_err());
+    assert!((policy.resolve_reasoning)(&Reasoning::DeepSeekReasoning(
+        DeepSeekReasoning::DeepSeekHigh
+    ))
+    .is_err());
     let binding = factory.bind(
         &WorkbenchExecutionId::from_digest([1; 16]),
         PrincipalId::new(1, 1),
         &descriptor,
+        None,
     );
     binding.cancel();
     binding.cancel();
     let override_policy = factory
-        .policy(&descriptor.clone().with_fork_effort(Some(ForkEffort::High)))
+        .policy(
+            &descriptor
+                .clone()
+                .with_reasoning(Some(Reasoning::OpenAIReasoning(
+                    OpenAIReasoning::OpenAIHigh,
+                ))),
+            None,
+        )
         .unwrap();
-    assert_eq!(override_policy.efforts, [Effort::High]);
+    assert_eq!(
+        (override_policy.inherit_selection)().unwrap().1,
+        Effort::High
+    );
     assert_eq!(
         (
             policy.limits.requests,
@@ -549,7 +551,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         (16, 64, 128_000, 300)
     );
     assert!(factory
-        .policy(&descriptor.with_model(Some(Model::CustomAlias("not-admitted".into()))))
+        .policy(&descriptor.with_model(Some(Model::DeepSeekFlash)), None)
         .is_err());
 }
 
@@ -563,14 +565,11 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
         Arc::new(Store::memory().unwrap()),
         Arc::new(JobScheduler::new(1).unwrap()),
         config.model.clone(),
-        Effort::Medium,
+        config.reasoning,
         Arc::new(move || Script(transport.clone())),
     )
     .with_launch_config(&config);
-    config.workspace_inputs.as_mut().unwrap().models.insert(
-        "luna".into(),
-        "changed-after-admission".into(),
-    );
+    config.model = Model::DeepSeekFlash;
     let descriptor = ActorDescriptor::new(
         "selected-cell",
         ActorPlacement {
@@ -579,8 +578,11 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
         },
     )
-    .with_model(Some(Model::CustomAlias("fast".into())));
-    let policy = factory.policy(&descriptor).unwrap();
+    .with_model(Some(Model::for_backend(
+        exomonad_actor::Backend::OpenAIPlan,
+        "admitted-model",
+    )));
+    let policy = factory.policy(&descriptor, None).unwrap();
     let service = Arc::new(CellModelService::<Offline, Script>::new(
         tokio::runtime::Handle::current(),
         PrincipalId::new(1, 1),
@@ -594,15 +596,30 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
     tokio::task::spawn_blocking(move || {
         let request = |selection: Option<Model>| {
             json!({"instructions":"budget","input":"explicit input","model":selection,
-                "effort":null,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
+                "reasoning":null,"limits":{},"tools":[],"result_schema":null,"after_tool":false})
         };
         for selection in [
             None,
-            Some(Model::ProviderModel("admitted-model".into())),
-            Some(Model::Sol),
-            Some(Model::Luna),
-            Some(Model::ProviderModel("configured-sol".into())),
-            Some(Model::CustomAlias("sol-twin".into())),
+            Some(Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "admitted-model",
+            )),
+            Some(Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "configured-sol",
+            )),
+            Some(Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "configured-luna",
+            )),
+            Some(Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "configured-sol",
+            )),
+            Some(Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "configured-sol",
+            )),
         ] {
             let result = worker
                 .start(PrincipalId::new(1, 1), request(selection))
@@ -612,11 +629,9 @@ async fn typed_cell_model_selection_resolves_frozen_policy_before_provider_work(
             assert_eq!(result["receipt"]["counts"]["requests"], 1);
         }
         for selection in [
-            Model::Astra,
-            Model::CustomAlias("unrelated".into()),
-            Model::CustomAlias("missing".into()),
-            Model::ProviderModel("luna".into()),
-            Model::ProviderModel("unadmitted-model".into()),
+            Model::DeepSeekFlash,
+            Model::DeepSeekPro,
+            Model::CustomModel(exomonad_actor::Backend::DeepSeek, "admitted-model".into()),
         ] {
             assert!(matches!(
                 worker.start(PrincipalId::new(1, 1), request(Some(selection))),

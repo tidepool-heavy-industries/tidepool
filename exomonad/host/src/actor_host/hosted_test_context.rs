@@ -1721,9 +1721,15 @@ impl HostedTestRuntime {
             root_binding_path: run_root.join("root-binding.json"),
             run_directory,
             embedded: Some(settings),
+            inference_auth: None,
             tmux_session: "unused-hosted-acceptance".into(),
-            model: "test-model".into(),
-            effort: exomonad_actor::ForkEffort::Low,
+            model: exomonad_actor::Model::for_backend(
+                exomonad_actor::Backend::OpenAIPlan,
+                "test-model",
+            ),
+            reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                exomonad_actor::OpenAIReasoning::OpenAILow,
+            ),
             pane_environment: BTreeMap::new(),
             jev: None,
         };

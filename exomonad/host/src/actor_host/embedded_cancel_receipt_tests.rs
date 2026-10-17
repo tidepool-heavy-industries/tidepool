@@ -550,6 +550,13 @@ async fn cancelled_prefix_with_order(order: Option<CancellationOrder>) {
 }
 struct DiagnosticFailureOffline;
 impl harness::transport::Auth for DiagnosticFailureOffline {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, harness::transport::TransportError> {
         panic!("offline diagnostic transport cannot request credentials")
     }
@@ -631,7 +638,8 @@ async fn provider_diagnostic_and_block_write_refusal_retain_native_cleanup_cause
             public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https, public_origin: None,
             asset_root: super::super::test_campaign::hosted_browser_assets(),
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret, session_secret_file: Some(secret),
-            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan, credential_file: auth,
+            provider: exomonad_actor::Backend::OpenAIPlan,
+        inference_limits: Default::default(), credential_file: auth,
             context_capacity_tokens: 200_000, concurrent_jobs: 2,
         };
         let mut service = campaign.prepare_engine_component_service(&settings).await.unwrap();

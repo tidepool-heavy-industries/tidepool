@@ -540,11 +540,15 @@ pub(super) fn provenance(run: &Path, bound: u64) -> (RunProvenance, Option<PathB
                 .as_ref()
                 .map(|(value, _)| value.workspace.display().to_string()),
         ),
-        model: field(status.as_ref().map(|(value, _)| value.agent.model.clone())),
+        model: field(
+            status
+                .as_ref()
+                .map(|(value, _)| value.agent.model.to_string()),
+        ),
         effort: field(
             status
                 .as_ref()
-                .map(|(value, _)| format!("{:?}", value.agent.effort)),
+                .map(|(value, _)| value.agent.reasoning.to_string()),
         ),
         host_generation: status.as_ref().map_or_else(
             || unknown("No valid bounded status.json evidence"),

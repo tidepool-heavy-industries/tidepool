@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use exomonad_actor::ActorRef;
-use exomonad_actor::ForkEffort;
+use exomonad_actor::{Backend, Model, Reasoning};
 
 use exomonad_node::{TmuxLaunch, TmuxSession};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,9 @@ use tracing_subscriber::Layer;
 pub(crate) const STATUS_VERSION: u32 = 5;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
+mod inference_selection;
 mod launch_preflight;
+pub use inference_selection::AgentInferenceDefaults as ExomonadAgentDefaults;
 pub mod resources;
 mod scaffold;
 pub(crate) mod source;
@@ -70,7 +72,7 @@ pub struct InitOptions {
     pub recreate: bool,
     pub no_attach: bool,
     pub model: Option<String>,
-    pub effort: Option<ExomonadEffort>,
+    pub reasoning: Option<String>,
     pub preflight: PreflightMode,
 }
 
@@ -106,13 +108,37 @@ struct AdmittedHost {
     agent: ExomonadAgentDefaults,
 }
 
+const RUN_LAUNCH_VERSION: u32 = 2;
+
 impl RunLaunchCoordinates {
     fn read(root: &Path, expected: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(root.join("launch.json")).map_err(|error| {
             std::io::Error::new(error.kind(), format!("cannot read admitted launch coordinates: {error}; legacy runs require their retained matching binary"))
         })?;
-        let value: Self = serde_json::from_slice(&bytes)?;
-        if value.version != 1 || value.run_id != expected || !value.workspace.is_absolute() {
+        let wire: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let agent = wire
+            .get("agent")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| runtime_error("run launch coordinates have no agent selection"))?;
+        match wire.get("version").and_then(serde_json::Value::as_u64) {
+            Some(1)
+                if agent.get("model").is_some_and(serde_json::Value::is_string)
+                    && !agent.contains_key("reasoning") => {}
+            Some(version)
+                if version == u64::from(RUN_LAUNCH_VERSION)
+                    && agent.get("model").is_some_and(serde_json::Value::is_object)
+                    && agent
+                        .get("reasoning")
+                        .is_some_and(serde_json::Value::is_object)
+                    && !agent.contains_key("effort") => {}
+            _ => {
+                return Err(runtime_error(
+                    "unsupported run launch selection format; use its matching binary",
+                ))
+            }
+        }
+        let value: Self = serde_json::from_value(wire)?;
+        if value.run_id != expected || !value.workspace.is_absolute() {
             return Err(runtime_error(
                 "run launch coordinates do not match requested identity",
             ));
@@ -121,6 +147,12 @@ impl RunLaunchCoordinates {
         Ok(value)
     }
     fn publish(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if self.version != RUN_LAUNCH_VERSION {
+            return Err(runtime_error(
+                "new launch publication requires the current selection format",
+            ));
+        }
+        self.agent.validate().map_err(runtime_error)?;
         let bytes = serde_json::to_vec_pretty(self)?;
         if !tidepool_atomic_write::write_durable_new(&root.join("launch.json"), &bytes)? {
             return Err(runtime_error("run launch coordinates already published"));
@@ -195,53 +227,6 @@ pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::E
     exomonad_node::run_process_supervisor(&manifest).map_err(Into::into)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExomonadAgentDefaults {
-    pub model: String,
-    #[serde(default)]
-    pub effort: ExomonadEffort,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExomonadEffort {
-    #[default]
-    Low,
-    Medium,
-    High,
-}
-
-impl From<ForkEffort> for ExomonadEffort {
-    fn from(value: ForkEffort) -> Self {
-        match value {
-            ForkEffort::Low => Self::Low,
-            ForkEffort::Medium => Self::Medium,
-            ForkEffort::High => Self::High,
-        }
-    }
-}
-
-impl From<ExomonadEffort> for ForkEffort {
-    fn from(value: ExomonadEffort) -> Self {
-        match value {
-            ExomonadEffort::Low => Self::Low,
-            ExomonadEffort::Medium => Self::Medium,
-            ExomonadEffort::High => Self::High,
-        }
-    }
-}
-
-impl std::fmt::Display for ExomonadEffort {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        })
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExomonadConfig {
@@ -252,8 +237,8 @@ pub(crate) struct ExomonadConfig {
     #[serde(default)]
     pub(crate) resources: exomonad_node::command_resources::CommandResourcePolicy,
     pub(crate) defaults: ExomonadAgentDefaults,
-    #[serde(default)]
-    pub(crate) models: std::collections::BTreeMap<String, String>,
+    #[serde(default, with = "inference_selection::models_config")]
+    pub(crate) models: std::collections::BTreeMap<String, Model>,
     #[serde(default)]
     pub(crate) haskell: workspace::HaskellConfig,
     #[serde(default)]
@@ -272,8 +257,10 @@ pub(crate) fn write_fixture_project_config(
         compiler: CompilerConfig::default(),
         resources: exomonad_node::command_resources::CommandResourcePolicy::default(),
         defaults: ExomonadAgentDefaults {
-            model: model.into(),
-            effort: ExomonadEffort::default(),
+            model: Model::for_backend(Backend::OpenAIPlan, model),
+            reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                exomonad_actor::OpenAIReasoning::OpenAILow,
+            ),
         },
         models: std::collections::BTreeMap::new(),
         haskell: workspace::HaskellConfig::default(),
@@ -336,7 +323,7 @@ pub(crate) struct LaunchConfig {
     pub(crate) embedded: Option<EmbeddedLaunchConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
@@ -348,30 +335,35 @@ pub struct EmbeddedLaunchConfig {
     #[serde(default)]
     pub(crate) browser_auth: EmbeddedBrowserAuth,
     pub(crate) session_secret_file: Option<PathBuf>,
+    #[serde(
+        default = "legacy_openai_backend",
+        with = "inference_selection::backend_config"
+    )]
+    pub(crate) provider: Backend,
     #[serde(default)]
-    pub(crate) provider: EmbeddedModelProvider,
     pub(crate) credential_file: PathBuf,
+    #[serde(default)]
+    pub(crate) inference_limits: inference_selection::InferenceLimitOverrides,
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-pub(crate) enum EmbeddedModelProvider {
-    #[default]
-    #[serde(rename = "chatgpt_plan")]
-    ChatGptPlan,
+impl std::fmt::Debug for EmbeddedLaunchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddedLaunchConfig")
+            .field("listen", &self.listen)
+            .field("provider", &self.provider)
+            .field("credential_reference", &"[redacted]")
+            .field("inference_limits", &self.inference_limits)
+            .field("context_capacity_tokens", &self.context_capacity_tokens)
+            .field("concurrent_jobs", &self.concurrent_jobs)
+            .finish_non_exhaustive()
+    }
 }
 
-impl<'de> Deserialize<'de> for EmbeddedModelProvider {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match String::deserialize(deserializer)?.as_str() {
-            "chatgpt_plan" => Ok(Self::ChatGptPlan),
-            _ => Err(serde::de::Error::custom(
-                "embedded inference requires provider = 'chatgpt_plan' and credentials from exomonad auth login; the private Codex credential bridge has been retired",
-            )),
-        }
-    }
+fn legacy_openai_backend() -> Backend {
+    Backend::OpenAIPlan
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -492,7 +484,9 @@ impl EmbeddedLaunchConfig {
                 "embedded browser asset_root is required unless EXOMONAD_EMBEDDED_ASSET_ROOT is set",
             ));
         }
-        for path in [&self.asset_root, &self.credential_file] {
+        for path in std::iter::once(&self.asset_root)
+            .chain((!self.credential_file.as_os_str().is_empty()).then_some(&self.credential_file))
+        {
             if !path.is_absolute() {
                 return Err(runtime_error(format!(
                     "embedded path must be absolute: {}",
@@ -506,7 +500,7 @@ impl EmbeddedLaunchConfig {
                 self.asset_root.display()
             )));
         }
-        if !self.credential_file.is_file() {
+        if self.provider == Backend::OpenAIPlan && !self.credential_file.is_file() {
             return Err(runtime_error(format!(
                 "embedded provider credential file is missing: {}",
                 self.credential_file.display()
@@ -747,29 +741,47 @@ fn parse_project_config(
         config.defaults,
         &format!("Exomonad configuration {}", path.display()),
     )?;
+    if let Some(embedded) = &config.launch.embedded {
+        if embedded.provider != config.defaults.model.backend() {
+            return Err(runtime_error(
+                "embedded provider and model select different run backends",
+            ));
+        }
+    }
     Ok((config, text))
 }
 
 fn validate_agent_defaults(
-    mut defaults: ExomonadAgentDefaults,
+    defaults: ExomonadAgentDefaults,
     source: &str,
 ) -> Result<ExomonadAgentDefaults, Box<dyn std::error::Error>> {
-    let model = defaults.model.trim();
-    if model.is_empty() {
-        return Err(runtime_error(format!("{source} selects an empty model")));
-    }
-    defaults.model = model.to_owned();
+    defaults
+        .validate()
+        .map_err(|error| runtime_error(format!("{source}: {error}")))?;
     Ok(defaults)
 }
 
 fn resolve_agent_defaults(
     configured: ExomonadAgentDefaults,
+    aliases: &std::collections::BTreeMap<String, Model>,
     model: Option<String>,
-    effort: Option<ExomonadEffort>,
+    reasoning: Option<String>,
 ) -> Result<ExomonadAgentDefaults, Box<dyn std::error::Error>> {
+    let backend = configured.model.backend();
     let resolved = ExomonadAgentDefaults {
-        model: model.unwrap_or(configured.model),
-        effort: effort.unwrap_or(configured.effort),
+        model: model
+            .map(|id| {
+                aliases
+                    .get(id.trim())
+                    .cloned()
+                    .unwrap_or_else(|| Model::for_backend(backend, id.trim()))
+            })
+            .unwrap_or(configured.model),
+        reasoning: reasoning
+            .map(|effort| Reasoning::for_backend(backend, &effort))
+            .transpose()
+            .map_err(runtime_error)?
+            .unwrap_or(configured.reasoning),
     };
     validate_agent_defaults(resolved, "resolved Exomonad agent defaults")
 }
@@ -1090,7 +1102,12 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
 
     exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
-    let agent = resolve_agent_defaults(configuration.defaults, options.model, options.effort)?;
+    let agent = resolve_agent_defaults(
+        configuration.defaults,
+        &configuration.models,
+        options.model,
+        options.reasoning,
+    )?;
     let session_name = options
         .session
         .unwrap_or_else(|| default_session_name(&workspace));
@@ -1141,7 +1158,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     tidepool_atomic_write::write_durable(&deployment_path, &serde_json::to_vec_pretty(authority)?)?;
     let selected_environment = compiler_environment(&run_root, authority, &compiler_bin, &worker);
     let coordinates = RunLaunchCoordinates {
-        version: 1,
+        version: RUN_LAUNCH_VERSION,
         run_id: run_id.clone(),
         workspace: workspace.clone(),
         session: session_name.clone(),
@@ -1184,7 +1201,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     println!(
         "launch: backend=embedded model={} effort={} extractor={}",
         agent.model,
-        agent.effort,
+        agent.reasoning,
         compiler_bin.display()
     );
     let compiler_program = compiler_bin
@@ -1293,7 +1310,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         "operator socket: {}",
         run_root.join("operator/operator.sock").display()
     );
-    println!("agent:  model={} effort={}", agent.model, agent.effort);
+    println!("agent:  model={} effort={}", agent.model, agent.reasoning);
     println!("config: {}", workspace.join(EXOMONAD_CONFIG).display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
@@ -1846,7 +1863,7 @@ async fn host_owned(
         session = %options.session,
         workspace = %options.workspace.display(),
         model = %options.agent.model,
-        effort = %options.agent.effort,
+        effort = %options.agent.reasoning,
         detailed_log = %log_path.display(),
         host_generation = generation,
         "starting Exomonad actor host"
@@ -1991,9 +2008,10 @@ async fn run_host(
         root_binding_path: options.run_root.join("root-binding.json"),
 
         embedded: configuration.launch.embedded,
+        inference_auth: None,
         tmux_session: options.session.clone(),
         model: options.agent.model.clone(),
-        effort: options.agent.effort.into(),
+        reasoning: options.agent.reasoning,
         workspace_inputs: Some(workspace_inputs),
         pane_environment: pane_environment(),
         jev: None,
@@ -2998,10 +3016,10 @@ mod tests {
         let fields = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
         let public: EmbeddedLaunchConfig =
             toml::from_str(&format!("provider = 'chatgpt_plan'\n{fields}")).unwrap();
-        assert_eq!(public.provider, EmbeddedModelProvider::ChatGptPlan);
+        assert_eq!(public.provider, Backend::OpenAIPlan);
         assert_eq!(public.credential_file, PathBuf::from("/tmp/exomonad-auth"));
         let default: EmbeddedLaunchConfig = toml::from_str(fields).unwrap();
-        assert_eq!(default.provider, EmbeddedModelProvider::ChatGptPlan);
+        assert_eq!(default.provider, Backend::OpenAIPlan);
         assert!(
             toml::from_str::<EmbeddedLaunchConfig>(&format!("provider = 'codex'\n{fields}"))
                 .unwrap_err()
@@ -3115,8 +3133,10 @@ mod tests {
 
     fn test_agent_defaults() -> ExomonadAgentDefaults {
         ExomonadAgentDefaults {
-            model: "test-model".into(),
-            effort: ExomonadEffort::Medium,
+            model: Model::for_backend(Backend::OpenAIPlan, "test-model"),
+            reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                exomonad_actor::OpenAIReasoning::OpenAIMedium,
+            ),
         }
     }
 
@@ -3139,17 +3159,23 @@ mod tests {
     #[test]
     fn config_effort_defaults_low_and_preserves_explicit_values() {
         let absent: ExomonadConfig = toml::from_str("[defaults]\nmodel = \"test\"\n").unwrap();
-        assert_eq!(absent.defaults.effort, ExomonadEffort::Low);
+        assert_eq!(
+            absent.defaults.reasoning,
+            exomonad_actor::Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow)
+        );
         for effort in [
-            ExomonadEffort::Low,
-            ExomonadEffort::Medium,
-            ExomonadEffort::High,
+            exomonad_actor::Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAILow),
+            exomonad_actor::Reasoning::OpenAIReasoning(
+                exomonad_actor::OpenAIReasoning::OpenAIMedium,
+            ),
+            exomonad_actor::Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAIHigh),
         ] {
             let config: ExomonadConfig = toml::from_str(&format!(
-                "[defaults]\nmodel = \"test\"\neffort = \"{effort}\"\n"
+                "[defaults]\nmodel = \"test\"\neffort = \"{}\"\n",
+                effort.value()
             ))
             .unwrap();
-            assert_eq!(config.defaults.effort, effort);
+            assert_eq!(config.defaults.reasoning, effort);
         }
         assert!(toml::from_str::<ExomonadConfig>(
             "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
@@ -3201,13 +3227,7 @@ mod tests {
         assert!(workspace.join(".exomonad/logs").is_dir());
         assert!(workspace.join(".exomonad/sessions").is_dir());
         let config = read_project_config(&workspace).unwrap().0;
-        assert_eq!(
-            config.defaults,
-            ExomonadAgentDefaults {
-                model: "gpt-6.1-sol".into(),
-                effort: ExomonadEffort::Medium,
-            }
-        );
+        assert_eq!(config.defaults, ExomonadAgentDefaults::deepseek_default());
         assert_eq!(
             config.haskell.flake_sources.get("jev-dsl").unwrap(),
             &[PathBuf::from("core")]
@@ -3574,7 +3594,7 @@ mod tests {
             recreate: false,
             no_attach: true,
             model: None,
-            effort: None,
+            reasoning: None,
             preflight: PreflightMode::Warn,
         })
         .await
@@ -3692,19 +3712,28 @@ mod tests {
         assert!(workspace.path().join(EXOMONAD_CONFIG).is_file());
 
         assert_eq!(
-            resolve_agent_defaults(configured.clone(), None, None).unwrap(),
+            resolve_agent_defaults(
+                configured.clone(),
+                &std::collections::BTreeMap::new(),
+                None,
+                None
+            )
+            .unwrap(),
             configured
         );
         assert_eq!(
             resolve_agent_defaults(
                 configured,
+                &std::collections::BTreeMap::new(),
                 Some("  override-model  ".into()),
-                Some(ExomonadEffort::High),
+                Some("high".into()),
             )
             .unwrap(),
             ExomonadAgentDefaults {
-                model: "override-model".into(),
-                effort: ExomonadEffort::High,
+                model: Model::for_backend(Backend::OpenAIPlan, "override-model"),
+                reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                    exomonad_actor::OpenAIReasoning::OpenAIHigh
+                ),
             }
         );
     }
@@ -4514,13 +4543,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(RunLaunchCoordinates::read(root.path(), "run").is_err());
         let selected = RunLaunchCoordinates {
-            version: 1,
+            version: RUN_LAUNCH_VERSION,
             run_id: "run".into(),
             workspace: PathBuf::from("/workspace"),
             session: "session".into(),
             agent: ExomonadAgentDefaults {
-                model: "test".into(),
-                effort: ExomonadEffort::Medium,
+                model: Model::for_backend(Backend::OpenAIPlan, "test"),
+                reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                    exomonad_actor::OpenAIReasoning::OpenAIMedium,
+                ),
             },
         };
         selected.publish(root.path()).unwrap();
@@ -4530,6 +4561,45 @@ mod tests {
         );
         assert!(RunLaunchCoordinates::read(root.path(), "different").is_err());
         assert!(selected.publish(root.path()).is_err());
+    }
+
+    #[test]
+    fn retained_launch_selection_preserves_legacy_openai_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = br#"{"version":1,"run_id":"run","workspace":"/workspace","session":"session","agent":{"model":"gpt-6-luna","effort":"high"}}"#;
+        std::fs::write(root.path().join("launch.json"), bytes).unwrap();
+        let retained = RunLaunchCoordinates::read(root.path(), "run").unwrap();
+        assert_eq!(
+            retained.agent.model,
+            Model::for_backend(Backend::OpenAIPlan, "gpt-6-luna")
+        );
+        assert_eq!(
+            retained.agent.reasoning,
+            Reasoning::OpenAIReasoning(exomonad_actor::OpenAIReasoning::OpenAIHigh)
+        );
+        assert_ne!(retained.agent, ExomonadAgentDefaults::deepseek_default());
+        assert_eq!(
+            std::fs::read(root.path().join("launch.json")).unwrap(),
+            bytes
+        );
+        assert!(retained.publish(root.path()).is_err());
+    }
+
+    #[test]
+    fn launch_version_and_selection_shape_must_agree() {
+        let root = tempfile::tempdir().unwrap();
+        let qualified = serde_json::to_value(ExomonadAgentDefaults::deepseek_default()).unwrap();
+        let legacy = serde_json::json!({"model":"gpt-6-luna","effort":"high"});
+        for (version, agent) in [(1, qualified.clone()), (2, legacy), (3, qualified)] {
+            let wire = serde_json::json!({"version":version,"run_id":"run","workspace":"/workspace","session":"session","agent":agent});
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            std::fs::write(root.path().join("launch.json"), &bytes).unwrap();
+            assert!(RunLaunchCoordinates::read(root.path(), "run").is_err());
+            assert_eq!(
+                std::fs::read(root.path().join("launch.json")).unwrap(),
+                bytes
+            );
+        }
     }
 
     #[tokio::test]
@@ -4549,13 +4619,15 @@ mod tests {
     async fn launch_admission_refuses_missing_products_without_publishing_coordinates() {
         let root = tempfile::tempdir().unwrap();
         let coordinates = RunLaunchCoordinates {
-            version: 1,
+            version: RUN_LAUNCH_VERSION,
             run_id: "run".into(),
             workspace: PathBuf::from("/workspace"),
             session: "session".into(),
             agent: ExomonadAgentDefaults {
-                model: "test".into(),
-                effort: ExomonadEffort::Medium,
+                model: Model::for_backend(Backend::OpenAIPlan, "test"),
+                reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                    exomonad_actor::OpenAIReasoning::OpenAIMedium,
+                ),
             },
         };
         assert!(admit_run_launch(root.path(), &coordinates, None)

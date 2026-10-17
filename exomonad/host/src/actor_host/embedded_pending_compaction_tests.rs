@@ -28,6 +28,13 @@ use tokio::sync::{mpsc, oneshot, watch};
 struct Offline;
 
 impl Auth for Offline {
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        Err(harness::transport::TransportError::InvalidAdmission)
+    }
+
     fn access(&self) -> Result<String, TransportError> {
         panic!("the scripted transport must not request credentials")
     }
@@ -354,7 +361,8 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                     asset_root: assets,
                     browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
                     session_secret_file: Some(session_secret_file),
-                    provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+                    provider: exomonad_actor::Backend::OpenAIPlan,
+                    inference_limits: Default::default(),
                     credential_file,
                     context_capacity_tokens: 200_000,
                     concurrent_jobs: 2,
@@ -611,7 +619,8 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                     asset_root: assets,
                     browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
                     session_secret_file: Some(session_secret_file),
-                    provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+                    provider: exomonad_actor::Backend::OpenAIPlan,
+                    inference_limits: Default::default(),
                     credential_file,
                     context_capacity_tokens: 200_000,
                     concurrent_jobs: 2,
@@ -734,7 +743,8 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret),
-        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+        provider: exomonad_actor::Backend::OpenAIPlan,
+        inference_limits: Default::default(),
         credential_file: auth,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,

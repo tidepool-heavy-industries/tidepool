@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use exomonad_host::exomonad::ExomonadEffort;
 
 #[derive(Debug, Parser)]
 #[command(name = "exomonad", about = "Run typed Tidepool actor ensembles")]
@@ -166,8 +165,8 @@ enum Command {
         #[arg(long)]
         model: Option<String>,
         /// Override `.exomonad/config.toml` for this run.
-        #[arg(long, value_enum)]
-        effort: Option<Effort>,
+        #[arg(long, alias = "effort")]
+        reasoning: Option<String>,
         /// Skip the launch preflight (workspace pin and compile daemons).
         #[arg(long, conflicts_with = "strict_preflight")]
         no_preflight: bool,
@@ -241,23 +240,6 @@ enum OperatorCommand {
         /// Path relative to the actor's .exomonad/build/cargo mount.
         path: PathBuf,
     },
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum Effort {
-    Low,
-    Medium,
-    High,
-}
-
-impl From<Effort> for ExomonadEffort {
-    fn from(value: Effort) -> Self {
-        match value {
-            Effort::Low => Self::Low,
-            Effort::Medium => Self::Medium,
-            Effort::High => Self::High,
-        }
-    }
 }
 
 /// The default `Result`-returning `main` prints an unhandled `Err` via
@@ -364,9 +346,11 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&exomonad_host::actor_host::workspace_cleanup::cleanup(
-                    &run_root, apply, source
-                )?)?
+                serde_json::to_string_pretty(
+                    &exomonad_host::actor_host::workspace_cleanup::cleanup(
+                        &run_root, apply, source
+                    )?
+                )?
             );
             Ok(())
         }
@@ -433,15 +417,17 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     incarnation,
                     operation,
                     file,
-                } => exomonad_host::operator::OperatorAction::Input(exomonad_host::operator::InputRequest {
-                    operation,
-                    target: harness::server::HostActorIdentity {
-                        run,
-                        actor: harness::model::AgentPath(actor),
-                        incarnation,
+                } => exomonad_host::operator::OperatorAction::Input(
+                    exomonad_host::operator::InputRequest {
+                        operation,
+                        target: harness::server::HostActorIdentity {
+                            run,
+                            actor: harness::model::AgentPath(actor),
+                            incarnation,
+                        },
+                        text: std::fs::read_to_string(file)?,
                     },
-                    text: std::fs::read_to_string(file)?,
-                }),
+                ),
                 OperatorCommand::InputStatus { run, operation } => {
                     exomonad_host::operator::OperatorAction::InputStatus(
                         exomonad_host::operator::InputStatusRequest { run, operation },
@@ -483,10 +469,12 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             })
             .await
         }
-        Command::New { path } => exomonad_host::exomonad::new(exomonad_host::exomonad::NewOptions {
-            path,
-            ..Default::default()
-        }),
+        Command::New { path } => {
+            exomonad_host::exomonad::new(exomonad_host::exomonad::NewOptions {
+                path,
+                ..Default::default()
+            })
+        }
         Command::Check {
             workspace,
             recipes,
@@ -523,7 +511,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             recreate,
             no_attach,
             model,
-            effort,
+            reasoning,
             no_preflight,
             strict_preflight,
         } => {
@@ -535,7 +523,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 recreate,
                 no_attach,
                 model,
-                effort: effort.map(Into::into),
+                reasoning,
                 preflight: if no_preflight {
                     PreflightMode::Skip
                 } else if strict_preflight {
@@ -551,7 +539,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::Host { run_id, run_root } => {
             let (_log_path, _trace_guard) =
                 exomonad_host::exomonad::init_run_host_tracing(&run_root, &run_id)?;
-            exomonad_host::exomonad::host(exomonad_host::exomonad::HostOptions { run_id, run_root }).await
+            exomonad_host::exomonad::host(exomonad_host::exomonad::HostOptions { run_id, run_root })
+                .await
         }
     }
 }

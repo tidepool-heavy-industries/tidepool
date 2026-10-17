@@ -16,15 +16,20 @@ pub(super) struct EmbeddedPolicyInstallation {
     policy: Arc<dyn ResidentToolEndpoint>,
     projection: std::sync::Mutex<Option<CachedToolProjection>>,
     observation: exomonad_actor::ActorRuntimeObservationHandle,
+    model: Option<exomonad_actor::Model>,
+    reasoning: Option<exomonad_actor::Reasoning>,
 }
 
 impl EmbeddedPolicyInstallation {
     pub(super) fn from_installation(installation: &LocalResidentInstallation) -> Self {
-        Self::with_observation(
+        let mut policy = Self::with_observation(
             installation.actor.identity(),
             installation.policy.clone(),
             installation.runtime_observation.clone(),
-        )
+        );
+        policy.model = installation.model.clone();
+        policy.reasoning = installation.reasoning;
+        policy
     }
 
     #[cfg(test)]
@@ -42,7 +47,18 @@ impl EmbeddedPolicyInstallation {
             policy,
             projection: std::sync::Mutex::new(None),
             observation,
+            model: None,
+            reasoning: None,
         }
+    }
+
+    pub(super) fn inference_defaults(
+        &self,
+    ) -> (
+        Option<exomonad_actor::Model>,
+        Option<exomonad_actor::Reasoning>,
+    ) {
+        (self.model.clone(), self.reasoning)
     }
 
     pub(super) fn observation(&self) -> exomonad_actor::ActorRuntimeObservationHandle {

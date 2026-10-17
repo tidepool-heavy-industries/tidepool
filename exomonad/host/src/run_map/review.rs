@@ -521,14 +521,7 @@ fn tree_from_records(
                 parent,
                 label: admission.display_label().to_owned(),
                 model: admission.model.clone(),
-                effort: admission.effort.map(|effort| {
-                    match effort {
-                        exomonad_actor::ForkEffort::Low => "low",
-                        exomonad_actor::ForkEffort::Medium => "medium",
-                        exomonad_actor::ForkEffort::High => "high",
-                    }
-                    .to_owned()
-                }),
+                effort: admission.reasoning.map(|reasoning| reasoning.to_string()),
                 own_session: record.application.is_some(),
                 thread: record
                     .application
@@ -1521,7 +1514,7 @@ mod tests {
     fn fixture_records() -> Vec<exomonad_actor::DurableActorRecord> {
         use exomonad_actor::{
             ActorId, ActorRef, ApplicationConversation, DurableActorAdmission,
-            DurableActorApplication, DurableActorRecord, ForkEffort,
+            DurableActorApplication, DurableActorRecord, Reasoning,
         };
         let actor = |id| ActorRef::first(ActorId(id));
         [
@@ -1543,7 +1536,9 @@ mod tests {
                 descendant_depth: 8,
                 descendant_active_children: None,
                 model: Some("executor".into()),
-                effort: Some(ForkEffort::Medium),
+                reasoning: Some(Reasoning::OpenAIReasoning(
+                    exomonad_actor::OpenAIReasoning::OpenAIMedium,
+                )),
                 instructions: None,
                 launch_worktrees: vec![],
                 source_layer: vec![],

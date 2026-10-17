@@ -322,9 +322,10 @@ impl Driver {
             root_binding_path: runtime.path().join("unused-native-binding.json"),
 
             embedded: None,
+            inference_auth: None,
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
-            effort: defaults.defaults.effort.into(),
+            reasoning: defaults.defaults.reasoning,
 
             pane_environment: crate::exomonad::pane_environment(),
             jev: None,
@@ -850,7 +851,7 @@ impl Driver {
         let identity = selected.identity().to_owned();
         let defaults = selected.config()?;
         self.config.model = defaults.defaults.model;
-        self.config.effort = defaults.defaults.effort.into();
+        self.config.reasoning = defaults.defaults.reasoning.into();
         self.config.workspace_inputs = Some(selected);
         let session = Self::acquire_session(&self.config).await?;
         self.installations

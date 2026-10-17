@@ -514,7 +514,8 @@ fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(session_secret_file),
-            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
+            provider: exomonad_actor::Backend::OpenAIPlan,
+            inference_limits: Default::default(),
             credential_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 3,
@@ -565,7 +566,8 @@ async fn start_with_spec_and_model(
     let fixture = HostedTestRuntime::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
-        config.model = initial_model.into();
+        config.model =
+            exomonad_actor::Model::for_backend(exomonad_actor::Backend::OpenAIPlan, initial_model);
         if let Some(spec) = spec {
             std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
             std::fs::write(

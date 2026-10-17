@@ -600,13 +600,18 @@ impl Fixture {
             admit_run_launch(
                 run.path(),
                 &RunLaunchCoordinates {
-                    version: 1,
+                    version: RUN_LAUNCH_VERSION,
                     run_id,
                     workspace: project.to_path_buf(),
                     session: "outer-restart-acceptance".into(),
                     agent: ExomonadAgentDefaults {
-                        model: "test-model".into(),
-                        effort: ExomonadEffort::Low,
+                        model: exomonad_actor::Model::for_backend(
+                            exomonad_actor::Backend::OpenAIPlan,
+                            "test-model",
+                        ),
+                        reasoning: exomonad_actor::Reasoning::OpenAIReasoning(
+                            exomonad_actor::OpenAIReasoning::OpenAILow,
+                        ),
                     },
                 },
                 Some(&preparation),
