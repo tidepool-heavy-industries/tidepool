@@ -678,3 +678,65 @@ fn composing_same_publication_preserves_later_executable_demand() {
         "composing the same source publication does not erase the caller's later executable demand"
     );
 }
+
+#[test]
+fn same_owner_later_proof_does_not_change_reopened_publication() {
+    let (root, _, publication) = fixture(0);
+    let published = publication.context();
+    let original_offers = published
+        .compiler_source_support()
+        .native_offer_observations()
+        .unwrap();
+    let later = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+        published.compiler_input_projection().clone(),
+        published.artifact_view().clone(),
+    )
+    .unwrap();
+    assert!(later
+        .native_offers()
+        .iter()
+        .any(|offer| offer.original() == root.descriptor.id));
+    assert_ne!(
+        later.native_offer_observations().unwrap(),
+        original_offers,
+        "the same root's role selection is a distinct proof from its earlier native offer"
+    );
+    let carried = crate::artifact_inventory::CompilerSourceSupport::new(
+        published.compiler_input_projection().clone(),
+        published.artifact_view().clone(),
+        published
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .chain(later.native_offers())
+            .cloned(),
+    )
+    .unwrap();
+    let continued = ExactDeclarationContext::from_authenticated_execution_support(
+        [2; 32],
+        carried,
+        published.lexical_graph().to_vec(),
+        root.descriptor.owner.clone(),
+        &[root.descriptor.owner.clone()],
+    )
+    .unwrap();
+    let reopened = continued.published_source_original_selections().unwrap();
+    assert_eq!(
+        reopened[0].context().compiler_input_roles(),
+        published.compiler_input_roles(),
+        "same-owner native offers do not alter the frozen policy"
+    );
+    assert_eq!(
+        reopened[0]
+            .context()
+            .compiler_source_support()
+            .native_offer_observations()
+            .unwrap(),
+        original_offers,
+        "reopening keeps exactly the publication's original native-offer ownership set"
+    );
+    assert_eq!(
+        reopened[0].context().semantic_sha256(),
+        published.semantic_sha256()
+    );
+}
