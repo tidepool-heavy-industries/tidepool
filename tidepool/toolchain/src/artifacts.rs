@@ -4,8 +4,8 @@
 //! the extractor, reading its output directory, and deserializing typed
 //! artifacts happen in exactly one place.
 //!
-//! All cacheable requests use one recipe and one named artifact bundle.
-//! Compiler dependency evidence is validated on publication and on every hit.
+//! Each request acquires one complete named physical output. Native reuse
+//! retains its source evidence and compiler-issued product authority.
 
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -4003,9 +4003,6 @@ pub struct CompileInvocation<'a> {
 /// so two targets' different `runLLMTurn`/`runLLMTurnFork` sites never
 /// collapse into one ambiguous file.
 ///
-/// **MEMOIZED** per [`CompileInvocation::cache`] — see the module doc for why
-/// both cacheable entry points share the same recipe and bundle.
-///
 /// `on_stage(name, elapsed, bytes)` fires once per measured stage —
 /// [`timing::STAGE_EXTRACT_SPAWN`], each forwarded `extract.<phase>` row
 /// parsed from the extract's stderr, [`timing::STAGE_CBOR_READ`],
@@ -4033,8 +4030,8 @@ pub fn compile_invocation(
 }
 
 /// Compile fresh source against immutable declaration owners through the same
-/// artifact front door. Ordinary source candidates and artifact memo are
-/// unavailable; successful products require context-bound compiler receipts.
+/// artifact front door. Ordinary source candidates are unavailable; successful
+/// products require context-bound compiler receipts.
 pub fn compile_invocation_in_context(
     inv: &CompileInvocation<'_>,
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -4054,8 +4051,8 @@ pub fn compile_invocation_in_context(
 
 /// Compile a declaration probe in full-home-product mode, which produces
 /// original products for every home module, including modules with no
-/// executable references from the probe. The probe bypasses memo lookup and
-/// candidate publication while retaining the shared certification front door.
+/// executable references from the probe. The probe bypasses candidate
+/// publication while retaining the shared certification front door.
 pub(crate) fn compile_authored_products(
     source: &str,
     target: &str,
@@ -4272,8 +4269,8 @@ impl CompilationOutputOwner {
 /// Compile one declared module and target set for an immutable build action.
 /// The action owns its current-directory scratch and an absent output directory.
 /// This policy uses a
-/// direct configured compiler and cannot read or publish runtime memo entries,
-/// module candidates, deployment catalogs or mutable runtime build products.
+/// direct configured compiler and cannot read or publish runtime module
+/// candidates, deployment catalogs or mutable runtime build products.
 /// Only portable code and metadata are exported; source-bound authority stays
 /// in its original compiler transaction and is never relocated or restamped.
 pub fn build_prepared_fixture(
@@ -4467,6 +4464,7 @@ fn compile_invocation_inner(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
     );
+    crate::host_work::checkpoint()?;
     let layout = invocation_output::InvocationOutputLayout::new(inv.targets)?;
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
@@ -4618,11 +4616,10 @@ fn compile_invocation_inner(
         None
     };
 
-    // Bind the logical build-products root before recipe construction. The
-    // process boundary privately places mutable GHC outputs by daemon epoch
-    // and worker slot; its placement does not alter the logical recipe or
-    // authorize additional source inputs. Reaped slot rotations retain disk
-    // warmth, while new daemons and direct invocations use fresh namespaces.
+    // Select build products for each bound endpoint. The process boundary
+    // privately places mutable GHC outputs by daemon epoch and worker slot;
+    // this placement never authorizes additional source inputs. Reaped slot
+    // rotations retain disk warmth; new daemons use fresh writer namespaces.
     let base_cmd = cmd;
     let attempt = retry_bounded(
         || {
@@ -4676,71 +4673,6 @@ fn compile_invocation_inner(
                     output_owner.path(),
                 )
                 .map_err(CompileAttemptError::ModulePackage)?
-            } else {
-                None
-            };
-
-            let inv_key = if allow_candidates {
-                let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: inv.source,
-                    argv: &argv,
-                    input_path: &input_path,
-                    include: inv.include,
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                });
-                if let Some(key) = &key {
-                    let load_start = Instant::now();
-                    if let Some((bundle, evidence)) =
-                        cache::artifacts_load(key, &layout, inv.source)
-                            .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
-                    {
-                        // Direct invocation memo lacks a worker group/target
-                        // certificate. Home products must use the exact
-                        // module-candidate transaction instead.
-                        if !evidence
-                            .modules
-                            .iter()
-                            .any(|module| module.product == cache::ProductAvailability::Ready)
-                        {
-                            let raw = bundle.targets();
-                            if let Ok(mut artifacts) =
-                                certified_products::ParsedModuleProducts::decode_with_operation(
-                                    bundle.products(),
-                                    bundle.package_imports(),
-                                    bundle.operation().clone(),
-                                )
-                                .map_err(compiler_evidence_failure)
-                                .and_then(|fresh| {
-                                    assemble_with_products(
-                                        bundle.metadata(),
-                                        &raw,
-                                        fresh.into_products(),
-                                        Vec::new(),
-                                        Some(&evidence),
-                                        None,
-                                        None,
-                                        &mut on_stage,
-                                    )
-                                })
-                            {
-                                artifacts.producer_identity =
-                                    Some(*endpoint.identity().producer_bytes());
-                                on_stage(
-                                    timing::STAGE_CBOR_READ,
-                                    load_start.elapsed(),
-                                    bundle.bytes_len(),
-                                );
-                                return Ok(CompileAttempt::Cached(Box::new(artifacts)));
-                            }
-                            // An interrupted memo admission is a refusal, not
-                            // permission to retry with physical compiler work.
-                            crate::host_work::checkpoint()
-                                .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
-                        }
-                    }
-                }
-                key
             } else {
                 None
             };
@@ -4829,15 +4761,14 @@ fn compile_invocation_inner(
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
-                CompileAttempt::Executed((
+                (
                     cmd,
                     selected_session_values,
                     run,
-                    inv_key,
                     producer,
                     candidate_set,
                     deployment,
-                ))
+                )
             })
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
@@ -4857,16 +4788,7 @@ fn compile_invocation_inner(
             return Err(error.into_compile_error());
         }
     };
-    let (cmd, selected_session_values, run, inv_key, producer, candidate_set, deployment) =
-        match attempt {
-            CompileAttempt::Cached(artifacts) => {
-                return Ok(CompilationOutput {
-                    artifacts: *artifacts,
-                    original_entry: None,
-                });
-            }
-            CompileAttempt::Executed(executed) => executed,
-        };
+    let (cmd, selected_session_values, run, producer, candidate_set, deployment) = attempt;
 
     if let Some(request) = exact_request.as_ref() {
         let actual =
@@ -4996,9 +4918,6 @@ fn compile_invocation_inner(
     let package_bundle_bytes = bundle.package_imports();
     let inventory_operation = bundle.operation();
 
-    // Store only what DESERIALIZED, so a malformed artifact set is never
-    // memoized into a permanently-failing entry. Best-effort: an unwritable
-    // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory_operation.clone(),
@@ -5355,17 +5274,6 @@ fn compile_invocation_inner(
             module_candidates::record_exact_context_publication_skip(
                 &artifacts.module_products[..fresh_count],
             );
-        }
-        // A memo hit has no certified source group owner mapping. The module
-        // store owns reuse for invocations with home products.
-        if allow_candidates
-            && exact_request.is_none()
-            && cached_receipts.is_empty()
-            && fresh_count == 0
-        {
-            if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
-                cache::artifacts_store(key, &bundle, evidence, inv.source);
-            }
         }
         Ok(artifacts)
     })();
@@ -5771,11 +5679,6 @@ impl CompileAttemptError {
     }
 }
 
-enum CompileAttempt<T> {
-    Cached(Box<CompiledArtifacts>),
-    Executed(T),
-}
-
 fn retry_bounded<T, E>(
     mut attempt: impl FnMut() -> Result<T, E>,
     permits_retry: impl Fn(&E) -> bool,
@@ -5791,7 +5694,7 @@ fn retry_bounded<T, E>(
 
 /// Compile `source` against multiple named targets through
 /// [`compile_invocation`]. See its doc for the full contract
-/// (target semantics, asks sidecar shape, memoization, timing hook).
+/// (target semantics, asks sidecar shape, timing hook).
 pub fn compile_targets(
     source: &str,
     targets: &[&str],
@@ -5859,9 +5762,8 @@ pub(crate) fn extract_and_read<P>(
     // Default-on per-compile summary (compile-attribution lane): unlike
     // `extract_timing` above, this is emitted by the extract UNCONDITIONALLY
     // (no `TIDEPOOL_TIMING` required) — see `Tidepool.Timing.emitCompileSummary`.
-    // Logged at INFO so it lands in the ordinary compile log; absent on
-    // a memo hit (this function isn't reached) or on a compile that threw
-    // before reaching the summary line.
+    // Logged at INFO so it lands in the ordinary compile log; absent when
+    // compilation threw before reaching the summary line.
     if let Some(summary) = timing::CompileSummary::parse(&stderr) {
         timing::log_compile_summary(&summary);
     }
@@ -5910,10 +5812,7 @@ pub fn check_constructor_identity_agreement(
         })
 }
 
-/// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
-/// — into a [`CompiledArtifacts`]. Both paths landing here (rather than each
-/// deserializing separately) is what makes a cache hit observationally
-/// identical to a cold compile.
+/// Deserialize physical metadata and ordered target outputs into checked artifacts.
 pub(crate) fn assemble(
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
@@ -6471,7 +6370,7 @@ mod typed_site_tests {
 
     #[test]
     #[serial_test::serial]
-    fn safe_refusal_rederives_cache_and_build_products_identity() {
+    fn safe_refusal_rederives_producer_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
 
         struct RestoreDaemon(Option<std::ffi::OsString>);
@@ -6522,20 +6421,12 @@ mod typed_site_tests {
                 attempt_index += 1;
                 crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
                 let argv = cmd.argv();
-                let key = cache::invocation_key(&cache::Invocation {
-                    source: "result = 1",
-                    argv: &argv,
-                    input_path: Path::new("Input.hs"),
-                    include: &[],
-                    endpoint_identity: endpoint.identity().producer_bytes(),
-                })
-                .expect("test invocation is cacheable");
                 let products = argv
                     .windows(2)
                     .find(|pair| pair[0] == "--build-products-dir")
                     .map(|pair| PathBuf::from(&pair[1]))
                     .expect("bound attempt must select build products");
-                selections.push((key, products));
+                selections.push((*endpoint.identity().producer_bytes(), products));
                 if attempt_index == 1 {
                     Err(true)
                 } else {
@@ -7278,7 +7169,7 @@ mod module_product_tests {
     }
 
     /// This test intentionally crosses the matched Rust frontend, Haskell
-    /// worker, entry-free wire reader and invocation bundle. Run it with
+    /// worker, entry-free wire reader and physical output owner. Run it with
     /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
@@ -9238,7 +9129,7 @@ mod dependency_cache_tests {
     use super::*;
 
     /// A package-importing graph, including implicit Prelude, must enter GHC
-    /// for package selection even if its paired bundle remains available.
+    /// for package selection across repeated requests and home shadow changes.
     #[test]
     fn package_imports_force_worker_selection_for_home_shadow_changes() {
         let root = tempfile::tempdir().unwrap();
@@ -9267,7 +9158,7 @@ mod dependency_cache_tests {
             .expect("fixture compiler request");
             prepared
         };
-        assert!(compile(), "fresh recipe compiles");
+        assert!(compile(), "fresh request compiles");
         assert!(
             compile(),
             "package lookup requires the worker on a repeated request"

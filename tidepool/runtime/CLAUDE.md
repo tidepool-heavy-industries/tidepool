@@ -5,7 +5,7 @@ session checkout, turn supervision, and classification of runtime/session
 failures.
 
 Toolchain discovery, validation, fingerprinting, diagnostics, timing, and the
-compiled-artifact cache belong to `tidepool-toolchain`. The corresponding
+native module-candidate reuse belong to `tidepool-toolchain`. The corresponding
 modules re-exported here are compatibility surfaces, not policy boundaries.
 
 Compiled targets, their certified native closure and constructor metadata form one

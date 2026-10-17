@@ -1,5 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude #-}
-module NoPackageMemo where
+module NativeTargets where
 
 data Token = First | Second
 

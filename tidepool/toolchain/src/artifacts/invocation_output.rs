@@ -50,19 +50,6 @@ impl InvocationOutputLayout<NativeOutput> {
             [Artifact::ModuleProducts, Artifact::ModulePackageImports],
         )
     }
-
-    pub(crate) fn capture<E>(
-        &self,
-        operation: Arc<InventoryOperation>,
-        mut read: impl FnMut(&str, bool) -> Result<Vec<u8>, E>,
-    ) -> Result<InvocationOutputBundle, E> {
-        self.capture_members(operation, |artifact| {
-            read(
-                &artifact.filename(),
-                matches!(artifact, Artifact::Prepared(_)),
-            )
-        })
-    }
 }
 
 impl InvocationOutputLayout<PortableOutput> {
@@ -232,12 +219,6 @@ impl<P> InvocationOutputBundle<P> {
             .collect()
     }
 
-    pub(crate) fn named_artifacts(&self) -> impl Iterator<Item = (String, &[u8])> {
-        self.artifacts
-            .iter()
-            .map(|(artifact, bytes)| (artifact.filename(), bytes.as_slice()))
-    }
-
     pub(crate) fn bytes_len(&self) -> u64 {
         self.artifacts
             .iter()
@@ -325,20 +306,234 @@ mod portable_tests {
 
     #[test]
     fn portable_members_cannot_satisfy_native_layout() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["meta.cbor", "entry.prepared.cbor", "asks.json"] {
+            std::fs::write(root.path().join(name), b"portable member").unwrap();
+        }
         let layout = InvocationOutputLayout::new(&["entry"]).unwrap();
-        let missing = layout
-            .capture(
+        let missing = layout.read(
+            root.path(),
+            Arc::new(InventoryOperation::new(Default::default())),
+        );
+        assert!(matches!(missing, Err(CompileError::MissingOutput(path))
+            if path == root.path().join("module-products.cbor")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_repr::execution_schema::InventoryDecodeLimits;
+
+    // Representation-only raw files exercise acquisition, not semantic issuance.
+    fn physical_outputs(root: &Path, names: &[&str]) {
+        for name in names {
+            std::fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn physical_output_requires_package_sidecar_and_preserves_ordered_targets() {
+        for (targets, names) in [
+            (
+                vec!["result"],
+                vec![
+                    "meta.cbor",
+                    "result.prepared.cbor",
+                    "asks.json",
+                    "module-products.cbor",
+                    "module-package-imports.cbor",
+                ],
+            ),
+            (
+                vec!["second", "first"],
+                vec![
+                    "meta.cbor",
+                    "second.prepared.cbor",
+                    "second.asks.json",
+                    "first.prepared.cbor",
+                    "first.asks.json",
+                    "module-products.cbor",
+                    "module-package-imports.cbor",
+                ],
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            physical_outputs(root.path(), &names);
+            let layout = InvocationOutputLayout::new(&targets).unwrap();
+            let read = || {
+                layout.read(
+                    root.path(),
+                    Arc::new(InventoryOperation::new(Default::default())),
+                )
+            };
+            let bundle = read().unwrap();
+            assert_eq!(bundle.metadata(), b"meta.cbor");
+            assert_eq!(bundle.products(), b"module-products.cbor");
+            assert_eq!(bundle.package_imports(), b"module-package-imports.cbor");
+            let raw = bundle.targets();
+            assert_eq!(
+                raw.iter()
+                    .map(|target| target.target.as_str())
+                    .collect::<Vec<_>>(),
+                targets
+            );
+            for target in &raw {
+                assert_eq!(
+                    target.prepared_bytes.as_slice(),
+                    format!("{}.prepared.cbor", target.target).as_bytes()
+                );
+                let asks = if targets.len() == 1 {
+                    "asks.json".into()
+                } else {
+                    format!("{}.asks.json", target.target)
+                };
+                assert_eq!(target.asks_bytes.as_slice(), asks.as_bytes());
+            }
+            assert_eq!(
+                bundle.bytes_len(),
+                names.iter().map(|name| name.len() as u64).sum::<u64>()
+            );
+            // Every named output is required; package provenance cannot be omitted.
+            for name in &names {
+                std::fs::remove_file(root.path().join(name)).unwrap();
+                assert!(
+                    matches!(read(), Err(CompileError::MissingOutput(path)) if path == root.path().join(name))
+                );
+                std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+            }
+            // A failed observation is not evidence that a member is missing.
+            let package = root.path().join("module-package-imports.cbor");
+            std::fs::remove_file(&package).unwrap();
+            std::fs::create_dir(&package).unwrap();
+            assert!(matches!(read(), Err(CompileError::CompilerEvidence(_))));
+        }
+        for targets in [
+            vec![],
+            vec![""],
+            vec!["same", "same"],
+            vec!["../escape"],
+            vec!["/absolute"],
+            vec!["nested/target"],
+        ] {
+            assert!(InvocationOutputLayout::new(&targets).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_output_acquisition_preserves_work_and_member_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let names = [
+            "meta.cbor",
+            "result.prepared.cbor",
+            "asks.json",
+            "module-products.cbor",
+            "module-package-imports.cbor",
+        ];
+        physical_outputs(root.path(), &names);
+        let layout = InvocationOutputLayout::new(&["result"]).unwrap();
+        layout
+            .read(
+                root.path(),
                 Arc::new(InventoryOperation::new(Default::default())),
-                |name, _| {
-                    if matches!(name, "meta.cbor" | "entry.prepared.cbor" | "asks.json") {
-                        Ok(Vec::new())
-                    } else {
-                        Err(name.to_owned())
-                    }
-                },
             )
-            .err()
-            .expect("native output still requires native products");
-        assert_eq!(missing, "module-products.cbor");
+            .unwrap();
+        let bounded = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 1,
+            ..Default::default()
+        });
+        assert!(layout.read(root.path(), Arc::new(bounded)).is_err());
+        std::fs::write(root.path().join("asks.json"), [0; 128]).unwrap();
+        let bounded = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: 127,
+            ..Default::default()
+        });
+        let Err(CompileError::CompilerEvidence(error)) =
+            layout.read(root.path(), Arc::new(bounded))
+        else {
+            panic!("required asks must respect aggregate admission byte bound");
+        };
+        assert!(matches!(
+            *error,
+            certified_products::CertificationError::EvidenceRead {
+                failure: certified_products::EvidenceReadFailure::SizeLimit {
+                    actual: 128,
+                    limit: 127
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cancelled_runtime_compile_refuses_before_worker_submission() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let mut stages = 0;
+        let refused = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                crate::artifacts::compile_invocation(
+                    &crate::artifacts::CompileInvocation {
+                        source: include_str!(
+                            "../../tests/fixtures/invocation-output/NativeTargets.hs"
+                        ),
+                        targets: &["second", "first"],
+                        include: &[],
+                        fallback_module_name: "NativeTargets",
+                    },
+                    |_, _, _| stages += 1,
+                    &mut |_| {},
+                )
+            },
+        );
+        assert!(
+            matches!(refused.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(stages, 0);
+        assert_eq!(refused.close, CompilerTransactionClose::NotStarted);
+    }
+
+    #[test]
+    fn runtime_targets_complete_through_physical_output_with_native_products() {
+        let root = tempfile::tempdir().unwrap();
+        let includes = [root.path().to_owned()];
+        let invocation = crate::artifacts::CompileInvocation {
+            source: include_str!("../../tests/fixtures/invocation-output/NativeTargets.hs"),
+            targets: &["second", "first"],
+            include: &includes,
+            fallback_module_name: "NativeTargets",
+        };
+        let mut executions = 0;
+        let output =
+            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
+                executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
+            })
+            .expect("actual runtime compile through the physical output owner");
+        assert_eq!(executions, 1);
+        assert_eq!(
+            output
+                .targets
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(output
+            .module_products
+            .iter()
+            .any(|product| product.module == "NativeTargets"));
+        assert!(output
+            .module_inventory
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|module| module.module == "NativeTargets"
+                && module.product == crate::cache::ProductAvailability::Ready));
     }
 }

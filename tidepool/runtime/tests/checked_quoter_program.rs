@@ -40,7 +40,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public = session.mint_scope(ScopeId::ROOT).unwrap();
     let source = include_str!("fixtures/checked-quoter-program.hs");
-    for phase in ["cold", "warm artifact cache"] {
+    for phase in ["first request", "repeated request"] {
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = execution.view();
         let imports = view.turn_imports(&SourceImports::from_specs([

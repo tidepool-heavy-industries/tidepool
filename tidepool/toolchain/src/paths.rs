@@ -2,7 +2,8 @@
 //!
 //! Four scopes:
 //! - regenerable **cache** ([`cache_dir`]) — the materialized bundled stdlib, the
-//!   generated `Tidepool.Effects` module, and the compiled-artifact memo cache;
+//!   generated `Tidepool.Effects` module, native module candidates and mutable
+//!   compiler build products;
 //! - user-global durable **state** ([`state_dir`]) — Exomonad run roots and
 //!   managed worktrees;
 //! - user-global **config** ([`config_dir`]) — the authored verb `lib/`,
@@ -79,18 +80,10 @@ pub fn persistent_compile_daemon_socket() -> PathBuf {
     cache_dir().join("battery-daemon").join("extract.sock")
 }
 
-/// Where the content-addressed compiled-artifact memo lives:
-/// `$TIDEPOOL_COMPILE_CACHE_DIR` if set,
-/// else [`cache_dir`]. **The default layout is unchanged** — nobody's existing
-/// cache moves.
-///
-/// The override exists so a process can isolate its MUTABLE state
-/// (`XDG_CACHE_HOME` → a private tempdir: checkpoints, transcripts, logs, the
-/// generated effects module, the materialized stdlib) while still SHARING the
-/// memo. That split is only sound because the memo is content-addressed: two
-/// writers reach the same entry only when every input that can reach the
-/// output bytes is identical, in which case they are the same compilation and
-/// are entitled to the same bytes.
+/// Root for compiler-owned native module candidates and mutable build products.
+/// `$TIDEPOOL_COMPILE_CACHE_DIR` overrides the default [`cache_dir`] so callers
+/// can isolate compiler state independently of checkpoints, transcripts and logs.
+/// Each consumer owns its namespace and validation policy within this root.
 pub fn compile_cache_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR") {
         return PathBuf::from(d);
@@ -139,7 +132,7 @@ pub fn stdlib_dir(content_hash: &str) -> PathBuf {
 /// harness's own `transcript.jsonl`, which records only harness-turn
 /// failures. Lives under [`cache_dir`] alongside the other regenerable-but-
 /// durable observability streams this server already writes (the generated
-/// effects modules, the compiled-artifact memo).
+/// effects modules, native module candidates).
 pub fn eval_failure_log_path() -> PathBuf {
     cache_dir().join("eval-failures.jsonl")
 }
@@ -155,7 +148,7 @@ pub fn eval_failure_log_path() -> PathBuf {
 /// boundaries so concurrent compilers never write the same module products.
 /// Final process retirement reclaims only its private scratch directories;
 /// ungraceful process death can leave orphans. The logical root and immutable
-/// artifact cache remain shared independently.
+/// native module-candidate store remain shared independently.
 pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
     if let Some(d) = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR") {
         return PathBuf::from(d);
@@ -168,16 +161,9 @@ pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
 /// Wire the default build-products dir (see [`build_products_dir`]) onto
 /// `cmd`, on by default for EVERY `tidepool-extract` spawn in this crate —
 /// not just the ones built through `artifacts::compile_invocation`.
-/// `tidepool-runtime` has more than one spawn site (`session/turn.rs`'s
-/// `run_turn`/`classify_block` and `session/mod.rs`'s
-/// `validate_candidate` build their own `ExtractCmd`s directly, bypassing
-/// `compile_invocation`'s memo — a session turn has on-disk side effects and
-/// mutable-session dependencies a content-addressed cache would get wrong,
-/// see `session/turn.rs`'s module doc), and the module-granular GHC
-/// recompilation win this dir gives is orthogonal to that memo: applying it
-/// everywhere a `tidepool-extract` gets spawned is what makes "on by
-/// default" actually mean every real caller, not just the one with the
-/// fanciest doc comment. A no-op if the directory can't be created.
+/// `tidepool-runtime` also constructs commands directly for session turns and
+/// validation. Applying this owner at every spawn retains module-granular GHC
+/// recompilation state across those callers. A no-op if creation fails.
 pub fn apply_build_products_dir(
     cmd: &mut tidepool_extract_cmd::ExtractCmd,
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
