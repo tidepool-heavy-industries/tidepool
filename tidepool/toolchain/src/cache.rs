@@ -6,7 +6,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::artifacts::invocation_output::{InvocationOutputBundle, InvocationOutputLayout};
 use crate::digest::frame;
+use std::sync::Arc;
+use tidepool_repr::execution_schema::InventoryOperation;
 
 /// Source snapshot identity, independent from compiler dependency selection.
 #[derive(Clone, Debug)]
@@ -776,8 +779,8 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         return None;
     }
     let mut hasher = blake3::Hasher::new();
-    // Product receipt v8 changes the matched worker/frontend ownership wire.
-    frame(&mut hasher, b"tidepool-compile-recipe-v3");
+    // The complete typed output bundle invalidates incomplete positional bundles.
+    frame(&mut hasher, b"tidepool-compile-recipe-v4");
     frame(&mut hasher, inv.source.as_bytes());
     frame(&mut hasher, inv.input_path.file_name()?.as_encoded_bytes());
     let mut args = inv.argv.iter();
@@ -839,115 +842,143 @@ fn append_frame(out: &mut Vec<u8>, bytes: &[u8]) {
 /// manifest as every named artifact. Old layouts and malformed bundles miss.
 pub(crate) fn artifacts_load(
     key: &InvocationKey,
-    names: &[&str],
+    layout: &InvocationOutputLayout,
     source: &str,
-) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
+) -> std::io::Result<Option<(InvocationOutputBundle, DependencyEvidence)>> {
     crate::host_work::checkpoint()?;
-    let bytes = match crate::host_work::read(
-        &crate::paths::compile_cache_dir().join(format!("{key}.bundle")),
+    let operation = Arc::new(InventoryOperation::new(Default::default()));
+    let path = match std::path::absolute(
+        crate::paths::compile_cache_dir().join(format!("{key}.bundle")),
     ) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
+        Ok(path) => path,
         Err(_) => return Ok(None),
     };
-    let result = decode_bundle(&bytes, names, source)?;
-    if result.is_none() {
-        crate::host_work::checkpoint()?;
-    }
-    Ok(result)
+    // This is an acquisition/work bound, not a cache retention limit. Use the
+    // same aggregate owner for the physical bundle, captured members and parsers.
+    let bytes = match crate::certified_products::read_bounded_with_operation(
+        &path,
+        operation.limits().max_bytes as u64,
+        &operation,
+    ) {
+        Ok(bytes) => bytes,
+        Err(crate::certified_products::CertificationError::Interrupted(error)) => {
+            return Err(error)
+        }
+        Err(_) => {
+            crate::host_work::checkpoint()?;
+            return Ok(None);
+        }
+    };
+    decode_bundle(&bytes, layout, source, operation)
 }
 
 fn decode_bundle(
     bytes: &[u8],
-    names: &[&str],
+    layout: &InvocationOutputLayout,
     source: &str,
-) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
-    macro_rules! present {
-        ($value:expr) => {
-            match $value {
-                Some(value) => value,
-                None => return Ok(None),
-            }
-        };
-    }
-    crate::host_work::checkpoint()?;
-    let mut remaining = bytes;
-    let manifest = present!(
-        tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(present!(take_frame(
-            &mut remaining
-        )),)
-        .ok()
-    );
-    if manifest.entries().len() != names.len() + 1 {
-        return Ok(None);
-    }
-    let mut out = Vec::with_capacity(names.len());
-    let mut recorded_evidence = None;
-    for (name, entry) in names
-        .iter()
-        .copied()
-        .chain(std::iter::once("dependencies.json"))
-        .zip(manifest.entries())
-    {
+    operation: Arc<InventoryOperation>,
+) -> std::io::Result<Option<(InvocationOutputBundle, DependencyEvidence)>> {
+    use std::io::{Error, ErrorKind};
+    let invalid = || Error::from(ErrorKind::InvalidData);
+    let decode = || -> std::io::Result<_> {
         crate::host_work::checkpoint()?;
-        if name != entry.name() || entry.digest().is_none() {
-            return Ok(None);
+        let mut remaining = bytes;
+        let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
+            take_frame(&mut remaining).ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?;
+        if manifest.entries().len() != layout.len() + 1 {
+            return Err(invalid());
         }
-        let value = present!(take_frame(&mut remaining));
-        if !entry.matches(value) {
-            return Ok(None);
-        }
-        if name == "dependencies.json" {
-            let evidence: DependencyEvidence = present!(serde_json::from_slice(value).ok());
-            if !evidence.reusable_without_worker(source) {
-                // Source authentication can observe cancellation during its read.
-                crate::host_work::checkpoint()?;
-                return Ok(None);
+        let mut entries = manifest.entries().iter();
+        let bundle = layout.capture(operation.clone(), |name, prepared| {
+            crate::host_work::checkpoint()?;
+            let entry = entries.next().ok_or_else(invalid)?;
+            if entry.name() != name {
+                return Err(invalid());
             }
-            recorded_evidence = Some(evidence);
-        } else {
-            out.push(Some(value.to_vec()));
+            let value = take_frame(&mut remaining).ok_or_else(invalid)?;
+            let limit = if prepared {
+                tidepool_repr::execution_schema::DecodeLimits::default().max_bytes
+            } else {
+                operation.limits().max_bytes
+            };
+            if value.len() > limit || !entry.matches(value) {
+                return Err(invalid());
+            }
+            operation.charge(value.len()).map_err(|_| invalid())?;
+            Ok(value.to_vec())
+        })?;
+        let entry = entries.next().ok_or_else(invalid)?;
+        let value = take_frame(&mut remaining).ok_or_else(invalid)?;
+        if entry.name() != "dependencies.json"
+            || !entry.matches(value)
+            || entries.next().is_some()
+            || !remaining.is_empty()
+        {
+            return Err(invalid());
+        }
+        // Match the fresh compiler front door's conservative dependency-JSON
+        // decoding charge, before serde may expand its strings and containers.
+        operation
+            .charge(value.len().checked_mul(64).ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+        let evidence: DependencyEvidence = serde_json::from_slice(value).map_err(|_| invalid())?;
+        if !evidence.reusable_without_worker(source) {
+            return Err(invalid());
+        }
+        // Completion cutoff for the fully authenticated immutable memo.
+        crate::host_work::checkpoint()?;
+        Ok((bundle, evidence))
+    };
+    match decode() {
+        Ok(result) => Ok(Some(result)),
+        Err(error) if error.kind() == ErrorKind::Interrupted => Err(error),
+        Err(_) => {
+            crate::host_work::checkpoint()?;
+            Ok(None)
         }
     }
-    // This is the completion cutoff for the fully authenticated immutable memo.
-    crate::host_work::checkpoint()?;
-    Ok(remaining.is_empty().then_some(out).zip(recorded_evidence))
+}
+
+fn encode_bundle(
+    bundle: &InvocationOutputBundle,
+    evidence: &DependencyEvidence,
+) -> Option<Vec<u8>> {
+    let dependencies = serde_json::to_vec(evidence).ok()?;
+    let mut artifacts: Vec<_> = bundle.named_artifacts().collect();
+    artifacts.push(("dependencies.json".into(), dependencies.as_slice()));
+    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
+        artifacts
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), Some(*bytes))),
+    );
+    let mut encoded = Vec::new();
+    append_frame(&mut encoded, &manifest.encode());
+    for (_, bytes) in artifacts {
+        append_frame(&mut encoded, bytes);
+    }
+    Some(encoded)
 }
 
 pub(crate) fn artifacts_store(
     key: &InvocationKey,
-    artifacts: &[(&str, Option<&[u8]>)],
+    bundle: &InvocationOutputBundle,
     evidence: &DependencyEvidence,
     source: &str,
 ) {
-    if !evidence.valid(source)
-        || artifacts
-            .iter()
-            .any(|(name, bytes)| *name == "dependencies.json" || bytes.is_none())
-    {
+    if !evidence.valid(source) {
         return;
     }
-    let Ok(dependencies) = serde_json::to_vec(evidence) else {
+    let Some(encoded) = encode_bundle(bundle, evidence) else {
         return;
     };
-    let mut artifacts = artifacts.to_vec();
-    artifacts.push(("dependencies.json", Some(&dependencies)));
-    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
-        artifacts.iter().copied(),
-    );
-    let mut bundle = Vec::new();
-    append_frame(&mut bundle, &manifest.encode());
-    for (_, bytes) in artifacts {
-        let Some(bytes) = bytes else { return };
-        append_frame(&mut bundle, bytes);
-    }
     let dir = crate::paths::compile_cache_dir();
     if fs::create_dir_all(&dir).is_err() || !evidence.valid(source) {
         return;
     }
-    // best-effort: name says it all; a failed cache write just means the
-    // next compile misses this memo entry.
-    tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle).ok();
+    // Best-effort publication: an unwritable memo costs a fresh compilation.
+    tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &encoded).ok();
 }
 
 #[cfg(all(test, unix))]
@@ -1418,7 +1449,7 @@ mod tests {
             || {
                 artifacts_load(
                     &InvocationKey("cancelled-lookup-must-not-read".into()),
-                    &["meta.cbor"],
+                    &InvocationOutputLayout::new(&["result"]).unwrap(),
                     "target",
                 )
             },
@@ -1431,63 +1462,348 @@ mod tests {
         let recovered = with_compiler_transaction_cancellable(
             CompilerTransactionCancellation::new(),
             |_| {},
-            || decode_bundle(b"malformed", &["meta.cbor"], "target"),
+            || {
+                decode_bundle(
+                    b"malformed",
+                    &InvocationOutputLayout::new(&["result"]).unwrap(),
+                    "target",
+                    Arc::new(InventoryOperation::new(Default::default())),
+                )
+            },
         );
         assert!(recovered.action.unwrap().is_none());
         assert_eq!(recovered.close, CompilerTransactionClose::NotStarted);
     }
 
-    #[test]
-    fn bundle_integrity_binds_evidence_and_exact_named_artifacts() {
-        let root = tempfile::tempdir().unwrap();
-        let evidence_bytes = serde_json::to_vec(&evidence(root.path())).unwrap();
-        let artifacts = [
-            ("meta.cbor", Some(b"meta".as_slice())),
-            ("dependencies.json", Some(evidence_bytes.as_slice())),
-        ];
-        let manifest =
-            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(artifacts);
+    fn output_fixture(
+        root: &Path,
+        targets: &[&str],
+    ) -> (InvocationOutputLayout, InvocationOutputBundle) {
+        let layout = InvocationOutputLayout::new(targets).unwrap();
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        // Representation-only fixtures: disk acquisition owns these bytes;
+        // they do not manufacture compiler certificates or source authority.
+        let bundle = layout
+            .capture(operation, |name, _| {
+                fs::write(root.join(name), name.as_bytes())?;
+                fs::read(root.join(name))
+            })
+            .unwrap();
+        (layout, bundle)
+    }
+
+    fn decode_output(
+        bytes: &[u8],
+        layout: &InvocationOutputLayout,
+        source: &str,
+    ) -> Option<(InvocationOutputBundle, DependencyEvidence)> {
+        decode_bundle(
+            bytes,
+            layout,
+            source,
+            Arc::new(InventoryOperation::new(Default::default())),
+        )
+        .unwrap()
+    }
+
+    /// Deliberate storage corruption, retaining valid integrity checksums so
+    /// membership/order refusals cannot pass merely because a digest is wrong.
+    fn wire_bundle(artifacts: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
+            artifacts
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), Some(bytes.as_slice()))),
+        );
         let mut bytes = Vec::new();
         append_frame(&mut bytes, &manifest.encode());
         for (_, value) in artifacts {
-            append_frame(&mut bytes, value.unwrap());
+            append_frame(&mut bytes, value);
         }
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
-            .unwrap()
-            .is_some());
-        assert!(decode_bundle(&bytes, &["other.cbor"], "target")
-            .unwrap()
-            .is_none());
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "other source")
-            .unwrap()
-            .is_none());
-        let end = bytes.len() - 1;
-        bytes[end] ^= 1;
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
-            .unwrap()
-            .is_none());
-        assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target")
-            .unwrap()
-            .is_none());
+        bytes
+    }
 
-        let mut package_evidence = evidence(root.path());
-        package_evidence.packages.push("Data.List".into());
-        let package_evidence = serde_json::to_vec(&package_evidence).unwrap();
-        let package_artifacts = [
-            ("meta.cbor", Some(b"meta".as_slice())),
-            ("dependencies.json", Some(package_evidence.as_slice())),
-        ];
-        let package_manifest =
-            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
-                package_artifacts,
-            );
-        let mut package_bytes = Vec::new();
-        append_frame(&mut package_bytes, &package_manifest.encode());
-        for (_, value) in package_artifacts {
-            append_frame(&mut package_bytes, value.unwrap());
-        }
-        assert!(decode_bundle(&package_bytes, &["meta.cbor"], "target")
+    #[test]
+    fn invocation_bundle_acquisition_enforces_inventory_work_and_member_read_bounds() {
+        use tidepool_repr::execution_schema::InventoryDecodeLimits;
+        let root = tempfile::tempdir().unwrap();
+        let evidence = evidence(root.path());
+        let (layout, _) = output_fixture(root.path(), &["result"]);
+        let bundle = layout
+            .read(
+                root.path(),
+                Arc::new(InventoryOperation::new(Default::default())),
+            )
+            .unwrap();
+        let bytes = encode_bundle(&bundle, &evidence).unwrap();
+        assert!(decode_output(&bytes, &layout, "target").is_some());
+        let bounded = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 1,
+            ..Default::default()
+        });
+        assert!(decode_bundle(&bytes, &layout, "target", Arc::new(bounded))
             .unwrap()
             .is_none());
+        fs::write(root.path().join("asks.json"), [0; 128]).unwrap();
+        let bounded = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: 127,
+            ..Default::default()
+        });
+        let Err(crate::CompileError::CompilerEvidence(error)) =
+            layout.read(root.path(), Arc::new(bounded))
+        else {
+            panic!("required asks must respect the aggregate admission byte bound");
+        };
+        assert!(matches!(
+            *error,
+            crate::certified_products::CertificationError::EvidenceRead {
+                failure: crate::certified_products::EvidenceReadFailure::SizeLimit {
+                    actual: 128,
+                    limit: 127
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn package_free_runtime_invocation_reuses_complete_bundle_and_refuses_bad_package_sidecar() {
+        use crate::artifacts::{test_support, CompileInvocation};
+        let root = tempfile::tempdir().unwrap();
+        let includes = [root.path().to_owned()];
+        let source = include_str!("../tests/fixtures/invocation-memo/NoPackageMemo.hs");
+        let targets = ["second", "first"];
+        let invocation = CompileInvocation {
+            source,
+            targets: &targets,
+            include: &includes,
+            fallback_module_name: "NoPackageMemo",
+        };
+        let compile = || {
+            let mut executions = 0;
+            let output = test_support::compile_invocation(&invocation, |stage, _, _| {
+                executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
+            })
+            .expect("supported package-free runtime request");
+            assert!(
+                output.module_products.is_empty(),
+                "witness requires zero native home products"
+            );
+            assert!(output
+                .module_inventory
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|module| module.product != ProductAvailability::Ready));
+            assert_eq!(
+                output
+                    .targets
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+            (executions, output)
+        };
+        let cache_root = crate::paths::compile_cache_dir();
+        let inventory = || -> std::collections::BTreeSet<_> {
+            fs::read_dir(&cache_root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "bundle")
+                })
+                .collect()
+        };
+        fs::create_dir_all(&cache_root).unwrap();
+        let before = inventory();
+        let (executions, _) = compile();
+        assert_eq!(executions, 1, "fresh request must execute the compiler");
+        let added = inventory().difference(&before).cloned().collect::<Vec<_>>();
+        assert_eq!(added.len(), 1, "eligible frontdoor must publish one bundle");
+        let path = &added[0];
+        let bytes = fs::read(path).unwrap();
+        let layout = InvocationOutputLayout::new(&targets).unwrap();
+        let (_, evidence) =
+            decode_output(&bytes, &layout, source).expect("frontdoor published reusable evidence");
+        assert!(evidence.packages.is_empty());
+        let (executions, _) = compile();
+        assert_eq!(
+            executions, 0,
+            "repeat must reuse memo without entering the worker"
+        );
+
+        // Deliberate cache corruption with a valid checksum tests the semantic
+        // package-sidecar consumer independently of integrity authentication.
+        let mut remaining = bytes.as_slice();
+        let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
+            take_frame(&mut remaining).unwrap(),
+        )
+        .unwrap();
+        let mut artifacts = manifest
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name().to_owned(),
+                    take_frame(&mut remaining).unwrap().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let package = artifacts
+            .iter_mut()
+            .find(|(name, _)| name == "module-package-imports.cbor")
+            .unwrap();
+        package.1 = b"malformed package inventory".to_vec();
+        fs::write(path, wire_bundle(&artifacts)).unwrap();
+        assert_eq!(
+            compile().0,
+            1,
+            "invalid paired package evidence must force fresh acquisition"
+        );
+        assert_eq!(
+            compile().0,
+            0,
+            "fresh compiler output restores a complete reusable bundle"
+        );
+    }
+
+    #[test]
+    fn invocation_bundle_round_trip_binds_required_sidecars_and_target_order() {
+        for targets in [&["second"][..], &["second", "first"][..]] {
+            let root = tempfile::tempdir().unwrap();
+            let evidence = evidence(root.path());
+            let (layout, bundle) = output_fixture(root.path(), targets);
+            let bytes = encode_bundle(&bundle, &evidence).unwrap();
+            let (loaded, _) = decode_output(&bytes, &layout, "target")
+                .expect("production writer/reader round trip");
+            let expected_names = if targets.len() == 1 {
+                vec![
+                    "meta.cbor",
+                    "second.prepared.cbor",
+                    "asks.json",
+                    "module-products.cbor",
+                    "module-package-imports.cbor",
+                ]
+            } else {
+                vec![
+                    "meta.cbor",
+                    "second.prepared.cbor",
+                    "second.asks.json",
+                    "first.prepared.cbor",
+                    "first.asks.json",
+                    "module-products.cbor",
+                    "module-package-imports.cbor",
+                ]
+            };
+            let mut remaining = bytes.as_slice();
+            let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
+                take_frame(&mut remaining).unwrap(),
+            )
+            .unwrap();
+            let mut expected_manifest = expected_names.clone();
+            expected_manifest.push("dependencies.json");
+            assert_eq!(
+                manifest
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.name())
+                    .collect::<Vec<_>>(),
+                expected_manifest
+            );
+            let members: Vec<_> = loaded.named_artifacts().collect();
+            assert_eq!(
+                members
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                expected_names
+            );
+            for (name, bytes) in members {
+                assert_eq!(bytes, fs::read(root.path().join(name)).unwrap());
+            }
+            assert_eq!(loaded.package_imports(), b"module-package-imports.cbor");
+            assert_eq!(
+                loaded
+                    .targets()
+                    .iter()
+                    .map(|target| target.target.as_str())
+                    .collect::<Vec<_>>(),
+                targets
+            );
+            assert_eq!(
+                loaded.bytes_len(),
+                expected_names
+                    .iter()
+                    .map(|name| name.len() as u64)
+                    .sum::<u64>()
+            );
+            assert_eq!(loaded.bytes_len(), bundle.bytes_len());
+
+            let mut members: Vec<_> = bundle
+                .named_artifacts()
+                .map(|(name, bytes)| (name, bytes.to_vec()))
+                .collect();
+            members.push((
+                "dependencies.json".into(),
+                serde_json::to_vec(&evidence).unwrap(),
+            ));
+            // Exactly the old producer mismatch: required final package sidecar
+            // omitted, while dependency evidence and all other members survive.
+            let package_index = members
+                .iter()
+                .position(|(name, _)| name == "module-package-imports.cbor")
+                .unwrap();
+            let mut missing = members.clone();
+            missing.remove(package_index);
+            assert!(decode_output(&wire_bundle(&missing), &layout, "target").is_none());
+            for index in 0..members.len() {
+                let mut missing = members.clone();
+                missing.remove(index);
+                assert!(decode_output(&wire_bundle(&missing), &layout, "target").is_none());
+            }
+            let mut extra = members.clone();
+            extra.push(("unexpected".into(), vec![1]));
+            assert!(decode_output(&wire_bundle(&extra), &layout, "target").is_none());
+            let mut reordered = members.clone();
+            reordered.swap(0, package_index);
+            assert!(decode_output(&wire_bundle(&reordered), &layout, "target").is_none());
+            let mut duplicate = members.clone();
+            duplicate[package_index] = duplicate[0].clone();
+            assert!(decode_output(&wire_bundle(&duplicate), &layout, "target").is_none());
+            let mut trailing = bytes.clone();
+            append_frame(&mut trailing, b"extra frame");
+            assert!(decode_output(&trailing, &layout, "target").is_none());
+            let mut corrupt = bytes.clone();
+            *corrupt.last_mut().unwrap() ^= 1;
+            assert!(decode_output(&corrupt, &layout, "target").is_none());
+            assert!(decode_output(&bytes[..bytes.len() - 1], &layout, "target").is_none());
+            assert!(decode_output(&bytes, &layout, "different source").is_none());
+            let other = InvocationOutputLayout::new(&["other"]).unwrap();
+            assert!(decode_output(&bytes, &other, "target").is_none());
+
+            let mut package_evidence = evidence.clone();
+            package_evidence.packages.push("Data.List".into());
+            assert!(decode_output(
+                &encode_bundle(&bundle, &package_evidence).unwrap(),
+                &layout,
+                "target"
+            )
+            .is_none());
+            fs::write(root.path().join("first/Library.hs"), "shadow").unwrap();
+            assert!(decode_output(&bytes, &layout, "target").is_none());
+            fs::remove_file(root.path().join("first/Library.hs")).unwrap();
+            assert!(decode_output(&bytes, &layout, "target").is_some());
+            fs::write(root.path().join("later/Library.hs"), "changed").unwrap();
+            assert!(decode_output(&bytes, &layout, "target").is_none());
+        }
+        assert!(InvocationOutputLayout::new(&["same", "same"]).is_err());
+        assert!(InvocationOutputLayout::new(&[]).is_err());
+        for target in ["", "../outside", "/outside", "nested/target"] {
+            assert!(
+                InvocationOutputLayout::new(&[target]).is_err(),
+                "invalid target {target:?}"
+            );
+        }
     }
 }

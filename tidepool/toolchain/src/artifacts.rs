@@ -37,6 +37,7 @@ use crate::{
 mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
+pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
@@ -4466,7 +4467,7 @@ fn compile_invocation_inner(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
     );
-    let multi = inv.targets.len() > 1;
+    let layout = invocation_output::InvocationOutputLayout::new(inv.targets)?;
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime { .. }
@@ -4622,8 +4623,6 @@ fn compile_invocation_inner(
     // and worker slot; its placement does not alter the logical recipe or
     // authorize additional source inputs. Reaped slot rotations retain disk
     // warmth, while new daemons and direct invocations use fresh namespaces.
-    let names = artifact_names(inv.targets, multi);
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let base_cmd = cmd;
     let attempt = retry_bounded(
         || {
@@ -4692,11 +4691,9 @@ fn compile_invocation_inner(
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
-                    if let Some((meta_bytes, raw, product_bytes, evidence)) = allow_candidates
-                        .then(|| load_memo(key, &name_refs, inv.targets, inv.source))
-                        .transpose()
-                        .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
-                        .flatten()
+                    if let Some((bundle, evidence)) =
+                        cache::artifacts_load(key, &layout, inv.source)
+                            .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
                     {
                         // Direct invocation memo lacks a worker group/target
                         // certificate. Home products must use the exact
@@ -4706,12 +4703,19 @@ fn compile_invocation_inner(
                             .iter()
                             .any(|module| module.product == cache::ProductAvailability::Ready)
                         {
-                            if let Ok(mut artifacts) = decode_fresh_products(&product_bytes)
+                            let raw = bundle.targets();
+                            if let Ok(mut artifacts) =
+                                certified_products::ParsedModuleProducts::decode_with_operation(
+                                    bundle.products(),
+                                    bundle.package_imports(),
+                                    bundle.operation().clone(),
+                                )
+                                .map_err(compiler_evidence_failure)
                                 .and_then(|fresh| {
                                     assemble_with_products(
-                                        &meta_bytes,
+                                        bundle.metadata(),
                                         &raw,
-                                        fresh,
+                                        fresh.into_products(),
                                         Vec::new(),
                                         Some(&evidence),
                                         None,
@@ -4725,7 +4729,7 @@ fn compile_invocation_inner(
                                 on_stage(
                                     timing::STAGE_CBOR_READ,
                                     load_start.elapsed(),
-                                    total_bytes(&meta_bytes, &raw, &product_bytes),
+                                    bundle.bytes_len(),
                                 );
                                 return Ok(CompileAttempt::Cached(Box::new(artifacts)));
                             }
@@ -4926,8 +4930,7 @@ fn compile_invocation_inner(
     let extracted = extract_and_read(
         run,
         output_owner.path(),
-        inv.targets,
-        multi,
+        &layout,
         &mut on_stage,
         |stderr, success| {
             if !success && !stderr.is_empty() {
@@ -4937,15 +4940,19 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let (meta_bytes, raw, product_bytes, inventory_operation) =
-        extracted.map_err(|error| match &policy {
-            CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { .. },
-                ..
-            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        })?;
+    let bundle = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+    })?;
+    let meta_bytes = bundle.metadata();
+    let raw = bundle.targets();
+    let product_bytes = bundle.products();
+    let package_bundle_bytes = bundle.package_imports();
+    let inventory_operation = bundle.operation();
 
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
@@ -4956,8 +4963,6 @@ fn compile_invocation_inner(
         );
         let evidence_bytes =
             CompilerSidecar::Dependencies.read(output_owner.path(), &inventory_operation)?;
-        let package_bundle_bytes = CompilerSidecar::ModulePackageImports
-            .read(output_owner.path(), &inventory_operation)?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
@@ -5317,15 +5322,7 @@ fn compile_invocation_inner(
             && fresh_count == 0
         {
             if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
-                store_memo(
-                    key,
-                    &name_refs,
-                    &meta_bytes,
-                    &raw,
-                    &product_bytes,
-                    evidence,
-                    inv.source,
-                );
+                cache::artifacts_store(key, &bundle, evidence, inv.source);
             }
         }
         Ok(artifacts)
@@ -5354,7 +5351,7 @@ fn compile_invocation_inner(
             )?;
             std::fs::write(
                 output.join(format!("{}.asks.json", target.target)),
-                &target.asks_bytes,
+                target.asks_bytes.as_slice(),
             )?;
         }
     }
@@ -5800,7 +5797,7 @@ pub fn compile_targets(
 /// One target's raw (pre-deserialize) bytes.
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
-    asks_bytes: Vec<u8>,
+    asks_bytes: Arc<Vec<u8>>,
     prepared_bytes: Arc<Vec<u8>>,
 }
 
@@ -5819,19 +5816,10 @@ pub(crate) struct RawTargetOutput {
 pub(crate) fn extract_and_read(
     run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
-    targets: &[&str],
-    multi: bool,
+    layout: &invocation_output::InvocationOutputLayout,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<
-    (
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ),
-    CompileError,
-> {
+) -> Result<invocation_output::InvocationOutputBundle, CompileError> {
     let inventory_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
         Default::default(),
     ));
@@ -5868,52 +5856,13 @@ pub(crate) fn extract_and_read(
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
 
     let cbor_read_start = Instant::now();
-    let meta_path = temp_dir.join("meta.cbor");
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-    let meta_bytes = certified_products::read_bounded_with_operation(
-        &meta_path,
-        inventory_operation.limits().max_bytes as u64,
-        &inventory_operation,
-    )
-    .map_err(compiler_evidence_failure)?;
-    let products_path = temp_dir.join("module-products.cbor");
-    if !products_path.exists() {
-        return Err(CompileError::MissingOutput(products_path));
-    }
-    let product_bytes = CompilerSidecar::ModuleProducts.read(temp_dir, &inventory_operation)?;
-
-    let mut raw = Vec::with_capacity(targets.len());
-    for target in targets {
-        let prepared_path = temp_dir.join(prepared_artifact_name(target));
-        if !prepared_path.exists() {
-            return Err(CompileError::MissingOutput(prepared_path));
-        }
-        let prepared_bytes = certified_products::read_bounded_with_operation(
-            &prepared_path,
-            DecodeLimits::default().max_bytes as u64,
-            &inventory_operation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let asks_path = if multi {
-            temp_dir.join(format!("{target}.asks.json"))
-        } else {
-            temp_dir.join("asks.json")
-        };
-        let asks_bytes = read_asks_bytes(&asks_path)?;
-        raw.push(RawTargetOutput {
-            target: (*target).to_string(),
-            asks_bytes,
-            prepared_bytes: Arc::new(prepared_bytes),
-        });
-    }
+    let bundle = layout.read(temp_dir, inventory_operation)?;
     on_stage(
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        total_bytes(&meta_bytes, &raw, &product_bytes),
+        bundle.bytes_len(),
     );
-    Ok((meta_bytes, raw, product_bytes, inventory_operation))
+    Ok(bundle)
 }
 
 /// A prepared output and its complete constructor table disagree.
@@ -6003,14 +5952,6 @@ pub(crate) fn assemble(
         completed_source_evidence: None,
         exact_source_admission: None,
     })
-}
-
-fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
-    Ok(tidepool_repr::execution_schema::parse_module_products(
-        bytes,
-        &crate::prepared_artifact::production_requirements()?,
-        module_candidates::product_decode_limits(),
-    )?)
 }
 
 fn assemble_with_products(
@@ -6118,112 +6059,6 @@ fn parse_asks(bytes: &[u8]) -> Result<YieldSites, CompileError> {
 pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
     let bytes = read_asks_bytes(path)?;
     serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Invocation-keyed memo glue
-// ---------------------------------------------------------------------------
-
-/// The logical artifact names of one invocation's output set — exactly the
-/// filenames [`compile_targets`] reads out of the extract's output dir, in a
-/// fixed order: shared `meta.cbor`, then per target `<target>.cbor`,
-/// `<target>.prepared.cbor`, and its asks sidecar. `multi` picks the sidecar SHAPE on the same
-/// `targets.len() > 1` test the Haskell side uses to decide which shape to
-/// write, so the memo's names track the extract's own contract.
-fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(2 + targets.len() * 2);
-    names.push("meta.cbor".to_string());
-    for target in targets {
-        names.push(prepared_artifact_name(target));
-        names.push(if multi {
-            format!("{target}.asks.json")
-        } else {
-            "asks.json".to_string()
-        });
-    }
-    names.push("module-products.cbor".to_string());
-    names.push("module-package-imports.cbor".to_string());
-    names
-}
-
-/// Total bytes read for this compile, for the `cbor_read` timing stage —
-/// identical on the memo path and the spawn path, since both count the same
-/// artifacts.
-fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput], product_bytes: &[u8]) -> u64 {
-    let total = meta_bytes.len()
-        + product_bytes.len()
-        + raw
-            .iter()
-            .map(|r| r.prepared_bytes.len() + r.asks_bytes.len())
-            .sum::<usize>();
-    total as u64
-}
-
-/// Reassemble a memoized artifact set into the same `(meta, raw)` pair the
-/// spawn path produces. `None` — any absent-but-required artifact, or a set
-/// the memo declines — falls through to a cold compile.
-fn load_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    targets: &[&str],
-    source: &str,
-) -> std::io::Result<
-    Option<(
-        Vec<u8>,
-        Vec<RawTargetOutput>,
-        Vec<u8>,
-        cache::DependencyEvidence,
-    )>,
-> {
-    let Some((loaded, evidence)) = cache::artifacts_load(key, names, source)? else {
-        return Ok(None);
-    };
-    Ok((|| {
-        let mut it = loaded.into_iter();
-        // Every artifact is required. An extractor represents a target with no
-        // typed suspension sites by writing an `[]` sidecar.
-        let meta_bytes = it.next()??;
-        let mut raw = Vec::with_capacity(targets.len());
-        for target in targets {
-            let prepared_bytes = it.next()??;
-            let asks_bytes = it.next()??;
-            raw.push(RawTargetOutput {
-                target: (*target).to_string(),
-                asks_bytes,
-                prepared_bytes: Arc::new(prepared_bytes),
-            });
-        }
-        Some((meta_bytes, raw, it.next()??, evidence))
-    })())
-}
-
-/// Store this invocation's full artifact set under `names`, in the order
-/// [`artifact_names`] fixed.
-fn store_memo(
-    key: &cache::InvocationKey,
-    names: &[&str],
-    meta_bytes: &[u8],
-    raw: &[RawTargetOutput],
-    product_bytes: &[u8],
-    evidence: &cache::DependencyEvidence,
-    source: &str,
-) {
-    let mut artifacts: Vec<(&str, Option<&[u8]>)> = Vec::with_capacity(names.len());
-    let mut names = names.iter();
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(meta_bytes)));
-    }
-    for r in raw {
-        let (Some(prepared_name), Some(asks_name)) = (names.next(), names.next()) else {
-            return;
-        };
-        artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
-        artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
-    }
-    if let Some(name) = names.next() {
-        artifacts.push((name, Some(product_bytes)));
-    }
-    cache::artifacts_store(key, &artifacts, evidence, source);
 }
 
 #[cfg(test)]
@@ -7352,6 +7187,13 @@ mod module_product_tests {
 
     #[test]
     fn fresh_product_byte_admission_refuses_malformed_and_duplicate_wire_owners() {
+        fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
+            Ok(tidepool_repr::execution_schema::parse_module_products(
+                bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                module_candidates::product_decode_limits(),
+            )?)
+        }
         let rows = |names: &[&str]| {
             Value::Array(vec![
                 Value::Text("TPMOD".into()),
@@ -8889,7 +8731,7 @@ mod constructor_identity_tests {
     fn raw_target(target: &str, prepared_bytes: Vec<u8>) -> RawTargetOutput {
         RawTargetOutput {
             target: target.to_string(),
-            asks_bytes: b"[]".to_vec(),
+            asks_bytes: Arc::new(b"[]".to_vec()),
             prepared_bytes: Arc::new(prepared_bytes),
         }
     }

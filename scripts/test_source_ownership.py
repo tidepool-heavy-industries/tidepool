@@ -282,6 +282,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelfCapture.hs',
+        'tidepool/toolchain/tests/fixtures/invocation-memo/NoPackageMemo.hs',
         'tidepool/toolchain/tests/fixtures/materialization-fault.c',
         'tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs',
         'tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs',

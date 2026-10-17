@@ -67,6 +67,15 @@ in one checksummed bundle, published by atomic rename. A malformed bundle or
 incompatible evidence is a miss. The recipe namespace deliberately invalidates
 the former eval and invocation cache layouts; neither is read or written.
 
+Invocation recipe v4 requires one typed output bundle, including paired module
+products and module package imports. Its request-derived layout retains target
+order and rejects duplicate names before compiler submission. Memo acquisition
+uses the existing inventory admission budget for the bounded whole-file read,
+member copies and paired product/package decoding. This is an operational work
+bound, separate from cache retention: an oversized or exhausted memo misses.
+Fresh output acquisition also bounds required typed-site sidecars through that
+inventory owner. Cancellation remains a refusal through optional memo reads.
+
 `source_root_manifest` and `source_roots_identity` still own whole-source-revision
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
