@@ -760,89 +760,124 @@ mod tests {
             before_sha,
             "joining custody must not mutate the immutable publication"
         );
-        let fresh = crate::certified_products::tests::recovered_witness_fixtures(&[
-            crate::certified_products::fixture_finalized_product_with_requirements(
-                crate::certified_products::tests::original_groups_fixture_with_interface(
-                    "UnrelatedAuthored",
-                    vec![(7, vec![])],
-                    2,
-                    &BTreeMap::new(),
-                    b"fresh authored interface".to_vec(),
-                ),
-                producer,
-                Some(BTreeMap::from([(
-                    (
-                        root.descriptor.owner.unit.clone(),
-                        root.descriptor.owner.module.clone(),
+        for shared_type in [false, true] {
+            for fresh_group_count in [1, 2, 3] {
+                let fresh = crate::certified_products::tests::recovered_witness_fixtures(&[
+                    crate::certified_products::fixture_finalized_product_with_requirements(
+                        crate::certified_products::tests::original_groups_fixture_with_interface(
+                            "UnrelatedAuthored",
+                            (0..fresh_group_count)
+                                .map(|index| (7 + index * 10, vec![]))
+                                .collect(),
+                            2 + fresh_group_count as u8,
+                            &BTreeMap::new(),
+                            b"fresh authored interface".to_vec(),
+                        ),
+                        producer,
+                        Some(if shared_type {
+                            BTreeMap::from([(
+                                (
+                                    root.descriptor.owner.unit.clone(),
+                                    root.descriptor.owner.module.clone(),
+                                ),
+                                root.descriptor.interface_sha256,
+                            )])
+                        } else {
+                            BTreeMap::new()
+                        }),
                     ),
-                    root.descriptor.interface_sha256,
-                )])),
-            ),
-        ])
-        .remove(0)
-        .product;
-        let fresh_entry = Arc::new(ArtifactEntry::original(producer, fresh).unwrap());
-        let ArtifactPayload::Original(root_product) = &root.payload else {
-            unreachable!()
-        };
-        let root_interface = Arc::new(ArtifactEntry::canonical(
-            root_product.module_interface().unwrap().clone(),
-        ));
-        let fresh_inventory = ArtifactInventory::default();
-        let fresh_view = fresh_inventory
-            .admit_shared(
-                &fresh_inventory.empty_view(),
-                vec![fresh_entry.clone(), root_interface.clone()],
-            )
-            .unwrap();
-        let fresh_projection =
-            CompilerInputProjection::from_issued_entries(&[fresh_entry, root_interface]).unwrap();
-        let fresh_selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &fresh_projection,
-                &fresh_view.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
-        let fresh_originals = fresh_selection
-            .selected_original_closure(&fresh_view)
-            .unwrap();
-        let baseline = published
-            .as_ref()
-            .clone()
-            .extend_issued_compiler_support(
-                &crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
-                    fresh_projection,
-                    fresh_view,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        assert!(
-            baseline
-                .compiler_input_projection()
-                .within_view(fresh_originals.native_closure())
-                .validate(fresh_originals.native_closure())
-                .is_err(),
-            "within_view must not silently erase missing published policy"
-        );
-        let certified = certified_artifact_view(&fresh_originals, &baseline).unwrap();
-        assert_eq!(
-            certified.projection().snapshot_roles()[&root.descriptor.owner],
-            role
-        );
-        assert!(certified
-            .artifacts()
-            .capture_graph_selection()
-            .roots
-            .contains(&crate::artifact_inventory::ArtifactBindingNode::Group(
-                *policy
-                    .selection
-                    .graph_selection()
-                    .native_groups
-                    .first()
-                    .unwrap()
-            )));
+                ])
+                .remove(0)
+                .product;
+                let fresh_entry = Arc::new(ArtifactEntry::original(producer, fresh).unwrap());
+                let ArtifactPayload::Original(root_product) = &root.payload else {
+                    unreachable!()
+                };
+                let root_interface = Arc::new(ArtifactEntry::canonical(
+                    root_product.module_interface().unwrap().clone(),
+                ));
+                let fresh_inventory = ArtifactInventory::default();
+                let fresh_view = fresh_inventory
+                    .admit_shared(
+                        &fresh_inventory.empty_view(),
+                        vec![fresh_entry.clone(), root_interface.clone()],
+                    )
+                    .unwrap();
+                let fresh_projection =
+                    CompilerInputProjection::from_issued_entries(&[fresh_entry, root_interface])
+                        .unwrap();
+                let fresh_selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &fresh_projection,
+                        &fresh_view.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(
+                            Default::default(),
+                        ),
+                    )
+                    .unwrap();
+                let fresh_originals = fresh_selection
+                    .selected_original_closure(&fresh_view)
+                    .unwrap();
+                let baseline = published
+                    .as_ref()
+                    .clone()
+                    .extend_issued_compiler_support(
+                        &crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+                            fresh_projection,
+                            fresh_view,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                assert!(
+                    baseline
+                        .compiler_input_projection()
+                        .within_view(fresh_originals.native_closure())
+                        .validate(fresh_originals.native_closure())
+                        .is_err(),
+                    "within_view must not silently erase missing published policy"
+                );
+                let certified = certified_artifact_view(&fresh_originals, &baseline).unwrap();
+                assert_eq!(
+                    certified.artifacts().selected_native_groups().len(),
+                    fresh_group_count as usize + 1
+                );
+                for selected in fresh_originals
+                    .native_closure()
+                    .capture_graph_selection()
+                    .roots
+                    .iter()
+                    .filter(|node| {
+                        matches!(
+                            node,
+                            crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                        )
+                    })
+                {
+                    assert!(certified
+                        .artifacts()
+                        .capture_graph_selection()
+                        .roots
+                        .contains(selected));
+                }
+                assert_eq!(
+                    certified.projection().snapshot_roles()[&root.descriptor.owner],
+                    role
+                );
+                assert!(certified
+                    .artifacts()
+                    .capture_graph_selection()
+                    .roots
+                    .contains(&crate::artifact_inventory::ArtifactBindingNode::Group(
+                        *policy
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .first()
+                            .unwrap()
+                    )));
+            }
+        }
     }
 
     #[test]

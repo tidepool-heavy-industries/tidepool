@@ -6343,9 +6343,20 @@ impl ArtifactView {
         originals: &crate::certified_products::SelectedOriginalClosure,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
         let compiled = originals.native_closure();
-        let incoming = projection.within_view(compiled);
+        let owners = originals
+            .products()
+            .iter()
+            .map(|product| ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            })
+            .collect();
+        // Persistent published policy survives missing custody in within_view.
+        // Incoming roles instead belong to this closure's selected originals;
+        // required external owners contribute types and retain baseline policy.
+        let incoming = projection.source_support(compiled, &owners)?;
         compiled.merge_compiler_inputs_with_originals(
-            &incoming,
+            incoming.projection(),
             self,
             projection,
             CompilerNativeDemand::SelectedOriginals(originals),
