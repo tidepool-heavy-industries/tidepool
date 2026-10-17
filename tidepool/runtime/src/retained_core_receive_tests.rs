@@ -324,7 +324,6 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         })
         .expect("the certified retained owner carries its original receive site");
     assert_eq!(receive.origin(), ProductOrigin::RetainedCore);
-    let receive_definitions = receive.group().definitions();
     let mut state = crate::session::PersistentSession::new(None, 4096);
     let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
         .expect("install the target and its complete certified native closure");
@@ -333,7 +332,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         state.prepared_mut().unwrap(),
         program,
         table,
-        receive_definitions,
+        declared_site.site,
+        crate::session::prepared::assert_parked_receive_schema,
     );
     assert!(state.prepared_mut().unwrap().unpin(program));
 }

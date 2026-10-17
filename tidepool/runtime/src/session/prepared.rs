@@ -6810,6 +6810,37 @@ impl PreparedEngine {
     }
 }
 
+/// Assert receiver-owned evidence without treating a group as a closed program.
+#[cfg(test)]
+pub(crate) fn assert_parked_receive_schema(
+    engine: &PreparedEngine,
+    parked: &PreparedParked,
+    payload_layout: &JsonLayout<DataConId>,
+) {
+    let (_, frame) = engine.machine.parked(parked.id).expect("live parked frame");
+    let PreparedReplyEvidence::AtSite { owner, row } = frame.reply else {
+        panic!("the actual receive request must select AtSite reply evidence")
+    };
+    let facts = engine.programs.get(&owner).expect("installed reply owner");
+    assert_eq!(facts.sites[row].delivery, SiteDelivery::LiveReentry);
+    assert_eq!(facts.json_layout().as_ref(), Some(payload_layout));
+    let HaskellValue::Con(constructor, _) = &parked.request else {
+        panic!("the actual request has an admitted constructor")
+    };
+    let witness = engine
+        .constructor_replies
+        .get(constructor)
+        .expect("installed constructor reply");
+    let constructor_owner = engine
+        .programs
+        .get(&witness.owner)
+        .expect("installed constructor owner");
+    assert_eq!(
+        constructor_owner.constructor_replies[witness.row].1,
+        ConstructorReply::AtSite
+    );
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

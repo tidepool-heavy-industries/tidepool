@@ -145,7 +145,48 @@ fn assert_typed_receive_json(prepared: PreparedProgram, table: tidepool_repr::Da
             4096,
         )
         .expect("bootstrap self-contained compiler-produced typed receive fixture");
-    typed_receive_test_support::assert_typed_receive_json(&mut engine, program, table, receive);
+    use tidepool_repr::execution_schema::{ConstructorId, ConstructorReply, SiteDelivery};
+    let receiver = receive
+        .constructors()
+        .iter()
+        .position(|constructor| {
+            constructor.identity.symbol.module == "Tidepool.Effects.Core"
+                && constructor.identity.symbol.occurrence == "ActorReceiveWith"
+        })
+        .expect("compiler retained the genuine receive constructor");
+    assert!(receive
+        .constructor_replies()
+        .contains(&(ConstructorId(receiver as u32), ConstructorReply::AtSite)));
+    let layout = receive
+        .json_layout()
+        .expect("compiler-issued receiver Value layout")
+        .try_map(|id| {
+            receive
+                .constructors()
+                .get(id.0 as usize)
+                .map(|constructor| constructor.host_id)
+                .ok_or(())
+        })
+        .expect("declared canonical JSON constructors");
+    let mut live_sites = receive
+        .sites()
+        .iter()
+        .filter(|site| site.delivery == SiteDelivery::LiveReentry);
+    let site = live_sites
+        .next()
+        .expect("compiler-issued live receive site")
+        .site;
+    assert!(
+        live_sites.next().is_none(),
+        "the standalone JsonReply fixture has one live receive site"
+    );
+    typed_receive_test_support::assert_typed_receive_json(
+        &mut engine,
+        program,
+        table,
+        site,
+        |_, _, payload_layout| assert_eq!(&layout, payload_layout),
+    );
 }
 
 #[test]
