@@ -2582,7 +2582,12 @@ fn write_response_with_timing(
 fn is_raw_compiler_detail(line: &str) -> bool {
     matches!(
         line.split_ascii_whitespace().next(),
-        Some("tidepool-timing-detail" | "tidepool-timing-module-detail" | "tidepool-count")
+        Some(
+            "tidepool-timing-detail"
+                | "tidepool-timing-module-detail"
+                | "tidepool-count"
+                | "tidepool-module-counts"
+        )
     )
 }
 
@@ -5146,7 +5151,7 @@ tidepool-reuse-error: witness failed\n";
                     Path::new("/owned/source"),
                     &[],
                 );
-                log_compile_timing("owned", "digest", b"tidepool-validation {\"schema\":1,\"invocation_id\":2,\"worker_pid\":123,\"start_ns\":10,\"end_ns\":20,\"wall_ns\":10,\"cpu_ns\":9,\"clock_domain\":\"ghc_monotonic_ns\",\"outcome\":\"success\",\"counts\":{}}\ntidepool-timing-detail parent=prepared_recover phase=lookup ms=1\n");
+                log_compile_timing("owned", "digest", b"tidepool-validation {\"schema\":1,\"invocation_id\":2,\"worker_pid\":123,\"start_ns\":10,\"end_ns\":20,\"wall_ns\":10,\"cpu_ns\":9,\"clock_domain\":\"ghc_monotonic_ns\",\"outcome\":\"success\",\"counts\":{}}\ntidepool-timing-detail parent=prepared_recover phase=lookup ms=1\ntidepool-module-counts name=raw_projection_output owner_unit=main owner_module=Execute count_ns=21 successful_groups=2 original_encoding_bytes=70\n");
             });
             let output = trace.text();
             let rows = output
@@ -5166,6 +5171,10 @@ tidepool-reuse-error: witness failed\n";
             assert!(output.contains("tidepool-validation"));
             assert_eq!(
                 output.contains("tidepool-timing-detail"),
+                profile == CompilerTraceProfile::Full
+            );
+            assert_eq!(
+                output.contains("tidepool-module-counts"),
                 profile == CompilerTraceProfile::Full
             );
         }

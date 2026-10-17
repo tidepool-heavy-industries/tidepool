@@ -19,6 +19,7 @@ module Tidepool.Timing
   , emitPhase
   , emitDetailPhase
   , emitCount
+  , emitModuleCounts
   , emitCompileSummary
   , emitModuleTiming
   , emitModuleInterfaceTiming
@@ -341,6 +342,18 @@ emitCount True name count = do
   countNs <- getMonotonicTimeNSec
   hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count
     ++ " count_ns=" ++ show countNs)
+
+-- | One aggregate record from the actual module owner. Values describe output,
+-- not attempted or rolled-back projection work.
+emitModuleCounts :: Bool -> String -> Module -> [(String, Integer)] -> IO ()
+emitModuleCounts False _ _ _ = pure ()
+emitModuleCounts True name owner counts = do
+  countNs <- getMonotonicTimeNSec
+  hPutStrLn stderr ("tidepool-module-counts name=" ++ name
+    ++ " owner_unit=" ++ unitString (moduleUnit owner)
+    ++ " owner_module=" ++ moduleNameString (moduleName owner)
+    ++ " count_ns=" ++ show countNs
+    ++ concatMap (\(key, value) -> " " ++ key ++ "=" ++ show value) counts)
 
 elapsedMs :: Double -> Double -> Integer
 elapsedMs t0 t1 = round ((t1 - t0) * 1000)
