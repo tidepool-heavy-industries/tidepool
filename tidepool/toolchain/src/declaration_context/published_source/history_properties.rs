@@ -520,3 +520,97 @@ fn published_role_refuses_missing_issuer_selection() {
         "legacy publication facts cannot reconstruct the issuer's selection from broader custody"
     );
 }
+
+#[test]
+fn unrelated_later_native_offer_does_not_change_reopened_publication() {
+    let (root, _, publication) = fixture(0);
+    let published = publication.context();
+    let original_graph = published.artifact_view().capture_graph_selection();
+    let original_roles = published.compiler_input_roles();
+    let original_offers = published
+        .compiler_source_support()
+        .native_offer_observations()
+        .unwrap();
+    let unrelated = Arc::new(
+        ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::tests::recovered_witness_fixtures(&[
+                crate::certified_products::fixture_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture_with_interface(
+                        "UnrelatedLaterOutput",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                        b"unrelated later output".to_vec(),
+                    ),
+                    [2; 32],
+                ),
+            ])
+            .remove(0)
+            .product,
+        )
+        .unwrap(),
+    );
+    let inventory = ArtifactInventory::default();
+    let issued_view = inventory
+        .admit_shared(&inventory.empty_view(), vec![unrelated.clone()])
+        .unwrap();
+    let later_support = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+        CompilerInputProjection::from_issued_entries(&[unrelated.clone()]).unwrap(),
+        issued_view,
+    )
+    .unwrap();
+    let carried = published
+        .compiler_source_support()
+        .merge(&later_support)
+        .unwrap();
+    assert!(original_offers.is_subset(&carried.native_offer_observations().unwrap()));
+    assert!(
+        carried.native_offers().len() > published.compiler_source_support().native_offers().len()
+    );
+    let mut lexical = published.facts.lexical.to_vec();
+    lexical.push(ExactLexicalNode {
+        owner: unrelated.descriptor.owner.clone(),
+        imports: vec![],
+    });
+    let continued = ExactDeclarationContext::from_authenticated_execution_support(
+        [2; 32],
+        carried,
+        lexical,
+        root.descriptor.owner.clone(),
+        &[root.descriptor.owner.clone()],
+    )
+    .unwrap();
+    let reopened = continued.published_source_original_selections().unwrap();
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(
+        reopened[0].context().compiler_input_roles(),
+        original_roles,
+        "the publication's policy graph and policy SHA remain the issued values"
+    );
+    assert_eq!(
+        published.artifact_view().capture_graph_selection(),
+        original_graph,
+        "later support cannot mutate the original publication view"
+    );
+    assert_eq!(
+        published
+            .compiler_source_support()
+            .native_offer_observations()
+            .unwrap(),
+        original_offers,
+        "later support cannot mutate original offer issuance"
+    );
+    assert_eq!(
+        reopened[0].context().semantic_sha256(),
+        published.semantic_sha256(),
+        "unrelated later issuance cannot change the reopened publication's identity"
+    );
+    assert_eq!(
+        reopened[0]
+            .context()
+            .artifact_view()
+            .capture_graph_selection(),
+        original_graph
+    );
+}
