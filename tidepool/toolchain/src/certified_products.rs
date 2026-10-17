@@ -2523,15 +2523,24 @@ impl ReceiptSourceSelection {
         }
     }
 
-    fn compiler_namespace_original(&self) -> Option<&ReceiptNativeSelection> {
-        match self {
+    fn compiler_namespace_row(&self) -> CompilerNamespaceRow<'_> {
+        let original = match self {
             Self::Native { native, .. } => match native.version {
                 ReceiptSourceVersion::Original | ReceiptSourceVersion::Fresh => Some(native),
                 ReceiptSourceVersion::RetainedCore => None,
             },
             Self::InterfaceOnly { .. } => None,
+        };
+        CompilerNamespaceRow {
+            interface: self.interface(),
+            original,
         }
     }
+}
+
+struct CompilerNamespaceRow<'a> {
+    interface: crate::artifact_inventory::ArtifactId,
+    original: Option<&'a ReceiptNativeSelection>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2714,15 +2723,11 @@ impl CertifiedSourceSelection {
                 }
             }
         }
-        if self
-            .visible_modules()
-            .filter_map(|(_, selected)| selected.native())
-            .any(|selected| {
-                ambiguous.contains(&crate::artifact_inventory::NativeOwnerKey::from_owner(
-                    &selected.owner,
-                ))
-            })
-        {
+        if self.compiler_namespace_originals().any(|selected| {
+            ambiguous.contains(&crate::artifact_inventory::NativeOwnerKey::from_owner(
+                &selected.owner,
+            ))
+        }) {
             return Err(CertificationError::Mismatch(
                 "ambiguous issued compiler native artifact",
             ));
@@ -2763,8 +2768,8 @@ impl CertifiedSourceSelection {
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
         use crate::artifact_inventory::{ArtifactKind, ArtifactPayload, NativeOwnerKey};
         let mut ids = BTreeSet::new();
-        for (_, selected) in self.visible_modules() {
-            let interface = selected.interface();
+        for (_, selected) in self.compiler_namespace_rows() {
+            let interface = selected.interface;
             if !entries.get(&interface).is_some_and(|entry| {
                 !matches!(entry.payload, ArtifactPayload::Original(_))
                     && (entry.descriptor.kind != ArtifactKind::ValueInterface
@@ -2778,7 +2783,7 @@ impl CertifiedSourceSelection {
                 ));
             }
             ids.insert(interface);
-            if let Some(selected_native) = selected.native() {
+            if let Some(selected_native) = selected.original {
                 let id = native
                     .get(&NativeOwnerKey::from_owner(&selected_native.owner))
                     .ok_or(CertificationError::Mismatch(
@@ -3085,9 +3090,16 @@ impl CertifiedSourceSelection {
             .filter_map(ReceiptSourceSelection::native)
     }
 
-    fn compiler_namespace_originals(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
+    fn compiler_namespace_rows(
+        &self,
+    ) -> impl Iterator<Item = (&(String, String), CompilerNamespaceRow<'_>)> {
         self.visible_modules()
-            .filter_map(|(_, row)| row.compiler_namespace_original())
+            .map(|(owner, row)| (owner, row.compiler_namespace_row()))
+    }
+
+    fn compiler_namespace_originals(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
+        self.compiler_namespace_rows()
+            .filter_map(|(_, row)| row.original)
     }
 
     /// Module receipt body owners; private request availability is independent.
@@ -3135,7 +3147,7 @@ impl CertifiedSourceSelection {
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
         let mut entries = Vec::new();
-        for ((unit, module), selected) in self.visible_modules() {
+        for ((unit, module), selected) in self.compiler_namespace_rows() {
             if omitted_generated
                 .iter()
                 .any(|owner| owner.unit == *unit && owner.module == *module)
@@ -3144,7 +3156,7 @@ impl CertifiedSourceSelection {
             }
             let interface = metadata
                 .artifacts
-                .get(&selected.interface())
+                .get(&selected.interface)
                 .filter(|entry| {
                     !matches!(
                         &entry.payload,
@@ -3155,7 +3167,7 @@ impl CertifiedSourceSelection {
                     "issued compiler interface artifact",
                 ))?;
             entries.push(Arc::clone(interface));
-            if let Some(native) = selected.compiler_namespace_original() {
+            if let Some(native) = selected.original {
                 let matching = metadata.artifacts.values().filter(|entry| {
                     matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
                 }).collect::<Vec<_>>();
@@ -11317,6 +11329,50 @@ pub(crate) mod tests {
             )
             .unwrap();
         let operation = InventoryOperation::new(Default::default());
+        let assert_namespace_ids = |selection: &CertifiedSourceSelection,
+                                    view: &crate::artifact_inventory::ArtifactView,
+                                    namespace_original: bool| {
+            let metadata = view.metadata_snapshot();
+            let native_owners = metadata
+                .artifacts
+                .iter()
+                .filter_map(|(id, entry)| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product) => Some((
+                        crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner()),
+                        *id,
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let expected = std::iter::once(interface.descriptor.id)
+                .chain(namespace_original.then_some(native.descriptor.id))
+                .collect::<BTreeSet<_>>();
+            let projected = selection
+                .compiler_projection(view)
+                .unwrap()
+                .roles()
+                .into_iter()
+                .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(projected, expected);
+            assert_eq!(
+                selection
+                    .artifact_ids_from_entries(&metadata.artifacts)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                selection
+                    .artifact_ids_from_bound_entries(
+                        &metadata.artifacts,
+                        &native_owners,
+                        view,
+                        &BTreeSet::new()
+                    )
+                    .unwrap(),
+                expected
+            );
+        };
         for (origin, namespace_original) in [
             (ProductOrigin::Fresh, true),
             (ProductOrigin::Cached, true),
@@ -11359,6 +11415,7 @@ pub(crate) mod tests {
                 selection.compiler_support_projection(&view, &[]).unwrap(),
                 projected
             );
+            assert_namespace_ids(&selection, &view, namespace_original);
             let mut carried = selection;
             for _ in 0..3 {
                 let owner = crate::declaration_join::ExactModuleIdentity {
@@ -11406,6 +11463,7 @@ pub(crate) mod tests {
                     usize::from(namespace_original)
                 );
                 assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
+                assert_namespace_ids(&carried, &inputs.artifacts, namespace_original);
             }
             if !namespace_original {
                 assert_eq!(carried.receipt_native_body_owners().count(), 0);

@@ -1386,6 +1386,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let inputs = ProtectedScaffoldRequirements::default()
         .compiler_inputs(&context, None)
         .unwrap();
+    assert!(inputs
+        .projection
+        .roles()
+        .iter()
+        .all(|role| role.original() != Some(a_id)));
     let inherited = inputs.native_availability(b_id).unwrap();
     assert!(inherited.permits(7));
     assert!(!inherited.permits(9001));
@@ -1397,6 +1402,41 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         &validation.inventory,
     )
     .unwrap();
+    let namespace = inputs
+        .projection
+        .roles()
+        .into_iter()
+        .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+        .collect::<BTreeSet<_>>();
+    let metadata = inputs.artifacts.metadata_snapshot();
+    let native_owners = metadata
+        .artifacts
+        .iter()
+        .filter_map(|(id, entry)| match &entry.payload {
+            ArtifactPayload::Original(product) => Some((
+                crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner()),
+                *id,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        selected
+            .artifact_ids_from_entries(&metadata.artifacts)
+            .unwrap(),
+        namespace
+    );
+    assert_eq!(
+        selected
+            .artifact_ids_from_bound_entries(
+                &metadata.artifacts,
+                &native_owners,
+                &inputs.artifacts,
+                &BTreeSet::new()
+            )
+            .unwrap(),
+        namespace
+    );
     drop(inputs);
     drop(context);
     drop(inherited);
