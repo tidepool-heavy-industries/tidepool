@@ -365,7 +365,7 @@ fn reached_payload_construction(
         .iter()
         .collect::<Vec<_>>();
     let mut visited = BTreeSet::new();
-    let mut payload = None;
+    let mut payload: Option<&tidepool_toolchain::certified_products::PendingCertifiedGroup> = None;
     while let Some(import) = pending.pop() {
         let PendingImportOwner::Source {
             owner,
