@@ -16549,9 +16549,10 @@ mod tests {
         let response = lookup_response(
             prepared,
             vec![
-                InspectionResult::Info {
+                InspectionResult::Lookup {
                     query: "awaitSettled".into(),
-                    entries: vec![InfoEntry {
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![InfoEntry {
                         references: vec![],
                         name: "awaitSettled".into(),
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
@@ -16559,7 +16560,7 @@ mod tests {
                         display: "awaitSettled :: Response result -> Await (Settlement result)"
                             .into(),
                         availability: InspectionAvailability::Available,
-                    }],
+                    }]),
                 },
                 InspectionResult::Rejected {
                     diagnostic: "NotInScope is not in scope".into(),
@@ -16629,14 +16630,17 @@ mod tests {
         );
         let response = lookup_response(
             prepared,
-            // The same batch carried both interpretations: no name, a module.
-            vec![
-                InspectionResult::NotFound {
-                    query: "Project.Investigate".into(),
-                },
-                InspectionResult::Browse {
+            // The worker selected the module after both exact-name searches missed.
+            vec![InspectionResult::Lookup {
+                query: "Project.Investigate".into(),
+                scopes: vec![
+                    tidepool_runtime::session::NameScope::Current,
+                    tidepool_runtime::session::NameScope::PublicModule(
+                        "Project.Investigate".into(),
+                    ),
+                ],
+                answer: tidepool_runtime::session::LookupAnswer::Module {
                     module: "Project.Investigate".into(),
-                    expanded: false,
                     entries: vec![info_entry(
                         "investigate",
                         "Project.Investigate",
@@ -16644,7 +16648,7 @@ mod tests {
                         "investigate :: FilePath -> IO ()",
                     )],
                 },
-            ],
+            }],
             &[],
             &[],
         );
@@ -16668,20 +16672,16 @@ mod tests {
         .unwrap();
         let response = lookup_response(
             prepared,
-            vec![
-                InspectionResult::Info {
-                    query: "Cmd.CommandResult".into(),
-                    entries: vec![info_entry(
-                        "CommandResult",
-                        "Tidepool.Command",
-                        "type",
-                        "data CommandResult",
-                    )],
-                },
-                InspectionResult::ModuleNotFound {
-                    module: "Cmd.CommandResult".into(),
-                },
-            ],
+            vec![InspectionResult::Lookup {
+                query: "Cmd.CommandResult".into(),
+                scopes: vec![tidepool_runtime::session::NameScope::Current],
+                answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
+                    "CommandResult",
+                    "Tidepool.Command",
+                    "type",
+                    "data CommandResult",
+                )]),
+            }],
             &[],
             &[],
         );
@@ -16701,28 +16701,24 @@ mod tests {
         .unwrap();
         let response = lookup_response(
             prepared,
-            vec![
-                InspectionResult::Ambiguous {
-                    query: "Cmd.RunResult".into(),
-                    entries: vec![
-                        info_entry(
-                            "RunResult",
-                            "Tidepool.Command",
-                            "type",
-                            "data RunResult = RunResult",
-                        ),
-                        info_entry(
-                            "RunResult",
-                            "Tidepool.Command",
-                            "constructor",
-                            "RunResult :: Int -> RunResult",
-                        ),
-                    ],
-                },
-                InspectionResult::ModuleNotFound {
-                    module: "Cmd.RunResult".into(),
-                },
-            ],
+            vec![InspectionResult::Lookup {
+                query: "Cmd.RunResult".into(),
+                scopes: vec![tidepool_runtime::session::NameScope::Current],
+                answer: tidepool_runtime::session::LookupAnswer::Ambiguous(vec![
+                    info_entry(
+                        "RunResult",
+                        "Tidepool.Command",
+                        "type",
+                        "data RunResult = RunResult",
+                    ),
+                    info_entry(
+                        "RunResult",
+                        "Tidepool.Command",
+                        "constructor",
+                        "RunResult :: Int -> RunResult",
+                    ),
+                ]),
+            }],
             &[],
             &[],
         );
@@ -16751,14 +16747,13 @@ mod tests {
         .unwrap();
         let response = lookup_response(
             prepared,
-            vec![
-                InspectionResult::NotFound {
-                    query: "No.Such.Module".into(),
-                },
-                InspectionResult::ModuleNotFound {
-                    module: "No.Such.Module".into(),
-                },
-            ],
+            vec![InspectionResult::Lookup {
+                query: "No.Such.Module".into(),
+                scopes: vec![tidepool_runtime::session::NameScope::Current],
+                answer: tidepool_runtime::session::LookupAnswer::ModuleNotFound(
+                    "No.Such.Module".into(),
+                ),
+            }],
             &[],
             &[],
         );
@@ -16779,11 +16774,8 @@ mod tests {
         );
     }
 
-    /// A dotted, lowercase-final `Name` miss (`Cmd.exitCode`) sent a paired
-    /// qualifier `Browse` in the same batch; its entries seed near-match
-    /// suggestions on the `NotFound` outcome, and the query right after it in
-    /// the batch must still land on its own result — the pairing consumes
-    /// exactly two results, same as the already-landed `Qualified` shape.
+    /// A semantic name miss carries cheap export spellings for suggestions;
+    /// the following query keeps its own compiler-issued decision.
     #[test]
     fn qualifier_shaped_name_miss_suggests_close_exports_without_misaligning_the_batch() {
         let prepared = crate::lookup_tool::prepare(serde_json::json!({
@@ -16797,35 +16789,22 @@ mod tests {
         let response = lookup_response(
             prepared,
             vec![
-                InspectionResult::NotFound {
+                InspectionResult::Lookup {
                     query: "Cmd.exitCode".into(),
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Missing {
+                        export_names: vec!["commandExitCode".into(), "readStdout".into()],
+                    },
                 },
-                InspectionResult::Browse {
-                    module: "Tidepool.Command".into(),
-                    expanded: false,
-                    entries: vec![
-                        info_entry(
-                            "commandExitCode",
-                            "Tidepool.Command",
-                            "value",
-                            "commandExitCode :: CommandResult -> Int",
-                        ),
-                        info_entry(
-                            "readStdout",
-                            "Tidepool.Command",
-                            "value",
-                            "readStdout :: Job -> IO Text",
-                        ),
-                    ],
-                },
-                InspectionResult::Info {
+                InspectionResult::Lookup {
                     query: "awaitSettled".into(),
-                    entries: vec![info_entry(
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
                         "awaitSettled",
                         "Tidepool.Agent.Watch",
                         "value",
                         "awaitSettled :: Int",
-                    )],
+                    )]),
                 },
             ],
             &[],
@@ -16853,38 +16832,25 @@ mod tests {
         assert!(rendered.contains("awaitSettled :: Int"), "{rendered}");
     }
 
-    /// A qualifier-shaped `Name` query that GHC does resolve still consumes
-    /// both results in the batch (the paired browse is discarded, not left
-    /// for the next query to accidentally consume).
+    /// A successful qualified name needs one compiler decision.
     #[test]
-    fn qualifier_shaped_name_hit_discards_its_paired_browse_result() {
+    fn qualifier_shaped_name_hit_consumes_one_semantic_result() {
         let prepared = crate::lookup_tool::prepare(serde_json::json!({
             "queries": ["Cmd.readOutput"]
         }))
         .unwrap();
         let response = lookup_response(
             prepared,
-            vec![
-                InspectionResult::Info {
-                    query: "Cmd.readOutput".into(),
-                    entries: vec![info_entry(
-                        "readOutput",
-                        "Tidepool.Command",
-                        "value",
-                        "readOutput :: Job -> IO Text",
-                    )],
-                },
-                InspectionResult::Browse {
-                    module: "Tidepool.Command".into(),
-                    expanded: false,
-                    entries: vec![info_entry(
-                        "readOutput",
-                        "Tidepool.Command",
-                        "value",
-                        "readOutput :: Job -> IO Text",
-                    )],
-                },
-            ],
+            vec![InspectionResult::Lookup {
+                query: "Cmd.readOutput".into(),
+                scopes: vec![tidepool_runtime::session::NameScope::Current],
+                answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
+                    "readOutput",
+                    "Tidepool.Command",
+                    "value",
+                    "readOutput :: Job -> IO Text",
+                )]),
+            }],
             &[],
             &[],
         );
@@ -16898,9 +16864,8 @@ mod tests {
             .contains("readOutput :: Job -> IO Text"));
     }
 
-    /// Queries answered locally consume no compiler result and a dotted
-    /// capitalized query consumes exactly two, so a mixed batch stays aligned:
-    /// every query must land on the results issued for it and no other.
+    /// Local queries consume no compiler result; each name query consumes
+    /// its one issued decision in the original input order.
     #[test]
     fn a_mixed_batch_keeps_each_query_on_its_own_results() {
         let prepared = crate::lookup_tool::prepare(serde_json::json!({
@@ -16913,48 +16878,45 @@ mod tests {
         let response = lookup_response(
             prepared,
             vec![
-                InspectionResult::Info {
+                InspectionResult::Lookup {
                     query: "Cmd.CommandResult".into(),
-                    entries: vec![info_entry(
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
                         "CommandResult",
                         "Tidepool.Command",
                         "type",
                         "data CommandResult",
-                    )],
+                    )]),
                 },
-                InspectionResult::ModuleNotFound {
-                    module: "Cmd.CommandResult".into(),
-                },
-                InspectionResult::NotFound {
+                InspectionResult::Lookup {
                     query: "Project.Investigate".into(),
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Module {
+                        module: "Project.Investigate".into(),
+                        entries: vec![info_entry(
+                            "investigate",
+                            "Project.Investigate",
+                            "value",
+                            "investigate :: FilePath -> IO ()",
+                        )],
+                    },
                 },
-                InspectionResult::Browse {
-                    module: "Project.Investigate".into(),
-                    expanded: false,
-                    entries: vec![info_entry(
-                        "investigate",
-                        "Project.Investigate",
-                        "value",
-                        "investigate :: FilePath -> IO ()",
-                    )],
-                },
-                InspectionResult::Ambiguous {
+                InspectionResult::Lookup {
                     query: "Cmd.CommandExited".into(),
-                    entries: vec![info_entry(
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Ambiguous(vec![info_entry(
                         "CommandExited",
                         "Tidepool.Command",
                         "constructor",
                         "CommandExited :: Int -> CommandOutcome",
-                    )],
+                    )]),
                 },
-                InspectionResult::ModuleNotFound {
-                    module: "Cmd.CommandExited".into(),
-                },
-                InspectionResult::NotFound {
+                InspectionResult::Lookup {
                     query: "Unknown.Module".into(),
-                },
-                InspectionResult::ModuleNotFound {
-                    module: "Unknown.Module".into(),
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::ModuleNotFound(
+                        "Unknown.Module".into(),
+                    ),
                 },
             ],
             &[],
@@ -17021,33 +16983,31 @@ mod tests {
         let response = lookup_response(
             prepared,
             vec![
-                InspectionResult::Info {
+                InspectionResult::Lookup {
                     query: "awaitSettled".into(),
-                    entries: vec![info_entry(
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Info(vec![info_entry(
                         "awaitSettled",
                         "Tidepool.Agent.Watch",
                         "value",
                         "awaitSettled :: Int",
-                    )],
-                },
-                InspectionResult::NotFound {
-                    query: "Broken.Query".into(),
+                    )]),
                 },
                 InspectionResult::Rejected {
                     diagnostic: "inspection unavailable".into(),
                 },
-                InspectionResult::NotFound {
+                InspectionResult::Lookup {
                     query: "Project.Investigate".into(),
-                },
-                InspectionResult::Browse {
-                    module: "Project.Investigate".into(),
-                    expanded: false,
-                    entries: vec![info_entry(
-                        "investigate",
-                        "Project.Investigate",
-                        "value",
-                        "investigate :: FilePath -> IO ()",
-                    )],
+                    scopes: vec![tidepool_runtime::session::NameScope::Current],
+                    answer: tidepool_runtime::session::LookupAnswer::Module {
+                        module: "Project.Investigate".into(),
+                        entries: vec![info_entry(
+                            "investigate",
+                            "Project.Investigate",
+                            "value",
+                            "investigate :: FilePath -> IO ()",
+                        )],
+                    },
                 },
             ],
             &[],
