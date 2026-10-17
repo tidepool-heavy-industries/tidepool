@@ -6581,8 +6581,8 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         );
         recovered_witness_fixtures(&[native]).remove(0).product
     };
-    let current = authored(1, 151);
-    let historical = authored(1, 152);
+    let current = product("PublishedFallbackOwner", 151);
+    let historical = product("PublishedFallbackOwner", 152);
     let fallback = authored(2, 153);
     assert_eq!(current.module_interface(), historical.module_interface());
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), current.clone()).unwrap());
@@ -6661,22 +6661,20 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
             .native_offers()
             .iter()
             .any(|offer| offer.original() == old.descriptor.id));
-        let reused = OriginalCompilerInputs::reuse_selected_authored(&mixed)
-            .expect(
-                "unrelated InterfaceOnly fallback cannot requalify selected B against historical A",
-            )
-            .unwrap();
+        let reused = OriginalCompilerInputs::reuse_selected_authored(&mixed).expect(
+            "unrelated InterfaceOnly fallback cannot requalify selected B against historical A",
+        );
+        assert!(
+            reused.is_none(),
+            "C has no issued original; B is a source original, not an authored fallback root"
+        );
         assert_eq!(
-            reused.issued_artifacts().capture_graph_selection().roots,
+            mixed.artifact_view().capture_graph_selection().roots,
             before.roots
         );
         assert_eq!(
-            reused.projection.snapshot_roles()[&entry.descriptor.owner].original(),
+            mixed.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].original(),
             Some(entry.descriptor.id)
         );
-        assert!(reused
-            .native_offers()
-            .iter()
-            .any(|offer| offer.original() == old.descriptor.id));
     }
 }
