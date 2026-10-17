@@ -72,7 +72,7 @@ check scratch = do
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared worker-response child executable") pure
   bracket (createProcess (proc executable ["--worker", scratch])
-      { std_in = CreatePipe, std_out = CreatePipe, std_err = NoStream })
+      { std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit })
     (\(_, _, _, child) -> terminateProcess child >> void (waitForProcess child)) $
     \(inputHandle, outputHandle, _, child) -> do
       input <- maybe (fail "missing worker stdin pipe") pure inputHandle
@@ -135,7 +135,7 @@ checkPartialAcquisition scratch = do
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared worker-response child executable") pure
   bracket (createProcess (proc executable ["--worker-one-fd-slot", scratch])
-      { std_in = CreatePipe, std_out = CreatePipe, std_err = NoStream })
+      { std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit })
     (\(_, _, _, child) -> terminateProcess child >> void (waitForProcess child)) $
     \(inputHandle, outputHandle, _, child) -> do
       input <- maybe (fail "missing limited worker stdin pipe") pure inputHandle
@@ -348,7 +348,7 @@ withCompilerCluster scratch use = do
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared compiler-cluster child") pure
   bracket (createProcess (proc executable ["--compiler-cluster", scratch])
-      { std_in = CreatePipe, std_out = CreatePipe, std_err = NoStream })
+      { std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit })
     (\(_, _, _, child) -> terminateProcess child >> void (waitForProcess child)) $
     \(inputHandle, outputHandle, _, child) -> do
       input <- maybe (fail "missing compiler-cluster stdin") pure inputHandle
