@@ -5598,14 +5598,13 @@ mod tests {
         ] {
             let issuance = offer.snapshot_facts().identity().unwrap();
             let offered_groups = offer
-                .custody()
-                .capture_graph_selection()
-                .native_groups
-                .iter()
+                .issued_group_carriers()
+                .unwrap()
+                .keys()
                 .map(|group| (group.binding.artifact(), group.original_ordinal))
                 .collect::<BTreeSet<_>>();
             assert_eq!(offered_groups, expected_groups);
-            let offered_edges = offer.custody().binding_dependencies();
+            let offered_edges = offer.custody_snapshot().binding_dependencies().unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 CompilerInputProjection::default(),
                 context.artifact_view().clone(),
@@ -5633,10 +5632,17 @@ mod tests {
                     .any(|offer| offer.snapshot_facts().identity().unwrap() == issuance),
                 "custody composition preserves the exact offered availability mode and proof"
             );
+            let retained_offer = retained
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .find(|offer| offer.snapshot_facts().identity().unwrap() == issuance)
+                .unwrap();
             assert_eq!(
-                before
-                    .native_groups
-                    .iter()
+                retained_offer
+                    .issued_group_carriers()
+                    .unwrap()
+                    .keys()
                     .filter(|group| group.binding.artifact() == authored_id
                         || group.binding.artifact() == binding_source)
                     .map(|group| (group.binding.artifact(), group.original_ordinal))
@@ -5648,16 +5654,14 @@ mod tests {
                     .iter()
                     .filter(|(from, _, _)| matches!(from, ArtifactBindingNode::Group(_)))
                 {
-                    assert!(retained
-                        .artifact_view()
+                    assert!(retained_offer
+                        .custody_snapshot()
                         .binding_dependencies()
+                        .unwrap()
                         .contains(edge));
                 }
             } else {
-                assert!(before
-                    .native_groups
-                    .iter()
-                    .all(|group| group.binding.artifact() != authored_id));
+                assert!(retained_offer.issued_group_carriers().unwrap().is_empty());
                 assert!(
                     retained
                         .artifact_view()
