@@ -8,14 +8,15 @@ import Tidepool.Actors.Exomonad
 
 let offlineWorkerOptions :: Text -> SpawnOptions (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
     offlineWorkerOptions marker = (defaultSpawnOptions Installed.agentSpec)
-      { spawnModel = Just DeepSeekFlash
-      , spawnReasoning = Just (DeepSeekReasoning DeepSeekHigh)
-      , spawnLifetime = ActorOwned
+      { spawnLifetime = ActorOwned
       , spawnLabel = Just marker
       , spawnInstructions = Just "Use the installed tools for the assigned file, then respond to the typed request."
       }
 Right offlineEditor <- spawnSubagent (FreshCtx "deepseek-offline-worker-editor") SameDir
-  (offlineWorkerOptions "offline-editor")
+  ((offlineWorkerOptions "offline-editor")
+    { spawnModel = Just DeepSeekPro
+    , spawnReasoning = Just (DeepSeekReasoning DeepSeekHigh)
+    })
 Right offlineTester <- spawnSubagent (FreshCtx "deepseek-offline-worker-tester") SameDir
   (offlineWorkerOptions "offline-tester")
 Right offlineEditRequest <- request @Text offlineEditor
