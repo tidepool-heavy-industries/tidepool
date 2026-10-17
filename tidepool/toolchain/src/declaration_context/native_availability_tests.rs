@@ -6310,6 +6310,35 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
             }
         ])
     );
+    let selected_fragment = |view: ArtifactView| {
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: fixture_compiler_support(projection.clone(), view),
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("selected-fragment-native-issuance-only"),
+            by_owner: BTreeMap::new(),
+            native_availability: vec![native.clone()],
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .unwrap()
+            .unwrap()
+    };
+    let explicit_a = selected_fragment(left);
+    let explicit_b = selected_fragment(right);
+    for (left, right) in [(&explicit_a, &explicit_b), (&explicit_b, &explicit_a)] {
+        assert!(
+            matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                if artifact == entry.descriptor.id)),
+            "two explicit incompatible selected sources must refuse in either order"
+        );
+    }
 }
 
 #[test]
@@ -6428,6 +6457,25 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         .unwrap()
         .selected_native_groups()
         .is_empty());
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        published.compiler_input_projection(),
+        &published.artifact_view().metadata_snapshot(),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .unwrap();
+    let policy_fragment =
+        OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
+    assert!(policy_fragment.selected_demand_source().is_none());
+    for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
+        let merged = left.merge(right).unwrap();
+        assert!(merged.issued_artifacts().selected_native_groups().is_empty(),
+            "an explicit empty source cannot fall back to the published role policy in either order");
+        assert!(merged
+            .selected_demand_source()
+            .unwrap()
+            .selected_native_groups()
+            .is_empty());
+    }
     let directory = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(Arc::new(context))
         .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(reused))
