@@ -8,7 +8,9 @@ Right () <- Memory.replaceBlock Memory.Persona "persona-memory-updated"
 personaAfterWrite <- C.getContext
 Right personaBody <- Orientation.renderMemory
 Right personaRefresh <- PersonaContext.refresh
+personaStagedStatus <- C.inspectContextTransaction personaRefresh
 personaAfterRefresh <- C.getContext
 display (toListOf C.visibleTexts personaBefore == toListOf C.visibleTexts personaAfterWrite
-  && personaBody `elem` toListOf C.visibleTexts personaAfterRefresh
+  && toListOf C.visibleTexts personaBefore == toListOf C.visibleTexts personaAfterRefresh
+  && (case personaStagedStatus of { C.ContextTransactionStaged -> True; _ -> False })
   && personaBody `notElem` toListOf C.visibleTexts personaBefore)
