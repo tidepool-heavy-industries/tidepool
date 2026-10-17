@@ -29,6 +29,7 @@ use crate::CompileError;
 
 pub(crate) mod original_inputs;
 mod published_source;
+pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 
 pub struct ExactDeclarationContext {
@@ -430,6 +431,13 @@ fn capture_native_original_requirements(
 }
 
 impl OriginalCompilerInputs {
+    pub(crate) fn role_projection(&self) -> &CompilerInputProjection {
+        &self.projection
+    }
+    pub(crate) fn issued_artifacts(&self) -> &ArtifactView {
+        &self.artifacts
+    }
+
     pub(crate) fn native_offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
         &self.native_offers
     }
@@ -900,11 +908,7 @@ impl OriginalCompilerInputs {
     }
 
     fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        let (artifacts, projection) = self.artifacts.merge_compiler_inputs(
-            &self.projection,
-            &other.artifacts,
-            &other.projection,
-        )?;
+        let (artifacts, projection) = ArtifactView::merge_original_fragments(self, other)?;
         // This joins alternatives, rather than selecting a caller namespace.
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
@@ -1229,13 +1233,7 @@ impl ProtectedScaffoldRequirements {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
                 native_offers.extend(private.native_offers.iter().cloned());
-                context
-                    .artifact_view()
-                    .merge_compiler_inputs(
-                        &context.facts.compiler_support.projection,
-                        &private.artifacts,
-                        &private.projection,
-                    )?
+                ArtifactView::receive_original_fragment(context.compiler_source_support(), private)?
                     .0
             }
             None => context.artifact_view().clone(),
@@ -2722,26 +2720,19 @@ impl ExactRequestInputs {
 /// Artifact dependencies alone cannot recover original instance scope.
 #[derive(Clone)]
 struct ProgramSourceSupport {
-    artifacts: ArtifactView,
-    compiler_projection: CompilerInputProjection,
+    compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     imports: Arc<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>>,
 }
 
 impl ProgramSourceSupport {
     fn extend(
         previous: Option<&Self>,
-        artifacts: ArtifactView,
-        compiler_projection: CompilerInputProjection,
+        compiler_support: crate::artifact_inventory::CompilerSourceSupport,
         imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
     ) -> Result<Self, CompileError> {
-        let compiler_projection = compiler_projection.for_selected_support(&artifacts);
-        let compiler_projection = match previous {
-            Some(previous) => previous.compiler_projection.merge(&compiler_projection)?,
-            None => compiler_projection,
-        };
-        let artifacts = match previous {
-            Some(previous) => previous.artifacts.merge(&artifacts)?,
-            None => artifacts,
+        let compiler_support = match previous {
+            Some(previous) => previous.compiler_support.merge(&compiler_support)?,
+            None => compiler_support,
         };
         let mut retained =
             previous.map_or_else(BTreeMap::new, |value| value.imports.as_ref().clone());
@@ -2755,10 +2746,8 @@ impl ProgramSourceSupport {
                 return Err(failure("program support changed its original import graph"));
             }
         }
-        compiler_projection.validate(&artifacts)?;
         Ok(Self {
-            artifacts,
-            compiler_projection,
+            compiler_support,
             imports: Arc::new(retained),
         })
     }
@@ -3499,7 +3488,8 @@ impl ExactProductAdmission<'_> {
             .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?
             .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
         if let Some(support) = &self.request.program_support {
-            projection = projection.merge(&support.compiler_projection.within_view(artifacts))?;
+            projection =
+                projection.merge(&support.compiler_support.projection().within_view(artifacts))?;
         }
         let selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -3573,7 +3563,8 @@ impl ExactProductAdmission<'_> {
         let mut scaffold = Vec::new();
         if let Some(support) = &self.request.program_support {
             let roots = support
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .root_entries()
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
@@ -3847,7 +3838,7 @@ impl ExactCompilationRequest {
         let support = self
             .program_support
             .as_ref()
-            .map(|support| support.artifacts.root_entries())
+            .map(|support| support.compiler_support.artifacts().root_entries())
             .unwrap_or_default();
         let checked_value_imports = self.checked_value_imports.owners().collect::<Vec<_>>();
         if self.artifacts.len() > EXACT_SCOPE_GRAPHS_LIMIT
@@ -4458,8 +4449,9 @@ impl ExactCompilationRequest {
             .collect::<BTreeSet<_>>();
         let program_support = ProgramSourceSupport::extend(
             self.program_support.as_ref(),
-            fresh.clone(),
-            context.facts.compiler_support.projection.clone(),
+            context.facts.compiler_support.select_support_roots(
+                entries.values().map(|entry| entry.descriptor.id).collect(),
+            )?,
             imports
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
@@ -4563,8 +4555,9 @@ impl ExactCompilationRequest {
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
         request.program_support = Some(ProgramSourceSupport::extend(
             self.program_support.as_ref(),
-            support.clone(),
-            planned.compiler_input_projection().clone(),
+            planned.compiler_source_support().select_support_roots(
+                entries.values().map(|entry| entry.descriptor.id).collect(),
+            )?,
             planned
                 .original_home_imports()
                 .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
@@ -4750,7 +4743,7 @@ impl ExactCompilationRequest {
         let support_entries = self
             .program_support
             .as_ref()
-            .map(|support| support.artifacts.root_entries())
+            .map(|support| support.compiler_support.artifacts().root_entries())
             .unwrap_or_default();
         selected.extend(
             support_entries
@@ -4794,11 +4787,18 @@ impl ExactCompilationRequest {
                 .ok_or_else(|| failure("selected originals lack source evidence"))?;
             // Earlier admitted program support carries the same original proof
             // as persisted context. This receipt cannot authorize itself.
-            let source_view = match &self.program_support {
-                Some(support) => context.artifact_view().merge(&support.artifacts)?,
-                None => context.artifact_view().clone(),
+            let source_support = match &self.program_support {
+                Some(support) => context
+                    .compiler_source_support()
+                    .merge(&support.compiler_support)?,
+                None => context.compiler_source_support().clone(),
             };
-            let entries = source_view.entries();
+            let selected_interfaces = source_support.selected_interfaces()?;
+            let entries = selected_interfaces
+                .entries()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
             let canonical = entries
                 .iter()
                 .filter_map(|entry| canonical_source_interface(entry))
@@ -5747,24 +5747,9 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             self = self.admit_producer(descriptor.producer_sha256)?;
         }
-        let owners = artifacts
-            .interface_owners()
-            .into_iter()
-            .map(|interface| interface.owner)
-            .collect::<Vec<_>>();
-        let interfaces = artifacts.interface_projection(&owners)?;
-        {
-            let updated = self.facts.compiler_support.artifacts.merge(&interfaces)?;
-            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
-        }
-        {
-            let updated = self
-                .facts
-                .compiler_support
-                .projection
-                .merge(&CompilerInputProjection::from_interface_view(&interfaces)?)?;
-            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
-        }
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::from_interface_selection(artifacts)?;
+        self.facts.compiler_support = self.facts.compiler_support.merge(&support)?;
         self.finish()
     }
 
@@ -13700,7 +13685,12 @@ mod tests {
         );
         let RetainedValueSourceSurface { lexical, .. } = effective
             .retain_value_source_surface(
-                &request.program_support.as_ref().unwrap().artifacts,
+                &request
+                    .program_support
+                    .as_ref()
+                    .unwrap()
+                    .compiler_support
+                    .artifacts(),
                 request.program_source_lexical(),
             )
             .unwrap();
@@ -13710,7 +13700,8 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .root_entries()
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
@@ -14123,7 +14114,8 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .artifact_ids(),
             support.artifacts.artifact_ids()
         );
@@ -14199,7 +14191,8 @@ mod tests {
             .program_support
             .as_ref()
             .unwrap()
-            .artifacts
+            .compiler_support
+            .artifacts()
             .artifact_ids();
         let refusal = request
             .admit_fixture_support(context.clone(), &support, &[], None)
@@ -14210,7 +14203,8 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .artifact_ids(),
             previous
         );
@@ -14358,7 +14352,7 @@ mod tests {
                             roots.push(role.original().unwrap());
                         }
                     }
-                    let mut view = parent.artifact_view().select_roots(roots).unwrap();
+                    let mut view = parent.artifact_view().select_roots(roots.clone()).unwrap();
                     if unrelated {
                         view = view
                             .merge(&support_view(&[support_product("Unrelated")]))
@@ -14366,12 +14360,14 @@ mod tests {
                     }
                     let support = ProgramSourceSupport::extend(
                         None,
-                        view.clone(),
-                        parent.facts.compiler_support.projection.clone(),
+                        parent
+                            .compiler_source_support()
+                            .select_support_roots(roots.clone())
+                            .unwrap(),
                         [],
                     )
                     .unwrap();
-                    let scoped = support.compiler_projection.roles();
+                    let scoped = support.compiler_support.projection().roles();
                     assert_eq!(
                         scoped.len(),
                         states.iter().filter(|state| **state > 0).count()
@@ -14390,20 +14386,31 @@ mod tests {
                             _ => unreachable!(),
                         }
                     }
-                    assert_eq!(support.artifacts.artifact_ids(), view.artifact_ids());
                     assert_eq!(
-                        support.artifacts.selected_native_groups(),
+                        support.compiler_support.artifacts().artifact_ids(),
+                        view.artifact_ids()
+                    );
+                    assert_eq!(
+                        support
+                            .compiler_support
+                            .artifacts()
+                            .selected_native_groups(),
                         view.selected_native_groups()
                     );
                     // Repeated extension/reopening cannot convert a type carrier to native authority.
                     let reopened = ProgramSourceSupport::extend(
                         Some(&support),
-                        view.clone(),
-                        parent.facts.compiler_support.projection.clone(),
+                        parent
+                            .compiler_source_support()
+                            .select_support_roots(roots.clone())
+                            .unwrap(),
                         [],
                     )
                     .unwrap();
-                    assert_eq!(reopened.compiler_projection, support.compiler_projection);
+                    assert_eq!(
+                        *reopened.compiler_support.projection(),
+                        support.compiler_support.projection().clone()
+                    );
                     assert_eq!(reopened.imports, support.imports);
                     if states != [2, 2] {
                         assert!(
@@ -14484,15 +14491,16 @@ mod tests {
             .unwrap();
         let transient = request.program_support.as_ref().unwrap();
         assert_eq!(
-            transient.compiler_projection.roles(),
+            transient.compiler_support.projection().roles(),
             offer.projection.roles()
         );
         assert_eq!(
-            transient.artifacts.artifact_ids(),
+            transient.compiler_support.artifacts().artifact_ids(),
             offer.artifacts.artifact_ids()
         );
         assert!(!transient
-            .compiler_projection
+            .compiler_support
+            .projection()
             .roles()
             .iter()
             .any(|role| role.is_published_source_original()));
@@ -14755,21 +14763,20 @@ mod tests {
             .unwrap();
         let mut request = program_request(directory.path(), context.clone());
         request.program_support = Some(ProgramSourceSupport {
-            compiler_projection: CompilerInputProjection::from_issued_entries(&[entries
-                [&identity("fixture", "InstanceRelay")]
-                .clone()])
-            .unwrap()
-            .merge(&CompilerInputProjection::from_interface_view(context.artifact_view()).unwrap())
-            .unwrap(),
-            artifacts: context
-                .artifact_view()
-                .select_roots(vec![
+            compiler_support: context
+                .compiler_source_support()
+                .select_support_roots(vec![
                     entries[&identity("fixture", "InstanceRelay")].descriptor.id,
                 ])
                 .unwrap(),
             imports: Arc::new(BTreeMap::new()),
         });
-        let support = &request.program_support.as_ref().unwrap().artifacts;
+        let support = &request
+            .program_support
+            .as_ref()
+            .unwrap()
+            .compiler_support
+            .artifacts();
         let mut actual_owners = support
             .descriptors()
             .into_iter()
@@ -14818,7 +14825,15 @@ mod tests {
             lexical,
             ..
         } = context
-            .retain_value_source_surface(&request.program_support.as_ref().unwrap().artifacts, &[])
+            .retain_value_source_surface(
+                &request
+                    .program_support
+                    .as_ref()
+                    .unwrap()
+                    .compiler_support
+                    .artifacts(),
+                &[],
+            )
             .unwrap();
         assert!(support
             .artifact_ids()
@@ -15084,7 +15099,8 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .root_entries()
                 .len(),
             2
@@ -15138,7 +15154,8 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
-                .artifacts
+                .compiler_support
+                .artifacts()
                 .root_entries()
                 .len(),
             3
@@ -15321,7 +15338,12 @@ mod tests {
             request.program_source_lexical()[0].owner,
             identity("main", "Tidepool.Internal.Resume")
         );
-        let native = &request.program_support.as_ref().unwrap().artifacts;
+        let native = &request
+            .program_support
+            .as_ref()
+            .unwrap()
+            .compiler_support
+            .artifacts();
         assert_eq!(native.descriptors().len(), 2);
         assert_eq!(
             context
@@ -16335,8 +16357,7 @@ mod tests {
         );
         let mut local = request.clone();
         local.program_support = Some(ProgramSourceSupport {
-            compiler_projection: persisted.compiler_input_projection().clone(),
-            artifacts: persisted.artifact_view().clone(),
+            compiler_support: persisted.compiler_source_support().clone(),
             imports: Arc::new(BTreeMap::new()),
         });
         let local_admission = local.validate_receipt(receipt, None, &empty).unwrap();
@@ -16558,10 +16579,18 @@ mod tests {
             .interface_projection(&[owner])
             .unwrap();
         local.program_support = Some(ProgramSourceSupport {
-            compiler_projection: changed
-                .compiler_input_projection()
-                .within_view(&changed_interfaces),
-            artifacts: changed_interfaces,
+            compiler_support: changed
+                .compiler_source_support()
+                .select_support_roots(
+                    changed
+                        .compiler_input_projection()
+                        .within_view(&changed_interfaces)
+                        .roles()
+                        .iter()
+                        .map(CompilerInputRole::interface)
+                        .collect(),
+                )
+                .unwrap(),
             imports: Arc::new(BTreeMap::new()),
         });
         assert!(

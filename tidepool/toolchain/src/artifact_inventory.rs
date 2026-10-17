@@ -907,6 +907,12 @@ impl NativeOriginalRequirement {
     }
 }
 
+enum CompilerInputValidation {
+    Closed,
+    ReceivedFragment,
+    FragmentPair,
+}
+
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
     ExtendInterfaces,
@@ -6317,6 +6323,7 @@ impl ArtifactView {
             other,
             incoming,
             CompilerNativeDemand::RoleIssuer,
+            CompilerInputValidation::Closed,
         )
     }
 
@@ -6332,6 +6339,7 @@ impl ArtifactView {
             incoming.artifacts(),
             incoming.projection(),
             CompilerNativeDemand::ExtendInterfaces,
+            CompilerInputValidation::Closed,
         )
     }
 
@@ -6360,6 +6368,33 @@ impl ArtifactView {
             self,
             projection,
             CompilerNativeDemand::SelectedOriginals(originals),
+            CompilerInputValidation::Closed,
+        )
+    }
+
+    pub(crate) fn receive_original_fragment(
+        baseline: &compiler_projection::CompilerSourceSupport,
+        fragment: &crate::declaration_context::OriginalCompilerInputs,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        baseline.artifacts().merge_compiler_inputs_with_demand(
+            baseline.projection(),
+            fragment.issued_artifacts(),
+            fragment.role_projection(),
+            CompilerNativeDemand::RoleIssuer,
+            CompilerInputValidation::ReceivedFragment,
+        )
+    }
+
+    pub(crate) fn merge_original_fragments(
+        left: &crate::declaration_context::OriginalCompilerInputs,
+        right: &crate::declaration_context::OriginalCompilerInputs,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        left.issued_artifacts().merge_compiler_inputs_with_demand(
+            left.role_projection(),
+            right.issued_artifacts(),
+            right.role_projection(),
+            CompilerNativeDemand::RoleIssuer,
+            CompilerInputValidation::FragmentPair,
         )
     }
 
@@ -6369,9 +6404,22 @@ impl ArtifactView {
         other: &Self,
         incoming: &CompilerInputProjection,
         demand: CompilerNativeDemand<'_>,
+        validation: CompilerInputValidation,
     ) -> Result<(Self, CompilerInputProjection), CompileError> {
-        projection.validate(self)?;
-        incoming.validate(other)?;
+        match validation {
+            CompilerInputValidation::Closed => {
+                projection.validate(self)?;
+                incoming.validate(other)?;
+            }
+            CompilerInputValidation::ReceivedFragment => {
+                projection.validate(self)?;
+                incoming.validate_associations(other)?;
+            }
+            CompilerInputValidation::FragmentPair => {
+                projection.validate_associations(self)?;
+                incoming.validate_associations(other)?;
+            }
+        }
         let selected = projection.merge(incoming)?;
         let mut namespace = BTreeMap::new();
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();

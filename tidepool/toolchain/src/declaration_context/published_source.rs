@@ -23,6 +23,20 @@ impl PublishedSourceOriginalSelection {
     }
 }
 
+pub(crate) struct PublishedOriginalEndorsement {
+    owner: ExactModuleIdentity,
+    role: CompilerInputRole,
+}
+
+impl PublishedOriginalEndorsement {
+    pub(crate) fn owner(&self) -> &ExactModuleIdentity {
+        &self.owner
+    }
+    pub(crate) fn role(&self) -> &CompilerInputRole {
+        &self.role
+    }
+}
+
 impl ExactDeclarationContext {
     fn published_artifact_roots(
         &self,
@@ -466,11 +480,15 @@ impl ExactDeclarationContext {
         {
             *selection_sha256 = digest;
         }
-        context
+        let endorsement = PublishedOriginalEndorsement {
+            owner: root.clone(),
+            role,
+        };
+        context.facts.compiler_support = context
             .facts
             .compiler_support
-            .projection
-            .admit_role(root.clone(), role)?;
+            .publish_original(&endorsement)?;
+
         Ok(Arc::new(PublishedSourceOriginalSelection {
             context: Arc::new(context.finish()?),
             revision: revision.into(),
@@ -492,22 +510,6 @@ impl ExactDeclarationContext {
                 .iter()
                 .chain(incoming.facts.lexical.iter()),
         )?;
-        {
-            let updated = self
-                .facts
-                .compiler_support
-                .projection
-                .merge(&incoming.facts.compiler_support.projection)?;
-            self = self.rebuild(|facts| facts.compiler_support.projection = updated);
-        }
-        {
-            let updated = self
-                .facts
-                .compiler_support
-                .artifacts
-                .merge(&incoming.facts.compiler_support.artifacts)?;
-            self = self.rebuild(|facts| facts.compiler_support.artifacts = updated);
-        }
         self.facts.compiler_support = self
             .facts
             .compiler_support

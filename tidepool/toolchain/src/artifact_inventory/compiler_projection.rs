@@ -295,6 +295,71 @@ impl CompilerSourceSupport {
         &self.native_offers
     }
 
+    pub(crate) fn from_interface_selection(artifacts: &ArtifactView) -> Result<Self, CompileError> {
+        let entries = artifacts
+            .namespace()
+            .keys()
+            .map(|id| Arc::clone(&artifacts.lease.payloads[id]))
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?.interface_only();
+        let interfaces = artifacts.select_roots(
+            projection
+                .roles()
+                .iter()
+                .map(CompilerInputRole::interface)
+                .collect(),
+        )?;
+        Self::new(projection, interfaces, [])
+    }
+
+    pub(crate) fn publish_original(
+        &self,
+        endorsement: &crate::declaration_context::PublishedOriginalEndorsement,
+    ) -> Result<Self, CompileError> {
+        let role = endorsement.role();
+        let previous = self
+            .projection
+            .snapshot_roles()
+            .get(endorsement.owner())
+            .ok_or_else(|| failure("publication lacks its issued compiler role"))?;
+        let CompilerInputRole::PublishedSourceOriginal { selection, .. } = role else {
+            return Err(failure("publication endorsement lacks published policy"));
+        };
+        if previous.interface() != role.interface()
+            || previous.original() != role.original()
+            || selection.graph_selection() != &self.artifacts.capture_graph_selection()
+        {
+            return Err(failure(
+                "publication endorsement differs from its exact issuer",
+            ));
+        }
+        let mut projection = self.projection.clone();
+        projection.admit_role(endorsement.owner().clone(), role.clone())?;
+        Self::new(
+            projection,
+            self.artifacts.clone(),
+            self.native_offers.iter().cloned(),
+        )
+    }
+
+    pub(crate) fn select_support_roots(
+        &self,
+        roots: Vec<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = self.artifacts.select_roots(roots)?;
+        let projection = self.projection.for_selected_support(&artifacts);
+        let offers = self
+            .native_offers
+            .iter()
+            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
+                Ok(true) => Some(Ok(offer.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(projection, artifacts, offers)
+    }
+
     pub(crate) fn source_support(
         &self,
         owners: &BTreeSet<ExactModuleIdentity>,
@@ -711,6 +776,59 @@ impl CompilerInputProjection {
         &self,
         artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
+        let selected = self.associated_entries(artifacts)?;
+        for entry in selected.values() {
+            for required in &entry.requirements {
+                let role = self.roles.get(required).ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::MissingDependency {
+                        artifact: entry.descriptor.id,
+                        dependent: entry.descriptor.owner.clone(),
+                        required: required.clone(),
+                        dependency: ArtifactDependency::Interface,
+                    })
+                })?;
+                if entry.interface_seals.get(required).is_some_and(|seal| {
+                    artifacts[&role.interface()].descriptor.interface_sha256 != *seal
+                }) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::InterfaceSealMismatch {
+                            dependent: entry.descriptor.owner.clone(),
+                            required: required.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(selected)
+    }
+    pub(crate) fn validate_associations(&self, view: &ArtifactView) -> Result<(), CompileError> {
+        self.associated_entries(&view.metadata_snapshot().artifacts)?;
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &view.read_projection(&state).nodes;
+        for role in self.roles.values() {
+            let canonical = view.resolve_binding(role.interface(), owned)?;
+            if let Some(original) = role.original() {
+                let carrier = view.resolve_binding(original, owned)?;
+                if !state
+                    .outgoing(InventoryNodeKey::Artifact(carrier))
+                    .any(|(target, edge)| {
+                        target == InventoryNodeKey::Artifact(canonical)
+                            && *edge == ArtifactDependency::Interface
+                    })
+                {
+                    return Err(failure(
+                        "compiler fragment canonical pair differs from its issuing bindings",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn associated_entries(
+        &self,
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
             let interface = artifacts
@@ -743,28 +861,6 @@ impl CompilerInputProjection {
                 }
             };
             selected.insert(owner.clone(), Arc::clone(entry));
-        }
-        for entry in selected.values() {
-            for required in &entry.requirements {
-                let role = self.roles.get(required).ok_or_else(|| {
-                    admission_failure(ArtifactInventoryFailure::MissingDependency {
-                        artifact: entry.descriptor.id,
-                        dependent: entry.descriptor.owner.clone(),
-                        required: required.clone(),
-                        dependency: ArtifactDependency::Interface,
-                    })
-                })?;
-                if entry.interface_seals.get(required).is_some_and(|seal| {
-                    artifacts[&role.interface()].descriptor.interface_sha256 != *seal
-                }) {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::InterfaceSealMismatch {
-                            dependent: entry.descriptor.owner.clone(),
-                            required: required.clone(),
-                        },
-                    ));
-                }
-            }
         }
         Ok(selected)
     }
