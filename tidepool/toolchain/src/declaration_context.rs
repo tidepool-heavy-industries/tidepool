@@ -9962,11 +9962,16 @@ mod tests {
             &edges,
         )
         .unwrap();
+        let ArtifactPayload::Original(recovered_product) = &recovered.entries[&native_id].payload
+        else {
+            unreachable!()
+        };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            recovered_product.module_interface().unwrap().clone(),
         ));
-        let canonical_view = issuer
-            .admit_shared(&issuer.empty_view(), vec![canonical])
+        let canonical_issuer = ArtifactInventory::default();
+        let canonical_view = canonical_issuer
+            .admit_shared(&canonical_issuer.empty_view(), vec![canonical])
             .unwrap();
         let canonical_selection = canonical_view.capture_graph_selection();
         let canonical_reference = products[0].module_interface.as_ref().unwrap();
