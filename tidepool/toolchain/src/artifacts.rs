@@ -8718,6 +8718,7 @@ mod module_product_tests {
             root: &Path,
         ) -> (CompiledArtifacts, usize) {
             use crate::module_candidates::publication_observer::{self, Stage};
+            use sha2::{Digest, Sha256};
             let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let observed = events.clone();
             let compiled = publication_observer::with_observer(
@@ -8750,6 +8751,7 @@ mod module_product_tests {
                     } => {
                         let written = std::fs::read(path).expect("observed proof write exists");
                         assert_eq!(written.len() as u64, *bytes);
+                        assert_eq!(format!("{:x}", Sha256::digest(&written)), sha256.as_str());
                         if let Some(artifacts) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
                             let directory = PathBuf::from(artifacts)
                                 .join("publication-proofs")
