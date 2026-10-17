@@ -5719,7 +5719,7 @@ mod tests {
                 && *edge == ArtifactDependency::Interface));
             assert!(issued_edges.iter().any(|(from, to, edge)| *from == source
                 && matches!(to, ArtifactBindingNode::Artifact(binding)
-                        if binding.artifact() == value_id)
+                        if binding.artifact == value_id)
                 && matches!(edge, ArtifactDependency::NativeBinding {
                             generation, namespace, occurrence, record_parent, ..
                         } if *generation == captured.owner().gen.0
