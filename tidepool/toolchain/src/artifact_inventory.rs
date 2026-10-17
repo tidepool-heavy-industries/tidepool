@@ -2165,6 +2165,7 @@ enum NativeClosureStage {
 }
 
 impl SelectedOwners {
+    #[track_caller]
     fn new(
         state: &InventoryState,
         entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
@@ -2191,6 +2192,28 @@ impl SelectedOwners {
                     } else {
                         (&entries[&previous], entry)
                     };
+                if tracing::enabled!(target: "tidepool::certified_products::source_closure_trace", tracing::Level::DEBUG)
+                {
+                    let caller = std::panic::Location::caller();
+                    let stack = std::backtrace::Backtrace::force_capture().to_string();
+                    let bounded_stack: String = stack
+                        .lines()
+                        .take(32)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .chars()
+                        .take(16384)
+                        .collect();
+                    tracing::debug!(target: "tidepool::certified_products::source_closure_trace",
+                        owner = ?entry.descriptor.owner,
+                        existing = ?existing.descriptor.id,
+                        incoming = ?incoming.descriptor.id,
+                        existing_in_parent = parent_ids.contains(&existing.descriptor.id),
+                        entry_count = entries.len(),
+                        caller = %caller,
+                        stack = %bounded_stack,
+                        "selected artifact owner conflict caller");
+                }
                 return Err(ArtifactInventoryError {
                     failure: ArtifactInventoryFailure::OwnerConflict {
                         owner: entry.descriptor.owner.clone(),
