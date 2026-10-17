@@ -337,10 +337,11 @@ numberedExcerptTree excerpt = StringLeaf (rows [first..] (T.unpack (excerptText 
   where first = case excerptLines excerpt of Just (LookupLines start _) -> start; Nothing -> 1
         rows _ [] = []
         rows [] _ = []
-        rows (number : following) text = show number ++ ": " ++ line following text
-        line _ [] = []
-        line following (character : rest) = character :
-          if character == '\n' then rows following rest else line following rest
+        rows (number : following) text =
+          let (body, rest) = break (== '\n') text
+          in show number ++ ": " ++ body ++ case rest of
+            [] -> []
+            newline : remaining -> newline : rows following remaining
 
 instance Display LookupExcerpt where
   displayTree excerpt = Constructor "LookupExcerpt"
