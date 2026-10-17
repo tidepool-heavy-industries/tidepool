@@ -57,6 +57,16 @@ cancellation control, or replay path. A failed hook preserves the original
 committed output and semantic value, and records a diagnostic internally;
 runtime shutdown retains the invocation's existing cleanup ownership.
 
+Shared source preparation belongs to the run's compiler preparation owner.
+`ActorWorkbenchSource` is configuration; native preparation requires a bound
+source with a client issued by that owner. Clones and repeated bindings to one
+client share pending work; another owner has independent pending work.
+A waiter observes the producer's compiler receipts without its stop authority.
+Run sealing closes admission and requests cancellation before waiting for physical
+settlement; finalization checks that settlement at the owning boundary.
+Standalone preparation uses `CompilerPreparationOwner::scope_with_client`, whose
+guard closes work even when its future is dropped before polling.
+
 Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;
 authored type text does not issue imports or additional effect authority.

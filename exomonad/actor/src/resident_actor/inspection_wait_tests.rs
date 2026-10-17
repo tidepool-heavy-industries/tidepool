@@ -137,14 +137,20 @@ async fn compiler_inspection_requires_cleanup_owner_before_checkout() {
     crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
         // Source preparation lifetime is explicit, while this new task has no
         // inherited task-local compiler owner for the inspection being refused.
-        tokio::spawn(async move { compiler_inspection_without_owner(preparation).await })
-            .await
-            .unwrap();
+        tokio::spawn(
+            async move { compiler_inspection_without_task_local_owner(preparation).await },
+        )
+        .await
+        .unwrap();
     })
     .await;
 }
 
-async fn compiler_inspection_without_owner(preparation: crate::CompilerPreparationClient) {
+async fn compiler_inspection_without_task_local_owner(
+    preparation: crate::CompilerPreparationClient,
+) {
+    assert!(crate::resident_workbench::CompilerCloseOwner::current().is_err());
+    let compiler_spawns = tidepool_extract_cmd::extract_spawn_count();
     for request in [InspectionRequest::Recovery, InspectionRequest::Bindings] {
         let (machines, workbench, session, _, _root) = fixture(preparation.clone());
         let before = machines
@@ -166,6 +172,11 @@ async fn compiler_inspection_without_owner(preparation: crate::CompilerPreparati
             Some(before)
         );
     }
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        compiler_spawns,
+        "missing task-local inspection authority must refuse before compiler work"
+    );
 }
 
 #[tokio::test]
