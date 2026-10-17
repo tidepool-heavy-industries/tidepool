@@ -1099,6 +1099,13 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertIn(f'--setenv={name}={value}', command)
         self.assertFalse(any('/ambient/rustc' in word for word in command))
 
+    def test_selected_offline_nix_policy_crosses_delegation_against_online_ambient(self):
+        with patch.dict(os.environ, {'EXOMONAD_NIX_OFFLINE': '0'}):
+            command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
+                environment={'EXOMONAD_NIX_OFFLINE': '1'})
+        self.assertIn('--setenv=EXOMONAD_NIX_OFFLINE=1', command)
+        self.assertNotIn('--setenv=EXOMONAD_NIX_OFFLINE=0', command)
+
     def test_actor_layout_diagnostics_cross_delegation_explicitly(self):
         command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
             environment={'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS': '1',

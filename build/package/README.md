@@ -263,6 +263,15 @@ python3 build/package/qualification.py freeze \
   --build-log "$SUCCESSFUL_BUILD_LOG" --build-commands "$BUILD_ARGV_JSON"
 ```
 
+Qualification `run` and `catalog-gate` force `EXOMONAD_NIX_OFFLINE=1`
+through their shared execution-environment owner, after clearing ambient
+selections. Scaffold locking and frozen flake-source admission must use
+already retained inputs; unavailable inputs refuse rather than fetch. The
+existing delegated runner forwards that exact policy. Ordinary package
+`exec` and deployment configuration keep their own Nix policy. This restricts
+Nix resolution; synthetic provider or local-HTTP proof remains a separate
+requirement for each selected workload.
+
 Use the one resulting descriptor for all cohorts. The existing isolated libtest
 runner executes each test in a fresh bounded process. Reports retain exact
 names, actual counts, exit status, elapsed time and bounded stdout/stderr. An

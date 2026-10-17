@@ -1712,6 +1712,13 @@ def execution_environment(descriptor: dict) -> dict:
     return environment
 
 
+def qualification_execution_environment(descriptor: dict) -> dict:
+    """Qualification may resolve only already retained Nix inputs."""
+    environment = execution_environment(descriptor)
+    environment["EXOMONAD_NIX_OFFLINE"] = "1"
+    return environment
+
+
 class NativeRunnerResources(NamedTuple):
     """Path declarations from a bundle environment, not ambient selections.
 
@@ -2170,7 +2177,7 @@ def _run_cohort(args) -> int:
     started = time.monotonic_ns()
     with (output / "runner.stdout").open("wb") as stdout, (output / "runner.stderr").open("wb") as stderr:
         result, owner_receipt = run_owned_qualification_runner(
-            command, execution_environment(descriptor), stdout, stderr,
+            command, qualification_execution_environment(descriptor), stdout, stderr,
             output / "run-owner.json", args.descriptor.absolute(), descriptor, args.cohort,
         )
     record_paths = sorted((output / "tests").glob("*.json"))
@@ -2455,7 +2462,7 @@ def run_catalog_gate(args) -> int:
                str(path), str(tools / "bin/bwrap"), str(output), str(tools / "bin/python3")]
     admitted_digest = sha256(path)
     started = time.monotonic_ns()
-    result = subprocess.run(command, env=execution_environment(descriptor), check=False)
+    result = subprocess.run(command, env=qualification_execution_environment(descriptor), check=False)
     records = [json.loads(record.read_text()) for record in sorted((output / "tests").glob("*.json"))]
     completed = (result.returncode == 0 and len(records) == 1 and records[0].get("test") == CATALOG_TEST
                  and records[0].get("passed") is True

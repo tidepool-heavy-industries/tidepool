@@ -1647,6 +1647,21 @@ class NativeQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'immutable Nix paths'):
                 qualification.offline_compilers(selected)
 
+    def test_qualification_nix_policy_reaches_direct_child_without_changing_deployment(self):
+        for ambient in (None, '0', '1'):
+            with self.subTest(ambient=ambient), patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('EXOMONAD_NIX_OFFLINE', None)
+                if ambient is not None:
+                    os.environ['EXOMONAD_NIX_OFFLINE'] = ambient
+                descriptor = {'environment': {}}
+                self.assertNotIn('EXOMONAD_NIX_OFFLINE', qualification.execution_environment(descriptor))
+                environment = qualification.qualification_execution_environment(descriptor)
+                child = subprocess.run([sys.executable, '-c',
+                    'import os; print(os.environ["EXOMONAD_NIX_OFFLINE"])'],
+                    env=environment, capture_output=True, text=True, check=True)
+                self.assertEqual(child.stdout, '1\n')
+                self.assertEqual(descriptor, {'environment': {}})
+
     def test_schema_four_refuses_old_descriptor_before_any_runtime_query(self):
         self.assertEqual(qualification.QUALIFICATION_SCHEMA, 4)
         self.assertEqual(qualification.EXTERNAL_INPUTS, {
@@ -1683,7 +1698,8 @@ class NativeQualificationTests(unittest.TestCase):
                                        foreground_jobs=2 if mutation == 'wrong_foreground' else None,
                                        preparation_jobs=2 if mutation == 'wrong_preparation' else None)
                 with patch.object(qualification, 'verify', return_value=descriptor), \
-                     patch.dict(os.environ, {'EXOMONAD_OFFLINE_RUSTC': '/ambient/rustc'}), \
+                     patch.dict(os.environ, {'EXOMONAD_OFFLINE_RUSTC': '/ambient/rustc',
+                                             'EXOMONAD_NIX_OFFLINE': '0'}), \
                      patch.object(qualification, 'run_owned_qualification_runner', side_effect=ObserveLaunch) as launch:
                     if mutation == 'default':
                         with self.assertRaises(ObserveLaunch):
@@ -1695,6 +1711,7 @@ class NativeQualificationTests(unittest.TestCase):
                             self.assertEqual(command[command.index(flag) + 1], value)
                         self.assertIn('--ignored', command)
                         self.assertEqual(child_env['EXOMONAD_OFFLINE_RUSTC'], env['EXOMONAD_OFFLINE_RUSTC'])
+                        self.assertEqual(child_env['EXOMONAD_NIX_OFFLINE'], '1')
                         resources = [command[i + 1] for i, word in enumerate(command) if word == '--resource-env']
                         self.assertTrue(set(qualification.OFFLINE_COMPILERS) <= set(resources))
                     else:
@@ -2856,7 +2873,7 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(verify_catalog.call_count, 1)
             self.assertEqual(verify_root.call_count, 3)
 
-            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler'):
+            for mutation in ('missing_compiler', 'extra_compiler', 'wrong_store', 'wrong_nar', 'old_schema', 'coherent_other_compiler', 'online_nix_environment'):
                 changed = json.loads(json.dumps(descriptor))
                 if mutation == 'missing_compiler':
                     del changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']
@@ -2867,6 +2884,8 @@ class CatalogSourceTests(unittest.TestCase):
                 elif mutation == 'wrong_nar':
                     first = next(iter(changed['nix_closure']['nar_hashes']))
                     changed['nix_closure']['nar_hashes'][first] = 'changed-nar'
+                elif mutation == 'online_nix_environment':
+                    changed['environment']['EXOMONAD_NIX_OFFLINE'] = '0'
                 elif mutation == 'coherent_other_compiler':
                     original_compiler = changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC']['store_path']
                     changed['external_inputs']['EXOMONAD_OFFLINE_RUSTC'] = dict(
