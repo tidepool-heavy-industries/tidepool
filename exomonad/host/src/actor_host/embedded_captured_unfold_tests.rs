@@ -584,16 +584,28 @@ async fn received_output(transport: &CapturedHostTransport, operation: &Operatio
     let expected = transport
         .runtime
         .store()
-        .replay_output_operation(operation)
+        .replay_tool_output_operation(operation)
         .unwrap()
         .expect("exact operation has durable output before provider delivery");
+    assert_eq!(
+        expected.output_format,
+        harness::provider::OutputFormat::NativeReceiptV1
+    );
+    let projected = super::embedded_policy::project_retained_result(&expected, operation)
+        .expect("native output must retain its exact operation and terminal receipt")
+        .expect("native output must have a model presentation");
+    let expected = harness::item::Item::tool_output(
+        &operation.call,
+        harness::item::ToolKind::Custom,
+        &JobOutput::Completed(Ok(projected)),
+    );
     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         loop {
             if let Some(returned) = transport.provider_outputs.lock().get(operation).cloned() {
                 assert_eq!(
                     returned,
                     vec![expected.clone()],
-                    "provider must receive exactly the durable original output"
+                    "provider must receive exactly the original operation's model presentation"
                 );
                 return;
             }
@@ -612,13 +624,25 @@ async fn durable_output(
     operation: &OperationId,
     output: &JobOutput,
 ) {
-    let expected =
+    let expected_format = embedded_harness::native_output_format(output);
+    let expected_terminal = harness::store::TerminalOutcome::from(output);
+    let mut expected =
         harness::item::Item::tool_output(&operation.call, harness::item::ToolKind::Custom, output);
+    if expected_format != harness::provider::OutputFormat::LegacyOpaque {
+        expected.0["output_format"] = serde_json::to_value(expected_format).unwrap();
+    }
     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         loop {
-            if let Some(item) = runtime.store().replay_output_operation(operation).unwrap() {
+            if let Some(recorded) = runtime
+                .store()
+                .replay_tool_output_operation(operation)
+                .unwrap()
+            {
+                assert_eq!(recorded.terminal, expected_terminal);
+                assert_eq!(recorded.output_format, expected_format);
+                assert_eq!(recorded.item.output_format().unwrap(), expected_format);
                 assert_eq!(
-                    item, expected,
+                    recorded.item, expected,
                     "Store must retain the exact Scheduler terminal output"
                 );
                 let claims = runtime.store().claims_for_operation(operation).unwrap();
