@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as T
-import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, checkArtifactSeal)
+import Tidepool.ArtifactBytes (checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, captureRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.BoundedRead (readFileAtMost)
@@ -119,7 +119,7 @@ readModuleCandidates = readModuleCandidatesWithGraphs []
 
 -- Candidate admission consumes these same bounded captured bytes, including
 -- when the source file changes.
-data CapturedCandidateManifest = CapturedCandidateManifest FilePath ArtifactBytes
+data CapturedCandidateManifest = CapturedCandidateManifest FilePath !BS.ByteString
 
 captureCandidateManifest :: FilePath -> IO (Either String CapturedCandidateManifest)
 captureCandidateManifest path = do
@@ -129,7 +129,7 @@ captureCandidateManifest path = do
     Left failure -> Left (show failure)
     Right bytes | toInteger (BS.length bytes) > maxManifestBytes ->
       Left "candidate manifest exceeds four MiB"
-    Right bytes -> Right (CapturedCandidateManifest path (captureArtifactBytes bytes))
+    Right bytes -> Right (CapturedCandidateManifest path bytes)
 
 -- Exact-scope graphs have already passed their digest and producer checks.
 -- Their inventory closes provenance; it does not grant lexical admission.
@@ -145,7 +145,7 @@ readCapturedModuleCandidatesWithGraphs
   :: [ExecutionSourceGraph] -> CapturedCandidateManifest -> IO (Either String [ModuleCandidate])
 readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest path body) = do
   result <- try (do
-    case deserialiseFromBytes decodeManifest (BL.fromStrict (artifactBytes body)) of
+    case deserialiseFromBytes decodeManifest (BL.fromStrict body) of
       Left failure -> pure (Left (show failure))
       Right (remaining, (candidates, descriptors, references, producer, acquisition))
         | BL.null remaining -> do
