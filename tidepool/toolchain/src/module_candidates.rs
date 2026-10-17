@@ -34,6 +34,19 @@ pub(crate) mod publication_observer {
             bytes: u64,
             path: std::path::PathBuf,
         },
+        CatalogCohortChecked {
+            owners: usize,
+            proof_modules: usize,
+        },
+        CatalogEvidenceEncoded {
+            sha256: String,
+            bytes: u64,
+        },
+        CatalogEvidenceWritten {
+            sha256: String,
+            bytes: u64,
+            path: std::path::PathBuf,
+        },
     }
 
     type Observer = Box<dyn FnMut(Stage)>;
@@ -1070,9 +1083,8 @@ fn root_shard(producer_dir: &Path, root: &Path) -> PathBuf {
 pub(crate) struct PreparedPublication<'a> {
     endpoint_identity: &'a [u8],
     include: &'a [PathBuf],
-    evidence: shared_evidence::PublicationEvidence<'a>,
+    cohort: shared_evidence::PublicationCohort<'a>,
     pub(super) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    records: Vec<Record>,
     group_counts: BTreeMap<(String, String), usize>,
     graphs: BTreeMap<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
@@ -1091,18 +1103,19 @@ pub(crate) fn prepare_publication<'a>(
     let owners = products.products().len();
     let inventory = Arc::clone(products.operation());
     let mut diagnostics = PublicationDiagnostics::new();
-    let mut evidence = shared_evidence::PublicationEvidence::new(evidence);
-    let (products, records) = eligible_records_with_report(
+    let mut cohort = shared_evidence::PublicationCohort::new(evidence);
+    let products = eligible_records_with_report(
         endpoint_identity,
         include,
-        &mut evidence,
+        &mut cohort,
         products,
         target_source,
         &version_origin,
         certified,
         &mut |product, bytes, disposition| diagnostics.report(product, bytes, None, disposition),
     );
-    let graphs = records
+    let graphs = cohort
+        .records()
         .iter()
         .filter_map(|record| record.execution_source.as_ref())
         .map(|graph| (graph.digest(), Arc::clone(graph)))
@@ -1129,9 +1142,8 @@ pub(crate) fn prepare_publication<'a>(
         PreparedPublication {
             endpoint_identity,
             include,
-            evidence,
+            cohort,
             inventory,
-            records,
             group_counts,
             graphs,
         },
@@ -1141,20 +1153,20 @@ pub(crate) fn prepare_publication<'a>(
 fn eligible_records_with_report(
     endpoint_identity: &[u8],
     include: &[PathBuf],
-    evidence: &mut shared_evidence::PublicationEvidence<'_>,
+    cohort: &mut shared_evidence::PublicationCohort<'_>,
     parsed: crate::certified_products::ParsedModuleProducts,
     target_source: &str,
     version_origin: &CandidateVersionOrigin,
     certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     report: &mut impl FnMut(&RawModuleProduct, Option<usize>, PublicationDisposition),
-) -> (Vec<RawModuleProduct>, Vec<Record>) {
+) -> Vec<RawModuleProduct> {
     let (inventory, products, per_module_bytes, package_imports) = parsed.into_publication_parts();
     macro_rules! reject_all {
         ($disposition:expr) => {{
             for product in products.iter().take(CANDIDATE_LIMIT) {
                 report(product, None, $disposition);
             }
-            return (products, Vec::new());
+            return products;
         }};
     }
     let Some(include) = context_paths(include) else {
@@ -1162,8 +1174,8 @@ fn eligible_records_with_report(
     };
     if endpoint_identity.is_empty()
         || endpoint_identity.len() > 4096
-        || !evidence.evidence().valid(target_source)
-        || !evidence.evidence().selection_complete
+        || !cohort.evidence().valid(target_source)
+        || !cohort.evidence().selection_complete
     {
         reject_all!(PublicationDisposition::InvocationProofRejected);
     }
@@ -1176,12 +1188,11 @@ fn eligible_records_with_report(
     let Some(mut package_imports) = package_imports else {
         reject_all!(PublicationDisposition::PackageBundleRejected);
     };
-    let mut records = Vec::new();
-    let Some((shared_evidence, evidence_reference)) = evidence.capture() else {
+    let Some(()) = cohort.capture() else {
         reject_all!(PublicationDisposition::InvocationProofRejected);
     };
-    let evidence = &**shared_evidence;
     for (product, module_bytes) in products.iter().zip(per_module_bytes) {
+        let evidence = cohort.evidence();
         let original_bytes = Some(module_bytes.len());
         if generation_dependent(product) {
             report(
@@ -1283,12 +1294,8 @@ fn eligible_records_with_report(
             );
             continue;
         }
-        let evidence: shared_evidence::SharedEvidence = shared_evidence.clone();
-        let record = Record {
-            evidence: evidence.clone(),
-            module_interface_proof: None,
-            execution_source: None,
-            data: RecordData {
+        if !cohort.issue_record(
+            |evidence_reference| RecordData {
                 evidence: evidence_reference.clone(),
                 tag: "TPMCAN".into(),
                 version: RECORD_VERSION,
@@ -1314,47 +1321,30 @@ fn eligible_records_with_report(
                 module_interface: None,
                 execution_source_sha256: None,
             },
-        };
-        let mut record = record;
-        let owner = computed_owner(&record);
-        record.data.original_owner = OriginalOwner::from_owner(&owner);
-        if let Some(original) = certified.iter().find(|original| {
-            original.owner().unit == record.unit && original.owner().module == record.module
-        }) {
-            if original.owner() != &owner
-                || original.interface_bytes() != record.interface
-                || original.product_bytes() != record.products
-                || original.package_imports_bytes() != record.package_imports
-            {
-                report(
-                    product,
-                    original_bytes,
-                    PublicationDisposition::ProductOwnerRejected,
-                );
-                continue;
-            }
-            record.module_interface_proof = original.module_interface().cloned();
-            record.data.original_certification = original.certification_bytes().to_vec();
-            record.execution_source = original.execution_source().cloned();
-            record.data.execution_source_sha256 =
-                record.execution_source.as_ref().map(|graph| graph.digest());
+            certified,
+        ) {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::ProductOwnerRejected,
+            );
+            continue;
         }
         report(product, original_bytes, PublicationDisposition::Eligible);
-        records.push(record);
     }
-    (products, records)
+    products
 }
 
 /// Persist each eligible ordinary source module in its own bounded record.
 pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Result<()> {
     crate::host_work::checkpoint()?;
     let start = std::time::Instant::now();
-    let owners = prepared.records.len();
+    let owners = prepared.cohort.records().len();
     let mut encoded_bytes = 0u64;
     let mut diagnostics = PublicationDiagnostics::new();
     let producer_dir = record_dir(prepared.endpoint_identity);
     // A reference becomes visible only after its complete immutable proof.
-    if !prepared.records.is_empty() && prepared.evidence.publish(&producer_dir).is_none() {
+    if prepared.cohort.publish_if_records(&producer_dir).is_none() {
         return crate::host_work::checkpoint();
     }
     if !prepared.graphs.is_empty() {
@@ -1373,7 +1363,7 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Re
             }
         }
     }
-    for mut record in prepared.records {
+    for mut record in prepared.cohort.into_records() {
         #[cfg(test)]
         publication_observer::observe(publication_observer::Stage::BeforeOwner);
         crate::host_work::checkpoint()?;
@@ -4188,17 +4178,18 @@ pub(crate) mod tests {
         )
         .unwrap();
         let mut dispositions = Vec::new();
-        let (_, records) = eligible_records_with_report(
+        let mut cohort = shared_evidence::PublicationCohort::new(&record.evidence);
+        eligible_records_with_report(
             &record.endpoint,
             &record.include,
-            &mut shared_evidence::PublicationEvidence::new(&record.evidence),
+            &mut cohort,
             parsed,
             &record.target_source,
             &CandidateVersionOrigin::Ordinary,
             &[],
             &mut |_, _, disposition| dispositions.push(disposition),
         );
-        (records, dispositions)
+        (cohort.into_records(), dispositions)
     }
 
     #[test]
@@ -4334,10 +4325,16 @@ pub(crate) mod tests {
             &[],
         );
         assert_eq!(products.len(), 1);
-        assert_eq!(prepared.records.len(), 1);
-        assert_eq!(prepared.records[0].products, record.products);
-        assert_eq!(prepared.records[0].package_imports, record.package_imports);
-        assert_eq!(version_hash(&prepared.records[0]), version_hash(&record));
+        assert_eq!(prepared.cohort.records().len(), 1);
+        assert_eq!(prepared.cohort.records()[0].products, record.products);
+        assert_eq!(
+            prepared.cohort.records()[0].package_imports,
+            record.package_imports
+        );
+        assert_eq!(
+            version_hash(&prepared.cohort.records()[0]),
+            version_hash(&record)
+        );
         assert!(!fixture_record_dir(root.path()).exists());
         drop(prepared); // Discarding a prepared request has no durable side effects.
         assert!(!fixture_record_dir(root.path()).exists());
@@ -4355,7 +4352,7 @@ pub(crate) mod tests {
             CandidateVersionOrigin::Ordinary,
             &[],
         );
-        assert!(rejected.records.is_empty());
+        assert!(rejected.cohort.records().is_empty());
         assert!(!fixture_record_dir(root.path()).exists());
     }
 
@@ -4404,17 +4401,18 @@ pub(crate) mod tests {
         )
         .unwrap();
         let mut dispositions = Vec::new();
-        let (_, eligible) = eligible_records_with_report(
+        let mut cohort = shared_evidence::PublicationCohort::new(&record.evidence);
+        eligible_records_with_report(
             &record.endpoint,
             &record.include,
-            &mut shared_evidence::PublicationEvidence::new(&record.evidence),
+            &mut cohort,
             parsed,
             &record.target_source,
             &CandidateVersionOrigin::Ordinary,
             &[],
             &mut |_, _, disposition| dispositions.push(disposition),
         );
-        assert!(eligible.is_empty());
+        assert!(cohort.records().is_empty());
         assert_eq!(
             dispositions,
             [PublicationDisposition::PackageWitnessRejected]
@@ -5178,7 +5176,7 @@ pub(crate) mod tests {
                 CandidateVersionOrigin::Ordinary,
                 &certified,
             );
-            assert_eq!(publication.records.len(), 1);
+            assert_eq!(publication.cohort.records().len(), 1);
             publish_prepared(publication).unwrap();
         };
         publish(&importer);
@@ -6021,7 +6019,7 @@ pub(crate) mod tests {
             CandidateVersionOrigin::Ordinary,
             &[certified],
         );
-        assert_eq!(prepared.records.len(), 1);
+        assert_eq!(prepared.cohort.records().len(), 1);
         prepared
     }
 
