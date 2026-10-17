@@ -134,7 +134,7 @@ impl RunLaunchCoordinates {
             _ => {
                 return Err(runtime_error(
                     "unsupported run launch selection format; use its matching binary",
-                ));
+                ))
             }
         }
         let value: Self = serde_json::from_value(wire)?;
@@ -1966,10 +1966,7 @@ async fn run_host(
         resources::connect(configuration.resources, resource_identity, &slice).await?
     };
     if host_generation > 1 {
-        let notice = format!(
-            "Host replacement attempt [{}:{}]. Reopened accepted source {} after the command resource owner confirmed predecessor cleanup. Prior process-local computations and bindings, if any, are unavailable. Unresolved tool calls are not replayed. Inspect durable actor and command observations before starting new work.",
-            options.run_id, host_generation, accepted_source
-        );
+        let notice = format!("Host replacement attempt [{}:{}]. Reopened accepted source {} after the command resource owner confirmed predecessor cleanup. Prior process-local computations and bindings, if any, are unavailable. Unresolved tool calls are not replayed. Inspect durable actor and command observations before starting new work.", options.run_id, host_generation, accepted_source);
         tidepool_atomic_write::write_durable(
             &options.run_root.join("host-recovery-notice.txt"),
             notice.as_bytes(),
