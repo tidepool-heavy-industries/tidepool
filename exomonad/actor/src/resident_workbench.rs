@@ -1604,6 +1604,7 @@ impl InstalledToolLease {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InstallationObservationWork {
+    // Successful owner observations, not a census of all capture API calls.
     captures: usize,
     encodings: usize,
     restored_decodes: usize,
@@ -1621,19 +1622,27 @@ struct ObservedInstallation {
 }
 
 impl ObservedInstallation {
-    fn durable_references(
-        &mut self,
+    fn into_durable_references(
+        self,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-    ) -> Result<tidepool_runtime::session::DurableGenerationReferences, String> {
+    ) -> Result<EncodedInstallation, String> {
         #[cfg(test)]
-        {
-            self.work.encodings += 1;
-        }
+        let work = InstallationObservationWork {
+            encodings: self.work.encodings + 1,
+            ..self.work
+        };
         let bytes = serde_json::to_vec(&self.facts).map_err(|error| error.to_string())?;
-        Ok(tidepool_runtime::session::DurableGenerationReferences {
-            source: self.source.clone(),
-            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
-            prompts,
+        Ok(EncodedInstallation {
+            lease: self.lease,
+            references: tidepool_runtime::session::DurableGenerationReferences {
+                source: self.source,
+                installation: tidepool_runtime::session::GenerationArtifactReference::capture(
+                    bytes,
+                ),
+                prompts,
+            },
+            #[cfg(test)]
+            work,
         })
     }
 
@@ -1657,6 +1666,14 @@ impl ObservedInstallation {
             .verify_facts(&self.facts)
             .map_err(|error| error.to_string())
     }
+}
+
+/// Consuming durable projection of the same observed lease and source bytes.
+struct EncodedInstallation {
+    lease: InstalledToolLease,
+    references: tidepool_runtime::session::DurableGenerationReferences,
+    #[cfg(test)]
+    work: InstallationObservationWork,
 }
 
 /// Immutable actor configuration and its notebook publication domain.
@@ -2249,8 +2266,16 @@ where
                         .map_err(ResidentError::Session)?
                 };
                 session.validate_lexical_scope_lease(scope.scope(), &scope)?;
+                let installation;
+                #[cfg(test)]
+                let installation_work;
                 let commit = match descriptor.persistence_policy() {
                     crate::ActorPersistencePolicy::Ephemeral => {
+                        #[cfg(test)]
+                        {
+                            installation_work = observed.work;
+                        }
+                        installation = observed.lease;
                         PreparedGenerationCommit::Ephemeral {
                             id: expected
                                 .as_ref()
@@ -2299,14 +2324,25 @@ where
                             let readiness = session
                                 .durable_public_readiness(&selected.owner, scope.scope())
                                 .map_err(ResidentError::Session)?;
+                            #[cfg(test)]
+                            {
+                                installation_work = observed.work;
+                            }
+                            installation = observed.lease;
                             PreparedGenerationCommit::Restored {
                                 selected,
                                 readiness,
                             }
                         } else {
-                            let references = observed
-                                .durable_references(prompts.clone())
+                            let encoded = observed
+                                .into_durable_references(prompts.clone())
                                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                            #[cfg(test)]
+                            {
+                                installation_work = encoded.work;
+                            }
+                            installation = encoded.lease;
+                            let references = encoded.references;
                             let prepared = session
                                 .prepare_notebook_generation(
                                     scope.scope(),
@@ -2342,8 +2378,8 @@ where
                     configuration_digest,
                     reload_report: None,
                     #[cfg(test)]
-                    installation_work: observed.work,
-                    installation: observed.lease,
+                    installation_work,
+                    installation,
                     context: next_context,
                     scope,
                     commit,
@@ -19743,6 +19779,18 @@ pub(crate) mod request_tests {
                 assert!(observed.verify_restored(&corrupt, &prompts).is_err());
                 assert!(observed.lease.same_installation(&installation));
                 assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+                let source_bytes = observed.source.bytes().as_ptr();
+                let encoded = observed.into_durable_references(prompts.clone()).unwrap();
+                assert_eq!(
+                    encoded.references.source.bytes().as_ptr(),
+                    source_bytes,
+                    "durable projection moves the exact observed source bytes"
+                );
+                assert!(encoded.lease.same_installation(&installation));
+                encoded
+                    .lease
+                    .verify_recovered_generation(&encoded.references)
+                    .unwrap();
             }
             let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
             let (before, before_visibility) = workbench
