@@ -61,7 +61,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         for diagnostic in (False, True):
             with self.subTest(diagnostic=diagnostic):
                 rendezvous = Path(self.tmp.name) / f'cache-race-{diagnostic}'
-                rendezvous.mkdir()
+                rendezvous.mkdir(mode=0o700)
                 ambient = rendezvous / 'ambient-cache'
                 ambient.mkdir()
                 (ambient / 'candidate').write_text('ambient must remain untouched')
@@ -100,8 +100,11 @@ class IsolatedLibtestTests(unittest.TestCase):
                 with patch.dict(os.environ, {'TIDEPOOL_COMPILE_CACHE_DIR': str(ambient)}), \
                      runner.concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                     outcomes = list(pool.map(run, range(2)))
-                for outcome in outcomes:
+                for index, (outcome, record) in enumerate(zip(outcomes, records)):
                     self.assertTrue(outcome[0], outcome[1:])
+                    passed, _ = runner.retain_case_result(rendezvous / 'results',
+                        ('suite::first', 'suite::second')[index], *outcome, record)
+                    self.assertTrue(passed)
                 caches = [Path(record['compile_cache_root']) for record in records]
                 self.assertNotEqual(caches[0], caches[1])
                 self.assertNotIn(ambient, caches)
@@ -297,6 +300,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                         os.environ.pop('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', None)
                     passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                         10, record, artifact_root=root, retain_artifacts=retain)
+                passed, _ = runner.retain_case_result(Path(self.tmp.name) / 'results',
+                    'suite::works', passed, '', '', record)
                 expected_pass = libtest_passes and cleanup
                 expected_retained = not (expected_pass and complete and not diagnostic and not retain)
                 self.assertEqual(passed, expected_pass)
@@ -623,6 +628,11 @@ class IsolatedLibtestTests(unittest.TestCase):
         with patch.object(runner, 'execute', side_effect=run):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['disposal']['status'], 'pending')
+        passed, _ = runner.retain_case_result(Path(self.tmp.name) / 'results',
+            'suite::works', passed, '', '', record)
         self.assertTrue(passed)
         self.assertFalse(root.exists())
         self.assertTrue(record['artifacts_removed_after_success'])
@@ -1133,6 +1143,11 @@ class IsolatedLibtestTests(unittest.TestCase):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, record, artifact_root=root)
         self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['disposal']['status'], 'pending')
+        passed, _ = runner.retain_case_result(Path(self.tmp.name) / 'results',
+            'suite::works', passed, '', '', record)
+        self.assertTrue(passed)
         self.assertFalse(root.exists())
         summary = record['diagnostic_summaries']
         self.assertEqual(summary['owned_compiler_lifecycle']['pid'], 73)
@@ -1328,6 +1343,11 @@ class IsolatedLibtestTests(unittest.TestCase):
         with patch.object(runner, 'execute', side_effect=run):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['disposal']['status'], 'pending')
+        passed, _ = runner.retain_case_result(Path(self.tmp.name) / 'results',
+            'suite::works', passed, '', '', record)
         self.assertTrue(passed)
         self.assertFalse(root.exists())
         roots = record['diagnostic_summaries']['owned_compiler_roots']
