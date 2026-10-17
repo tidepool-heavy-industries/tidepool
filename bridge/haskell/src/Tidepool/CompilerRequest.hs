@@ -10,7 +10,7 @@ module Tidepool.CompilerRequest
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
   , PreparedCompilation, preparedCompilationResult, prepareCompilationOriginals
-  , PreparedArtifact(..), PreparedOutputIntent(..), prepareArtifacts, prepareArtifactsWithIntent
+  , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
 
@@ -19,7 +19,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust, isNothing, mapMaybe)
 import Data.Word (Word64)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -248,8 +248,12 @@ compileWithWorklist request@(BoundCompilerRequest _ args _ _ _ executor _) selec
 
 compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
-compilePreparedRequest request@(BoundCompilerRequest _ _ _ _ _ executor _) selection retained purpose session path = do
-  (completed,worklist) <- compileWithWorklist request selection retained purpose session path
+compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) selection retained purpose session path = do
+  (completed,worklist) <- case preparedOutputIntent args of
+    NativeOriginals -> compileWithWorklist request selection retained purpose session path
+    PortableExecutable -> do
+      completed <- compileBoundCompleted request selection retained purpose session path
+      pure (completed,Nothing)
   pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist)
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
@@ -286,14 +290,31 @@ data PreparedArtifact = PreparedArtifact
 prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithIntent NativeOriginals
+prepareArtifacts = prepareArtifactsWithProjectionIntent NativeOriginals requireProjection
 
 data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
 
+data PreparedArtifactOutput
+  = NativeOutputs [PreparedArtifact] (Maybe PreparedProductContext)
+  | PortableOutputs [PreparedArtifact]
+
+-- The request chooses its output contract before module completion observers
+-- run. Portable compilation keeps the same checked pipeline and executor but
+-- does not observe unrelated modules as native-original export products.
+preparedOutputIntent :: WorkerRequest -> PreparedOutputIntent
+preparedOutputIntent args
+  | requestPortableOutput args = PortableExecutable
+  | otherwise = NativeOriginals
+
 prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithIntent intent = prepareArtifactsWithProjectionIntent intent requireProjection
+  -> IO PreparedArtifactOutput
+prepareArtifactsWithIntent intent interfaces directory completion targets auxiliary retained hostBindings = do
+  (artifacts,products) <- prepareArtifactsWithProjectionIntent intent requireProjection
+    interfaces directory completion targets auxiliary retained hostBindings
+  pure $ case intent of
+    NativeOriginals -> NativeOutputs artifacts products
+    PortableExecutable -> PortableOutputs artifacts
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
@@ -335,32 +356,40 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
             , binder <- originalBinders group]
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
             , binder <- candidateGroupBinders group])
-    (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
-      prepareCompilationOriginals completion (contextFor firstTarget) externalOriginalBinders
-    productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
-    inventory <- maybe (fail "current original admission did not issue its inventory") pure
-      (preparedCurrentOriginalInventory productContext)
-    originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
-    originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
-    let products = preparedProductInventory productContext
-        outputRoots = Set.fromList (map (projectionEntry . contextFor) targets
-          ++ projectionAuxiliaryRoots firstContext)
-        originalBindings = case intent of
-          NativeOriginals -> currentOriginalBindingsExcept inventory outputRoots
-          PortableExecutable -> Map.empty
-        withOriginals context = context {projectionCurrentOriginals = originalBindings}
-        admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
-    let originalProducts =
-          [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
-            either (Left . show) Right outcome)
-          | (owner, outcome) <- preparedModuleProductOutcomes products]
-        originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
-          originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-        exactOriginals =
-          [(originalUnit originalProduct, originalModule originalProduct,
-            [(originalOrdinal group, originalBinders group, originalGlobals group)
-             | group <- originalGroups originalProduct])
-          | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
+    (originalModules,productContext,originalBindings,admittedOriginalBinders,
+      originalConstructors,originalSites,originalPackageGlobals) <- case intent of
+      PortableExecutable -> do
+        unless (isNothing exactScope && null candidates && Map.null retainedGenerations
+            && null hostBindings) $
+          fail "portable output cannot consume retained native or host-binding inputs"
+        pure (modules,Nothing,Map.empty,Set.empty,[],[],const (Right []))
+      NativeOriginals -> do
+        (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
+          prepareCompilationOriginals completion (contextFor firstTarget) externalOriginalBinders
+        productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
+        inventory <- maybe (fail "current original admission did not issue its inventory") pure
+          (preparedCurrentOriginalInventory productContext)
+        originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
+        originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
+        let products = preparedProductInventory productContext
+            outputRoots = Set.fromList (map (projectionEntry . contextFor) targets
+              ++ projectionAuxiliaryRoots firstContext)
+            originalBindings = currentOriginalBindingsExcept inventory outputRoots
+            admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
+            originalProducts =
+              [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
+                either (Left . show) Right outcome)
+              | (owner, outcome) <- preparedModuleProductOutcomes products]
+            exactOriginals =
+              [(originalUnit originalProduct, originalModule originalProduct,
+                [(originalOrdinal group, originalBinders group, originalGlobals group)
+                 | group <- originalGroups originalProduct])
+              | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
+            originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
+              originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
+        pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
+          originalConstructors,originalSites,originalPackageGlobals)
+    let withOriginals context = context {projectionCurrentOriginals = originalBindings}
     finalCandidates <- newIORef Map.empty
     let demandPackages entry packageRoots recovered = do
           let target = T.unpack (symbolOccurrence entry)
@@ -426,7 +455,7 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
       pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
-    pure (artifacts, Just productContext)
+    pure (artifacts, productContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand
 -- failure. Every other projection, source, authority, or IO failure keeps its
