@@ -3090,9 +3090,9 @@ impl CertifiedSourceSelection {
             .filter_map(|(_, row)| row.compiler_namespace_original())
     }
 
-    /// Native body owners, including retained realizations without source roles.
+    /// Module receipt body owners; private request availability is independent.
     #[cfg(test)]
-    pub(crate) fn native_body_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
+    pub(crate) fn receipt_native_body_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
         self.native_selections().map(|selected| &selected.owner)
     }
 
@@ -11188,7 +11188,7 @@ pub(crate) mod tests {
             &operation,
         )
         .unwrap();
-        assert_eq!(selection.native_body_owners().count(), 0);
+        assert_eq!(selection.receipt_native_body_owners().count(), 0);
         assert_eq!(selection.compiler_projection(&view).unwrap(), issued);
         let sources =
             available_original_source_map(std::slice::from_ref(&original), &[], &operation)
@@ -11251,7 +11251,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(
-            selection.native_body_owners().collect::<Vec<_>>(),
+            selection.receipt_native_body_owners().collect::<Vec<_>>(),
             vec![original.owner()]
         );
         let upgraded = selection.compiler_projection(&view).unwrap();
@@ -11334,7 +11334,7 @@ pub(crate) mod tests {
                 .admit_current(original.owner(), origin, canonical, &operation)
                 .unwrap();
             assert_eq!(
-                selection.native_body_owners().collect::<Vec<_>>(),
+                selection.receipt_native_body_owners().collect::<Vec<_>>(),
                 vec![original.owner()]
             );
             assert_eq!(
@@ -11408,7 +11408,7 @@ pub(crate) mod tests {
                 assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
             }
             if !namespace_original {
-                assert_eq!(carried.native_body_owners().count(), 0);
+                assert_eq!(carried.receipt_native_body_owners().count(), 0);
                 carried
                     .admit_current(
                         original.owner(),
@@ -12165,7 +12165,7 @@ pub(crate) mod tests {
         assert!(sources.get(&(staged, 3, binder.clone())).is_none());
         assert!(sources.get(&(old, 3, binder.clone())).is_some());
         assert_eq!(
-            selection.native_body_owners().collect::<Vec<_>>(),
+            selection.receipt_native_body_owners().collect::<Vec<_>>(),
             vec![&final_owner]
         );
         assert_eq!(
@@ -17077,7 +17077,7 @@ pub(crate) mod tests {
             assert_eq!(
                 issued
                     .source_selection
-                    .native_body_owners()
+                    .receipt_native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
             );
@@ -18040,7 +18040,7 @@ pub(crate) mod tests {
             assert_eq!(
                 certified
                     .source_selection
-                    .native_body_owners()
+                    .receipt_native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
             );
@@ -18316,7 +18316,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     cached
                         .source_selection
-                        .native_body_owners()
+                        .receipt_native_body_owners()
                         .collect::<Vec<_>>(),
                     vec![&owner]
                 );

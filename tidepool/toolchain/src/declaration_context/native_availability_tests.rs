@@ -2207,7 +2207,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     assert!(cloned
         .native_original_requirements()
         .any(|proof| proof.original == entry.descriptor.id));
-    assert!(cloned.native_body_owners().next().is_none());
+    assert!(cloned.receipt_native_body_owners().next().is_none());
     assert!(cloned
         .complete_native_products(&inputs.artifacts)
         .unwrap()
@@ -5686,7 +5686,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     selection.permits_native_group(entry.descriptor.id, native.owner(), 9001),
                     index == 0
                 );
-                assert!(selection.native_body_owners().next().is_none());
+                assert!(selection.receipt_native_body_owners().next().is_none());
                 if index == 0 {
                     let mut fixed = inputs
                         .artifacts
