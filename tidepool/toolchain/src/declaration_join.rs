@@ -2876,10 +2876,17 @@ mod authored_tests {
         assert_eq!(recovered.semantic_sha256(), live.semantic_sha256());
     }
 
-    #[test]
-    #[ignore = "requires the matched Haskell worker and frontend"]
-    fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
-        use std::sync::Arc;
+    struct OwnedJoinRecoveryFixture {
+        recovered: ExactDeclarationContext,
+        certificate: Arc<CertifiedAuthoredDeclaration>,
+        accepted: AcceptedJoin,
+        lexical: Vec<ExactLexicalNode>,
+        module: SessionModule,
+        original_root: crate::artifact_inventory::ArtifactId,
+        _durable: tempfile::TempDir,
+    }
+
+    fn owned_join_recovery_fixture() -> OwnedJoinRecoveryFixture {
         let source_root = tempfile::tempdir().unwrap();
         let module = SessionModule::lib(Generation(1));
         let source = include_str!("../tests/fixtures/owned-declaration/G1.hs");
@@ -3078,6 +3085,22 @@ mod authored_tests {
             .source_sha256()
             .is_none());
         assert!(recovered.authored_native_root(2).is_err());
+        OwnedJoinRecoveryFixture {
+            recovered,
+            certificate,
+            accepted,
+            lexical,
+            module,
+            original_root,
+            _durable: durable,
+        }
+    }
+
+    fn assert_interface_only_recovery(
+        fixture: &OwnedJoinRecoveryFixture,
+    ) -> RecoveredDeclarationTip {
+        let recovered = fixture.recovered.clone();
+        let certificate = &fixture.certificate;
         let (recovered_join, native_work) =
             crate::recovery_artifacts::observe_native_materialization(|| {
                 certify_recovered_declaration_tip_in_context(
@@ -3129,6 +3152,29 @@ mod authored_tests {
         );
 
         assert_eq!(recovered_join.authored_generation(), None);
+        recovered_join
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn recovered_join_inspection_never_materializes_native_products() {
+        assert_interface_only_recovery(&owned_join_recovery_fixture());
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
+        let fixture = owned_join_recovery_fixture();
+        assert_interface_only_recovery(&fixture);
+        let OwnedJoinRecoveryFixture {
+            recovered,
+            certificate,
+            accepted,
+            lexical,
+            module,
+            original_root,
+            _durable,
+        } = fixture;
         let recovered_identity = recovered.semantic_sha256();
         let selected_instances = certificate.instances().clone();
         let extended = recovered
