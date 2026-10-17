@@ -3118,7 +3118,6 @@ impl CertifiedSourceSelection {
         }
         let mut candidates = BTreeSet::new();
         for row in self.issued_native_availability() {
-            let owner = row.original_owner();
             if let Some(support) = row.dependency_support(key, owner) {
                 candidates.extend(support.groups());
             }
